@@ -1,0 +1,17 @@
+services:
+  librewrx:
+    build: .
+    ports:
+      - "${LIBREWRX_PORT:-8080}:8080"
+    env_file:
+      - .env
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          # Adjust based on LIBREWRX_MAX_FRAMES and LIBREWRX_WORKERS:
+          #   1 worker, 12 frames: ~1.5 GB
+          #   1 worker, 20 frames: ~2.0 GB
+          #   2 workers, 12 frames: ~3.0 GB
+          #   2 workers, 20 frames: ~4.0 GB
+          memory: 2048M

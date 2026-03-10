@@ -1,0 +1,158 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Joshua Kimsey
+import asyncio
+import logging
+import time
+from datetime import datetime, timezone
+
+import numpy as np
+
+from librewrx.config import settings
+from librewrx.data.regions import REGIONS, RegionDef
+from librewrx.data.sources import IEMSource
+from librewrx.data.store import FrameStore, RadarFrame
+from librewrx.data.temperature import TemperatureGrid
+from librewrx.tiles.cache import TileCache
+
+logger = logging.getLogger(__name__)
+
+
+class RadarFetcher:
+    """Background task that periodically fetches radar frames from IEM."""
+
+    def __init__(
+        self,
+        store: FrameStore,
+        cache: TileCache,
+        temperature_grid: TemperatureGrid | None = None,
+    ):
+        self._store = store
+        self._cache = cache
+        self._temp_grid = temperature_grid
+        self._source = IEMSource(settings.iem_base_url)
+        self._task: asyncio.Task | None = None
+        self._enabled_regions = [
+            REGIONS[name] for name in settings.get_enabled_regions()
+        ]
+
+    async def start(self) -> None:
+        """Start the background fetch loop."""
+        region_names = [r.name for r in self._enabled_regions]
+        logger.info("Fetching regions: %s", ", ".join(region_names))
+        await self._fetch_all_frames()
+        self._task = asyncio.create_task(self._loop())
+        logger.info("Radar fetcher started")
+
+    async def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        await self._source.close()
+        if self._temp_grid:
+            await self._temp_grid.close()
+        logger.info("Radar fetcher stopped")
+
+    async def _loop(self) -> None:
+        while True:
+            await asyncio.sleep(settings.fetch_interval)
+            try:
+                await self._fetch_all_frames()
+            except Exception:
+                logger.exception("Error in fetch loop")
+
+    async def _fetch_all_frames(self) -> None:
+        """Fetch frames for all enabled regions to fill the store."""
+        # Update temperature grid (non-blocking, failures are OK)
+        if self._temp_grid is not None:
+            try:
+                await self._temp_grid.fetch()
+            except Exception:
+                logger.warning("Temperature fetch failed, snow rendering may be stale")
+
+        now = time.time()
+        now_rounded = int(now // 300) * 300
+
+        # Build timestamp list: live frames (10-min spacing) + archive frames
+        live_indices = list(range(0, 12, 2))
+        ts_and_sources: list[tuple[int, str, int | datetime]] = []
+
+        for idx in live_indices:
+            minutes_ago = idx * 5
+            ts = now_rounded - minutes_ago * 60
+            ts_and_sources.append((ts, "live", minutes_ago))
+
+        remaining = settings.max_frames - len(live_indices)
+        for i in range(remaining):
+            minutes_ago = 60 + (i + 1) * 10
+            ts = now_rounded - minutes_ago * 60
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            ts_and_sources.append((ts, "archive", dt))
+
+        # For each timestamp, fetch all enabled regions in parallel
+        tasks = []
+        task_meta: list[tuple[int, RegionDef]] = []
+
+        for ts, source_type, source_arg in ts_and_sources:
+            for region in self._enabled_regions:
+                if source_type == "live":
+                    tasks.append(self._source.fetch_frame(region, source_arg))
+                else:
+                    tasks.append(self._source.fetch_archive_frame(region, source_arg))
+                task_meta.append((ts, region))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Group results by timestamp and build frames
+        frames_by_ts: dict[int, dict[str, np.ndarray]] = {}
+        for (ts, region), result in zip(task_meta, results):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "Failed to fetch %s for ts=%d: %s", region.name, ts, result
+                )
+                continue
+            if result is None:
+                continue
+
+            if settings.despeckle_min_neighbors > 0:
+                result = _despeckle(result, settings.despeckle_min_neighbors)
+
+            if ts not in frames_by_ts:
+                frames_by_ts[ts] = {}
+            frames_by_ts[ts][region.name] = result
+
+        # Store frames
+        added = 0
+        for ts, regions_data in frames_by_ts.items():
+            frame = RadarFrame(timestamp=ts, regions=regions_data)
+            evicted_ts = await self._store.add_frame(frame)
+            if evicted_ts is not None:
+                self._cache.invalidate_timestamp(evicted_ts)
+            added += 1
+
+        count = await self._store.frame_count()
+        region_summary = ", ".join(
+            f"{r.name}" for r in self._enabled_regions
+        )
+        logger.info(
+            "Fetch complete: %d frames added, %d total in store (%s)",
+            added, count, region_summary,
+        )
+
+
+def _despeckle(data: np.ndarray, min_neighbors: int) -> np.ndarray:
+    """Remove isolated pixels (ground clutter / AP artifacts)."""
+    mask = data > 0
+    count = np.zeros(data.shape, dtype=np.int8)
+    for dr in (-1, 0, 1):
+        for dc in (-1, 0, 1):
+            if dr == 0 and dc == 0:
+                continue
+            shifted = np.roll(np.roll(mask, dr, axis=0), dc, axis=1)
+            count += shifted
+
+    result = data.copy()
+    result[mask & (count < min_neighbors)] = 0
+    return result
