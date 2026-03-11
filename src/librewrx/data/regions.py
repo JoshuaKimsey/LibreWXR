@@ -14,23 +14,45 @@ class RegionDef:
     """
 
     name: str
-    west: float
+    west: float  # geographic bounds in degrees (used for tile overlap checks)
     east: float
     south: float
     north: float
-    pixel_size: float  # degrees per pixel
+    pixel_size: float  # degrees per pixel (lon axis) for latlon grids
     group: str  # group this region belongs to (e.g. "US")
-    # IEM directory names for URL construction
-    live_dir: str   # e.g. "USCOMP" (uppercase, used in live image path)
-    archive_dir: str  # e.g. "uscomp" (lowercase, used in archive path)
+    pixel_size_y: float = 0.0  # degrees per pixel (lat axis); 0 = same as pixel_size
+    # IEM directory names for URL construction (only used by IEM regions)
+    live_dir: str = ""
+    archive_dir: str = ""
+    # Projected grid support (e.g. Lambert Conformal Conic)
+    proj: str = "latlon"  # "latlon" or "lcc"
+    # LCC parameters (only used when proj="lcc")
+    lcc_lat0: float = 0.0   # latitude of projection origin
+    lcc_lon0: float = 0.0   # central meridian
+    lcc_lat1: float = 0.0   # standard parallel (lat1 = lat2 for this LCC)
+    lcc_R: float = 6371000.0  # earth radius in meters
+    grid_x_min: float = 0.0   # x of top-left pixel in projection meters
+    grid_y_max: float = 0.0   # y of top-left pixel in projection meters
+    grid_scale: float = 1000.0  # meters per pixel
+    grid_width: int = 0   # explicit grid dimensions; 0 = compute from pixel_size
+    grid_height: int = 0
+
+    @property
+    def _ps_y(self) -> float:
+        """Effective latitude pixel size."""
+        return self.pixel_size_y if self.pixel_size_y > 0 else self.pixel_size
 
     @property
     def width(self) -> int:
+        if self.grid_width > 0:
+            return self.grid_width
         return int(round((self.east - self.west) / self.pixel_size))
 
     @property
     def height(self) -> int:
-        return int(round((self.north - self.south) / self.pixel_size))
+        if self.grid_height > 0:
+            return self.grid_height
+        return int(round((self.north - self.south) / self._ps_y))
 
 
 # All available radar composite regions
@@ -65,12 +87,27 @@ REGIONS: dict[str, RegionDef] = {
         pixel_size=0.0085, group="US",
         live_dir="GUCOMP", archive_dir="gucomp",
     ),
+    # Nordic countries composite (MET Norway)
+    # Native Lambert Conformal Conic grid at 1km resolution
+    # LCC params: lat_0=63, lon_0=15, lat_1=lat_2=63, R=6371000
+    "NORDIC": RegionDef(
+        name="NORDIC",
+        west=-8.1, east=40.7, south=53.1, north=71.8,
+        pixel_size=0.028808, group="NORDIC",
+        pixel_size_y=0.009585,
+        proj="lcc",
+        lcc_lat0=63.0, lcc_lon0=15.0, lcc_lat1=63.0,
+        lcc_R=6371000.0,
+        grid_x_min=-796500.0, grid_y_max=1125500.0, grid_scale=1000.0,
+        grid_width=1694, grid_height=1951,
+    ),
 }
 
 # Group aliases: shorthand names that expand to multiple regions
 REGION_GROUPS: dict[str, list[str]] = {
     "CONUS": ["USCOMP"],
     "US": ["USCOMP", "AKCOMP", "HICOMP", "PRCOMP", "GUCOMP"],
+    "NORDIC": ["NORDIC"],
 }
 
 

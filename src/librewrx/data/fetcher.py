@@ -9,7 +9,7 @@ import numpy as np
 
 from librewrx.config import settings
 from librewrx.data.regions import REGIONS, RegionDef
-from librewrx.data.sources import IEMSource
+from librewrx.data.sources import IEMSource, METNordicSource
 from librewrx.data.store import FrameStore, RadarFrame
 from librewrx.data.temperature import TemperatureGrid
 from librewrx.tiles.cache import TileCache
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class RadarFetcher:
-    """Background task that periodically fetches radar frames from IEM."""
+    """Background task that periodically fetches radar frames."""
 
     def __init__(
         self,
@@ -29,11 +29,24 @@ class RadarFetcher:
         self._store = store
         self._cache = cache
         self._temp_grid = temperature_grid
-        self._source = IEMSource(settings.iem_base_url)
         self._task: asyncio.Task | None = None
         self._enabled_regions = [
             REGIONS[name] for name in settings.get_enabled_regions()
         ]
+
+        # Build a source for each enabled region based on its group
+        self._sources: dict[str, IEMSource | METNordicSource] = {}
+        iem_source: IEMSource | None = None
+        nordic_source: METNordicSource | None = None
+        for region in self._enabled_regions:
+            if region.group == "NORDIC":
+                if nordic_source is None:
+                    nordic_source = METNordicSource(settings.met_nordic_base_url)
+                self._sources[region.name] = nordic_source
+            else:
+                if iem_source is None:
+                    iem_source = IEMSource(settings.iem_base_url)
+                self._sources[region.name] = iem_source
 
     async def start(self) -> None:
         """Start the background fetch loop."""
@@ -50,7 +63,12 @@ class RadarFetcher:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        await self._source.close()
+        # Close all unique sources
+        closed: set[int] = set()
+        for source in self._sources.values():
+            if id(source) not in closed:
+                await source.close()
+                closed.add(id(source))
         if self._temp_grid:
             await self._temp_grid.close()
         logger.info("Radar fetcher stopped")
@@ -97,10 +115,11 @@ class RadarFetcher:
 
         for ts, source_type, source_arg in ts_and_sources:
             for region in self._enabled_regions:
+                source = self._sources[region.name]
                 if source_type == "live":
-                    tasks.append(self._source.fetch_frame(region, source_arg))
+                    tasks.append(source.fetch_frame(region, source_arg))
                 else:
-                    tasks.append(self._source.fetch_archive_frame(region, source_arg))
+                    tasks.append(source.fetch_archive_frame(region, source_arg))
                 task_meta.append((ts, region))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)

@@ -18,6 +18,46 @@ COMPOSITE_WIDTH = _USCOMP.width
 COMPOSITE_HEIGHT = _USCOMP.height
 
 
+# ── LCC projection ─────────────────────────────────────────────────
+
+
+def _lcc_forward(
+    lon: np.ndarray, lat: np.ndarray, region: RegionDef
+) -> tuple[np.ndarray, np.ndarray]:
+    """Lambert Conformal Conic forward projection (vectorized).
+
+    Converts lon/lat (degrees) to projected x/y (meters) using the
+    LCC parameters stored in the RegionDef.
+    """
+    lat_r = np.radians(lat)
+    lat_0_r = math.radians(region.lcc_lat0)
+    lat_1_r = math.radians(region.lcc_lat1)
+    lon_0_r = math.radians(region.lcc_lon0)
+    R = region.lcc_R
+
+    n = math.sin(lat_1_r)
+    F = math.cos(lat_1_r) * math.tan(math.pi / 4 + lat_1_r / 2) ** n / n
+    rho = R * F / np.tan(np.pi / 4 + lat_r / 2) ** n
+    rho_0 = R * F / math.tan(math.pi / 4 + lat_0_r / 2) ** n
+    theta = n * (np.radians(lon) - lon_0_r)
+
+    x = rho * np.sin(theta)
+    y = rho_0 - rho * np.cos(theta)
+    return x, y
+
+
+def _lcc_pixel_coords(
+    lon: np.ndarray, lat: np.ndarray, region: RegionDef
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert lon/lat 1D arrays to 2D grid of (col_f, row_f) for an LCC region."""
+    # Build 2D grids from 1D lon/lat (LCC is non-separable)
+    lon_grid, lat_grid = np.meshgrid(lon, lat)
+    x, y = _lcc_forward(lon_grid, lat_grid, region)
+    col_grid = (x - region.grid_x_min) / region.grid_scale
+    row_grid = (region.grid_y_max - y) / region.grid_scale
+    return col_grid, row_grid
+
+
 # ── Region-aware coordinate functions ────────────────────────────────
 
 
@@ -38,10 +78,12 @@ def region_pixel_indices(
     lat_rad = np.arctan(np.sinh(math.pi * (1 - 2 * (y + cy / tile_size) / n)))
     lat = np.degrees(lat_rad)
 
-    col_f = (lon - region.west) / region.pixel_size
-    row_f = (region.north - lat) / region.pixel_size
-
-    col_grid, row_grid = np.meshgrid(col_f, row_f)
+    if region.proj == "lcc":
+        col_grid, row_grid = _lcc_pixel_coords(lon, lat, region)
+    else:
+        col_f = (lon - region.west) / region.pixel_size
+        row_f = (region.north - lat) / region._ps_y
+        col_grid, row_grid = np.meshgrid(col_f, row_f)
 
     col_idx = np.rint(col_grid).astype(np.int32)
     row_idx = np.rint(row_grid).astype(np.int32)
@@ -73,10 +115,12 @@ def region_pixel_indices_padded(
     lat_rad = np.arctan(np.sinh(math.pi * (1 - 2 * (y + cy / tile_size) / n)))
     lat = np.degrees(lat_rad)
 
-    col_f = (lon - region.west) / region.pixel_size
-    row_f = (region.north - lat) / region.pixel_size
-
-    col_grid, row_grid = np.meshgrid(col_f, row_f)
+    if region.proj == "lcc":
+        col_grid, row_grid = _lcc_pixel_coords(lon, lat, region)
+    else:
+        col_f = (lon - region.west) / region.pixel_size
+        row_f = (region.north - lat) / region._ps_y
+        col_grid, row_grid = np.meshgrid(col_f, row_f)
 
     col_idx = np.rint(col_grid).astype(np.int32)
     row_idx = np.rint(row_grid).astype(np.int32)
@@ -108,10 +152,12 @@ def region_pixel_indices_fractional(
     lat_rad = np.arctan(np.sinh(math.pi * (1 - 2 * (y + cy / tile_size) / n)))
     lat = np.degrees(lat_rad)
 
-    col_f = (lon - region.west) / region.pixel_size
-    row_f = (region.north - lat) / region.pixel_size
-
-    col_grid, row_grid = np.meshgrid(col_f, row_f)
+    if region.proj == "lcc":
+        col_grid, row_grid = _lcc_pixel_coords(lon, lat, region)
+    else:
+        col_f = (lon - region.west) / region.pixel_size
+        row_f = (region.north - lat) / region._ps_y
+        col_grid, row_grid = np.meshgrid(col_f, row_f)
 
     row_grid = np.clip(row_grid, 0, region.height - 1).astype(np.float32)
     col_grid = np.clip(col_grid, 0, region.width - 1).astype(np.float32)

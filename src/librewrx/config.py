@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     warmer_threads: int = 4  # Thread pool size for background tile warming
     enabled_regions: str = "CONUS"  # Region spec: CONUS, US, ALL, or comma-separated region names
     iem_base_url: str = "https://mesonet.agron.iastate.edu"
+    met_nordic_base_url: str = "https://thredds.met.no"
     cors_origins: list[str] = ["*"]
 
     def get_enabled_regions(self) -> list[str]:

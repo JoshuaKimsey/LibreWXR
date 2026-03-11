@@ -1,6 +1,6 @@
 # LibreWRX
 
-A self-hostable, drop-in replacement for the [Rain Viewer](https://www.rainviewer.com/) API. LibreWRX serves weather radar tiles using freely available US NEXRAD composite data from the [Iowa Environmental Mesonet (IEM)](https://mesonet.agron.iastate.edu/), with full compatibility for any client built against the Rain Viewer v2 API.
+A self-hostable, drop-in replacement for the [Rain Viewer](https://www.rainviewer.com/) API. LibreWRX serves weather radar tiles using freely available radar composite data from multiple sources, with full compatibility for any client built against the Rain Viewer v2 API.
 
 ## Why?
 
@@ -13,7 +13,7 @@ Rain Viewer recently (as of January 1st, 2026) restricted their free API tier: m
 - **Tile sizes** — 256px and 512px
 - **Image formats** — PNG and WebP (with configurable lossy/lossless quality)
 - **Smoothing** — zoom-adaptive Gaussian blur with seamless tile boundaries
-- **Multi-region coverage** — CONUS, Alaska, Hawaii, Puerto Rico, and Guam
+- **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam) and Nordic countries (Norway, Sweden, Finland, Denmark)
 - **Snow detection** — per-pixel snow/rain classification using GFS global surface temperature data
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
 - **Tile cache warming** — background pre-rendering for smooth animation playback
@@ -160,23 +160,25 @@ All settings are configured via environment variables (or a `.env` file). Copy `
 
 **Radar regions:**
 
-| Code | Region | Resolution | RAM per frame |
-|---|---|---|---|
-| `USCOMP` | Continental US | 0.005° (~500m) | ~63 MB |
-| `AKCOMP` | Alaska | 0.01° (~1km) | ~6 MB |
-| `HICOMP` | Hawaii | 0.005° (~500m) | ~3.4 MB |
-| `PRCOMP` | Puerto Rico | 0.01° (~1km) | ~1 MB |
-| `GUCOMP` | Guam | 0.0085° (~850m) | ~1 MB |
+| Code | Region | Source | Resolution | RAM per frame |
+|---|---|---|---|---|
+| `USCOMP` | Continental US | IEM | 0.005° (~500m) | ~63 MB |
+| `AKCOMP` | Alaska | IEM | 0.01° (~1km) | ~6 MB |
+| `HICOMP` | Hawaii | IEM | 0.005° (~500m) | ~3.4 MB |
+| `PRCOMP` | Puerto Rico | IEM | 0.01° (~1km) | ~1 MB |
+| `GUCOMP` | Guam | IEM | 0.0085° (~850m) | ~1 MB |
+| `NORDIC` | Norway, Sweden, Finland, Denmark | MET Norway | ~1km | ~3.2 MB |
 
-Group aliases: `CONUS` (continental US only), `US` (all US regions), `ALL` (everything).
-You can also mix groups and individual regions: `CONUS,HICOMP`.
+Group aliases: `CONUS` (continental US only), `US` (all US regions), `NORDIC` (Nordic countries), `ALL` (everything).
+You can also mix groups and individual regions: `CONUS,NORDIC`.
 
 Examples:
 ```bash
 LIBREWRX_ENABLED_REGIONS=CONUS        # just continental US (default)
 LIBREWRX_ENABLED_REGIONS=US           # all US regions
+LIBREWRX_ENABLED_REGIONS=NORDIC       # Nordic countries only
+LIBREWRX_ENABLED_REGIONS=CONUS,NORDIC # continental US + Nordic
 LIBREWRX_ENABLED_REGIONS=ALL          # everything available
-LIBREWRX_ENABLED_REGIONS=CONUS,HICOMP # continental US + Hawaii
 ```
 
 See `.env.example` for detailed descriptions and tuning guidance for each setting.
@@ -195,14 +197,16 @@ Tiles are served with `Cache-Control: public, max-age=300`, so any caching rever
 ## Architecture
 
 ```
-[IEM NEXRAD Fetcher] --> [In-Memory Frame Store] --> [FastAPI + Tile Renderer]
-  (every 5 min)           (N frames, multi-region)     (LRU cache + tile warmer)
+[IEM NEXRAD Fetcher]     --> [In-Memory Frame Store] --> [FastAPI + Tile Renderer]
+[MET Norway WCS Fetcher] -->   (N frames, multi-region)    (LRU cache + tile warmer)
+  (every 5 min)
 
 [UCAR THREDDS] --> [Temperature Grid] --> [Per-pixel snow/rain classification]
   (every 5 min)     (GFS 2m temp)
 ```
 
-- **Data source:** IEM NEXRAD N0Q composites — 8-bit reflectivity, multiple regions (CONUS, Alaska, Hawaii, Puerto Rico, Guam)
+- **US data source:** IEM NEXRAD N0Q composites — 8-bit reflectivity, multiple regions (CONUS, Alaska, Hawaii, Puerto Rico, Guam)
+- **Nordic data source:** MET Norway THREDDS WCS — float32 dBZ reflectivity composite (Norway, Sweden, Finland, Denmark), converted to uint8 on ingest
 - **Temperature source:** UCAR THREDDS GFS Global 0.25° 2m analysis — used for snow/rain precipitation classification (worldwide coverage)
 - **Tile rendering:** On-demand with LRU caching. Web Mercator reprojection via pure numpy (no GDAL required)
 - **Tile warming:** Background thread pool pre-renders tiles for all timestamps when a new tile position is requested, ensuring smooth animation playback
@@ -221,14 +225,15 @@ Open either file in a browser while LibreWRX is running to see the radar overlay
 
 LibreWRX uses the following freely available data:
 
-- **[Iowa Environmental Mesonet (IEM)](https://mesonet.agron.iastate.edu/)** — NEXRAD N0Q composite radar imagery
+- **[Iowa Environmental Mesonet (IEM)](https://mesonet.agron.iastate.edu/)** — NEXRAD N0Q composite radar imagery (US regions)
+- **[MET Norway THREDDS](https://thredds.met.no/)** — Nordic radar reflectivity composite (Norway, Sweden, Finland, Denmark)
 - **[UCAR THREDDS](https://thredds.ucar.edu/)** — GFS Global 0.25° 2m temperature analysis for snow classification
 
-Both sources are provided by US government-funded institutions and are freely available for any use.
+All sources are provided by government-funded institutions and are freely available for any use.
 
 ## Current Limitations
 
-- **US territories only** — radar coverage includes CONUS, Alaska, Hawaii, Puerto Rico, and Guam via IEM composites
+- **Limited geographic coverage** — US territories (CONUS, Alaska, Hawaii, Puerto Rico, Guam) and Nordic countries (Norway, Sweden, Finland, Denmark)
 - **No nowcast/forecast** — only past radar frames are available; precipitation prediction is not yet implemented
 - **No satellite imagery** — the satellite infrared endpoint returns empty data
 
