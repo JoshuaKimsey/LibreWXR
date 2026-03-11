@@ -14,6 +14,7 @@ Rain Viewer recently (as of January 1st, 2026) restricted their free API tier: m
 - **Image formats** — PNG and WebP (with configurable lossy/lossless quality)
 - **Smoothing** — zoom-adaptive Gaussian blur with seamless tile boundaries
 - **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Nordic countries (Norway, Sweden, Finland, Denmark), and Germany
+- **GFS global fallback** — GFS simulated reflectivity fills in worldwide coverage where no radar composite exists
 - **Snow detection** — per-pixel snow/rain classification using GFS global surface temperature data
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
 - **Tile cache warming** — background pre-rendering for smooth animation playback
@@ -203,14 +204,17 @@ Tiles are served with `Cache-Control: public, max-age=300`, so any caching rever
 [MET Norway WCS Fetcher] -->   (N frames, multi-region)    (LRU cache + tile warmer)
 [DWD HX Fetcher]         -->     (every 5 min)
 
-[UCAR THREDDS] --> [Temperature Grid] --> [Per-pixel snow/rain classification]
+[UCAR THREDDS] --> [Temperature Grid]     --> [Per-pixel snow/rain classification]
   (every 5 min)     (GFS 2m temp)
+               --> [Reflectivity Grid]    --> [Global fallback where no radar exists]
+                    (GFS sim. reflectivity)
 ```
 
 - **US data source:** IEM NEXRAD N0Q composites — 8-bit reflectivity, multiple regions (CONUS, Alaska, Hawaii, Puerto Rico, Guam)
 - **Nordic data source:** MET Norway THREDDS WCS — float32 dBZ reflectivity composite (Norway, Sweden, Finland, Denmark), converted to uint8 on ingest
 - **Germany data source:** DWD Open Data — HX reflectivity composite in OPERA HDF5 format (4800×4400 at 250m), converted to uint8 on ingest
 - **Temperature source:** UCAR THREDDS GFS Global 0.25° 2m analysis — used for snow/rain precipitation classification (worldwide coverage)
+- **GFS reflectivity fallback:** UCAR THREDDS GFS simulated reflectivity at 1000m — provides low-resolution (~25km) global coverage where no real radar composite exists
 - **Tile rendering:** On-demand with LRU caching. Web Mercator reprojection via pure numpy (no GDAL required)
 - **Tile warming:** Background thread pool pre-renders tiles for all timestamps when a new tile position is requested, ensuring smooth animation playback
 - **No external dependencies beyond pip** — no GDAL, rasterio, or system geo libraries needed
@@ -231,13 +235,13 @@ LibreWRX uses the following freely available data:
 - **[Iowa Environmental Mesonet (IEM)](https://mesonet.agron.iastate.edu/)** — NEXRAD N0Q composite radar imagery (US regions)
 - **[MET Norway THREDDS](https://thredds.met.no/)** — Nordic radar reflectivity composite (Norway, Sweden, Finland, Denmark)
 - **[DWD Open Data](https://opendata.dwd.de/)** — HX radar reflectivity composite (Germany). License: [GeoNutzV](https://www.gesetze-im-internet.de/geonutzv/) (free, attribution required: "Deutscher Wetterdienst")
-- **[UCAR THREDDS](https://thredds.ucar.edu/)** — GFS Global 0.25° 2m temperature analysis for snow classification
+- **[UCAR THREDDS](https://thredds.ucar.edu/)** — GFS Global 0.25° 2m temperature analysis for snow classification, and GFS simulated reflectivity at 1000m for global fallback coverage
 
 All sources are provided by government-funded institutions and are freely available for any use.
 
 ## Current Limitations
 
-- **Limited geographic coverage** — US territories (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Nordic countries (Norway, Sweden, Finland, Denmark), and Germany
+- **Limited high-resolution coverage** — real radar composites cover US territories (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Nordic countries (Norway, Sweden, Finland, Denmark), and Germany; the rest of the world uses low-resolution GFS model data (~25km) as a fallback
 - **No nowcast/forecast** — only past radar frames are available; precipitation prediction is not yet implemented
 - **No satellite imagery** — the satellite infrared endpoint returns empty data
 

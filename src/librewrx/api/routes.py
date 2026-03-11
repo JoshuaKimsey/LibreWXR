@@ -25,6 +25,7 @@ router = APIRouter()
 frame_store: FrameStore | None = None
 tile_cache: TileCache | None = None
 temperature_grid = None  # TemperatureGrid | None
+reflectivity_grid = None  # GFSReflectivityGrid | None
 tile_warmer = None  # TileWarmer | None
 start_time: float = 0.0
 enabled_regions: list[str] | None = None
@@ -56,6 +57,9 @@ async def health():
         },
         "temperature_grid": {
             "loaded": temperature_grid is not None and temperature_grid.data is not None,
+        },
+        "reflectivity_grid": {
+            "loaded": reflectivity_grid is not None and reflectivity_grid.data is not None,
         },
         "enabled_regions": enabled_regions or [],
     }
@@ -134,6 +138,7 @@ async def radar_tile(
         fmt=ext,
         temperature_grid=temperature_grid,
         enabled_regions=enabled_regions,
+        reflectivity_grid=reflectivity_grid,
     )
 
     tile_cache.put(cache_key, tile_bytes)
@@ -149,6 +154,7 @@ async def radar_tile(
                 snow=snow,
                 ext=ext,
                 temperature_grid=temperature_grid,
+                reflectivity_grid=reflectivity_grid,
             )
         )
 

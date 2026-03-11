@@ -30,6 +30,7 @@ def render_tile(
     fmt: str = "png",
     temperature_grid=None,
     enabled_regions: list[str] | None = None,
+    reflectivity_grid=None,
 ) -> bytes:
     """Render a single map tile from composite radar data.
 
@@ -43,6 +44,7 @@ def render_tile(
         fmt: "png" or "webp"
         temperature_grid: TemperatureGrid for per-pixel snow/rain classification
         enabled_regions: list of enabled region names (for overlap check)
+        reflectivity_grid: GFSReflectivityGrid for global fallback coverage
 
     Returns:
         Encoded image bytes.
@@ -52,6 +54,12 @@ def render_tile(
     regions_with_data = [r for r in regions if r.name in frame_regions]
 
     if not regions_with_data:
+        # No radar regions cover this tile — try GFS fallback
+        if reflectivity_grid is not None and reflectivity_grid.data is not None:
+            return _render_gfs_only_tile(
+                reflectivity_grid, z, x, y, tile_size,
+                color_scheme, smooth, snow, fmt, temperature_grid,
+            )
         return _transparent_tile(tile_size, fmt)
 
     # Determine blur radius (zoom-scaled) for smooth mode
@@ -75,6 +83,12 @@ def render_tile(
         values = _composite_regions(
             frame_regions, regions_with_data, z, x, y, tile_size,
             smooth, use_blur, pad,
+        )
+
+    # Fill uncovered pixels from GFS simulated reflectivity
+    if reflectivity_grid is not None and reflectivity_grid.data is not None:
+        values = _fill_gfs_fallback(
+            values, regions, z, x, y, tile_size, pad, reflectivity_grid,
         )
 
     # Apply noise floor
@@ -212,6 +226,95 @@ def render_coverage_tile(
 
     img = Image.fromarray(rgba, "RGBA")
     return _encode_image(img, "png")
+
+
+def _build_coverage_mask(
+    regions: list[RegionDef],
+    z: int, x: int, y: int,
+    tile_size: int, pad: int,
+) -> np.ndarray:
+    """Build a boolean mask of pixels covered by any radar region.
+
+    True = this pixel is within at least one radar region's spatial extent
+    (regardless of whether there's currently precipitation there).
+    """
+    out_size = tile_size + 2 * pad if pad > 0 else tile_size
+    covered = np.zeros((out_size, out_size), dtype=bool)
+
+    for region in regions:
+        if pad > 0:
+            row_idx, col_idx = region_pixel_indices_padded(
+                region, z, x, y, tile_size, pad
+            )
+        else:
+            row_idx, col_idx = region_pixel_indices(region, z, x, y, tile_size)
+
+        # Pixels with valid indices (not -1) are within this region
+        in_bounds = (row_idx != -1) & (col_idx != -1)
+        covered |= in_bounds
+
+    return covered
+
+
+def _fill_gfs_fallback(
+    values: np.ndarray,
+    regions: list[RegionDef],
+    z: int, x: int, y: int,
+    tile_size: int, pad: int,
+    reflectivity_grid,
+) -> np.ndarray:
+    """Fill pixels not covered by any radar region with GFS data."""
+    covered = _build_coverage_mask(regions, z, x, y, tile_size, pad)
+
+    # Only fill pixels that are NOT covered by any radar region
+    uncovered = ~covered
+    if not uncovered.any():
+        return values
+
+    # Get lat/lon for the tile pixels
+    if pad > 0:
+        lat_grid, lon_grid = tile_pixel_latlons_padded(z, x, y, tile_size, pad)
+    else:
+        lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
+
+    gfs_values = reflectivity_grid.sample(lat_grid, lon_grid)
+
+    result = values.copy()
+    result[uncovered] = gfs_values[uncovered]
+    return result
+
+
+def _render_gfs_only_tile(
+    reflectivity_grid,
+    z: int, x: int, y: int,
+    tile_size: int,
+    color_scheme: int,
+    smooth: bool,
+    snow: bool,
+    fmt: str,
+    temperature_grid,
+) -> bytes:
+    """Render a tile entirely from GFS data (no radar regions overlap)."""
+    lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
+    values = reflectivity_grid.sample(lat_grid, lon_grid)
+
+    # Apply noise floor
+    if settings.noise_floor_dbz > -32:
+        pixel_threshold = int((settings.noise_floor_dbz + 32) * 2)
+        values = values.copy()
+        values[values < pixel_threshold] = 0
+
+    # Apply color scheme with per-pixel snow/rain selection
+    if snow and temperature_grid is not None:
+        freezing = temperature_grid.get_freezing_mask(lat_grid, lon_grid)
+        rgba_rain = colorize(values, color_scheme, snow=False)
+        rgba_snow = colorize(values, color_scheme, snow=True)
+        rgba = np.where(freezing[..., np.newaxis], rgba_snow, rgba_rain)
+    else:
+        rgba = colorize(values, color_scheme, snow=False)
+
+    img = Image.fromarray(rgba, "RGBA")
+    return _encode_image(img, fmt)
 
 
 def _bilinear_sample(

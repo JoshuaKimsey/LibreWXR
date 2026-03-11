@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import numpy as np
 
 from librewrx.config import settings
+from librewrx.data.gfs_reflectivity import GFSReflectivityGrid
 from librewrx.data.regions import REGIONS, RegionDef
 from librewrx.data.sources import DWDSource, IEMSource, METNordicSource
 from librewrx.data.store import FrameStore, RadarFrame
@@ -25,10 +26,12 @@ class RadarFetcher:
         store: FrameStore,
         cache: TileCache,
         temperature_grid: TemperatureGrid | None = None,
+        reflectivity_grid: GFSReflectivityGrid | None = None,
     ):
         self._store = store
         self._cache = cache
         self._temp_grid = temperature_grid
+        self._refl_grid = reflectivity_grid
         self._task: asyncio.Task | None = None
         self._enabled_regions = [
             REGIONS[name] for name in settings.get_enabled_regions()
@@ -76,6 +79,8 @@ class RadarFetcher:
                 closed.add(id(source))
         if self._temp_grid:
             await self._temp_grid.close()
+        if self._refl_grid:
+            await self._refl_grid.close()
         logger.info("Radar fetcher stopped")
 
     async def _loop(self) -> None:
@@ -88,12 +93,18 @@ class RadarFetcher:
 
     async def _fetch_all_frames(self) -> None:
         """Fetch frames for all enabled regions to fill the store."""
-        # Update temperature grid (non-blocking, failures are OK)
+        # Update temperature and GFS reflectivity grids (non-blocking, failures are OK)
         if self._temp_grid is not None:
             try:
                 await self._temp_grid.fetch()
             except Exception:
                 logger.warning("Temperature fetch failed, snow rendering may be stale")
+
+        if self._refl_grid is not None:
+            try:
+                await self._refl_grid.fetch()
+            except Exception:
+                logger.warning("GFS reflectivity fetch failed, global fallback may be stale")
 
         now = time.time()
         now_rounded = int(now // 300) * 300

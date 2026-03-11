@@ -40,6 +40,7 @@ class TileWarmer:
         snow: bool,
         ext: str,
         temperature_grid=None,
+        reflectivity_grid=None,
     ) -> None:
         """Schedule background renders for all other timestamps."""
         timestamps = await self._store.get_timestamps()
@@ -78,6 +79,7 @@ class TileWarmer:
                 snow,
                 ext,
                 temperature_grid,
+                reflectivity_grid,
             )
 
     def _render_and_cache(
@@ -93,6 +95,7 @@ class TileWarmer:
         snow: bool,
         ext: str,
         temperature_grid,
+        reflectivity_grid,
     ) -> None:
         """Render a tile and store it in the cache (runs in thread pool)."""
         try:
@@ -106,6 +109,7 @@ class TileWarmer:
                 fmt=ext,
                 temperature_grid=temperature_grid,
                 enabled_regions=self._enabled_regions,
+                reflectivity_grid=reflectivity_grid,
             )
             self._cache.put(cache_key, tile_bytes)
         except Exception:

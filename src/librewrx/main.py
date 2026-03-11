@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from librewrx.api import routes
 from librewrx.config import settings
 from librewrx.data.fetcher import RadarFetcher
+from librewrx.data.gfs_reflectivity import GFSReflectivityGrid
 from librewrx.data.store import FrameStore
 from librewrx.data.temperature import TemperatureGrid
 from librewrx.tiles.cache import TileCache
@@ -27,6 +28,7 @@ async def lifespan(app: FastAPI):
     store = FrameStore(max_frames=settings.max_frames)
     cache = TileCache(max_size=settings.tile_cache_size)
     temp_grid = TemperatureGrid()
+    refl_grid = GFSReflectivityGrid()
     enabled = settings.get_enabled_regions()
 
     warmer = TileWarmer(
@@ -39,11 +41,16 @@ async def lifespan(app: FastAPI):
     routes.frame_store = store
     routes.tile_cache = cache
     routes.temperature_grid = temp_grid
+    routes.reflectivity_grid = refl_grid
     routes.tile_warmer = warmer
     routes.start_time = time.time()
     routes.enabled_regions = enabled
 
-    fetcher = RadarFetcher(store, cache, temperature_grid=temp_grid)
+    fetcher = RadarFetcher(
+        store, cache,
+        temperature_grid=temp_grid,
+        reflectivity_grid=refl_grid,
+    )
     logger.info(
         "Starting LibreWRX (public_url=%s, max_zoom=%d, regions=%s)",
         settings.public_url,
