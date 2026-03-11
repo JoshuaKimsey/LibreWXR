@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     enabled_regions: str = "CONUS"  # Region spec: CONUS, US, ALL, or comma-separated region names
     iem_base_url: str = "https://mesonet.agron.iastate.edu"
     met_nordic_base_url: str = "https://thredds.met.no"
+    dwd_base_url: str = "https://opendata.dwd.de"
     cors_origins: list[str] = ["*"]
 
     def get_enabled_regions(self) -> list[str]:

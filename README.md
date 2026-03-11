@@ -13,7 +13,7 @@ Rain Viewer recently (as of January 1st, 2026) restricted their free API tier: m
 - **Tile sizes** — 256px and 512px
 - **Image formats** — PNG and WebP (with configurable lossy/lossless quality)
 - **Smoothing** — zoom-adaptive Gaussian blur with seamless tile boundaries
-- **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam) and Nordic countries (Norway, Sweden, Finland, Denmark)
+- **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Nordic countries (Norway, Sweden, Finland, Denmark), and Germany
 - **Snow detection** — per-pixel snow/rain classification using GFS global surface temperature data
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
 - **Tile cache warming** — background pre-rendering for smooth animation playback
@@ -168,9 +168,10 @@ All settings are configured via environment variables (or a `.env` file). Copy `
 | `PRCOMP` | Puerto Rico | IEM | 0.01° (~1km) | ~1 MB |
 | `GUCOMP` | Guam | IEM | 0.0085° (~850m) | ~1 MB |
 | `NORDIC` | Norway, Sweden, Finland, Denmark | MET Norway | ~1km | ~3.2 MB |
+| `GERMANY` | Germany | DWD | 250m | ~20 MB |
 
-Group aliases: `CONUS` (continental US only), `US` (all US regions), `NORDIC` (Nordic countries), `ALL` (everything).
-You can also mix groups and individual regions: `CONUS,NORDIC`.
+Group aliases: `CONUS` (continental US only), `US` (all US regions), `NORDIC` (Nordic countries), `GERMANY` (Germany), `ALL` (everything).
+You can also mix groups and individual regions: `CONUS,NORDIC,GERMANY`.
 
 Examples:
 ```bash
@@ -178,6 +179,7 @@ LIBREWRX_ENABLED_REGIONS=CONUS        # just continental US (default)
 LIBREWRX_ENABLED_REGIONS=US           # all US regions
 LIBREWRX_ENABLED_REGIONS=NORDIC       # Nordic countries only
 LIBREWRX_ENABLED_REGIONS=CONUS,NORDIC # continental US + Nordic
+LIBREWRX_ENABLED_REGIONS=GERMANY      # Germany only
 LIBREWRX_ENABLED_REGIONS=ALL          # everything available
 ```
 
@@ -199,7 +201,7 @@ Tiles are served with `Cache-Control: public, max-age=300`, so any caching rever
 ```
 [IEM NEXRAD Fetcher]     --> [In-Memory Frame Store] --> [FastAPI + Tile Renderer]
 [MET Norway WCS Fetcher] -->   (N frames, multi-region)    (LRU cache + tile warmer)
-  (every 5 min)
+[DWD HX Fetcher]         -->     (every 5 min)
 
 [UCAR THREDDS] --> [Temperature Grid] --> [Per-pixel snow/rain classification]
   (every 5 min)     (GFS 2m temp)
@@ -207,6 +209,7 @@ Tiles are served with `Cache-Control: public, max-age=300`, so any caching rever
 
 - **US data source:** IEM NEXRAD N0Q composites — 8-bit reflectivity, multiple regions (CONUS, Alaska, Hawaii, Puerto Rico, Guam)
 - **Nordic data source:** MET Norway THREDDS WCS — float32 dBZ reflectivity composite (Norway, Sweden, Finland, Denmark), converted to uint8 on ingest
+- **Germany data source:** DWD Open Data — HX reflectivity composite in OPERA HDF5 format (4800×4400 at 250m), converted to uint8 on ingest
 - **Temperature source:** UCAR THREDDS GFS Global 0.25° 2m analysis — used for snow/rain precipitation classification (worldwide coverage)
 - **Tile rendering:** On-demand with LRU caching. Web Mercator reprojection via pure numpy (no GDAL required)
 - **Tile warming:** Background thread pool pre-renders tiles for all timestamps when a new tile position is requested, ensuring smooth animation playback
@@ -227,13 +230,14 @@ LibreWRX uses the following freely available data:
 
 - **[Iowa Environmental Mesonet (IEM)](https://mesonet.agron.iastate.edu/)** — NEXRAD N0Q composite radar imagery (US regions)
 - **[MET Norway THREDDS](https://thredds.met.no/)** — Nordic radar reflectivity composite (Norway, Sweden, Finland, Denmark)
+- **[DWD Open Data](https://opendata.dwd.de/)** — HX radar reflectivity composite (Germany). License: [GeoNutzV](https://www.gesetze-im-internet.de/geonutzv/) (free, attribution required: "Deutscher Wetterdienst")
 - **[UCAR THREDDS](https://thredds.ucar.edu/)** — GFS Global 0.25° 2m temperature analysis for snow classification
 
 All sources are provided by government-funded institutions and are freely available for any use.
 
 ## Current Limitations
 
-- **Limited geographic coverage** — US territories (CONUS, Alaska, Hawaii, Puerto Rico, Guam) and Nordic countries (Norway, Sweden, Finland, Denmark)
+- **Limited geographic coverage** — US territories (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Nordic countries (Norway, Sweden, Finland, Denmark), and Germany
 - **No nowcast/forecast** — only past radar frames are available; precipitation prediction is not yet implemented
 - **No satellite imagery** — the satellite infrared endpoint returns empty data
 

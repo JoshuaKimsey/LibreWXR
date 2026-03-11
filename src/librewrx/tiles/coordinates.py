@@ -18,6 +18,13 @@ COMPOSITE_WIDTH = _USCOMP.width
 COMPOSITE_HEIGHT = _USCOMP.height
 
 
+# ── WGS84 ellipsoidal constants ────────────────────────────────────
+
+_WGS84_A = 6378137.0
+_WGS84_F = 1 / 298.257223563
+_WGS84_E2 = 2 * _WGS84_F - _WGS84_F ** 2
+_WGS84_E = math.sqrt(_WGS84_E2)
+
 # ── LCC projection ─────────────────────────────────────────────────
 
 
@@ -58,6 +65,51 @@ def _lcc_pixel_coords(
     return col_grid, row_grid
 
 
+# ── Polar stereographic projection ────────────────────────────────
+
+
+def _stere_forward(
+    lon: np.ndarray, lat: np.ndarray, region: RegionDef
+) -> tuple[np.ndarray, np.ndarray]:
+    """WGS84 ellipsoidal north polar stereographic forward projection (vectorized).
+
+    Converts lon/lat (degrees) to projected x/y (meters) using the
+    polar stereographic parameters stored in the RegionDef.
+    """
+    lat_ts_r = math.radians(region.stere_lat_ts)
+    lon_0_r = math.radians(region.stere_lon0)
+
+    # Conformal latitude at true-scale parallel
+    sp_ts = math.sin(lat_ts_r)
+    t_c = math.tan(math.pi / 4 - lat_ts_r / 2) * (
+        (1 + _WGS84_E * sp_ts) / (1 - _WGS84_E * sp_ts)
+    ) ** (_WGS84_E / 2)
+    m_c = math.cos(lat_ts_r) / math.sqrt(1 - _WGS84_E2 * sp_ts ** 2)
+
+    lat_r = np.radians(lat)
+    sp = np.sin(lat_r)
+    t = np.tan(np.pi / 4 - lat_r / 2) * (
+        (1 + _WGS84_E * sp) / (1 - _WGS84_E * sp)
+    ) ** (_WGS84_E / 2)
+    rho = _WGS84_A * m_c * t / t_c
+
+    lam_diff = np.radians(lon) - lon_0_r
+    x = rho * np.sin(lam_diff) + region.stere_x0
+    y = -rho * np.cos(lam_diff) + region.stere_y0
+    return x, y
+
+
+def _stere_pixel_coords(
+    lon: np.ndarray, lat: np.ndarray, region: RegionDef
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert lon/lat 1D arrays to 2D grid of (col_f, row_f) for a stere region."""
+    lon_grid, lat_grid = np.meshgrid(lon, lat)
+    x, y = _stere_forward(lon_grid, lat_grid, region)
+    col_grid = (x - region.grid_x_min) / region.grid_scale
+    row_grid = (region.grid_y_max - y) / region.grid_scale
+    return col_grid, row_grid
+
+
 # ── Region-aware coordinate functions ────────────────────────────────
 
 
@@ -80,6 +132,8 @@ def region_pixel_indices(
 
     if region.proj == "lcc":
         col_grid, row_grid = _lcc_pixel_coords(lon, lat, region)
+    elif region.proj == "stere":
+        col_grid, row_grid = _stere_pixel_coords(lon, lat, region)
     else:
         col_f = (lon - region.west) / region.pixel_size
         row_f = (region.north - lat) / region._ps_y
@@ -117,6 +171,8 @@ def region_pixel_indices_padded(
 
     if region.proj == "lcc":
         col_grid, row_grid = _lcc_pixel_coords(lon, lat, region)
+    elif region.proj == "stere":
+        col_grid, row_grid = _stere_pixel_coords(lon, lat, region)
     else:
         col_f = (lon - region.west) / region.pixel_size
         row_f = (region.north - lat) / region._ps_y
@@ -154,6 +210,8 @@ def region_pixel_indices_fractional(
 
     if region.proj == "lcc":
         col_grid, row_grid = _lcc_pixel_coords(lon, lat, region)
+    elif region.proj == "stere":
+        col_grid, row_grid = _stere_pixel_coords(lon, lat, region)
     else:
         col_f = (lon - region.west) / region.pixel_size
         row_f = (region.north - lat) / region._ps_y

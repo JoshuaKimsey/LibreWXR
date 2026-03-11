@@ -14,6 +14,7 @@ dependencies = [
     "numpy>=2.0",
     "Pillow>=11.0",
     "pydantic-settings>=2.7",
+    "h5py>=3.10",
 ]
 
 [project.optional-dependencies]

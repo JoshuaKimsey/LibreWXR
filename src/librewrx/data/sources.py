@@ -7,6 +7,7 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
+import h5py
 import httpx
 import numpy as np
 from PIL import Image
@@ -294,3 +295,176 @@ def _dbz_float_to_uint8(arr: np.ndarray) -> np.ndarray:
     result = np.clip((arr + 32.0) * 2.0, 0, 255).astype(np.uint8)
     result[nodata_mask] = 0
     return result
+
+
+# ── DWD (Germany) source ─────────────────────────────────────────────
+
+# Filename pattern for DWD HX composite files
+_DWD_HX_FILENAME_RE = re.compile(r"composite_hx_(\d{8})_(\d{4})-hd5")
+
+
+class DWDSource:
+    """DWD (German Weather Service) radar composite source.
+
+    Fetches reflectivity composites from the DWD Open Data portal.
+    Data is delivered as HDF5 (OPERA standard) with uint16 dBZ values
+    and converted to the same uint8 encoding used by IEM.
+    """
+
+    _LISTING_PATH = "/weather/radar/composite/hx/"
+    _LISTING_MAX_AGE = 300  # re-fetch directory listing at most every 5 min
+
+    def __init__(self, base_url: str = "https://opendata.dwd.de"):
+        self._base_url = base_url.rstrip("/")
+        self._client: httpx.AsyncClient | None = None
+        # Cached listing: list of (unix_timestamp, filename) sorted newest-first
+        self._listing: list[tuple[int, str]] = []
+        self._listing_fetched_at: float = 0
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(60.0, connect=15.0),
+                follow_redirects=True,
+            )
+        return self._client
+
+    # -- Directory listing discovery ------------------------------------------
+
+    async def _refresh_listing(self) -> None:
+        """Fetch and parse the DWD directory listing for available HX files."""
+        if time.time() - self._listing_fetched_at < self._LISTING_MAX_AGE:
+            return
+
+        url = f"{self._base_url}{self._LISTING_PATH}"
+        try:
+            client = await self._get_client()
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                logger.warning("DWD listing fetch failed: HTTP %d", resp.status_code)
+                return
+
+            self._listing = _parse_dwd_listing(resp.text)
+            self._listing_fetched_at = time.time()
+            logger.debug("DWD listing: %d files available", len(self._listing))
+        except Exception:
+            logger.exception("Error fetching DWD listing")
+
+    def _find_closest_file(self, target_ts: int) -> str | None:
+        """Find the listing file closest to the target unix timestamp."""
+        if not self._listing:
+            return None
+
+        best_file = None
+        best_diff = float("inf")
+        for ts, filename in self._listing:
+            diff = abs(ts - target_ts)
+            if diff < best_diff:
+                best_diff = diff
+                best_file = filename
+
+        # Only accept matches within 10 minutes of the target
+        if best_diff > 600:
+            return None
+        return best_file
+
+    # -- Frame fetching -------------------------------------------------------
+
+    async def fetch_frame(
+        self, region: RegionDef, minutes_ago: int
+    ) -> np.ndarray | None:
+        """Fetch a DWD radar frame for the given minutes-ago offset."""
+        await self._refresh_listing()
+        now_rounded = int(time.time() // 300) * 300
+        target_ts = now_rounded - minutes_ago * 60
+        filename = self._find_closest_file(target_ts)
+        if filename is None:
+            return None
+        return await self._fetch_hdf5(filename)
+
+    async def fetch_archive_frame(
+        self, region: RegionDef, dt: datetime
+    ) -> np.ndarray | None:
+        """Fetch a DWD radar frame for a specific UTC datetime."""
+        await self._refresh_listing()
+        target_ts = int(dt.timestamp())
+        filename = self._find_closest_file(target_ts)
+        if filename is None:
+            return None
+        return await self._fetch_hdf5(filename)
+
+    async def _fetch_hdf5(self, filename: str) -> np.ndarray | None:
+        """Download and parse a single HX HDF5 file."""
+        url = f"{self._base_url}{self._LISTING_PATH}{filename}"
+        try:
+            client = await self._get_client()
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                logger.warning(
+                    "DWD HX fetch failed: HTTP %d (%s)", resp.status_code, filename
+                )
+                return None
+
+            return _parse_dwd_hdf5(resp.content)
+        except Exception:
+            logger.exception("Error fetching DWD HX frame %s", filename)
+            return None
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+
+
+def _parse_dwd_listing(html: str) -> list[tuple[int, str]]:
+    """Parse DWD Apache directory listing HTML for HX filenames and timestamps."""
+    entries: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for match in _DWD_HX_FILENAME_RE.finditer(html):
+        filename = match.group(0)
+        if filename in seen:
+            continue
+        seen.add(filename)
+        date_str = match.group(1)  # YYYYMMDD
+        time_str = match.group(2)  # HHMM
+        try:
+            dt = datetime.strptime(
+                f"{date_str}{time_str}", "%Y%m%d%H%M"
+            ).replace(tzinfo=timezone.utc)
+            entries.append((int(dt.timestamp()), filename))
+        except ValueError:
+            continue
+
+    entries.sort(key=lambda x: x[0], reverse=True)
+    return entries
+
+
+def _parse_dwd_hdf5(data: bytes) -> np.ndarray | None:
+    """Parse a DWD HX HDF5 file into a uint8 dBZ array.
+
+    Reads the OPERA-standard HDF5 structure:
+    - dataset1/data1/data: uint16 raw values
+    - dataset1/data1/what: gain, offset, nodata, undetect attributes
+
+    Converts to the same uint8 encoding used by IEM:
+    pixel = clamp((dBZ + 32) * 2, 0, 255).
+    """
+    try:
+        f = h5py.File(io.BytesIO(data), "r")
+        raw = f["dataset1/data1/data"][:]
+        what = f["dataset1/data1/what"]
+        gain = float(what.attrs["gain"])
+        offset = float(what.attrs["offset"])
+        nodata_val = int(what.attrs["nodata"])
+        undetect_val = int(what.attrs["undetect"])
+
+        # Convert to float dBZ
+        dbz = raw.astype(np.float32) * gain + offset
+
+        # Mark nodata and undetect as below threshold
+        invalid = (raw == nodata_val) | (raw == undetect_val)
+        dbz[invalid] = -33.0  # maps to 0 in uint8 conversion
+
+        return _dbz_float_to_uint8(dbz)
+    except Exception:
+        logger.exception("Failed to parse DWD HDF5")
+        return None

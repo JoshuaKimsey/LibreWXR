@@ -36,6 +36,11 @@ class RegionDef:
     grid_scale: float = 1000.0  # meters per pixel
     grid_width: int = 0   # explicit grid dimensions; 0 = compute from pixel_size
     grid_height: int = 0
+    # Polar stereographic parameters (only used when proj="stere")
+    stere_lat_ts: float = 0.0   # true-scale latitude
+    stere_lon0: float = 0.0     # central meridian
+    stere_x0: float = 0.0       # false easting (meters)
+    stere_y0: float = 0.0       # false northing (meters)
 
     @property
     def _ps_y(self) -> float:
@@ -101,6 +106,20 @@ REGIONS: dict[str, RegionDef] = {
         grid_x_min=-796500.0, grid_y_max=1125500.0, grid_scale=1000.0,
         grid_width=1694, grid_height=1951,
     ),
+    # Germany composite (DWD)
+    # Polar stereographic DE4800 grid at 250m resolution
+    # +proj=stere +lat_ts=60 +lat_0=90 +lon_0=10 +x_0=543571.835 +y_0=3622213.862
+    "GERMANY": RegionDef(
+        name="GERMANY",
+        west=1.4, east=18.8, south=45.6, north=55.9,
+        pixel_size=0.0035, group="GERMANY",
+        pixel_size_y=0.00215,
+        proj="stere",
+        stere_lat_ts=60.0, stere_lon0=10.0,
+        stere_x0=543571.83521776402, stere_y0=3622213.8619310022,
+        grid_x_min=0.0, grid_y_max=0.0, grid_scale=250.0,
+        grid_width=4400, grid_height=4800,
+    ),
 }
 
 # Group aliases: shorthand names that expand to multiple regions
@@ -108,6 +127,7 @@ REGION_GROUPS: dict[str, list[str]] = {
     "CONUS": ["USCOMP"],
     "US": ["USCOMP", "AKCOMP", "HICOMP", "PRCOMP", "GUCOMP"],
     "NORDIC": ["NORDIC"],
+    "GERMANY": ["GERMANY"],
 }
 
 

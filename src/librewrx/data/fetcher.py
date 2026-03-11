@@ -9,7 +9,7 @@ import numpy as np
 
 from librewrx.config import settings
 from librewrx.data.regions import REGIONS, RegionDef
-from librewrx.data.sources import IEMSource, METNordicSource
+from librewrx.data.sources import DWDSource, IEMSource, METNordicSource
 from librewrx.data.store import FrameStore, RadarFrame
 from librewrx.data.temperature import TemperatureGrid
 from librewrx.tiles.cache import TileCache
@@ -35,14 +35,19 @@ class RadarFetcher:
         ]
 
         # Build a source for each enabled region based on its group
-        self._sources: dict[str, IEMSource | METNordicSource] = {}
+        self._sources: dict[str, IEMSource | METNordicSource | DWDSource] = {}
         iem_source: IEMSource | None = None
         nordic_source: METNordicSource | None = None
+        dwd_source: DWDSource | None = None
         for region in self._enabled_regions:
             if region.group == "NORDIC":
                 if nordic_source is None:
                     nordic_source = METNordicSource(settings.met_nordic_base_url)
                 self._sources[region.name] = nordic_source
+            elif region.group == "GERMANY":
+                if dwd_source is None:
+                    dwd_source = DWDSource(settings.dwd_base_url)
+                self._sources[region.name] = dwd_source
             else:
                 if iem_source is None:
                     iem_source = IEMSource(settings.iem_base_url)
