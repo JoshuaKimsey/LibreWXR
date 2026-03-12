@@ -18,7 +18,7 @@ Rain Viewer recently (as of January 1st, 2026) restricted their free API tier: m
 - **Snow detection** — per-pixel snow/rain classification using GFS global surface temperature data
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
 - **Tile cache warming** — background pre-rendering for smooth animation playback
-- **Health endpoint** — `/health` for monitoring uptime, frame count, and cache status
+- **Health endpoint** — `/health` for monitoring uptime, RAM usage, frame count, and cache status
 - **Fully configurable** — all tunable parameters exposed via environment variables
 
 ## Quick Start

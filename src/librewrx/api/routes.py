@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import time
+import psutil
 
 from fastapi import APIRouter, HTTPException, Path, Response
 
@@ -36,6 +37,9 @@ async def health():
     """Health and status endpoint."""
     now = int(time.time())
     uptime = now - int(start_time)
+    ram = psutil.virtual_memory()
+    ram_usage = ram.percent
+    ram_used = round(ram.used / 1e9, 2)
     frame_count = await frame_store.frame_count()
     timestamps = await frame_store.get_timestamps()
     latest_ts = max(timestamps) if timestamps else None
@@ -44,6 +48,8 @@ async def health():
     return {
         "status": "ok" if frame_count > 0 else "degraded",
         "uptime_seconds": uptime,
+        "RAM Usage (%)": ram_usage,
+        "RAM Used (GB)": ram_used,
         "frames": {
             "count": frame_count,
             "max": settings.max_frames,
