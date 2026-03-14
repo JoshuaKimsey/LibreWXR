@@ -6,6 +6,8 @@ A self-hostable, drop-in replacement for the [Rain Viewer](https://www.rainviewe
 
 Rain Viewer recently (as of January 1st, 2026) restricted their free API tier: maximum zoom 7, single color scheme, no satellite, no forecast, PNG only. LibreWRX restores the full pre-restriction functionality as a self-hosted service.
 
+Beyond this though, is the goal of creating a far more customizable API backend for self hosters. The ability to specify regions, radar styles, denoising levels, and more to come as well. With the goal being self-hosting, there are far greater possibilities for what can be both ingested and output via the API, and there is no need to offer any limitations on what is provided, aside from the technicality of the implementation of such features.
+
 ## Features
 
 - **Rain Viewer v2 API compatible** — drop-in replacement, no client changes needed
