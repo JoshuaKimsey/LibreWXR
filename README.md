@@ -210,7 +210,7 @@ See `.env.example` for detailed descriptions and tuning guidance for each settin
 | 50-200 (medium) | 4 with CDN | ~22 GB | ~9 GB |
 | 200+ (large) | 8+ with CDN | 40+ GB | 16+ GB |
 
-Tiles are served with `Cache-Control: public, max-age=300`, so any caching reverse proxy (nginx, CloudFlare, etc.) will work out of the box for high-traffic deployments.
+Tiles are served with `Cache-Control: public, max-age=300`, so any caching reverse proxy (nginx, Cloudflare, etc.) will work out of the box for high-traffic deployments. A CDN like Cloudflare (free tier works) absorbs most tile requests at the edge, meaning a single worker can serve far more users than the table above suggests. Using a Cloudflare Tunnel also provides free HTTPS with no certificate management. For most self-hosting scenarios, 1 worker behind Cloudflare is sufficient.
 
 ## Architecture
 
