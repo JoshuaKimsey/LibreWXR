@@ -12,7 +12,7 @@ import httpx
 import numpy as np
 from PIL import Image
 
-from librewrx.data.regions import RegionDef
+from librewxr.data.regions import RegionDef
 
 logger = logging.getLogger(__name__)
 

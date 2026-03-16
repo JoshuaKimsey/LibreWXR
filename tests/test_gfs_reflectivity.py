@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from librewrx.data.gfs_reflectivity import (
+from librewxr.data.gfs_reflectivity import (
     GRID_HEIGHT,
     GRID_WIDTH,
     GFSReflectivityGrid,
@@ -69,7 +69,7 @@ class TestGFSFallbackRendering:
 
     def test_gfs_only_tile_with_data(self):
         """A tile with no radar regions should render from GFS if available."""
-        from librewrx.tiles.renderer import render_tile
+        from librewxr.tiles.renderer import render_tile
 
         grid = GFSReflectivityGrid()
         # 15 dBZ everywhere → pixel = (15 + 32) * 2 = 94
@@ -96,7 +96,7 @@ class TestGFSFallbackRendering:
 
     def test_gfs_only_tile_without_data(self):
         """Without GFS data, tiles outside radar coverage should be transparent."""
-        from librewrx.tiles.renderer import render_tile
+        from librewxr.tiles.renderer import render_tile
 
         tile_bytes = render_tile(
             frame_regions={},
@@ -116,8 +116,8 @@ class TestGFSFallbackRendering:
 
     def test_coverage_mask_excludes_radar_areas(self):
         """GFS should NOT fill pixels that are within radar region bounds."""
-        from librewrx.tiles.renderer import _build_coverage_mask
-        from librewrx.data.regions import REGIONS
+        from librewxr.tiles.renderer import _build_coverage_mask
+        from librewxr.data.regions import REGIONS
 
         # Tile over CONUS (z=4, x=4, y=5 is roughly central US)
         mask = _build_coverage_mask(
@@ -128,8 +128,8 @@ class TestGFSFallbackRendering:
 
     def test_gfs_fills_uncovered_pixels(self):
         """GFS data should fill pixels outside radar coverage."""
-        from librewrx.tiles.renderer import _fill_gfs_fallback
-        from librewrx.data.regions import REGIONS
+        from librewxr.tiles.renderer import _fill_gfs_fallback
+        from librewxr.data.regions import REGIONS
 
         grid = GFSReflectivityGrid()
         grid.data = np.full((GRID_HEIGHT, GRID_WIDTH), 94, dtype=np.uint8)

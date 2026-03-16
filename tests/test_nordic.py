@@ -3,9 +3,9 @@
 import numpy as np
 import pytest
 
-from librewrx.data.regions import REGIONS, resolve_regions
-from librewrx.data.sources import _dbz_float_to_uint8, _parse_nordic_catalog
-from librewrx.tiles.coordinates import tile_overlaps_region
+from librewxr.data.regions import REGIONS, resolve_regions
+from librewxr.data.sources import _dbz_float_to_uint8, _parse_nordic_catalog
+from librewxr.tiles.coordinates import tile_overlaps_region
 
 
 class TestNordicRegion:

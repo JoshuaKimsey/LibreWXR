@@ -5,9 +5,9 @@ import asyncio
 import numpy as np
 import pytest
 
-from librewrx.data.store import FrameStore, RadarFrame
-from librewrx.tiles.cache import TileCache
-from librewrx.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
+from librewxr.data.store import FrameStore, RadarFrame
+from librewxr.tiles.cache import TileCache
+from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
 
 
 class TestFrameStore:

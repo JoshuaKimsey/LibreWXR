@@ -7,14 +7,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from librewrx.api import routes
-from librewrx.config import settings
-from librewrx.data.fetcher import RadarFetcher
-from librewrx.data.gfs_reflectivity import GFSReflectivityGrid
-from librewrx.data.store import FrameStore
-from librewrx.data.temperature import TemperatureGrid
-from librewrx.tiles.cache import TileCache
-from librewrx.tiles.warmer import TileWarmer
+from librewxr.api import routes
+from librewxr.config import settings
+from librewxr.data.fetcher import RadarFetcher
+from librewxr.data.gfs_reflectivity import GFSReflectivityGrid
+from librewxr.data.store import FrameStore
+from librewxr.data.temperature import TemperatureGrid
+from librewxr.tiles.cache import TileCache
+from librewxr.tiles.warmer import TileWarmer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
         reflectivity_grid=refl_grid,
     )
     logger.info(
-        "Starting LibreWRX (public_url=%s, max_zoom=%d, regions=%s)",
+        "Starting LibreWXR (public_url=%s, max_zoom=%d, regions=%s)",
         settings.public_url,
         settings.max_zoom,
         ", ".join(enabled),
@@ -64,10 +64,10 @@ async def lifespan(app: FastAPI):
     await fetcher.stop()
     warmer.shutdown()
     cache.clear()
-    logger.info("LibreWRX shutdown complete")
+    logger.info("LibreWXR shutdown complete")
 
 
-app = FastAPI(title="LibreWRX", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="LibreWXR", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -82,7 +82,7 @@ app.include_router(routes.router)
 def main():
     import uvicorn
     uvicorn.run(
-        "librewrx.main:app",
+        "librewxr.main:app",
         host=settings.host,
         port=settings.port,
         workers=settings.workers,

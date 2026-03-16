@@ -1,10 +1,10 @@
-# LibreWRX
+# LibreWXR
 
-A self-hostable, drop-in replacement for the [Rain Viewer](https://www.rainviewer.com/) API. LibreWRX serves weather radar tiles using freely available radar composite data from multiple sources, with full compatibility for any client built against the Rain Viewer v2 API.
+A self-hostable, drop-in replacement for the [Rain Viewer](https://www.rainviewer.com/) API. LibreWXR serves weather radar tiles using freely available radar composite data from multiple sources, with full compatibility for any client built against the Rain Viewer v2 API.
 
 ## Why?
 
-Rain Viewer recently (as of January 1st, 2026) restricted their free API tier: maximum zoom 7, single color scheme, no satellite, no forecast, PNG only. LibreWRX restores the full pre-restriction functionality as a self-hosted service.
+Rain Viewer recently (as of January 1st, 2026) restricted their free API tier: maximum zoom 7, single color scheme, no satellite, no forecast, PNG only. LibreWXR restores the full pre-restriction functionality as a self-hosted service.
 
 Beyond this though, is the goal of creating a far more customizable API backend for self hosters. The ability to specify regions, radar styles, denoising levels, and more to come as well. With the goal being self-hosting, there are far greater possibilities for what can be both ingested and output via the API, and there is no need to offer any limitations on what is provided, aside from the technicality of the implementation of such features.
 
@@ -28,8 +28,8 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 ### Docker (recommended)
 
 ```bash
-git clone https://github.com/JoshuaKimsey/LibreWRX.git
-cd LibreWRX
+git clone https://github.com/JoshuaKimsey/LibreWXR.git
+cd LibreWXR
 cp .env.example .env
 # Edit .env to taste
 docker compose up -d
@@ -40,14 +40,14 @@ docker compose up -d
 Requires Python 3.11+.
 
 ```bash
-git clone https://github.com/JoshuaKimsey/LibreWRX.git
-cd LibreWRX
+git clone https://github.com/JoshuaKimsey/LibreWXR.git
+cd LibreWXR
 python3 -m venv .venv
 source .venv/bin/activate
 pip install .
 cp .env.example .env
 # Edit .env to taste
-python -m librewrx.main
+python -m librewxr.main
 ```
 
 The server starts at `http://localhost:8080` by default. It will fetch radar data on startup (takes a few seconds), then begin serving tiles.
@@ -56,7 +56,7 @@ The server starts at `http://localhost:8080` by default. It will fetch radar dat
 
 ### As a Rain Viewer replacement
 
-Point any Rain Viewer-compatible client at your LibreWRX instance. The only change needed is replacing the Rain Viewer host URL with your LibreWRX URL.
+Point any Rain Viewer-compatible client at your LibreWXR instance. The only change needed is replacing the Rain Viewer host URL with your LibreWXR URL.
 
 For example, in JavaScript:
 
@@ -64,7 +64,7 @@ For example, in JavaScript:
 // Before (Rain Viewer)
 const apiUrl = "https://tilecache.rainviewer.com";
 
-// After (LibreWRX)
+// After (LibreWXR)
 const apiUrl = "http://localhost:8080";
 ```
 
@@ -147,19 +147,19 @@ All settings are configured via environment variables (or a `.env` file). Copy `
 
 | Variable | Default | Description |
 |---|---|---|
-| `LIBREWRX_PUBLIC_URL` | `http://localhost:8080` | Public URL for metadata responses |
-| `LIBREWRX_PORT` | `8080` | Server listen port |
-| `LIBREWRX_MAX_ZOOM` | `12` | Maximum tile zoom level |
-| `LIBREWRX_FETCH_INTERVAL` | `300` | Seconds between radar data fetches |
-| `LIBREWRX_MAX_FRAMES` | `12` | Radar frames in memory (~63 MB each) |
-| `LIBREWRX_TILE_CACHE_SIZE` | `50000` | Max cached rendered tiles |
-| `LIBREWRX_SMOOTH_RADIUS` | `3.0` | Gaussian blur radius (0 = disabled) |
-| `LIBREWRX_NOISE_FLOOR_DBZ` | `5.0` | Min dBZ to display (-32 = disabled) |
-| `LIBREWRX_DESPECKLE_MIN_NEIGHBORS` | `3` | Speckle filter strength (0 = disabled) |
-| `LIBREWRX_WEBP_QUALITY` | `100` | WebP quality (100 = lossless, <100 = lossy) |
-| `LIBREWRX_WORKERS` | `1` | Uvicorn worker processes |
-| `LIBREWRX_ENABLED_REGIONS` | `CONUS` | Radar region spec (see below) |
-| `LIBREWRX_WARMER_THREADS` | `4` | Background tile warming threads |
+| `LIBREWXR_PUBLIC_URL` | `http://localhost:8080` | Public URL for metadata responses |
+| `LIBREWXR_PORT` | `8080` | Server listen port |
+| `LIBREWXR_MAX_ZOOM` | `12` | Maximum tile zoom level |
+| `LIBREWXR_FETCH_INTERVAL` | `300` | Seconds between radar data fetches |
+| `LIBREWXR_MAX_FRAMES` | `12` | Radar frames in memory (~63 MB each) |
+| `LIBREWXR_TILE_CACHE_SIZE` | `50000` | Max cached rendered tiles |
+| `LIBREWXR_SMOOTH_RADIUS` | `3.0` | Gaussian blur radius (0 = disabled) |
+| `LIBREWXR_NOISE_FLOOR_DBZ` | `5.0` | Min dBZ to display (-32 = disabled) |
+| `LIBREWXR_DESPECKLE_MIN_NEIGHBORS` | `3` | Speckle filter strength (0 = disabled) |
+| `LIBREWXR_WEBP_QUALITY` | `100` | WebP quality (100 = lossless, <100 = lossy) |
+| `LIBREWXR_WORKERS` | `1` | Uvicorn worker processes |
+| `LIBREWXR_ENABLED_REGIONS` | `CONUS` | Radar region spec (see below) |
+| `LIBREWXR_WARMER_THREADS` | `4` | Background tile warming threads |
 
 **Radar regions:**
 
@@ -178,12 +178,12 @@ You can also mix groups and individual regions: `CONUS,NORDIC,GERMANY`.
 
 Examples:
 ```bash
-LIBREWRX_ENABLED_REGIONS=CONUS        # just continental US (default)
-LIBREWRX_ENABLED_REGIONS=US           # all US regions
-LIBREWRX_ENABLED_REGIONS=NORDIC       # Nordic countries only
-LIBREWRX_ENABLED_REGIONS=CONUS,NORDIC # continental US + Nordic
-LIBREWRX_ENABLED_REGIONS=GERMANY      # Germany only
-LIBREWRX_ENABLED_REGIONS=ALL          # everything available
+LIBREWXR_ENABLED_REGIONS=CONUS        # just continental US (default)
+LIBREWXR_ENABLED_REGIONS=US           # all US regions
+LIBREWXR_ENABLED_REGIONS=NORDIC       # Nordic countries only
+LIBREWXR_ENABLED_REGIONS=CONUS,NORDIC # continental US + Nordic
+LIBREWXR_ENABLED_REGIONS=GERMANY      # Germany only
+LIBREWXR_ENABLED_REGIONS=ALL          # everything available
 ```
 
 See `.env.example` for detailed descriptions and tuning guidance for each setting.
@@ -228,11 +228,11 @@ The `examples/` directory contains ready-to-use HTML files:
 - **`leaflet.html`** — Leaflet-based radar map
 - **`maplibre.html`** — MapLibre GL-based radar map
 
-Open either file in a browser while LibreWRX is running to see the radar overlay on an interactive map.
+Open either file in a browser while LibreWXR is running to see the radar overlay on an interactive map.
 
 ## Data Sources
 
-LibreWRX uses the following freely available data:
+LibreWXR uses the following freely available data:
 
 - **[Iowa Environmental Mesonet (IEM)](https://mesonet.agron.iastate.edu/)** — NEXRAD N0Q composite radar imagery (US regions)
 - **[MET Norway THREDDS](https://thredds.met.no/)** — Nordic radar reflectivity composite (Norway, Sweden, Finland, Denmark)
@@ -249,4 +249,4 @@ All sources are provided by government-funded institutions and are freely availa
 
 ## License
 
-LibreWRX is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
+LibreWXR is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).

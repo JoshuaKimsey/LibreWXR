@@ -7,13 +7,13 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from librewrx.config import settings
-from librewrx.data.gfs_reflectivity import GFSReflectivityGrid
-from librewrx.data.regions import REGIONS, RegionDef
-from librewrx.data.sources import DWDSource, IEMSource, METNordicSource
-from librewrx.data.store import FrameStore, RadarFrame
-from librewrx.data.temperature import TemperatureGrid
-from librewrx.tiles.cache import TileCache
+from librewxr.config import settings
+from librewxr.data.gfs_reflectivity import GFSReflectivityGrid
+from librewxr.data.regions import REGIONS, RegionDef
+from librewxr.data.sources import DWDSource, IEMSource, METNordicSource
+from librewxr.data.store import FrameStore, RadarFrame
+from librewxr.data.temperature import TemperatureGrid
+from librewxr.tiles.cache import TileCache
 
 logger = logging.getLogger(__name__)
 

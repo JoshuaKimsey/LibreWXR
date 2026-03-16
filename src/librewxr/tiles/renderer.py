@@ -5,10 +5,10 @@ import io
 import numpy as np
 from PIL import Image, ImageFilter
 
-from librewrx.colors.schemes import colorize
-from librewrx.config import settings
-from librewrx.data.regions import RegionDef
-from librewrx.tiles.coordinates import (
+from librewxr.colors.schemes import colorize
+from librewxr.config import settings
+from librewxr.data.regions import RegionDef
+from librewxr.tiles.coordinates import (
     overlapping_regions,
     region_pixel_indices,
     region_pixel_indices_fractional,

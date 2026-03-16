@@ -4,9 +4,9 @@ import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
-from librewrx.data.store import FrameStore
-from librewrx.tiles.cache import TileCache
-from librewrx.tiles.renderer import render_tile
+from librewxr.data.store import FrameStore
+from librewxr.tiles.cache import TileCache
+from librewxr.tiles.renderer import render_tile
 
 logger = logging.getLogger(__name__)
 

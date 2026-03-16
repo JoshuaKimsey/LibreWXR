@@ -3,10 +3,10 @@
 import numpy as np
 import pytest
 
-from librewrx.data.regions import REGIONS
-from librewrx.data.store import FrameStore, RadarFrame
-from librewrx.tiles.cache import TileCache
-from librewrx.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
+from librewxr.data.regions import REGIONS
+from librewxr.data.store import FrameStore, RadarFrame
+from librewxr.tiles.cache import TileCache
+from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
 
 
 @pytest.fixture

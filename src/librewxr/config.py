@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    model_config = {"env_prefix": "LIBREWRX_", "env_file": ".env"}
+    model_config = {"env_prefix": "LIBREWXR_", "env_file": ".env"}
 
     host: str = "0.0.0.0"
     port: int = 8080
@@ -27,7 +27,7 @@ class Settings(BaseSettings):
 
     def get_enabled_regions(self) -> list[str]:
         """Resolve the region spec into individual region names."""
-        from librewrx.data.regions import resolve_regions
+        from librewxr.data.regions import resolve_regions
         return resolve_regions(self.enabled_regions)
 
 

@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>LibreWRX - MapLibre Example</title>
+    <title>LibreWXR - MapLibre Example</title>
     <meta charset="utf-8"/>
     <meta content="width=device-width, initial-scale=1.0" name="viewport">
     <link href="https://unpkg.com/maplibre-gl/dist/maplibre-gl.css" rel="stylesheet"/>
@@ -59,7 +59,7 @@
 <body>
 
 <div class="controls">
-    <span class="title">Weather Radar (LibreWRX)</span>
+    <span class="title">Weather Radar (LibreWXR)</span>
     <span id="timestamp">Loading...</span>
     <div class="buttons">
         <button onclick="stop(); showFrame(animationPosition - 1);">&#x2039;</button>
@@ -72,13 +72,13 @@
 
 <script>
 // === CONFIGURATION ===
-// Change this to your LibreWRX server URL
-var LIBREWRX_URL = "http://localhost:8080";
+// Change this to your LibreWXR server URL
+var LIBREWXR_URL = "http://46.225.49.208:8080";
 
 var TILE_SIZE = window.devicePixelRatio >= 2 ? 512 : 256;
 var RADAR_OPACITY = 0.8;
 var ANIMATION_DELAY_MS = 500;
-var API_URL = LIBREWRX_URL + "/public/weather-maps.json";
+var API_URL = LIBREWXR_URL + "/public/weather-maps.json";
 
 // === STATE ===
 var apiData = {};

@@ -5,8 +5,8 @@ import io
 import numpy as np
 from PIL import Image
 
-from librewrx.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
-from librewrx.tiles.renderer import render_coverage_tile, render_tile
+from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
+from librewxr.tiles.renderer import render_coverage_tile, render_tile
 
 
 class TestRenderTile:

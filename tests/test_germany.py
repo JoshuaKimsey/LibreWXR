@@ -5,9 +5,9 @@ import math
 import numpy as np
 import pytest
 
-from librewrx.data.regions import REGIONS, resolve_regions
-from librewrx.data.sources import _parse_dwd_hdf5, _parse_dwd_listing
-from librewrx.tiles.coordinates import tile_overlaps_region
+from librewxr.data.regions import REGIONS, resolve_regions
+from librewxr.data.sources import _parse_dwd_hdf5, _parse_dwd_listing
+from librewxr.tiles.coordinates import tile_overlaps_region
 
 
 class TestGermanyRegion:
@@ -51,7 +51,7 @@ class TestStereProjection:
 
     def test_known_reference_point(self):
         """(9°E, 51°N) should map to approximately col=2174, row=4222."""
-        from librewrx.tiles.coordinates import _stere_forward
+        from librewxr.tiles.coordinates import _stere_forward
 
         region = REGIONS["GERMANY"]
         lon = np.array([9.0])
@@ -68,7 +68,7 @@ class TestStereProjection:
 
     def test_central_meridian(self):
         """Point on central meridian (lon=10) should have x close to x_0."""
-        from librewrx.tiles.coordinates import _stere_forward
+        from librewxr.tiles.coordinates import _stere_forward
 
         region = REGIONS["GERMANY"]
         lon = np.array([10.0])
@@ -82,7 +82,7 @@ class TestStereProjection:
 
     def test_bounds_coverage(self):
         """Corner points should be within grid bounds."""
-        from librewrx.tiles.coordinates import _stere_forward
+        from librewxr.tiles.coordinates import _stere_forward
 
         region = REGIONS["GERMANY"]
         # Test point well inside Germany

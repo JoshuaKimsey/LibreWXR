@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Joshua Kimsey
 import numpy as np
 
-from librewrx.colors.schemes import colorize, get_lut, SCHEME_NAMES
+from librewxr.colors.schemes import colorize, get_lut, SCHEME_NAMES
 
 
 class TestGetLut:

@@ -34,7 +34,7 @@ def _load_color_table() -> None:
     """Parse color_table.csv into LUTs."""
     global _rain_luts, _snow_luts
 
-    csv_path = files("librewrx.colors").joinpath("color_table.csv")
+    csv_path = files("librewxr.colors").joinpath("color_table.csv")
     text = csv_path.read_text()
     reader = csv.reader(text.strip().splitlines())
     header = next(reader)

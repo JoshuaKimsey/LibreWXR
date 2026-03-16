@@ -7,16 +7,16 @@ import psutil
 
 from fastapi import APIRouter, HTTPException, Path, Response
 
-from librewrx.api.models import (
+from librewxr.api.models import (
     RadarData,
     RadarTimestamp,
     SatelliteData,
     WeatherMapsResponse,
 )
-from librewrx.config import settings
-from librewrx.data.store import FrameStore
-from librewrx.tiles.cache import TileCache
-from librewrx.tiles.renderer import render_coverage_tile, render_tile
+from librewxr.config import settings
+from librewxr.data.store import FrameStore
+from librewxr.tiles.cache import TileCache
+from librewxr.tiles.renderer import render_coverage_tile, render_tile
 
 logger = logging.getLogger(__name__)
 

@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from librewrx.tiles.coordinates import (
+from librewxr.tiles.coordinates import (
     COMPOSITE_HEIGHT,
     COMPOSITE_WIDTH,
     EAST,

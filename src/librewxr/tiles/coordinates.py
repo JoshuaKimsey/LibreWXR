@@ -5,7 +5,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from librewrx.data.regions import REGIONS, RegionDef
+from librewxr.data.regions import REGIONS, RegionDef
 
 # Legacy constants for USCOMP (kept for backward compatibility)
 _USCOMP = REGIONS["USCOMP"]
