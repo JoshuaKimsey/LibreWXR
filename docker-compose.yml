@@ -9,9 +9,16 @@ services:
     deploy:
       resources:
         limits:
-          # Adjust based on LIBREWXR_MAX_FRAMES and LIBREWXR_WORKERS:
-          #   1 worker, 12 frames: ~1.5 GB
-          #   1 worker, 20 frames: ~2.0 GB
-          #   2 workers, 12 frames: ~3.0 GB
-          #   2 workers, 20 frames: ~4.0 GB
-          memory: 2048M
+          # Adjust based on regions, frames, and workers.
+          # RAM includes frame data + coordinate caches + tile cache,
+          # which grow significantly under real usage.
+          # ALL regions, 1 worker:
+          #   12 frames: ~7 GB
+          #   20 frames: ~8 GB
+          # ALL regions, 2 workers:
+          #   12 frames: ~12 GB
+          #   20 frames: ~14 GB
+          # CONUS only, 1 worker:
+          #   12 frames: ~3 GB
+          #   20 frames: ~4 GB
+          memory: 7G

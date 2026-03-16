@@ -151,7 +151,7 @@ All settings are configured via environment variables (or a `.env` file). Copy `
 | `LIBREWXR_PORT` | `8080` | Server listen port |
 | `LIBREWXR_MAX_ZOOM` | `12` | Maximum tile zoom level |
 | `LIBREWXR_FETCH_INTERVAL` | `300` | Seconds between radar data fetches |
-| `LIBREWXR_MAX_FRAMES` | `12` | Radar frames in memory (~63 MB each) |
+| `LIBREWXR_MAX_FRAMES` | `12` | Radar frames in memory (~97 MB each with ALL regions) |
 | `LIBREWXR_TILE_CACHE_SIZE` | `50000` | Max cached rendered tiles |
 | `LIBREWXR_SMOOTH_RADIUS` | `3.0` | Gaussian blur radius (0 = disabled) |
 | `LIBREWXR_NOISE_FLOOR_DBZ` | `5.0` | Min dBZ to display (-32 = disabled) |
@@ -185,6 +185,19 @@ LIBREWXR_ENABLED_REGIONS=CONUS,NORDIC # continental US + Nordic
 LIBREWXR_ENABLED_REGIONS=GERMANY      # Germany only
 LIBREWXR_ENABLED_REGIONS=ALL          # everything available
 ```
+
+**RAM requirements:**
+
+Each worker process holds its own copy of all radar frames, coordinate caches, and tile caches. RAM usage grows significantly under real traffic as caches fill up.
+
+| Configuration | Estimated RAM Needed |
+|---|---|
+| CONUS, 1 worker, 12 frames | ~3 GB |
+| CONUS, 1 worker, 20 frames | ~4 GB |
+| ALL regions, 1 worker, 12 frames | ~7 GB |
+| ALL regions, 1 worker, 20 frames | ~8 GB |
+| ALL regions, 2 workers, 12 frames | ~12 GB |
+| ALL regions, 2 workers, 20 frames | ~14 GB |
 
 See `.env.example` for detailed descriptions and tuning guidance for each setting.
 
