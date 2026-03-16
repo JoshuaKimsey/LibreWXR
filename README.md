@@ -203,12 +203,12 @@ See `.env.example` for detailed descriptions and tuning guidance for each settin
 
 ### Scaling
 
-| Users | Workers | RAM |
-|---|---|---|
-| 1-5 (personal) | 1 | ~1.3 GB |
-| 5-50 (small community) | 2-4 | ~2.6-5.2 GB |
-| 50-200 (medium) | 4-8 | ~5.2-10.4 GB |
-| 200+ (large) | 8+ with nginx/CDN | 10+ GB |
+| Users | Workers | RAM (ALL regions) | RAM (CONUS only) |
+|---|---|---|---|
+| 1-5 (personal) | 1 | ~7 GB | ~3 GB |
+| 5-50 (small community) | 2 | ~12 GB | ~5 GB |
+| 50-200 (medium) | 4 with CDN | ~22 GB | ~9 GB |
+| 200+ (large) | 8+ with CDN | 40+ GB | 16+ GB |
 
 Tiles are served with `Cache-Control: public, max-age=300`, so any caching reverse proxy (nginx, CloudFlare, etc.) will work out of the box for high-traffic deployments.
 
