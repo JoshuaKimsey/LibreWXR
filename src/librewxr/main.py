@@ -64,6 +64,7 @@ async def lifespan(app: FastAPI):
     await fetcher.stop()
     warmer.shutdown()
     cache.clear()
+    store.cleanup()
     logger.info("LibreWXR shutdown complete")
 
 

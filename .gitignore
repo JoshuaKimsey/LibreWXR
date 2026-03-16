@@ -25,3 +25,4 @@ htmlcov/
 
 # Claude Code
 .claude/
+.claude-context/

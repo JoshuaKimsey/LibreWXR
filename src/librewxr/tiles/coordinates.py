@@ -5,6 +5,7 @@ from functools import lru_cache
 
 import numpy as np
 
+from librewxr.config import settings
 from librewxr.data.regions import REGIONS, RegionDef
 
 # Legacy constants for USCOMP (kept for backward compatibility)
@@ -113,7 +114,7 @@ def _stere_pixel_coords(
 # ── Region-aware coordinate functions ────────────────────────────────
 
 
-@lru_cache(maxsize=8192)
+@lru_cache(maxsize=settings.coord_cache_size)
 def region_pixel_indices(
     region: RegionDef, z: int, x: int, y: int, tile_size: int = 256
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -156,7 +157,7 @@ def region_pixel_indices(
     return row_idx, col_idx
 
 
-@lru_cache(maxsize=8192)
+@lru_cache(maxsize=settings.coord_cache_size)
 def region_pixel_indices_padded(
     region: RegionDef, z: int, x: int, y: int, tile_size: int = 256, pad: int = 8
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -195,7 +196,7 @@ def region_pixel_indices_padded(
     return row_idx, col_idx
 
 
-@lru_cache(maxsize=8192)
+@lru_cache(maxsize=settings.coord_cache_size)
 def region_pixel_indices_fractional(
     region: RegionDef, z: int, x: int, y: int, tile_size: int = 256
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -255,7 +256,7 @@ def overlapping_regions(
     return result
 
 
-@lru_cache(maxsize=8192)
+@lru_cache(maxsize=settings.coord_cache_size)
 def tile_pixel_latlons(
     z: int, x: int, y: int, tile_size: int = 256
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -278,7 +279,7 @@ def tile_pixel_latlons(
     return lat_grid, lon_grid
 
 
-@lru_cache(maxsize=8192)
+@lru_cache(maxsize=settings.coord_cache_size)
 def tile_pixel_latlons_padded(
     z: int, x: int, y: int, tile_size: int = 256, pad: int = 8
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -310,7 +311,7 @@ def tile_bounds(z: int, x: int, y: int) -> tuple[float, float, float, float]:
     return west, south, east, north
 
 
-@lru_cache(maxsize=4096)
+@lru_cache(maxsize=settings.coord_cache_size)
 def tile_pixel_indices(
     z: int, x: int, y: int, tile_size: int = 256
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -318,7 +319,7 @@ def tile_pixel_indices(
     return region_pixel_indices(_USCOMP, z, x, y, tile_size)
 
 
-@lru_cache(maxsize=4096)
+@lru_cache(maxsize=settings.coord_cache_size)
 def tile_pixel_indices_padded(
     z: int, x: int, y: int, tile_size: int = 256, pad: int = 8
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -326,7 +327,7 @@ def tile_pixel_indices_padded(
     return region_pixel_indices_padded(_USCOMP, z, x, y, tile_size, pad)
 
 
-@lru_cache(maxsize=4096)
+@lru_cache(maxsize=settings.coord_cache_size)
 def tile_pixel_indices_fractional(
     z: int, x: int, y: int, tile_size: int = 256
 ) -> tuple[np.ndarray, np.ndarray]:

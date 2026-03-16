@@ -152,6 +152,7 @@ All settings are configured via environment variables (or a `.env` file). Copy `
 | `LIBREWXR_MAX_ZOOM` | `12` | Maximum tile zoom level |
 | `LIBREWXR_FETCH_INTERVAL` | `300` | Seconds between radar data fetches |
 | `LIBREWXR_MAX_FRAMES` | `12` | Radar frames in memory (~97 MB each with ALL regions) |
+| `LIBREWXR_COORD_CACHE_SIZE` | `2048` | Coordinate cache entries per cache (lower = less RAM) |
 | `LIBREWXR_TILE_CACHE_SIZE` | `50000` | Max cached rendered tiles |
 | `LIBREWXR_SMOOTH_RADIUS` | `3.0` | Gaussian blur radius (0 = disabled) |
 | `LIBREWXR_NOISE_FLOOR_DBZ` | `5.0` | Min dBZ to display (-32 = disabled) |
@@ -236,12 +237,14 @@ Tiles are served with `Cache-Control: public, max-age=300`, so any caching rever
 
 ## Examples
 
-The `examples/` directory contains ready-to-use HTML files:
+The `examples/` directory contains ready-to-use HTML files for local development:
 
-- **`leaflet.html`** — Leaflet-based radar map
-- **`maplibre.html`** — MapLibre GL-based radar map
+- **`leaflet.html`** — Leaflet-based radar map (connects to `localhost:8080`)
+- **`maplibre.html`** — MapLibre GL-based radar map (connects to `localhost:8080`)
 
 Open either file in a browser while LibreWXR is running to see the radar overlay on an interactive map.
+
+The `examples/live-demo/` directory contains the same examples pre-configured to use the public LibreWXR instance at `api.librewxr.net` — no local server required. Just open them in a browser to try it out.
 
 ## Data Sources
 

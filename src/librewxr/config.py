@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     max_frames: int = 12
     max_zoom: int = 12
     tile_cache_size: int = 50_000
+    coord_cache_size: int = 2048  # LRU entries per coordinate cache (lower = less RAM)
     smooth_radius: float = 3.0  # Gaussian blur radius when smoothing is enabled
     noise_floor_dbz: float = 5.0  # Minimum dBZ to display; lower values are zeroed out
     despeckle_min_neighbors: int = 3  # Min non-zero neighbors (of 8) to keep a pixel; 0 to disable

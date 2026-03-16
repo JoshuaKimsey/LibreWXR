@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>LibreWXR - Leaflet Example</title>
+    <title>LibreWXR - Leaflet Live Demo</title>
     <meta charset="utf-8"/>
     <meta content="width=device-width, initial-scale=1.0" name="viewport">
     <link href="https://unpkg.com/leaflet/dist/leaflet.css" rel="stylesheet"/>
@@ -75,8 +75,9 @@
 
 <script>
 // === CONFIGURATION ===
-// Change this to your LibreWXR server URL
-var LIBREWXR_URL = "http://localhost:8080";
+// This demo uses the public LibreWXR instance.
+// For your own instance, see the examples in the parent directory.
+var LIBREWXR_URL = "https://api.librewxr.net";
 
 var TILE_SIZE = window.devicePixelRatio >= 2 ? 512 : 256;
 var RADAR_OPACITY = 0.8;
