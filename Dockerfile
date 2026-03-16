@@ -9,4 +9,4 @@ RUN pip install --no-cache-dir .
 
 EXPOSE 8080
 
-CMD ["python", "-m", "librewrx.main"]
+CMD ["python", "-m", "librewxr.main"]
