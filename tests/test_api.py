@@ -32,7 +32,7 @@ def populated_store():
 def client(populated_store):
     """Create a test client with pre-populated data (no background fetcher)."""
     store, ts = populated_store
-    cache = TileCache(max_size=100)
+    cache = TileCache(max_mb=10)
 
     with TestClient(app, raise_server_exceptions=False) as c:
         # Override after lifespan sets its own store/cache

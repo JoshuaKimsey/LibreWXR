@@ -77,26 +77,40 @@ class TestFrameStore:
 
 class TestTileCache:
     def test_put_and_get(self):
-        cache = TileCache(max_size=10)
+        cache = TileCache(max_mb=10)
         key = (100, 4, 3, 5, 256, 2, False, False, "png")
         cache.put(key, b"tile_data")
         assert cache.get(key) == b"tile_data"
 
-    def test_eviction(self):
-        cache = TileCache(max_size=2)
+    def test_byte_eviction(self):
+        # Create a cache with a 10-byte limit
+        cache = TileCache.__new__(TileCache)
+        cache._max_bytes = 10
+        cache._cache = __import__("collections").OrderedDict()
+        cache._total_bytes = 0
+        cache._lock = __import__("threading").Lock()
+
         k1 = (1,)
         k2 = (2,)
         k3 = (3,)
-        cache.put(k1, b"1")
-        cache.put(k2, b"2")
-        cache.put(k3, b"3")
+        cache.put(k1, b"12345")  # 5 bytes, total=5
+        cache.put(k2, b"12345")  # 5 bytes, total=10
+        cache.put(k3, b"12345")  # 5 bytes, would be 15 -> evicts k1, total=10
 
         assert cache.get(k1) is None  # evicted
-        assert cache.get(k2) == b"2"
-        assert cache.get(k3) == b"3"
+        assert cache.get(k2) == b"12345"
+        assert cache.get(k3) == b"12345"
+        assert cache.total_bytes == 10
+
+    def test_tracks_bytes(self):
+        cache = TileCache(max_mb=10)
+        cache.put((1,), b"hello")
+        cache.put((2,), b"world!")
+        assert cache.total_bytes == 11
+        assert cache.size == 2
 
     def test_invalidate_timestamp(self):
-        cache = TileCache(max_size=100)
+        cache = TileCache(max_mb=10)
         cache.put((100, 4, 3, 5), b"a")
         cache.put((100, 4, 3, 6), b"b")
         cache.put((200, 4, 3, 5), b"c")
@@ -105,3 +119,20 @@ class TestTileCache:
         assert cache.get((100, 4, 3, 5)) is None
         assert cache.get((100, 4, 3, 6)) is None
         assert cache.get((200, 4, 3, 5)) == b"c"
+        assert cache.total_bytes == 1
+
+    def test_evict_half(self):
+        cache = TileCache(max_mb=10)
+        cache.put((1,), b"aaa")
+        cache.put((2,), b"bbb")
+        cache.put((3,), b"ccc")
+        cache.put((4,), b"ddd")
+
+        freed = cache.evict_half()
+        assert freed == 6  # evicted 2 oldest entries (3 bytes each)
+        assert cache.size == 2
+        assert cache.total_bytes == 6
+        assert cache.get((1,)) is None
+        assert cache.get((2,)) is None
+        assert cache.get((3,)) == b"ccc"
+        assert cache.get((4,)) == b"ddd"

@@ -32,7 +32,7 @@ def frame_store() -> FrameStore:
 
 @pytest.fixture
 def tile_cache() -> TileCache:
-    return TileCache(max_size=100)
+    return TileCache(max_mb=10)
 
 
 @pytest.fixture

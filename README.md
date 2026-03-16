@@ -153,7 +153,8 @@ All settings are configured via environment variables (or a `.env` file). Copy `
 | `LIBREWXR_FETCH_INTERVAL` | `300` | Seconds between radar data fetches |
 | `LIBREWXR_MAX_FRAMES` | `12` | Radar frames in memory (~97 MB each with ALL regions) |
 | `LIBREWXR_COORD_CACHE_SIZE` | `2048` | Coordinate cache entries per cache (lower = less RAM) |
-| `LIBREWXR_TILE_CACHE_SIZE` | `50000` | Max cached rendered tiles |
+| `LIBREWXR_TILE_CACHE_MB` | `200` | Max tile cache size in MB (byte-capped) |
+| `LIBREWXR_MEMORY_LIMIT_MB` | `0` | Memory limit in MB (0 = auto-detect from Docker/cgroup) |
 | `LIBREWXR_SMOOTH_RADIUS` | `3.0` | Gaussian blur radius (0 = disabled) |
 | `LIBREWXR_NOISE_FLOOR_DBZ` | `5.0` | Min dBZ to display (-32 = disabled) |
 | `LIBREWXR_DESPECKLE_MIN_NEIGHBORS` | `3` | Speckle filter strength (0 = disabled) |

@@ -58,8 +58,9 @@ async def health():
             "latest_age_seconds": now - latest_ts if latest_ts else None,
         },
         "tile_cache": {
-            "size": tile_cache.size,
-            "max": settings.tile_cache_size,
+            "entries": tile_cache.size,
+            "used_mb": round(tile_cache.total_bytes / (1024 * 1024), 1),
+            "max_mb": settings.tile_cache_mb,
         },
         "temperature_grid": {
             "loaded": temperature_grid is not None and temperature_grid.data is not None,
