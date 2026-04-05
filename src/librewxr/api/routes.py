@@ -25,8 +25,7 @@ router = APIRouter()
 # These get set by main.py during startup
 frame_store: FrameStore | None = None
 tile_cache: TileCache | None = None
-temperature_grid = None  # TemperatureGrid | None
-reflectivity_grid = None  # GFSReflectivityGrid | None
+ecmwf_grid = None  # ECMWFGrid | None
 tile_warmer = None  # TileWarmer | None
 start_time: float = 0.0
 enabled_regions: list[str] | None = None
@@ -62,11 +61,9 @@ async def health():
             "used_mb": round(tile_cache.total_bytes / (1024 * 1024), 1),
             "max_mb": settings.tile_cache_mb,
         },
-        "temperature_grid": {
-            "loaded": temperature_grid is not None and temperature_grid.data is not None,
-        },
-        "reflectivity_grid": {
-            "loaded": reflectivity_grid is not None and reflectivity_grid.data is not None,
+        "ecmwf_grid": {
+            "loaded": ecmwf_grid is not None and ecmwf_grid.data is not None,
+            "reference_time": ecmwf_grid.reference_time if ecmwf_grid else None,
         },
         "enabled_regions": enabled_regions or [],
     }
@@ -143,9 +140,8 @@ async def radar_tile(
         smooth=smooth,
         snow=snow,
         fmt=ext,
-        temperature_grid=temperature_grid,
+        ecmwf_grid=ecmwf_grid,
         enabled_regions=enabled_regions,
-        reflectivity_grid=reflectivity_grid,
     )
 
     tile_cache.put(cache_key, tile_bytes)
@@ -160,8 +156,7 @@ async def radar_tile(
                 smooth=smooth,
                 snow=snow,
                 ext=ext,
-                temperature_grid=temperature_grid,
-                reflectivity_grid=reflectivity_grid,
+                ecmwf_grid=ecmwf_grid,
             )
         )
 

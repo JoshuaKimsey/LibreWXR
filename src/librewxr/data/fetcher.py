@@ -8,11 +8,10 @@ from datetime import datetime, timezone
 import numpy as np
 
 from librewxr.config import settings
-from librewxr.data.gfs_reflectivity import GFSReflectivityGrid
+from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.data.sources import DWDSource, IEMSource, METNordicSource
 from librewxr.data.store import FrameStore, RadarFrame
-from librewxr.data.temperature import TemperatureGrid
 from librewxr.tiles.cache import TileCache
 
 logger = logging.getLogger(__name__)
@@ -25,13 +24,11 @@ class RadarFetcher:
         self,
         store: FrameStore,
         cache: TileCache,
-        temperature_grid: TemperatureGrid | None = None,
-        reflectivity_grid: GFSReflectivityGrid | None = None,
+        ecmwf_grid: ECMWFGrid | None = None,
     ):
         self._store = store
         self._cache = cache
-        self._temp_grid = temperature_grid
-        self._refl_grid = reflectivity_grid
+        self._ecmwf_grid = ecmwf_grid
         self._task: asyncio.Task | None = None
         self._enabled_regions = [
             REGIONS[name] for name in settings.get_enabled_regions()
@@ -82,10 +79,8 @@ class RadarFetcher:
             if id(source) not in closed:
                 await source.close()
                 closed.add(id(source))
-        if self._temp_grid:
-            await self._temp_grid.close()
-        if self._refl_grid:
-            await self._refl_grid.close()
+        if self._ecmwf_grid:
+            await self._ecmwf_grid.close()
         logger.info("Radar fetcher stopped")
 
     async def _backfill_then_loop(self) -> None:
@@ -110,18 +105,12 @@ class RadarFetcher:
         await self._fetch_timestamps([(now_rounded, "live", 0)])
 
     async def _fetch_auxiliary_grids(self) -> None:
-        """Fetch temperature and GFS reflectivity grids."""
-        if self._temp_grid is not None:
+        """Fetch ECMWF IFS precipitation grid."""
+        if self._ecmwf_grid is not None:
             try:
-                await self._temp_grid.fetch()
+                await self._ecmwf_grid.fetch()
             except Exception:
-                logger.warning("Temperature fetch failed, snow rendering may be stale")
-
-        if self._refl_grid is not None:
-            try:
-                await self._refl_grid.fetch()
-            except Exception:
-                logger.warning("GFS reflectivity fetch failed, global fallback may be stale")
+                logger.warning("ECMWF IFS fetch failed, global fallback may be stale")
 
     async def _fetch_all_frames(self) -> None:
         """Fetch frames for all enabled regions to fill the store."""

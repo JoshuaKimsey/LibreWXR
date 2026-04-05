@@ -16,8 +16,8 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Image formats** — PNG and WebP (with configurable lossy/lossless quality)
 - **Smoothing** — zoom-adaptive Gaussian blur with seamless tile boundaries
 - **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Nordic countries (Norway, Sweden, Finland, Denmark), and Germany
-- **GFS global fallback** — GFS simulated reflectivity fills in worldwide coverage where no radar composite exists
-- **Snow detection** — per-pixel snow/rain classification using GFS global surface temperature data
+- **ECMWF IFS global fallback** — ECMWF IFS 9km precipitation data fills in worldwide coverage where no radar composite exists (~3x higher resolution than previous GFS fallback)
+- **Snow detection** — per-pixel snow/rain classification using ECMWF IFS snowfall data
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
 - **Tile cache warming** — background pre-rendering for smooth animation playback
 - **Health endpoint** — `/health` for monitoring uptime, RAM usage, frame count, and cache status
@@ -139,7 +139,7 @@ Returns tiles showing where radar data exists (white semi-transparent overlay).
 GET /health
 ```
 
-Returns server status, frame count, cache usage, and temperature grid status.
+Returns server status, frame count, cache usage, and ECMWF grid status.
 
 ## Configuration
 
@@ -221,17 +221,14 @@ Tiles are served with `Cache-Control: public, max-age=300`, so any caching rever
 [MET Norway WCS Fetcher] -->   (N frames, multi-region)    (LRU cache + tile warmer)
 [DWD HX Fetcher]         -->     (every 5 min)
 
-[UCAR THREDDS] --> [Temperature Grid]     --> [Per-pixel snow/rain classification]
-  (every 5 min)     (GFS 2m temp)
-               --> [Reflectivity Grid]    --> [Global fallback where no radar exists]
-                    (GFS sim. reflectivity)
+[Open-Meteo S3] --> [ECMWF Grid]  --> [Per-pixel snow/rain classification]
+  (every 5 min)    (IFS 9km)      --> [Global fallback where no radar exists]
 ```
 
 - **US data source:** IEM NEXRAD N0Q composites — 8-bit reflectivity, multiple regions (CONUS, Alaska, Hawaii, Puerto Rico, Guam)
 - **Nordic data source:** MET Norway THREDDS WCS — float32 dBZ reflectivity composite (Norway, Sweden, Finland, Denmark), converted to uint8 on ingest
 - **Germany data source:** DWD Open Data — HX reflectivity composite in OPERA HDF5 format (4800×4400 at 250m), converted to uint8 on ingest
-- **Temperature source:** UCAR THREDDS GFS Global 0.25° 2m analysis — used for snow/rain precipitation classification (worldwide coverage)
-- **GFS reflectivity fallback:** UCAR THREDDS GFS simulated reflectivity at 1000m — provides low-resolution (~25km) global coverage where no real radar composite exists
+- **ECMWF IFS global fallback:** ECMWF IFS at native 9km resolution via [Open-Meteo](https://open-meteo.com/) S3 — precipitation rate converted to pseudo-reflectivity via Marshall-Palmer Z-R relationship, with direct snow/rain classification from snowfall ratio (replaces both GFS simulated reflectivity and GFS temperature)
 - **Tile rendering:** On-demand with LRU caching. Web Mercator reprojection via pure numpy (no GDAL required)
 - **Tile warming:** Background thread pool pre-renders tiles for all timestamps when a new tile position is requested, ensuring smooth animation playback
 - **No external dependencies beyond pip** — no GDAL, rasterio, or system geo libraries needed
@@ -254,13 +251,13 @@ LibreWXR uses the following freely available data:
 - **[Iowa Environmental Mesonet (IEM)](https://mesonet.agron.iastate.edu/)** — NEXRAD N0Q composite radar imagery (US regions)
 - **[MET Norway THREDDS](https://thredds.met.no/)** — Nordic radar reflectivity composite (Norway, Sweden, Finland, Denmark)
 - **[DWD Open Data](https://opendata.dwd.de/)** — HX radar reflectivity composite (Germany). License: [GeoNutzV](https://www.gesetze-im-internet.de/geonutzv/) (free, attribution required: "Deutscher Wetterdienst")
-- **[UCAR THREDDS](https://thredds.ucar.edu/)** — GFS Global 0.25° 2m temperature analysis for snow classification, and GFS simulated reflectivity at 1000m for global fallback coverage
+- **[ECMWF IFS](https://www.ecmwf.int/) via [Open-Meteo](https://open-meteo.com/)** — ECMWF IFS 9km global precipitation and snowfall data for worldwide fallback coverage and snow/rain classification (CC-BY-4.0, data provided by Open-Meteo.com)
 
-All sources are provided by government-funded institutions and are freely available for any use.
+All sources are provided by government-funded institutions and are freely available for any use. ECMWF IFS data is provided by Open-Meteo under the [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) license.
 
 ## Current Limitations
 
-- **Limited high-resolution coverage** — real radar composites cover US territories (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Nordic countries (Norway, Sweden, Finland, Denmark), and Germany; the rest of the world uses low-resolution GFS model data (~25km) as a fallback
+- **Limited high-resolution coverage** — real radar composites cover US territories (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Nordic countries (Norway, Sweden, Finland, Denmark), and Germany; the rest of the world uses ECMWF IFS 9km precipitation data (~9km) as a fallback
 - **No nowcast/forecast** — only past radar frames are available; precipitation prediction is not yet implemented
 - **No satellite imagery** — the satellite infrared endpoint returns empty data
 

@@ -9,10 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from librewxr.api import routes
 from librewxr.config import settings
+from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.fetcher import RadarFetcher
-from librewxr.data.gfs_reflectivity import GFSReflectivityGrid
 from librewxr.data.store import FrameStore
-from librewxr.data.temperature import TemperatureGrid
 from librewxr.memory import MemoryMonitor, detect_memory_limit_mb
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import (
@@ -51,8 +50,7 @@ def _clear_coord_caches() -> None:
 async def lifespan(app: FastAPI):
     store = FrameStore(max_frames=settings.max_frames)
     cache = TileCache(max_mb=settings.tile_cache_mb)
-    temp_grid = TemperatureGrid()
-    refl_grid = GFSReflectivityGrid()
+    ecmwf_grid = ECMWFGrid()
     enabled = settings.get_enabled_regions()
 
     warmer = TileWarmer(
@@ -73,16 +71,14 @@ async def lifespan(app: FastAPI):
     # Wire up the shared state
     routes.frame_store = store
     routes.tile_cache = cache
-    routes.temperature_grid = temp_grid
-    routes.reflectivity_grid = refl_grid
+    routes.ecmwf_grid = ecmwf_grid
     routes.tile_warmer = warmer
     routes.start_time = time.time()
     routes.enabled_regions = enabled
 
     fetcher = RadarFetcher(
         store, cache,
-        temperature_grid=temp_grid,
-        reflectivity_grid=refl_grid,
+        ecmwf_grid=ecmwf_grid,
     )
     logger.info(
         "Starting LibreWXR (public_url=%s, max_zoom=%d, regions=%s, "

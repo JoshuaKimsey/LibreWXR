@@ -28,9 +28,8 @@ def render_tile(
     smooth: bool = False,
     snow: bool = False,
     fmt: str = "png",
-    temperature_grid=None,
+    ecmwf_grid=None,
     enabled_regions: list[str] | None = None,
-    reflectivity_grid=None,
 ) -> bytes:
     """Render a single map tile from composite radar data.
 
@@ -40,11 +39,10 @@ def render_tile(
         tile_size: 256 or 512
         color_scheme: Rain Viewer color scheme ID
         smooth: apply Gaussian blur
-        snow: use snow color variant (requires temperature_grid)
+        snow: use snow color variant (requires ecmwf_grid for classification)
         fmt: "png" or "webp"
-        temperature_grid: TemperatureGrid for per-pixel snow/rain classification
+        ecmwf_grid: ECMWFGrid for global fallback coverage and snow classification
         enabled_regions: list of enabled region names (for overlap check)
-        reflectivity_grid: GFSReflectivityGrid for global fallback coverage
 
     Returns:
         Encoded image bytes.
@@ -54,11 +52,11 @@ def render_tile(
     regions_with_data = [r for r in regions if r.name in frame_regions]
 
     if not regions_with_data:
-        # No radar regions cover this tile — try GFS fallback
-        if reflectivity_grid is not None and reflectivity_grid.data is not None:
-            return _render_gfs_only_tile(
-                reflectivity_grid, z, x, y, tile_size,
-                color_scheme, smooth, snow, fmt, temperature_grid,
+        # No radar regions cover this tile — try ECMWF fallback
+        if ecmwf_grid is not None and ecmwf_grid.data is not None:
+            return _render_ecmwf_only_tile(
+                ecmwf_grid, z, x, y, tile_size,
+                color_scheme, smooth, snow, fmt,
             )
         return _transparent_tile(tile_size, fmt)
 
@@ -85,10 +83,10 @@ def render_tile(
             smooth, use_blur, pad,
         )
 
-    # Fill uncovered pixels from GFS simulated reflectivity
-    if reflectivity_grid is not None and reflectivity_grid.data is not None:
-        values = _fill_gfs_fallback(
-            values, regions, z, x, y, tile_size, pad, reflectivity_grid,
+    # Fill uncovered pixels from ECMWF precipitation data
+    if ecmwf_grid is not None and ecmwf_grid.data is not None:
+        values = _fill_ecmwf_fallback(
+            values, regions, z, x, y, tile_size, pad, ecmwf_grid,
         )
 
     # Apply noise floor
@@ -98,15 +96,15 @@ def render_tile(
         values[values < pixel_threshold] = 0
 
     # Apply color scheme with per-pixel snow/rain selection
-    if snow and temperature_grid is not None:
+    if snow and ecmwf_grid is not None:
         if pad > 0:
             lat_grid, lon_grid = tile_pixel_latlons_padded(z, x, y, tile_size, pad)
         else:
             lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
-        freezing = temperature_grid.get_freezing_mask(lat_grid, lon_grid)
+        is_snow = ecmwf_grid.get_snow_mask(lat_grid, lon_grid)
         rgba_rain = colorize(values, color_scheme, snow=False)
         rgba_snow = colorize(values, color_scheme, snow=True)
-        rgba = np.where(freezing[..., np.newaxis], rgba_snow, rgba_rain)
+        rgba = np.where(is_snow[..., np.newaxis], rgba_snow, rgba_rain)
     else:
         rgba = colorize(values, color_scheme, snow=False)
 
@@ -256,14 +254,14 @@ def _build_coverage_mask(
     return covered
 
 
-def _fill_gfs_fallback(
+def _fill_ecmwf_fallback(
     values: np.ndarray,
     regions: list[RegionDef],
     z: int, x: int, y: int,
     tile_size: int, pad: int,
-    reflectivity_grid,
+    ecmwf_grid,
 ) -> np.ndarray:
-    """Fill pixels not covered by any radar region with GFS data."""
+    """Fill pixels not covered by any radar region with ECMWF data."""
     covered = _build_coverage_mask(regions, z, x, y, tile_size, pad)
 
     # Only fill pixels that are NOT covered by any radar region
@@ -277,26 +275,25 @@ def _fill_gfs_fallback(
     else:
         lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
 
-    gfs_values = reflectivity_grid.sample(lat_grid, lon_grid)
+    ecmwf_values = ecmwf_grid.sample(lat_grid, lon_grid)
 
     result = values.copy()
-    result[uncovered] = gfs_values[uncovered]
+    result[uncovered] = ecmwf_values[uncovered]
     return result
 
 
-def _render_gfs_only_tile(
-    reflectivity_grid,
+def _render_ecmwf_only_tile(
+    ecmwf_grid,
     z: int, x: int, y: int,
     tile_size: int,
     color_scheme: int,
     smooth: bool,
     snow: bool,
     fmt: str,
-    temperature_grid,
 ) -> bytes:
-    """Render a tile entirely from GFS data (no radar regions overlap)."""
+    """Render a tile entirely from ECMWF data (no radar regions overlap)."""
     lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
-    values = reflectivity_grid.sample(lat_grid, lon_grid)
+    values = ecmwf_grid.sample(lat_grid, lon_grid)
 
     # Apply noise floor
     if settings.noise_floor_dbz > -32:
@@ -305,11 +302,11 @@ def _render_gfs_only_tile(
         values[values < pixel_threshold] = 0
 
     # Apply color scheme with per-pixel snow/rain selection
-    if snow and temperature_grid is not None:
-        freezing = temperature_grid.get_freezing_mask(lat_grid, lon_grid)
+    if snow:
+        is_snow = ecmwf_grid.get_snow_mask(lat_grid, lon_grid)
         rgba_rain = colorize(values, color_scheme, snow=False)
         rgba_snow = colorize(values, color_scheme, snow=True)
-        rgba = np.where(freezing[..., np.newaxis], rgba_snow, rgba_rain)
+        rgba = np.where(is_snow[..., np.newaxis], rgba_snow, rgba_rain)
     else:
         rgba = colorize(values, color_scheme, snow=False)
 

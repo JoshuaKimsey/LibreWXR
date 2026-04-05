@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     iem_base_url: str = "https://mesonet.agron.iastate.edu"
     met_nordic_base_url: str = "https://thredds.met.no"
     dwd_base_url: str = "https://opendata.dwd.de"
+    ecmwf_s3_bucket: str = "openmeteo"
+    ecmwf_s3_region: str = "us-west-2"
+    ecmwf_s3_prefix: str = "data_spatial/ecmwf_ifs"
+    ecmwf_snow_ratio_threshold: float = 0.5
     cors_origins: list[str] = ["*"]
 
     def get_enabled_regions(self) -> list[str]:
