@@ -7,6 +7,7 @@ from PIL import Image, ImageFilter
 
 from librewxr.colors.schemes import colorize
 from librewxr.config import settings
+from librewxr.data.coverage import sample_coverage
 from librewxr.data.regions import RegionDef
 from librewxr.tiles.coordinates import (
     overlapping_regions,
@@ -229,34 +230,6 @@ def render_coverage_tile(
     return _encode_image(img, "png")
 
 
-def _build_coverage_mask(
-    regions: list[RegionDef],
-    z: int, x: int, y: int,
-    tile_size: int, pad: int,
-) -> np.ndarray:
-    """Build a boolean mask of pixels covered by any radar region.
-
-    True = this pixel is within at least one radar region's spatial extent
-    (regardless of whether there's currently precipitation there).
-    """
-    out_size = tile_size + 2 * pad if pad > 0 else tile_size
-    covered = np.zeros((out_size, out_size), dtype=bool)
-
-    for region in regions:
-        if pad > 0:
-            row_idx, col_idx = region_pixel_indices_padded(
-                region, z, x, y, tile_size, pad
-            )
-        else:
-            row_idx, col_idx = region_pixel_indices(region, z, x, y, tile_size)
-
-        # Pixels with valid indices (not -1) are within this region
-        in_bounds = (row_idx != -1) & (col_idx != -1)
-        covered |= in_bounds
-
-    return covered
-
-
 def _fill_ecmwf_fallback(
     values: np.ndarray,
     regions: list[RegionDef],
@@ -266,19 +239,32 @@ def _fill_ecmwf_fallback(
     frame_timestamp: int | None = None,
     smooth: bool = False,
 ) -> np.ndarray:
-    """Fill pixels not covered by any radar region with ECMWF data."""
-    covered = _build_coverage_mask(regions, z, x, y, tile_size, pad)
+    """Fill pixels outside radar coverage from ECMWF.
 
-    # Only fill pixels that are NOT covered by any radar region
-    uncovered = ~covered
-    if not uncovered.any():
-        return values
-
+    IEM N0Q and the Nordic / DWD composites all encode pixel value 0
+    for both "outside radar range" *and* "clear sky within range", so
+    we can't use ``values == 0`` alone — that would make ECMWF bleed
+    into legitimately dry areas inside radar coverage. Instead we use
+    precomputed station-based coverage masks (see data/coverage.py):
+    a pixel is filled only when it has no radar value *and* no region
+    whose station circles cover it.
+    """
     # Get lat/lon for the tile pixels
     if pad > 0:
         lat_grid, lon_grid = tile_pixel_latlons_padded(z, x, y, tile_size, pad)
     else:
         lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
+
+    # Union coverage from every region that overlaps this tile — even
+    # regions we don't have a frame for yet, because if a station reaches
+    # this tile we still don't want ECMWF overlapping with radar.
+    covered = np.zeros(lat_grid.shape, dtype=bool)
+    for region in regions:
+        covered |= sample_coverage(region.name, lat_grid, lon_grid)
+
+    uncovered = (values == 0) & ~covered
+    if not uncovered.any():
+        return values
 
     ecmwf_values = ecmwf_grid.sample(
         lat_grid, lon_grid, frame_timestamp, bilinear=smooth,

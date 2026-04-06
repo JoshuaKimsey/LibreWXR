@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from librewxr.api import routes
 from librewxr.config import settings
+from librewxr.data.coverage import build_coverage_masks
 from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.fetcher import RadarFetcher
 from librewxr.data.store import FrameStore
@@ -52,6 +53,10 @@ async def lifespan(app: FastAPI):
     cache = TileCache(max_mb=settings.tile_cache_mb)
     ecmwf_grid = ECMWFGrid()
     enabled = settings.get_enabled_regions()
+
+    # Precompute radar station coverage masks used by the ECMWF fallback
+    # to distinguish "outside radar range" from "clear sky within range".
+    build_coverage_masks()
 
     warmer = TileWarmer(
         store, cache,

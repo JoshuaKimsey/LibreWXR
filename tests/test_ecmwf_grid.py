@@ -340,33 +340,79 @@ class TestECMWFFallbackRendering:
         arr = np.array(img)
         assert arr[:, :, 3].max() == 0
 
-    def test_coverage_mask_excludes_radar_areas(self):
-        """ECMWF should NOT fill pixels that are within radar region bounds."""
-        from librewxr.tiles.renderer import _build_coverage_mask
+    def test_ecmwf_fills_uncovered_pixels(self, monkeypatch):
+        """ECMWF should fill pixels outside radar station coverage."""
+        from librewxr.tiles import renderer
         from librewxr.data.regions import REGIONS
 
-        mask = _build_coverage_mask(
-            [REGIONS["USCOMP"]], z=4, x=4, y=5, tile_size=256, pad=0,
+        # Patch sample_coverage to report "nothing is covered" → every
+        # zero-valued pixel is eligible for ECMWF fill.
+        monkeypatch.setattr(
+            renderer, "sample_coverage",
+            lambda name, lat, lon: np.zeros(lat.shape, dtype=bool),
         )
-        assert mask.sum() > 0.5 * 256 * 256
-
-    def test_ecmwf_fills_uncovered_pixels(self):
-        """ECMWF data should fill pixels outside radar coverage."""
-        from librewxr.tiles.renderer import _fill_ecmwf_fallback
-        from librewxr.data.regions import REGIONS
 
         grid = ECMWFGrid()
         _inject_timestep(grid, np.full((GRID_HEIGHT, GRID_WIDTH), 94, dtype=np.uint8))
 
         values = np.zeros((256, 256), dtype=np.uint8)
-        result = _fill_ecmwf_fallback(
+        result = renderer._fill_ecmwf_fallback(
             values, [REGIONS["USCOMP"]], z=4, x=3, y=5, tile_size=256,
             pad=0, ecmwf_grid=grid,
         )
-        has_ecmwf = (result == 94).any()
-        has_zero = (result == 0).any()
-        assert has_ecmwf, "ECMWF should fill some uncovered pixels"
-        assert has_zero, "Covered pixels should remain as radar values"
+        assert (result == 94).all()
+
+    def test_ecmwf_preserves_covered_pixels(self, monkeypatch):
+        """ECMWF must not overwrite pixels inside radar coverage.
+
+        Including clear-sky (value 0) pixels inside coverage — they are
+        "known-dry", not "unknown".
+        """
+        from librewxr.tiles import renderer
+        from librewxr.data.regions import REGIONS
+
+        # Left half of the tile is inside radar coverage; right half is outside.
+        def fake_coverage(name, lat, lon):
+            mask = np.zeros(lat.shape, dtype=bool)
+            mask[:, :128] = True
+            return mask
+
+        monkeypatch.setattr(renderer, "sample_coverage", fake_coverage)
+
+        grid = ECMWFGrid()
+        _inject_timestep(grid, np.full((GRID_HEIGHT, GRID_WIDTH), 200, dtype=np.uint8))
+
+        # All-zero radar values. Left half is "covered clear sky"; right half
+        # is "outside coverage" and should be filled.
+        values = np.zeros((256, 256), dtype=np.uint8)
+        result = renderer._fill_ecmwf_fallback(
+            values, [REGIONS["USCOMP"]], z=4, x=3, y=5, tile_size=256,
+            pad=0, ecmwf_grid=grid,
+        )
+        assert (result[:, :128] == 0).all()
+        assert (result[:, 128:] == 200).all()
+
+    def test_ecmwf_preserves_nonzero_radar_pixels(self, monkeypatch):
+        """Any non-zero radar pixel is left alone, covered or not."""
+        from librewxr.tiles import renderer
+        from librewxr.data.regions import REGIONS
+
+        monkeypatch.setattr(
+            renderer, "sample_coverage",
+            lambda name, lat, lon: np.zeros(lat.shape, dtype=bool),
+        )
+
+        grid = ECMWFGrid()
+        _inject_timestep(grid, np.full((GRID_HEIGHT, GRID_WIDTH), 200, dtype=np.uint8))
+
+        values = np.zeros((256, 256), dtype=np.uint8)
+        values[:, :128] = 50
+        result = renderer._fill_ecmwf_fallback(
+            values, [REGIONS["USCOMP"]], z=4, x=3, y=5, tile_size=256,
+            pad=0, ecmwf_grid=grid,
+        )
+        assert (result[:, :128] == 50).all()
+        assert (result[:, 128:] == 200).all()
 
     def test_snow_mask_used_for_coloring(self):
         """When snow=True, the renderer should use ECMWF snow mask."""
