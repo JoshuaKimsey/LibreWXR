@@ -64,6 +64,7 @@ async def health():
         "ecmwf_grid": {
             "loaded": ecmwf_grid is not None and ecmwf_grid.data is not None,
             "reference_time": ecmwf_grid.reference_time if ecmwf_grid else None,
+            "timesteps": ecmwf_grid.timestep_count if ecmwf_grid else 0,
         },
         "enabled_regions": enabled_regions or [],
     }
@@ -142,6 +143,7 @@ async def radar_tile(
         fmt=ext,
         ecmwf_grid=ecmwf_grid,
         enabled_regions=enabled_regions,
+        frame_timestamp=timestamp,
     )
 
     tile_cache.put(cache_key, tile_bytes)

@@ -10,12 +10,21 @@ from librewxr.data.ecmwf_grid import (
     GRID_HEIGHT,
     GRID_WIDTH,
     PIXEL_SIZE,
+    WEST,
     ECMWFGrid,
     ZR_A_RAIN,
     ZR_B_RAIN,
     ZR_A_SNOW,
     ZR_B_SNOW,
 )
+
+
+def _inject_timestep(grid, precip_dbz, snow_mask=None, timestamp=1000000):
+    """Helper to inject test data into an ECMWFGrid's multi-timestep store."""
+    if snow_mask is None:
+        snow_mask = np.zeros_like(precip_dbz, dtype=bool)
+    grid._timesteps[timestamp] = (precip_dbz, snow_mask)
+    grid._sorted_timestamps = sorted(grid._timesteps.keys())
 
 
 class TestECMWFGrid:
@@ -25,6 +34,7 @@ class TestECMWFGrid:
         grid = ECMWFGrid()
         assert grid.data is None
         assert grid.reference_time is None
+        assert grid.timestep_count == 0
 
     def test_sample_returns_zeros_when_no_data(self):
         grid = ECMWFGrid()
@@ -45,7 +55,7 @@ class TestECMWFGrid:
     def test_sample_with_data(self):
         grid = ECMWFGrid()
         # 20 dBZ everywhere → pixel = (20 + 32) * 2 = 104
-        grid._precip_dbz = np.full((GRID_HEIGHT, GRID_WIDTH), 104, dtype=np.uint8)
+        _inject_timestep(grid, np.full((GRID_HEIGHT, GRID_WIDTH), 104, dtype=np.uint8))
 
         lat = np.array([40.0, 0.0, -30.0])
         lon = np.array([-90.0, 0.0, 120.0])
@@ -55,7 +65,7 @@ class TestECMWFGrid:
 
     def test_sample_2d_array(self):
         grid = ECMWFGrid()
-        grid._precip_dbz = np.full((GRID_HEIGHT, GRID_WIDTH), 80, dtype=np.uint8)
+        _inject_timestep(grid, np.full((GRID_HEIGHT, GRID_WIDTH), 80, dtype=np.uint8))
 
         lat = np.ones((256, 256)) * 45.0
         lon = np.ones((256, 256)) * -75.0
@@ -66,7 +76,7 @@ class TestECMWFGrid:
     def test_sample_clamps_coordinates(self):
         """Coordinates outside -90/90 or -180/180 should clamp, not crash."""
         grid = ECMWFGrid()
-        grid._precip_dbz = np.full((GRID_HEIGHT, GRID_WIDTH), 64, dtype=np.uint8)
+        _inject_timestep(grid, np.full((GRID_HEIGHT, GRID_WIDTH), 64, dtype=np.uint8))
 
         lat = np.array([91.0, -91.0])
         lon = np.array([181.0, -181.0])
@@ -76,9 +86,14 @@ class TestECMWFGrid:
 
     def test_get_snow_mask_with_data(self):
         grid = ECMWFGrid()
-        grid._snow_mask = np.zeros((GRID_HEIGHT, GRID_WIDTH), dtype=bool)
+        snow_mask = np.zeros((GRID_HEIGHT, GRID_WIDTH), dtype=bool)
         # Mark northern hemisphere as snow
-        grid._snow_mask[:GRID_HEIGHT // 2, :] = True
+        snow_mask[:GRID_HEIGHT // 2, :] = True
+        _inject_timestep(
+            grid,
+            np.full((GRID_HEIGHT, GRID_WIDTH), 94, dtype=np.uint8),
+            snow_mask=snow_mask,
+        )
 
         # Northern point should be snow
         lat_n = np.array([60.0])
@@ -94,6 +109,149 @@ class TestECMWFGrid:
         assert GRID_WIDTH == 3600
         assert GRID_HEIGHT == 1801
         assert PIXEL_SIZE == 0.1
+
+    def test_nearest_timestamp(self):
+        """Binary search should find the closest stored timestep."""
+        grid = ECMWFGrid()
+        precip = np.zeros((GRID_HEIGHT, GRID_WIDTH), dtype=np.uint8)
+        _inject_timestep(grid, precip, timestamp=1000)
+        _inject_timestep(grid, precip, timestamp=4600)
+        _inject_timestep(grid, precip, timestamp=8200)
+
+        assert grid._nearest_timestamp(1000) == 1000
+        assert grid._nearest_timestamp(2000) == 1000
+        assert grid._nearest_timestamp(3000) == 4600
+        assert grid._nearest_timestamp(7000) == 8200
+        assert grid._nearest_timestamp(None) == 8200
+
+    def test_sample_selects_correct_timestep(self):
+        """sample() should return data from the nearest timestep."""
+        grid = ECMWFGrid()
+        _inject_timestep(grid, np.full((GRID_HEIGHT, GRID_WIDTH), 50, dtype=np.uint8), timestamp=1000)
+        _inject_timestep(grid, np.full((GRID_HEIGHT, GRID_WIDTH), 100, dtype=np.uint8), timestamp=4600)
+
+        lat = np.array([40.0])
+        lon = np.array([-90.0])
+
+        # Close to ts=1000
+        assert grid.sample(lat, lon, timestamp=1200)[0] == 50
+        # Close to ts=4600
+        assert grid.sample(lat, lon, timestamp=4000)[0] == 100
+        # None → latest (4600)
+        assert grid.sample(lat, lon, timestamp=None)[0] == 100
+
+    def test_bilinear_sample_smooths_between_pixels(self):
+        """Bilinear sampling should produce intermediate values between source cells."""
+        grid = ECMWFGrid()
+        # Build a grid with a simple gradient: every column has a different value
+        precip = np.zeros((GRID_HEIGHT, GRID_WIDTH), dtype=np.uint8)
+        precip[:, :] = 100  # uniform non-zero so no zero-fallback kicks in
+        precip[:, GRID_WIDTH // 2] = 200
+        _inject_timestep(grid, precip)
+
+        # Sample at the lon corresponding to the boundary between 100 and 200
+        # (col index slightly under WIDTH/2)
+        lat = np.array([0.0])
+        lon_center = WEST + (GRID_WIDTH // 2) * PIXEL_SIZE - PIXEL_SIZE * 0.5
+        lon = np.array([lon_center])
+
+        nearest = grid.sample(lat, lon, bilinear=False)
+        bilinear = grid.sample(lat, lon, bilinear=True)
+
+        # Bilinear should give an intermediate value (~150), nearest should be 100 or 200
+        assert bilinear[0] != nearest[0]
+        assert 100 < bilinear[0] < 200
+
+    def test_bilinear_sample_avoids_zero_bleed(self):
+        """Bilinear should fall back to nearest at the precip/clear-sky boundary."""
+        grid = ECMWFGrid()
+        precip = np.zeros((GRID_HEIGHT, GRID_WIDTH), dtype=np.uint8)
+        precip[:, GRID_WIDTH // 2:] = 200  # right half non-zero, left half zero
+        _inject_timestep(grid, precip)
+
+        # Sample lots of points across the boundary
+        lats = np.zeros(100)
+        lons = np.linspace(-1.0, 1.0, 100)
+        result = grid.sample(lats, lons, bilinear=True)
+
+        # No intermediate ghost values: every pixel is either 0 or 200
+        unique = set(result.tolist())
+        assert unique <= {0, 200}, f"Bilinear bled into clear sky: {unique}"
+
+    def test_data_property_returns_latest(self):
+        """The data property should return the latest timestep's precip grid."""
+        grid = ECMWFGrid()
+        early = np.full((GRID_HEIGHT, GRID_WIDTH), 50, dtype=np.uint8)
+        late = np.full((GRID_HEIGHT, GRID_WIDTH), 100, dtype=np.uint8)
+        _inject_timestep(grid, early, timestamp=1000)
+        _inject_timestep(grid, late, timestamp=4600)
+
+        assert (grid.data == 100).all()
+
+    def test_select_valid_times_brackets_now(self):
+        """Window should bracket current time, not end before it."""
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+
+        vt_list = [f"2026-04-05T{h:02d}:00Z" for h in range(1, 13)]
+
+        # now=06:30Z, max_ts=3 → first vt >= now is 07Z → window [05, 06, 07]
+        mock_now = datetime(2026, 4, 5, 6, 30, tzinfo=timezone.utc)
+        with patch("librewxr.data.ecmwf_grid.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            mock_dt.fromisoformat = datetime.fromisoformat
+            result = ECMWFGrid._select_valid_times(vt_list, max_ts=3)
+
+        assert result == [
+            "2026-04-05T05:00Z",
+            "2026-04-05T06:00Z",
+            "2026-04-05T07:00Z",
+        ]
+
+    def test_select_valid_times_all_future(self):
+        """When all IFS hours are in the future, take the earliest ones."""
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+
+        # IFS run just released — all valid_times are after now
+        vt_list = [f"2026-04-05T{h:02d}:00Z" for h in range(7, 19)]
+        mock_now = datetime(2026, 4, 5, 6, 30, tzinfo=timezone.utc)
+        with patch("librewxr.data.ecmwf_grid.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            mock_dt.fromisoformat = datetime.fromisoformat
+            result = ECMWFGrid._select_valid_times(vt_list, max_ts=3)
+
+        # First vt >= now is 07Z (idx 0), window shifts forward to fill
+        assert result == [
+            "2026-04-05T07:00Z",
+            "2026-04-05T08:00Z",
+            "2026-04-05T09:00Z",
+        ]
+
+    def test_select_valid_times_all_past(self):
+        """When all IFS hours are in the past, take the latest ones."""
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+
+        vt_list = [f"2026-04-05T{h:02d}:00Z" for h in range(1, 5)]
+        mock_now = datetime(2026, 4, 5, 12, 0, tzinfo=timezone.utc)
+        with patch("librewxr.data.ecmwf_grid.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            mock_dt.fromisoformat = datetime.fromisoformat
+            result = ECMWFGrid._select_valid_times(vt_list, max_ts=3)
+
+        # No vt >= now → anchor at last index → window [02, 03, 04]
+        assert result == [
+            "2026-04-05T02:00Z",
+            "2026-04-05T03:00Z",
+            "2026-04-05T04:00Z",
+        ]
+
+    def test_select_valid_times_few_available(self):
+        """When fewer valid_times than max_ts, return all of them."""
+        vt_list = ["2026-04-05T01:00Z", "2026-04-05T02:00Z"]
+        result = ECMWFGrid._select_valid_times(vt_list, max_ts=3)
+        assert result == vt_list
 
 
 class TestZRConversion:
@@ -147,7 +305,7 @@ class TestECMWFFallbackRendering:
 
         grid = ECMWFGrid()
         # 15 dBZ everywhere → pixel = (15 + 32) * 2 = 94
-        grid._precip_dbz = np.full((GRID_HEIGHT, GRID_WIDTH), 94, dtype=np.uint8)
+        _inject_timestep(grid, np.full((GRID_HEIGHT, GRID_WIDTH), 94, dtype=np.uint8))
 
         # Tile over the Atlantic Ocean (no radar regions)
         tile_bytes = render_tile(
@@ -198,7 +356,7 @@ class TestECMWFFallbackRendering:
         from librewxr.data.regions import REGIONS
 
         grid = ECMWFGrid()
-        grid._precip_dbz = np.full((GRID_HEIGHT, GRID_WIDTH), 94, dtype=np.uint8)
+        _inject_timestep(grid, np.full((GRID_HEIGHT, GRID_WIDTH), 94, dtype=np.uint8))
 
         values = np.zeros((256, 256), dtype=np.uint8)
         result = _fill_ecmwf_fallback(
@@ -215,8 +373,11 @@ class TestECMWFFallbackRendering:
         from librewxr.tiles.renderer import render_tile
 
         grid = ECMWFGrid()
-        grid._precip_dbz = np.full((GRID_HEIGHT, GRID_WIDTH), 94, dtype=np.uint8)
-        grid._snow_mask = np.ones((GRID_HEIGHT, GRID_WIDTH), dtype=bool)
+        _inject_timestep(
+            grid,
+            np.full((GRID_HEIGHT, GRID_WIDTH), 94, dtype=np.uint8),
+            snow_mask=np.ones((GRID_HEIGHT, GRID_WIDTH), dtype=bool),
+        )
 
         tile_snow = render_tile(
             frame_regions={},

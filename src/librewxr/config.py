@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
+import math
+
 from pydantic_settings import BaseSettings
 
 
@@ -30,7 +32,18 @@ class Settings(BaseSettings):
     ecmwf_s3_region: str = "us-west-2"
     ecmwf_s3_prefix: str = "data_spatial/ecmwf_ifs"
     ecmwf_snow_ratio_threshold: float = 0.5
+    ecmwf_max_timesteps: int = 0  # 0 = auto (derived from max_frames)
     cors_origins: list[str] = ["*"]
+
+    def get_ecmwf_max_timesteps(self) -> int:
+        """Return effective ECMWF timestep count.
+
+        If ecmwf_max_timesteps > 0, use it as-is (user override).
+        Otherwise auto-derive from max_frames: ceil(max_frames / 6) + 1.
+        """
+        if self.ecmwf_max_timesteps > 0:
+            return self.ecmwf_max_timesteps
+        return math.ceil(self.max_frames / 6) + 1
 
     def get_enabled_regions(self) -> list[str]:
         """Resolve the region spec into individual region names."""

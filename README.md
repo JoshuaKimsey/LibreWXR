@@ -16,7 +16,7 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Image formats** — PNG and WebP (with configurable lossy/lossless quality)
 - **Smoothing** — zoom-adaptive Gaussian blur with seamless tile boundaries
 - **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Nordic countries (Norway, Sweden, Finland, Denmark), and Germany
-- **ECMWF IFS global fallback** — ECMWF IFS 9km precipitation data fills in worldwide coverage where no radar composite exists (~3x higher resolution than previous GFS fallback)
+- **ECMWF IFS global fallback** — ECMWF IFS 9km precipitation data fills in worldwide coverage where no radar composite exists (~3x higher resolution than previous GFS fallback), with multi-timestep animation that auto-scales to match radar history length
 - **Snow detection** — per-pixel snow/rain classification using ECMWF IFS snowfall data
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
 - **Tile cache warming** — background pre-rendering for smooth animation playback

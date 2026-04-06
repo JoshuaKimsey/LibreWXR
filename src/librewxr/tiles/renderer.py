@@ -30,6 +30,7 @@ def render_tile(
     fmt: str = "png",
     ecmwf_grid=None,
     enabled_regions: list[str] | None = None,
+    frame_timestamp: int | None = None,
 ) -> bytes:
     """Render a single map tile from composite radar data.
 
@@ -43,6 +44,7 @@ def render_tile(
         fmt: "png" or "webp"
         ecmwf_grid: ECMWFGrid for global fallback coverage and snow classification
         enabled_regions: list of enabled region names (for overlap check)
+        frame_timestamp: Unix timestamp of the radar frame being rendered
 
     Returns:
         Encoded image bytes.
@@ -56,7 +58,7 @@ def render_tile(
         if ecmwf_grid is not None and ecmwf_grid.data is not None:
             return _render_ecmwf_only_tile(
                 ecmwf_grid, z, x, y, tile_size,
-                color_scheme, smooth, snow, fmt,
+                color_scheme, smooth, snow, fmt, frame_timestamp,
             )
         return _transparent_tile(tile_size, fmt)
 
@@ -87,6 +89,7 @@ def render_tile(
     if ecmwf_grid is not None and ecmwf_grid.data is not None:
         values = _fill_ecmwf_fallback(
             values, regions, z, x, y, tile_size, pad, ecmwf_grid,
+            frame_timestamp, smooth,
         )
 
     # Apply noise floor
@@ -101,7 +104,7 @@ def render_tile(
             lat_grid, lon_grid = tile_pixel_latlons_padded(z, x, y, tile_size, pad)
         else:
             lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
-        is_snow = ecmwf_grid.get_snow_mask(lat_grid, lon_grid)
+        is_snow = ecmwf_grid.get_snow_mask(lat_grid, lon_grid, frame_timestamp)
         rgba_rain = colorize(values, color_scheme, snow=False)
         rgba_snow = colorize(values, color_scheme, snow=True)
         rgba = np.where(is_snow[..., np.newaxis], rgba_snow, rgba_rain)
@@ -260,6 +263,8 @@ def _fill_ecmwf_fallback(
     z: int, x: int, y: int,
     tile_size: int, pad: int,
     ecmwf_grid,
+    frame_timestamp: int | None = None,
+    smooth: bool = False,
 ) -> np.ndarray:
     """Fill pixels not covered by any radar region with ECMWF data."""
     covered = _build_coverage_mask(regions, z, x, y, tile_size, pad)
@@ -275,7 +280,9 @@ def _fill_ecmwf_fallback(
     else:
         lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
 
-    ecmwf_values = ecmwf_grid.sample(lat_grid, lon_grid)
+    ecmwf_values = ecmwf_grid.sample(
+        lat_grid, lon_grid, frame_timestamp, bilinear=smooth,
+    )
 
     result = values.copy()
     result[uncovered] = ecmwf_values[uncovered]
@@ -290,10 +297,13 @@ def _render_ecmwf_only_tile(
     smooth: bool,
     snow: bool,
     fmt: str,
+    frame_timestamp: int | None = None,
 ) -> bytes:
     """Render a tile entirely from ECMWF data (no radar regions overlap)."""
     lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
-    values = ecmwf_grid.sample(lat_grid, lon_grid)
+    values = ecmwf_grid.sample(
+        lat_grid, lon_grid, frame_timestamp, bilinear=smooth,
+    )
 
     # Apply noise floor
     if settings.noise_floor_dbz > -32:
@@ -303,7 +313,7 @@ def _render_ecmwf_only_tile(
 
     # Apply color scheme with per-pixel snow/rain selection
     if snow:
-        is_snow = ecmwf_grid.get_snow_mask(lat_grid, lon_grid)
+        is_snow = ecmwf_grid.get_snow_mask(lat_grid, lon_grid, frame_timestamp)
         rgba_rain = colorize(values, color_scheme, snow=False)
         rgba_snow = colorize(values, color_scheme, snow=True)
         rgba = np.where(is_snow[..., np.newaxis], rgba_snow, rgba_rain)
