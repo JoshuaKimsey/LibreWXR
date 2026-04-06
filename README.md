@@ -52,6 +52,30 @@ python -m librewxr.main
 
 The server starts at `http://localhost:8080` by default. It will fetch radar data on startup (takes a few seconds), then begin serving tiles.
 
+### Auto-updating a Docker deployment
+
+`scripts/auto-update.sh` is an optional helper for self-hosters running LibreWXR from a git checkout with `docker compose`. When run, it:
+
+1. Fetches `origin` and checks whether the tracked branch has new commits.
+2. If so, fast-forwards the working tree and runs `docker compose up -d --build` to rebuild and redeploy.
+3. Otherwise exits quietly — it's safe to schedule via cron or a systemd timer.
+
+The script is a **no-op by default** on any host. To opt in on a production host:
+
+```bash
+touch /path/to/LibreWXR/.auto-update-enabled
+```
+
+(Or export `LIBREWXR_AUTO_UPDATE=1` in the environment.) This sentinel is in `.gitignore`, so cloning the repo on a development machine will *not* accidentally enable auto-updates.
+
+A typical cron entry for hourly updates:
+
+```cron
+0 * * * * /path/to/LibreWXR/scripts/auto-update.sh >> /var/log/librewxr-update.log 2>&1
+```
+
+Use `scripts/auto-update.sh --dry-run` to see what the script would do without making any changes; dry-run is always allowed regardless of the sentinel.
+
 ## Usage
 
 ### As a Rain Viewer replacement

@@ -26,3 +26,6 @@ htmlcov/
 # Claude Code
 .claude/
 .claude-context/
+
+# Per-host opt-in sentinel for scripts/auto-update.sh
+.auto-update-enabled
