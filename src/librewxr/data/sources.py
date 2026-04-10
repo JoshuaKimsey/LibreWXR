@@ -2,9 +2,7 @@
 # Copyright (C) 2026 Joshua Kimsey
 import io
 import logging
-import re
 import time
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 import h5py
@@ -15,14 +13,6 @@ from PIL import Image
 from librewxr.data.regions import RegionDef
 
 logger = logging.getLogger(__name__)
-
-# Filename pattern for MET Norway Nordic reflectivity files
-_NORDIC_FILENAME_PREFIX = (
-    "yrwms-nordic.mos.pcappi-0-dbz."
-    "noclass-clfilter-novpr-clcorr-block.nordiclcc-1000."
-)
-_NORDIC_TIMESTAMP_RE = re.compile(r"(\d{8}T\d{6}Z)\.nc$")
-
 
 class IEMSource:
     """Iowa Environmental Mesonet NEXRAD composite source.
@@ -114,176 +104,6 @@ def _parse_n0q_png(data: bytes, region: RegionDef) -> np.ndarray | None:
         return None
 
 
-class METNordicSource:
-    """MET Norway Nordic radar composite source.
-
-    Fetches reflectivity composites covering Norway, Sweden, Finland, and
-    Denmark from MET Norway's THREDDS WCS endpoint.  Data is delivered as
-    float32 GeoTIFF (raw dBZ) and converted to the same uint8 encoding
-    used by IEM: pixel = clamp((dBZ + 32) * 2, 0, 255).
-    """
-
-    _CATALOG_PATH = (
-        "/thredds/catalog/remotesensing/reflectivity-nordic"
-        "/latest/catalog.xml"
-    )
-    _WCS_PATH = (
-        "/thredds/wcs/remotesensing/reflectivity-nordic/latest"
-    )
-    _CATALOG_MAX_AGE = 300  # re-fetch catalog at most every 5 minutes
-
-    def __init__(self, base_url: str = "https://thredds.met.no"):
-        self._base_url = base_url.rstrip("/")
-        self._client: httpx.AsyncClient | None = None
-        # Cached catalog: list of (unix_timestamp, filename) sorted newest-first
-        self._catalog: list[tuple[int, str]] = []
-        self._catalog_fetched_at: float = 0
-
-    async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(60.0, connect=15.0),
-                follow_redirects=True,
-            )
-        return self._client
-
-    # -- Catalog discovery ---------------------------------------------------
-
-    async def _refresh_catalog(self) -> None:
-        """Fetch and parse the THREDDS catalog XML for available files."""
-        if time.time() - self._catalog_fetched_at < self._CATALOG_MAX_AGE:
-            return
-
-        url = f"{self._base_url}{self._CATALOG_PATH}"
-        try:
-            client = await self._get_client()
-            resp = await client.get(url)
-            if resp.status_code != 200:
-                logger.warning("Nordic catalog fetch failed: HTTP %d", resp.status_code)
-                return
-
-            self._catalog = _parse_nordic_catalog(resp.content)
-            self._catalog_fetched_at = time.time()
-            logger.debug("Nordic catalog: %d files available", len(self._catalog))
-        except Exception:
-            logger.exception("Error fetching Nordic catalog")
-
-    def _find_closest_file(self, target_ts: int) -> str | None:
-        """Find the catalog file closest to the target unix timestamp."""
-        if not self._catalog:
-            return None
-
-        best_file = None
-        best_diff = float("inf")
-        for ts, filename in self._catalog:
-            diff = abs(ts - target_ts)
-            if diff < best_diff:
-                best_diff = diff
-                best_file = filename
-
-        # Only accept matches within 10 minutes of the target
-        if best_diff > 600:
-            return None
-        return best_file
-
-    # -- Frame fetching ------------------------------------------------------
-
-    async def fetch_frame(
-        self, region: RegionDef, minutes_ago: int
-    ) -> np.ndarray | None:
-        """Fetch a Nordic radar frame for the given minutes-ago offset."""
-        await self._refresh_catalog()
-        now_rounded = int(time.time() // 300) * 300
-        target_ts = now_rounded - minutes_ago * 60
-        filename = self._find_closest_file(target_ts)
-        if filename is None:
-            return None
-        return await self._fetch_wcs(filename, region)
-
-    async def fetch_archive_frame(
-        self, region: RegionDef, dt: datetime
-    ) -> np.ndarray | None:
-        """Fetch a Nordic radar frame for a specific UTC datetime."""
-        await self._refresh_catalog()
-        target_ts = int(dt.timestamp())
-        filename = self._find_closest_file(target_ts)
-        if filename is None:
-            return None
-        return await self._fetch_wcs(filename, region)
-
-    async def _fetch_wcs(
-        self, filename: str, region: RegionDef
-    ) -> np.ndarray | None:
-        """Download a single frame via WCS GetCoverage as float32 GeoTIFF."""
-        # Request the full native LCC grid — the server returns it in
-        # its native projection regardless of CRS request, so we use the
-        # LCC projection parameters in coordinates.py to map pixels.
-        url = (
-            f"{self._base_url}{self._WCS_PATH}/{filename}"
-            f"?service=WCS&version=1.0.0&request=GetCoverage"
-            f"&coverage=equivalent_reflectivity_factor"
-            f"&CRS=OGC:CRS84"
-            f"&BBOX={region.west},{region.south},{region.east},{region.north}"
-            f"&format=GeoTIFF_Float"
-        )
-        try:
-            client = await self._get_client()
-            resp = await client.get(url)
-            if resp.status_code != 200:
-                logger.warning("Nordic WCS fetch failed: HTTP %d (%s)", resp.status_code, filename)
-                return None
-
-            return _parse_nordic_geotiff(resp.content, region)
-        except Exception:
-            logger.exception("Error fetching Nordic WCS frame %s", filename)
-            return None
-
-    async def close(self) -> None:
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
-
-
-def _parse_nordic_catalog(data: bytes) -> list[tuple[int, str]]:
-    """Parse THREDDS catalog XML into a list of (unix_timestamp, filename)."""
-    entries: list[tuple[int, str]] = []
-    try:
-        root = ET.fromstring(data)
-        # THREDDS catalog uses a namespace
-        ns = {"thredds": "http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0"}
-        for dataset in root.iter("{http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0}dataset"):
-            name = dataset.get("name", "")
-            if not name.endswith(".nc"):
-                continue
-            match = _NORDIC_TIMESTAMP_RE.search(name)
-            if not match:
-                continue
-            ts_str = match.group(1)  # e.g. "20260310T233000Z"
-            dt = datetime.strptime(ts_str, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-            entries.append((int(dt.timestamp()), name))
-    except Exception:
-        logger.exception("Failed to parse Nordic catalog XML")
-        return []
-
-    # Sort newest-first
-    entries.sort(key=lambda x: x[0], reverse=True)
-    return entries
-
-
-def _parse_nordic_geotiff(data: bytes, region: RegionDef) -> np.ndarray | None:
-    """Parse a float32 GeoTIFF from MET Norway WCS into a uint8 dBZ array.
-
-    Converts float32 dBZ values to the same uint8 encoding used by IEM:
-    pixel = clamp((dBZ + 32) * 2, 0, 255).  NODATA (-32.5) maps to 0.
-    """
-    try:
-        img = Image.open(io.BytesIO(data))
-        arr = np.array(img, dtype=np.float32)
-
-        return _dbz_float_to_uint8(arr)
-    except Exception:
-        logger.exception("Failed to parse Nordic GeoTIFF for %s", region.name)
-        return None
-
 
 def _dbz_float_to_uint8(arr: np.ndarray) -> np.ndarray:
     """Convert float32 dBZ values to uint8 using IEM's encoding.
@@ -297,29 +117,147 @@ def _dbz_float_to_uint8(arr: np.ndarray) -> np.ndarray:
     return result
 
 
-# ── DWD (Germany) source ─────────────────────────────────────────────
+# ── MSC Canada (GeoMet WMS) source ───────────────────────────────────
 
-# Filename pattern for DWD HX composite files
-_DWD_HX_FILENAME_RE = re.compile(r"composite_hx_(\d{8})_(\d{4})-hd5")
+# RADAR_1KM_RRAI discrete palette (Radar-Rain_Dis-14colors style).
+#
+# MSC's WMS serves Canadian radar as pre-colored PNG only (no WCS/TIFF
+# access to raw data).  The "Dis" style uses 14 discrete buckets mapping
+# RGB → precipitation rate in mm/h.  Each entry is (R, G, B, rate) where
+# rate is the geometric mean of the bucket's [lower, upper) edges — the
+# typical value within the bucket, given that precipitation rates are
+# log-distributed.  Using lower-edge labels directly systematically
+# under-reports by ~30% within each bucket and (crucially) pushes the
+# lowest bucket below the 10 dBZ noise floor, making broad light-rain
+# regions invisible compared to Rain Viewer and other MSC consumers.
+#
+# The top bucket (≥200 mm/h, unbounded) is represented as 250 mm/h —
+# a reasonable "typical extreme" that preserves headroom below the
+# clamp ceiling without requiring an arbitrary upper edge.
+#
+# Bucket edges from the legend: 0.1, 1.0, 2.0, 4.0, 8.0, 12.0, 16.0,
+# 24.0, 32.0, 50.0, 64.0, 100.0, 125.0, 200.0, (∞).
+#
+# Colors were extracted from the legend graphic; composite pixels are
+# within ±1 of these values due to server-side rendering rounding, so we
+# use nearest-anchor lookup with a small Euclidean distance threshold.
+_MSC_CANADA_PALETTE: tuple[tuple[int, int, int, float], ...] = (
+    (152, 203, 254, 0.3162),   # √(0.1 × 1.0)
+    (0, 152, 254, 1.4142),     # √(1.0 × 2.0)
+    (0, 254, 102, 2.8284),     # √(2.0 × 4.0)
+    (0, 203, 0, 5.6569),       # √(4.0 × 8.0)
+    (0, 152, 0, 9.7980),       # √(8.0 × 12.0)
+    (0, 102, 0, 13.8564),      # √(12.0 × 16.0)
+    (254, 254, 0, 19.5959),    # √(16.0 × 24.0)
+    (254, 203, 0, 27.7128),    # √(24.0 × 32.0)
+    (254, 152, 0, 40.0),       # √(32.0 × 50.0)
+    (254, 102, 0, 56.5685),    # √(50.0 × 64.0)
+    (254, 0, 0, 80.0),         # √(64.0 × 100.0)
+    (254, 2, 152, 111.8034),   # √(100.0 × 125.0)
+    (152, 51, 203, 158.1139),  # √(125.0 × 200.0)
+    (102, 0, 152, 250.0),      # top bucket (unbounded): typical extreme
+)
+
+# Max Euclidean RGB distance for nearest-anchor matching.  Legend vs
+# composite colors differ by ≤±1 per channel (≈1.7 total); any pixel
+# farther than this from every anchor is probably an artifact or
+# unexpected color and is treated as no-data.
+_MSC_CANADA_MAX_RGB_DIST = 8.0
 
 
-class DWDSource:
-    """DWD (German Weather Service) radar composite source.
+def _mmhr_to_dbz(rate: np.ndarray) -> np.ndarray:
+    """Convert precipitation rate (mm/h) to reflectivity (dBZ).
 
-    Fetches reflectivity composites from the DWD Open Data portal.
-    Data is delivered as HDF5 (OPERA standard) with uint16 dBZ values
-    and converted to the same uint8 encoding used by IEM.
+    Uses the Marshall-Palmer Z-R relationship: Z = 200 * R^1.6.
+    NaN inputs propagate as NaN (no-data).  Rates ≤ 0 map to NaN.
+    """
+    with np.errstate(invalid="ignore", divide="ignore"):
+        z = 200.0 * np.power(rate, 1.6)
+        dbz = 10.0 * np.log10(z)
+    dbz[~np.isfinite(dbz)] = np.nan
+    return dbz
+
+
+def _decode_msc_canada_png(data: bytes) -> np.ndarray | None:
+    """Decode an MSC GeoMet WMS PNG into a uint8 dBZ array.
+
+    Steps:
+    1. Open as RGBA (transparent pixels → no-data).
+    2. For each opaque pixel, find the nearest palette anchor in RGB
+       space.  Pixels beyond the distance threshold become no-data.
+    3. Convert anchor mm/h values to dBZ via Marshall-Palmer.
+    4. Encode to uint8 using the shared scheme: (dBZ + 32) * 2, clamped.
+    """
+    try:
+        img = Image.open(io.BytesIO(data)).convert("RGBA")
+        arr = np.array(img, dtype=np.uint8)
+    except Exception:
+        logger.exception("Failed to decode MSC Canada PNG")
+        return None
+
+    h, w = arr.shape[:2]
+    # int32 — per-channel squared diffs can reach ~65k and we sum three of
+    # them, which overflows int16.
+    rgb = arr[..., :3].astype(np.int32)
+    alpha = arr[..., 3]
+
+    # Build palette arrays: shape (N, 3) for colors, (N,) for rates
+    anchors_rgb = np.array(
+        [(r, g, b) for r, g, b, _ in _MSC_CANADA_PALETTE], dtype=np.int32
+    )
+    anchors_rate = np.array(
+        [rate for *_, rate in _MSC_CANADA_PALETTE], dtype=np.float32
+    )
+
+    # Flatten pixels for vectorized nearest-anchor lookup
+    flat = rgb.reshape(-1, 3)  # (H*W, 3)
+
+    # Squared distance from each pixel to each anchor: (H*W, N)
+    # Using broadcasting: (H*W, 1, 3) - (1, N, 3) → (H*W, N, 3)
+    diffs = flat[:, None, :] - anchors_rgb[None, :, :]
+    dist2 = np.sum(diffs * diffs, axis=2)  # (H*W, N)
+
+    nearest_idx = np.argmin(dist2, axis=1)  # (H*W,)
+    nearest_dist2 = dist2[np.arange(len(flat)), nearest_idx]
+
+    # Map nearest index → mm/h rate
+    rate_flat = anchors_rate[nearest_idx]  # (H*W,)
+
+    # Mask out: transparent pixels, or pixels too far from any anchor
+    valid = (alpha.reshape(-1) > 0) & (
+        nearest_dist2 <= _MSC_CANADA_MAX_RGB_DIST ** 2
+    )
+    rate_flat = np.where(valid, rate_flat, np.nan)
+
+    # Convert mm/h → dBZ
+    dbz_flat = _mmhr_to_dbz(rate_flat)
+    dbz = dbz_flat.reshape(h, w)
+
+    # NaN → -33 sentinel so the shared uint8 encoder maps it to 0
+    dbz = np.where(np.isnan(dbz), -33.0, dbz)
+    return _dbz_float_to_uint8(dbz)
+
+
+class MSCCanadaSource:
+    """Environment and Climate Change Canada radar composite source.
+
+    Fetches the RADAR_1KM_RRAI composite from MSC GeoMet WMS as a
+    pre-colored PNG (MSC does not publish raw radar data in any open
+    format).  Uses the "Radar-Rain_Dis-14colors" discrete style and
+    reverse-engineers the color palette back to precipitation rate,
+    then converts to dBZ via Marshall-Palmer.
+
+    The WMS time dimension gives a rolling ~3-hour history at 6-minute
+    cadence — sufficient for live + archive playback.
     """
 
-    _LISTING_PATH = "/weather/radar/composite/hx/"
-    _LISTING_MAX_AGE = 300  # re-fetch directory listing at most every 5 min
+    _WMS_PATH = "/geomet"
+    _STYLE = "Radar-Rain_Dis-14colors"
+    _LAYER = "RADAR_1KM_RRAI"
 
-    def __init__(self, base_url: str = "https://opendata.dwd.de"):
+    def __init__(self, base_url: str = "https://geo.weather.gc.ca"):
         self._base_url = base_url.rstrip("/")
         self._client: httpx.AsyncClient | None = None
-        # Cached listing: list of (unix_timestamp, filename) sorted newest-first
-        self._listing: list[tuple[int, str]] = []
-        self._listing_fetched_at: float = 0
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -329,85 +267,71 @@ class DWDSource:
             )
         return self._client
 
-    # -- Directory listing discovery ------------------------------------------
-
-    async def _refresh_listing(self) -> None:
-        """Fetch and parse the DWD directory listing for available HX files."""
-        if time.time() - self._listing_fetched_at < self._LISTING_MAX_AGE:
-            return
-
-        url = f"{self._base_url}{self._LISTING_PATH}"
-        try:
-            client = await self._get_client()
-            resp = await client.get(url)
-            if resp.status_code != 200:
-                logger.warning("DWD listing fetch failed: HTTP %d", resp.status_code)
-                return
-
-            self._listing = _parse_dwd_listing(resp.text)
-            self._listing_fetched_at = time.time()
-            logger.debug("DWD listing: %d files available", len(self._listing))
-        except Exception:
-            logger.exception("Error fetching DWD listing")
-
-    def _find_closest_file(self, target_ts: int) -> str | None:
-        """Find the listing file closest to the target unix timestamp."""
-        if not self._listing:
-            return None
-
-        best_file = None
-        best_diff = float("inf")
-        for ts, filename in self._listing:
-            diff = abs(ts - target_ts)
-            if diff < best_diff:
-                best_diff = diff
-                best_file = filename
-
-        # Only accept matches within 10 minutes of the target
-        if best_diff > 600:
-            return None
-        return best_file
-
-    # -- Frame fetching -------------------------------------------------------
+    def _build_url(self, region: RegionDef, time_iso: str | None) -> str:
+        params = [
+            "SERVICE=WMS",
+            "VERSION=1.3.0",
+            "REQUEST=GetMap",
+            f"LAYERS={self._LAYER}",
+            f"STYLES={self._STYLE}",
+            "CRS=EPSG:4326",
+            # WMS 1.3.0 EPSG:4326 axis order is (lat, lon)
+            f"BBOX={region.south},{region.west},{region.north},{region.east}",
+            f"WIDTH={region.width}",
+            f"HEIGHT={region.height}",
+            "FORMAT=image/png",
+            "TRANSPARENT=TRUE",
+        ]
+        if time_iso:
+            params.append(f"TIME={time_iso}")
+        return f"{self._base_url}{self._WMS_PATH}?" + "&".join(params)
 
     async def fetch_frame(
         self, region: RegionDef, minutes_ago: int
     ) -> np.ndarray | None:
-        """Fetch a DWD radar frame for the given minutes-ago offset."""
-        await self._refresh_listing()
-        now_rounded = int(time.time() // 300) * 300
-        target_ts = now_rounded - minutes_ago * 60
-        filename = self._find_closest_file(target_ts)
-        if filename is None:
-            return None
-        return await self._fetch_hdf5(filename)
+        """Fetch a live frame.  minutes_ago=0 → server default (latest)."""
+        if minutes_ago <= 0:
+            return await self._fetch(region, None)
+        # MSC cadence is 6 minutes — let the server snap to nearest timestep
+        target_ts = int(time.time()) - minutes_ago * 60
+        target = datetime.fromtimestamp(target_ts, tz=timezone.utc)
+        return await self._fetch(region, target.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
     async def fetch_archive_frame(
         self, region: RegionDef, dt: datetime
     ) -> np.ndarray | None:
-        """Fetch a DWD radar frame for a specific UTC datetime."""
-        await self._refresh_listing()
-        target_ts = int(dt.timestamp())
-        filename = self._find_closest_file(target_ts)
-        if filename is None:
-            return None
-        return await self._fetch_hdf5(filename)
+        """Fetch a specific historical frame via WMS TIME parameter."""
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return await self._fetch(
+            region, dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
 
-    async def _fetch_hdf5(self, filename: str) -> np.ndarray | None:
-        """Download and parse a single HX HDF5 file."""
-        url = f"{self._base_url}{self._LISTING_PATH}{filename}"
+    async def _fetch(
+        self, region: RegionDef, time_iso: str | None
+    ) -> np.ndarray | None:
+        url = self._build_url(region, time_iso)
         try:
             client = await self._get_client()
             resp = await client.get(url)
             if resp.status_code != 200:
                 logger.warning(
-                    "DWD HX fetch failed: HTTP %d (%s)", resp.status_code, filename
+                    "MSC Canada WMS fetch failed: HTTP %d (time=%s)",
+                    resp.status_code, time_iso,
                 )
                 return None
-
-            return _parse_dwd_hdf5(resp.content)
+            # MSC returns a ServiceExceptionReport (XML) with 200 when the
+            # requested TIME is not yet available — this is normal for the
+            # most recent slots, not an error worth warning about.
+            if resp.headers.get("content-type", "").startswith("text/xml"):
+                logger.debug(
+                    "MSC Canada WMS returned XML exception (time=%s)",
+                    time_iso,
+                )
+                return None
+            return _decode_msc_canada_png(resp.content)
         except Exception:
-            logger.exception("Error fetching DWD HX frame %s", filename)
+            logger.exception("Error fetching MSC Canada WMS")
             return None
 
     async def close(self) -> None:
@@ -415,56 +339,118 @@ class DWDSource:
             await self._client.aclose()
 
 
-def _parse_dwd_listing(html: str) -> list[tuple[int, str]]:
-    """Parse DWD Apache directory listing HTML for HX filenames and timestamps."""
-    entries: list[tuple[int, str]] = []
-    seen: set[str] = set()
-    for match in _DWD_HX_FILENAME_RE.finditer(html):
-        filename = match.group(0)
-        if filename in seen:
-            continue
-        seen.add(filename)
-        date_str = match.group(1)  # YYYYMMDD
-        time_str = match.group(2)  # HHMM
-        try:
-            dt = datetime.strptime(
-                f"{date_str}{time_str}", "%Y%m%d%H%M"
-            ).replace(tzinfo=timezone.utc)
-            entries.append((int(dt.timestamp()), filename))
-        except ValueError:
-            continue
-
-    entries.sort(key=lambda x: x[0], reverse=True)
-    return entries
+# ── OPERA (pan-European CIRRUS) source ───────────────────────────────
 
 
-def _parse_dwd_hdf5(data: bytes) -> np.ndarray | None:
-    """Parse a DWD HX HDF5 file into a uint8 dBZ array.
+class OperaSource:
+    """OPERA pan-European radar composite from MeteoGate S3.
 
-    Reads the OPERA-standard HDF5 structure:
-    - dataset1/data1/data: uint16 raw values
-    - dataset1/data1/what: gain, offset, nodata, undetect attributes
+    Downloads the CIRRUS MAX reflectivity composite (DBZH) as ODIM HDF5
+    directly from Cloudferro S3.  Rolling 24-hour archive, 5-minute cadence.
 
-    Converts to the same uint8 encoding used by IEM:
-    pixel = clamp((dBZ + 32) * 2, 0, 255).
+    URL pattern:
+        s3://openradar-24h/YYYY/MM/DD/OPERA/COMP/OPERA@YYYYMMDDTHHMM@0@DBZH.h5
+    HTTP:
+        https://s3.waw3-1.cloudferro.com/openradar-24h/...
+    """
+
+    _S3_PATH = "/openradar-24h"
+    # OPERA files are published with a ~5-10 minute delay; try up to
+    # 3 older 5-minute slots if the target timestamp 404s.
+    _MAX_FALLBACK_STEPS = 3
+
+    def __init__(self, base_url: str = "https://s3.waw3-1.cloudferro.com"):
+        self._base_url = base_url.rstrip("/")
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(90.0, connect=15.0),
+                follow_redirects=True,
+            )
+        return self._client
+
+    def _url_for_timestamp(self, ts: int) -> str:
+        """Build S3 URL for a unix timestamp (rounded to 5-min cadence)."""
+        rounded = (ts // 300) * 300
+        dt = datetime.fromtimestamp(rounded, tz=timezone.utc)
+        fname = dt.strftime("OPERA@%Y%m%dT%H%M@0@DBZH.h5")
+        path = dt.strftime(f"%Y/%m/%d/OPERA/COMP/{fname}")
+        return f"{self._base_url}{self._S3_PATH}/{path}"
+
+    async def fetch_frame(
+        self, region: RegionDef, minutes_ago: int
+    ) -> np.ndarray | None:
+        now_rounded = int(time.time() // 300) * 300
+        target_ts = now_rounded - minutes_ago * 60
+        return await self._fetch_hdf5(target_ts)
+
+    async def fetch_archive_frame(
+        self, region: RegionDef, dt: datetime
+    ) -> np.ndarray | None:
+        return await self._fetch_hdf5(int(dt.timestamp()))
+
+    async def _fetch_hdf5(self, ts: int) -> np.ndarray | None:
+        """Download and parse, falling back to older slots on 404."""
+        client = await self._get_client()
+        for step in range(self._MAX_FALLBACK_STEPS + 1):
+            url = self._url_for_timestamp(ts - step * 300)
+            try:
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    return _parse_opera_hdf5(resp.content)
+                if resp.status_code == 404 and step < self._MAX_FALLBACK_STEPS:
+                    continue  # try older slot
+                logger.warning(
+                    "OPERA fetch failed: HTTP %d (%s)",
+                    resp.status_code, url.split("/")[-1],
+                )
+                return None
+            except Exception:
+                logger.exception("Error fetching OPERA composite")
+                return None
+        return None
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+
+
+def _parse_opera_hdf5(data: bytes) -> np.ndarray | None:
+    """Parse an OPERA CIRRUS ODIM HDF5 file into a uint8 dBZ array.
+
+    OPERA files use float64 with gain=1.0, offset=0.0 — the raw values
+    ARE dBZ directly.  Sentinel values:
+      nodata  = -9999000.0  (no radar coverage)
+      undetect = -8888000.0 (coverage but below detection threshold)
+
+    Both ``nodata`` and ``undetect`` are encoded as 0 — OPERA acts as a
+    gap-filler that only contributes pixels with actual precipitation.
+    Clear-sky areas fall through to ECMWF, avoiding the problem that
+    OPERA marks inconsistent swaths of ocean as "undetect."
     """
     try:
         f = h5py.File(io.BytesIO(data), "r")
         raw = f["dataset1/data1/data"][:]
         what = f["dataset1/data1/what"]
+        nodata_val = float(what.attrs["nodata"])
+        undetect_val = float(what.attrs["undetect"])
         gain = float(what.attrs["gain"])
         offset = float(what.attrs["offset"])
-        nodata_val = int(what.attrs["nodata"])
-        undetect_val = int(what.attrs["undetect"])
 
-        # Convert to float dBZ
+        # Apply gain/offset (usually 1.0/0.0 for OPERA CIRRUS)
         dbz = raw.astype(np.float32) * gain + offset
 
-        # Mark nodata and undetect as below threshold
-        invalid = (raw == nodata_val) | (raw == undetect_val)
-        dbz[invalid] = -33.0  # maps to 0 in uint8 conversion
+        # Mark nodata and undetect as below threshold → 0 in uint8
+        invalid = np.isclose(raw, nodata_val, atol=1.0) | np.isclose(
+            raw, undetect_val, atol=1.0
+        )
+        dbz[invalid] = -33.0
 
         return _dbz_float_to_uint8(dbz)
     except Exception:
-        logger.exception("Failed to parse DWD HDF5")
+        logger.exception("Failed to parse OPERA HDF5")
         return None
+
+

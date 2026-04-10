@@ -3,7 +3,6 @@
 import numpy as np
 import pytest
 
-from librewxr.data.regions import REGIONS
 from librewxr.data.store import FrameStore, RadarFrame
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
@@ -40,17 +39,3 @@ def sample_radar_frame(sample_frame_data) -> RadarFrame:
     return RadarFrame(timestamp=1700000000, regions={"USCOMP": sample_frame_data})
 
 
-@pytest.fixture
-def sample_nordic_data() -> np.ndarray:
-    """Create a sample Nordic frame with some non-zero values."""
-    region = REGIONS["NORDIC"]
-    data = np.zeros((region.height, region.width), dtype=np.uint8)
-    # Add some "rain" in the middle (roughly over central Scandinavia)
-    center_row = region.height // 2
-    center_col = region.width // 2
-    for i in range(100):
-        for j in range(100):
-            data[center_row - 50 + i, center_col - 50 + j] = min(
-                255, int(((i + j) / 200) * 255)
-            )
-    return data

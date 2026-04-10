@@ -15,7 +15,7 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Tile sizes** — 256px and 512px
 - **Image formats** — PNG and WebP (with configurable lossy/lossless quality)
 - **Smoothing** — zoom-adaptive Gaussian blur with seamless tile boundaries
-- **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Nordic countries (Norway, Sweden, Finland, Denmark), and Germany
+- **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Europe (OPERA pan-European composite, ~155 radars across 24 countries), and Canada
 - **ECMWF IFS global fallback** — ECMWF IFS 9km precipitation data fills in worldwide coverage where no radar composite exists (~3x higher resolution than previous GFS fallback), with multi-timestep animation that auto-scales to match radar history length
 - **Snow detection** — per-pixel snow/rain classification using ECMWF IFS snowfall data
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
@@ -175,7 +175,7 @@ All settings are configured via environment variables (or a `.env` file). Copy `
 | `LIBREWXR_PORT` | `8080` | Server listen port |
 | `LIBREWXR_MAX_ZOOM` | `12` | Maximum tile zoom level |
 | `LIBREWXR_FETCH_INTERVAL` | `300` | Seconds between radar data fetches |
-| `LIBREWXR_MAX_FRAMES` | `12` | Radar frames in memory (~97 MB each with ALL regions) |
+| `LIBREWXR_MAX_FRAMES` | `12` | Radar frames in memory (~96 MB each with ALL regions) |
 | `LIBREWXR_COORD_CACHE_SIZE` | `2048` | Coordinate cache entries per cache (lower = less RAM) |
 | `LIBREWXR_TILE_CACHE_MB` | `200` | Max tile cache size in MB (byte-capped) |
 | `LIBREWXR_MEMORY_LIMIT_MB` | `0` | Memory limit in MB (0 = auto-detect from Docker/cgroup) |
@@ -196,20 +196,20 @@ All settings are configured via environment variables (or a `.env` file). Copy `
 | `HICOMP` | Hawaii | IEM | 0.005° (~500m) | ~3.4 MB |
 | `PRCOMP` | Puerto Rico | IEM | 0.01° (~1km) | ~1 MB |
 | `GUCOMP` | Guam | IEM | 0.0085° (~850m) | ~1 MB |
-| `NORDIC` | Norway, Sweden, Finland, Denmark | MET Norway | ~1km | ~3.2 MB |
-| `GERMANY` | Germany | DWD | 250m | ~20 MB |
+| `CACOMP` | Canada | ECCC (MSC GeoMet) | 0.025° (~2.5km) | ~6 MB |
+| `OPERA` | Europe (24 countries) | EUMETNET OPERA | 1km | ~16 MB |
 
-Group aliases: `CONUS` (continental US only), `US` (all US regions), `NORDIC` (Nordic countries), `GERMANY` (Germany), `ALL` (everything).
-You can also mix groups and individual regions: `CONUS,NORDIC,GERMANY`.
+Group aliases: `CONUS` (continental US only), `US` (all US regions), `CANADA` (Canada), `EUROPE` (OPERA pan-European composite), `ALL` (everything).
+You can also mix groups and individual regions: `CONUS,EUROPE,CANADA`.
 
 Examples:
 ```bash
-LIBREWXR_ENABLED_REGIONS=CONUS        # just continental US (default)
-LIBREWXR_ENABLED_REGIONS=US           # all US regions
-LIBREWXR_ENABLED_REGIONS=NORDIC       # Nordic countries only
-LIBREWXR_ENABLED_REGIONS=CONUS,NORDIC # continental US + Nordic
-LIBREWXR_ENABLED_REGIONS=GERMANY      # Germany only
-LIBREWXR_ENABLED_REGIONS=ALL          # everything available
+LIBREWXR_ENABLED_REGIONS=CONUS          # just continental US (default)
+LIBREWXR_ENABLED_REGIONS=US             # all US regions
+LIBREWXR_ENABLED_REGIONS=EUROPE         # Europe only (OPERA composite)
+LIBREWXR_ENABLED_REGIONS=CANADA         # Canada only
+LIBREWXR_ENABLED_REGIONS=CONUS,EUROPE   # continental US + Europe
+LIBREWXR_ENABLED_REGIONS=ALL            # everything available
 ```
 
 **RAM requirements:**
@@ -241,18 +241,18 @@ Tiles are served with `Cache-Control: public, max-age=300`, so any caching rever
 ## Architecture
 
 ```
-[IEM NEXRAD Fetcher]     --> [In-Memory Frame Store] --> [FastAPI + Tile Renderer]
-[MET Norway WCS Fetcher] -->   (N frames, multi-region)    (LRU cache + tile warmer)
-[DWD HX Fetcher]         -->     (every 5 min)
+[IEM NEXRAD Fetcher]      --> [In-Memory Frame Store] --> [FastAPI + Tile Renderer]
+[MSC Canada WMS Fetcher]  -->   (N frames, multi-region)    (LRU cache + tile warmer)
+[OPERA S3 Fetcher]        -->     (every 5 min)
 
 [Open-Meteo S3] --> [ECMWF Grid]  --> [Per-pixel snow/rain classification]
   (every 5 min)    (IFS 9km)      --> [Global fallback where no radar exists]
 ```
 
 - **US data source:** IEM NEXRAD N0Q composites — 8-bit reflectivity, multiple regions (CONUS, Alaska, Hawaii, Puerto Rico, Guam)
-- **Nordic data source:** MET Norway THREDDS WCS — float32 dBZ reflectivity composite (Norway, Sweden, Finland, Denmark), converted to uint8 on ingest
-- **Germany data source:** DWD Open Data — HX reflectivity composite in OPERA HDF5 format (4800×4400 at 250m), converted to uint8 on ingest
-- **ECMWF IFS global fallback:** ECMWF IFS at native 9km resolution via [Open-Meteo](https://open-meteo.com/) S3 — precipitation rate converted to pseudo-reflectivity via Marshall-Palmer Z-R relationship, with direct snow/rain classification from snowfall ratio (replaces both GFS simulated reflectivity and GFS temperature)
+- **Canada data source:** ECCC MSC GeoMet WMS — pre-colored PNG precipitation composite, decoded via palette reverse-engineering back to dBZ
+- **Europe data source:** EUMETNET OPERA CIRRUS composite via MeteoGate S3 — ODIM HDF5, 3800×4400 at 1km (LAEA projection), ~155 radars across 24 countries
+- **ECMWF IFS global fallback:** ECMWF IFS at native 9km resolution via [Open-Meteo](https://open-meteo.com/) S3 — precipitation rate converted to pseudo-reflectivity via Marshall-Palmer Z-R relationship, with direct snow/rain classification from snowfall ratio
 - **Tile rendering:** On-demand with LRU caching. Web Mercator reprojection via pure numpy (no GDAL required)
 - **Tile warming:** Background thread pool pre-renders tiles for all timestamps when a new tile position is requested, ensuring smooth animation playback
 - **No external dependencies beyond pip** — no GDAL, rasterio, or system geo libraries needed
@@ -273,15 +273,15 @@ The `examples/live-demo/` directory contains the same examples pre-configured to
 LibreWXR uses the following freely available data:
 
 - **[Iowa Environmental Mesonet (IEM)](https://mesonet.agron.iastate.edu/)** — NEXRAD N0Q composite radar imagery (US regions)
-- **[MET Norway THREDDS](https://thredds.met.no/)** — Nordic radar reflectivity composite (Norway, Sweden, Finland, Denmark)
-- **[DWD Open Data](https://opendata.dwd.de/)** — HX radar reflectivity composite (Germany). License: [GeoNutzV](https://www.gesetze-im-internet.de/geonutzv/) (free, attribution required: "Deutscher Wetterdienst")
+- **[ECCC MSC GeoMet](https://eccc-msc.github.io/open-data/msc-geomet/readme_en/)** — Canadian weather radar composite (RADAR_1KM_RRAI via WMS)
+- **[EUMETNET OPERA](https://www.eumetnet.eu/activities/observations-programme/current-activities/opera/)** — Pan-European CIRRUS radar composite via [MeteoGate](https://meteogate.eu/) S3 (~155 radars, 24 countries, ODIM HDF5)
 - **[ECMWF IFS](https://www.ecmwf.int/) via [Open-Meteo](https://open-meteo.com/)** — ECMWF IFS 9km global precipitation and snowfall data for worldwide fallback coverage and snow/rain classification (CC-BY-4.0, data provided by Open-Meteo.com)
 
 All sources are provided by government-funded institutions and are freely available for any use. ECMWF IFS data is provided by Open-Meteo under the [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) license.
 
 ## Current Limitations
 
-- **Limited high-resolution coverage** — real radar composites cover US territories (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Nordic countries (Norway, Sweden, Finland, Denmark), and Germany; the rest of the world uses ECMWF IFS 9km precipitation data (~9km) as a fallback
+- **Limited high-resolution coverage** — real radar composites cover the US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Canada, and Europe (via OPERA); the rest of the world uses ECMWF IFS 9km precipitation data as a fallback
 - **No nowcast/forecast** — only past radar frames are available; precipitation prediction is not yet implemented
 - **No satellite imagery** — the satellite infrared endpoint returns empty data
 

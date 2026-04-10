@@ -26,86 +26,88 @@ _WGS84_F = 1 / 298.257223563
 _WGS84_E2 = 2 * _WGS84_F - _WGS84_F ** 2
 _WGS84_E = math.sqrt(_WGS84_E2)
 
-# ── LCC projection ─────────────────────────────────────────────────
+# ── Lambert Azimuthal Equal Area (LAEA) projection ────────────────────
 
 
-def _lcc_forward(
+def _laea_forward(
     lon: np.ndarray, lat: np.ndarray, region: RegionDef
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Lambert Conformal Conic forward projection (vectorized).
+    """WGS84 ellipsoidal Lambert Azimuthal Equal Area forward projection.
 
-    Converts lon/lat (degrees) to projected x/y (meters) using the
-    LCC parameters stored in the RegionDef.
+    Implements the oblique case per Snyder (1987) §24 / EPSG guidance
+    note 7-2.  The projection parameters are taken from the RegionDef's
+    ``laea_*`` fields (lat_0, lon_0, x_0, y_0).
     """
-    lat_r = np.radians(lat)
-    lat_0_r = math.radians(region.lcc_lat0)
-    lat_1_r = math.radians(region.lcc_lat1)
-    lon_0_r = math.radians(region.lcc_lon0)
-    R = region.lcc_R
+    phi_0 = math.radians(region.laea_lat0)
+    lam_0 = math.radians(region.laea_lon0)
 
-    n = math.sin(lat_1_r)
-    F = math.cos(lat_1_r) * math.tan(math.pi / 4 + lat_1_r / 2) ** n / n
-    rho = R * F / np.tan(np.pi / 4 + lat_r / 2) ** n
-    rho_0 = R * F / math.tan(math.pi / 4 + lat_0_r / 2) ** n
-    theta = n * (np.radians(lon) - lon_0_r)
+    # Eccentricity-derived constants at the origin latitude
+    sin_phi0 = math.sin(phi_0)
+    cos_phi0 = math.cos(phi_0)
+    q_p = (1 - _WGS84_E2) * (
+        1 / (1 - _WGS84_E2) - (1 / (2 * _WGS84_E)) * math.log((1 - _WGS84_E) / (1 + _WGS84_E))
+    )
+    q_0 = _laea_q(sin_phi0)
+    beta_0 = math.asin(q_0 / q_p)
+    R_q = _WGS84_A * math.sqrt(q_p / 2)
+    D = _WGS84_A * cos_phi0 / (
+        math.sqrt(1 - _WGS84_E2 * sin_phi0 ** 2) * R_q * math.cos(beta_0)
+    )
 
-    x = rho * np.sin(theta)
-    y = rho_0 - rho * np.cos(theta)
+    # Per-point computations (vectorized)
+    phi = np.radians(lat)
+    lam = np.radians(lon)
+    sin_phi = np.sin(phi)
+    q = _laea_q_vec(sin_phi)
+    beta = np.arcsin(np.clip(q / q_p, -1.0, 1.0))
+
+    sin_beta = np.sin(beta)
+    cos_beta = np.cos(beta)
+    lam_diff = lam - lam_0
+
+    B = R_q * np.sqrt(
+        2.0 / (
+            1
+            + math.sin(beta_0) * sin_beta
+            + math.cos(beta_0) * cos_beta * np.cos(lam_diff)
+        )
+    )
+
+    x = B * D * cos_beta * np.sin(lam_diff) + region.laea_x0
+    y = (B / D) * (
+        math.cos(beta_0) * sin_beta
+        - math.sin(beta_0) * cos_beta * np.cos(lam_diff)
+    ) + region.laea_y0
+
     return x, y
 
 
-def _lcc_pixel_coords(
+def _laea_q(sin_phi: float) -> float:
+    """Authalic latitude helper q (scalar)."""
+    return (1 - _WGS84_E2) * (
+        sin_phi / (1 - _WGS84_E2 * sin_phi ** 2)
+        - (1 / (2 * _WGS84_E)) * math.log(
+            (1 - _WGS84_E * sin_phi) / (1 + _WGS84_E * sin_phi)
+        )
+    )
+
+
+def _laea_q_vec(sin_phi: np.ndarray) -> np.ndarray:
+    """Authalic latitude helper q (vectorized)."""
+    return (1 - _WGS84_E2) * (
+        sin_phi / (1 - _WGS84_E2 * sin_phi ** 2)
+        - (1 / (2 * _WGS84_E)) * np.log(
+            (1 - _WGS84_E * sin_phi) / (1 + _WGS84_E * sin_phi)
+        )
+    )
+
+
+def _laea_pixel_coords(
     lon: np.ndarray, lat: np.ndarray, region: RegionDef
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Convert lon/lat 1D arrays to 2D grid of (col_f, row_f) for an LCC region."""
-    # Build 2D grids from 1D lon/lat (LCC is non-separable)
+    """Convert lon/lat 1D arrays to 2D grid of (col_f, row_f) for a LAEA region."""
     lon_grid, lat_grid = np.meshgrid(lon, lat)
-    x, y = _lcc_forward(lon_grid, lat_grid, region)
-    col_grid = (x - region.grid_x_min) / region.grid_scale
-    row_grid = (region.grid_y_max - y) / region.grid_scale
-    return col_grid, row_grid
-
-
-# ── Polar stereographic projection ────────────────────────────────
-
-
-def _stere_forward(
-    lon: np.ndarray, lat: np.ndarray, region: RegionDef
-) -> tuple[np.ndarray, np.ndarray]:
-    """WGS84 ellipsoidal north polar stereographic forward projection (vectorized).
-
-    Converts lon/lat (degrees) to projected x/y (meters) using the
-    polar stereographic parameters stored in the RegionDef.
-    """
-    lat_ts_r = math.radians(region.stere_lat_ts)
-    lon_0_r = math.radians(region.stere_lon0)
-
-    # Conformal latitude at true-scale parallel
-    sp_ts = math.sin(lat_ts_r)
-    t_c = math.tan(math.pi / 4 - lat_ts_r / 2) * (
-        (1 + _WGS84_E * sp_ts) / (1 - _WGS84_E * sp_ts)
-    ) ** (_WGS84_E / 2)
-    m_c = math.cos(lat_ts_r) / math.sqrt(1 - _WGS84_E2 * sp_ts ** 2)
-
-    lat_r = np.radians(lat)
-    sp = np.sin(lat_r)
-    t = np.tan(np.pi / 4 - lat_r / 2) * (
-        (1 + _WGS84_E * sp) / (1 - _WGS84_E * sp)
-    ) ** (_WGS84_E / 2)
-    rho = _WGS84_A * m_c * t / t_c
-
-    lam_diff = np.radians(lon) - lon_0_r
-    x = rho * np.sin(lam_diff) + region.stere_x0
-    y = -rho * np.cos(lam_diff) + region.stere_y0
-    return x, y
-
-
-def _stere_pixel_coords(
-    lon: np.ndarray, lat: np.ndarray, region: RegionDef
-) -> tuple[np.ndarray, np.ndarray]:
-    """Convert lon/lat 1D arrays to 2D grid of (col_f, row_f) for a stere region."""
-    lon_grid, lat_grid = np.meshgrid(lon, lat)
-    x, y = _stere_forward(lon_grid, lat_grid, region)
+    x, y = _laea_forward(lon_grid, lat_grid, region)
     col_grid = (x - region.grid_x_min) / region.grid_scale
     row_grid = (region.grid_y_max - y) / region.grid_scale
     return col_grid, row_grid
@@ -131,10 +133,8 @@ def region_pixel_indices(
     lat_rad = np.arctan(np.sinh(math.pi * (1 - 2 * (y + cy / tile_size) / n)))
     lat = np.degrees(lat_rad)
 
-    if region.proj == "lcc":
-        col_grid, row_grid = _lcc_pixel_coords(lon, lat, region)
-    elif region.proj == "stere":
-        col_grid, row_grid = _stere_pixel_coords(lon, lat, region)
+    if region.proj == "laea":
+        col_grid, row_grid = _laea_pixel_coords(lon, lat, region)
     else:
         col_f = (lon - region.west) / region.pixel_size
         row_f = (region.north - lat) / region._ps_y
@@ -170,10 +170,8 @@ def region_pixel_indices_padded(
     lat_rad = np.arctan(np.sinh(math.pi * (1 - 2 * (y + cy / tile_size) / n)))
     lat = np.degrees(lat_rad)
 
-    if region.proj == "lcc":
-        col_grid, row_grid = _lcc_pixel_coords(lon, lat, region)
-    elif region.proj == "stere":
-        col_grid, row_grid = _stere_pixel_coords(lon, lat, region)
+    if region.proj == "laea":
+        col_grid, row_grid = _laea_pixel_coords(lon, lat, region)
     else:
         col_f = (lon - region.west) / region.pixel_size
         row_f = (region.north - lat) / region._ps_y
@@ -209,10 +207,8 @@ def region_pixel_indices_fractional(
     lat_rad = np.arctan(np.sinh(math.pi * (1 - 2 * (y + cy / tile_size) / n)))
     lat = np.degrees(lat_rad)
 
-    if region.proj == "lcc":
-        col_grid, row_grid = _lcc_pixel_coords(lon, lat, region)
-    elif region.proj == "stere":
-        col_grid, row_grid = _stere_pixel_coords(lon, lat, region)
+    if region.proj == "laea":
+        col_grid, row_grid = _laea_pixel_coords(lon, lat, region)
     else:
         col_f = (lon - region.west) / region.pixel_size
         row_f = (region.north - lat) / region._ps_y

@@ -24,23 +24,18 @@ class RegionDef:
     # IEM directory names for URL construction (only used by IEM regions)
     live_dir: str = ""
     archive_dir: str = ""
-    # Projected grid support (e.g. Lambert Conformal Conic)
-    proj: str = "latlon"  # "latlon" or "lcc"
-    # LCC parameters (only used when proj="lcc")
-    lcc_lat0: float = 0.0   # latitude of projection origin
-    lcc_lon0: float = 0.0   # central meridian
-    lcc_lat1: float = 0.0   # standard parallel (lat1 = lat2 for this LCC)
-    lcc_R: float = 6371000.0  # earth radius in meters
+    # Projected grid support
+    proj: str = "latlon"  # "latlon" or "laea"
     grid_x_min: float = 0.0   # x of top-left pixel in projection meters
     grid_y_max: float = 0.0   # y of top-left pixel in projection meters
     grid_scale: float = 1000.0  # meters per pixel
     grid_width: int = 0   # explicit grid dimensions; 0 = compute from pixel_size
     grid_height: int = 0
-    # Polar stereographic parameters (only used when proj="stere")
-    stere_lat_ts: float = 0.0   # true-scale latitude
-    stere_lon0: float = 0.0     # central meridian
-    stere_x0: float = 0.0       # false easting (meters)
-    stere_y0: float = 0.0       # false northing (meters)
+    # Lambert Azimuthal Equal Area parameters (only used when proj="laea")
+    laea_lat0: float = 0.0   # latitude of projection origin
+    laea_lon0: float = 0.0   # central meridian
+    laea_x0: float = 0.0     # false easting (meters)
+    laea_y0: float = 0.0     # false northing (meters)
 
     @property
     def _ps_y(self) -> float:
@@ -92,33 +87,29 @@ REGIONS: dict[str, RegionDef] = {
         pixel_size=0.0085, group="US",
         live_dir="GUCOMP", archive_dir="gucomp",
     ),
-    # Nordic countries composite (MET Norway)
-    # Native Lambert Conformal Conic grid at 1km resolution
-    # LCC params: lat_0=63, lon_0=15, lat_1=lat_2=63, R=6371000
-    "NORDIC": RegionDef(
-        name="NORDIC",
-        west=-8.1, east=40.7, south=53.1, north=71.8,
-        pixel_size=0.028808, group="NORDIC",
-        pixel_size_y=0.009585,
-        proj="lcc",
-        lcc_lat0=63.0, lcc_lon0=15.0, lcc_lat1=63.0,
-        lcc_R=6371000.0,
-        grid_x_min=-796500.0, grid_y_max=1125500.0, grid_scale=1000.0,
-        grid_width=1694, grid_height=1951,
+    # Canada composite (Environment and Climate Change Canada via MSC GeoMet WMS)
+    # Latlon grid; MSC serves pre-colored PNG only, decoded via palette
+    # reverse-engineering.  Resolution chosen for a ~3560x1720 single-request
+    # WMS tile (under typical server size caps).
+    "CACOMP": RegionDef(
+        name="CACOMP",
+        west=-141.0, east=-52.0, south=41.0, north=84.0,
+        pixel_size=0.025, group="CANADA",
     ),
-    # Germany composite (DWD)
-    # Polar stereographic DE4800 grid at 250m resolution
-    # +proj=stere +lat_ts=60 +lat_0=90 +lon_0=10 +x_0=543571.835 +y_0=3622213.862
-    "GERMANY": RegionDef(
-        name="GERMANY",
-        west=1.4, east=18.8, south=45.6, north=55.9,
-        pixel_size=0.0035, group="GERMANY",
-        pixel_size_y=0.00215,
-        proj="stere",
-        stere_lat_ts=60.0, stere_lon0=10.0,
-        stere_x0=543571.83521776402, stere_y0=3622213.8619310022,
-        grid_x_min=0.0, grid_y_max=0.0, grid_scale=250.0,
-        grid_width=4400, grid_height=4800,
+    # OPERA pan-European CIRRUS composite via MeteoGate S3
+    # LAEA projection: +proj=laea +lat_0=55 +lon_0=10 +x_0=1950000 +y_0=-2100000 +ellps=WGS84
+    # 3800x4400 at 1 km, 5-minute cadence, ODIM HDF5 with float64 dBZ
+    # bbox trimmed to actual European radar network extent (Iceland–Turkey,
+    # southern Mediterranean–northern Scandinavia), NOT the full LAEA grid.
+    "OPERA": RegionDef(
+        name="OPERA",
+        west=-25.0, east=45.0, south=34.0, north=72.0,
+        pixel_size=0.01, group="EUROPE",
+        proj="laea",
+        laea_lat0=55.0, laea_lon0=10.0,
+        laea_x0=1950000.0, laea_y0=-2100000.0,
+        grid_x_min=0.0, grid_y_max=0.0, grid_scale=1000.0,
+        grid_width=3800, grid_height=4400,
     ),
 }
 
@@ -126,8 +117,8 @@ REGIONS: dict[str, RegionDef] = {
 REGION_GROUPS: dict[str, list[str]] = {
     "CONUS": ["USCOMP"],
     "US": ["USCOMP", "AKCOMP", "HICOMP", "PRCOMP", "GUCOMP"],
-    "NORDIC": ["NORDIC"],
-    "GERMANY": ["GERMANY"],
+"CANADA": ["CACOMP"],
+    "EUROPE": ["OPERA"],
 }
 
 

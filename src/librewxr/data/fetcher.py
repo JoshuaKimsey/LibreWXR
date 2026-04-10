@@ -10,7 +10,11 @@ import numpy as np
 from librewxr.config import settings
 from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.regions import REGIONS, RegionDef
-from librewxr.data.sources import DWDSource, IEMSource, METNordicSource
+from librewxr.data.sources import (
+    IEMSource,
+    MSCCanadaSource,
+    OperaSource,
+)
 from librewxr.data.store import FrameStore, RadarFrame
 from librewxr.tiles.cache import TileCache
 
@@ -35,19 +39,22 @@ class RadarFetcher:
         ]
 
         # Build a source for each enabled region based on its group
-        self._sources: dict[str, IEMSource | METNordicSource | DWDSource] = {}
+        self._sources: dict[
+            str,
+            IEMSource | MSCCanadaSource | OperaSource,
+        ] = {}
         iem_source: IEMSource | None = None
-        nordic_source: METNordicSource | None = None
-        dwd_source: DWDSource | None = None
+        canada_source: MSCCanadaSource | None = None
+        opera_source: OperaSource | None = None
         for region in self._enabled_regions:
-            if region.group == "NORDIC":
-                if nordic_source is None:
-                    nordic_source = METNordicSource(settings.met_nordic_base_url)
-                self._sources[region.name] = nordic_source
-            elif region.group == "GERMANY":
-                if dwd_source is None:
-                    dwd_source = DWDSource(settings.dwd_base_url)
-                self._sources[region.name] = dwd_source
+            if region.group == "CANADA":
+                if canada_source is None:
+                    canada_source = MSCCanadaSource(settings.msc_canada_base_url)
+                self._sources[region.name] = canada_source
+            elif region.group == "EUROPE":
+                if opera_source is None:
+                    opera_source = OperaSource(settings.opera_base_url)
+                self._sources[region.name] = opera_source
             else:
                 if iem_source is None:
                     iem_source = IEMSource(settings.iem_base_url)

@@ -13,14 +13,23 @@ Coordinates are (lat, lon) in degrees. Range is in kilometers.
 - NEXRAD WSR-88D (US): official NOAA station list
   https://www.ncei.noaa.gov/access/homr/file/nexrad-stations.txt
   Effective precipitation range ~240 km.
-- Nordic (MET Norway / SMHI / FMI / DMI): approximate station
-  locations from the EUMETNET OPERA / NORDRAD networks. Coordinates
-  are accurate to within a few km, which is more than sufficient
-  given ~240 km range.
+- OPERA (EUMETNET): pan-European radar network, ~155 stations
+  across 24 countries. Coordinates from MeteoGate API and
+  national met services.
+- ECCC (Canada): 32 S-band dual-pol stations.
 """
 
-# Effective precipitation detection range for C- and S-band weather radars.
+# Default effective precipitation detection range (km).
 RADAR_RANGE_KM = 240.0
+
+# Per-region range overrides.  European C-band radars in the OPERA
+# network detect precipitation out to ~300 km — using the default 240 km
+# leaves gaps around peripheral stations (Iceland, Ireland) where OPERA
+# still has data but the coverage mask says "not covered," causing
+# visible ECMWF/OPERA overlap seams.
+REGION_RADAR_RANGE: dict[str, float] = {
+    "OPERA": 300.0,
+}
 
 # NEXRAD WSR-88D stations covering USCOMP (continental US).
 NEXRAD_CONUS: list[tuple[float, float]] = [
@@ -201,76 +210,253 @@ NEXRAD_GUAM: list[tuple[float, float]] = [
     (13.455833, 144.811111),   # PGUA
 ]
 
-# Nordic weather radar network (NORDRAD2 / OPERA).
-# Norway (MET Norway), Sweden (SMHI), Finland (FMI), Denmark (DMI).
-# Coordinates are approximate to within a few km.
-NORDIC_STATIONS: list[tuple[float, float]] = [
-    # Norway (MET Norway) - 11 radars
-    (59.79, 5.23),    # Bømlo
-    (61.21, 11.50),   # Hafjell
-    (63.69, 10.20),   # Rissa
-    (70.86, 29.02),   # Berlevåg
-    (69.26, 16.01),   # Andøya
-    (59.62, 10.55),   # Hurum
-    (62.10, 5.11),    # Stad
-    (59.38, 10.78),   # Rygge
-    (67.53, 12.10),   # Røst
-    (70.58, 22.13),   # Hasvik
-    (65.37, 12.22),   # Sømna
-    # Sweden (SMHI) - 12 radars
-    (67.85, 20.42),   # Kiruna
-    (65.43, 22.13),   # Luleå
-    (63.30, 14.50),   # Östersund
-    (61.58, 16.72),   # Hudiksvall
-    (60.72, 14.88),   # Leksand
-    (63.40, 18.60),   # Örnsköldsvik
-    (59.65, 17.95),   # Arlanda
-    (56.30, 15.61),   # Karlskrona
-    (58.25, 12.83),   # Vara
-    (58.11, 15.95),   # Vilebo
-    (56.37, 12.85),   # Ängelholm
-    # Finland (FMI) - 10 radars
-    (60.27, 24.87),   # Vantaa
-    (60.13, 21.64),   # Korppoo
-    (60.90, 26.96),   # Anjalankoski
-    (61.77, 23.08),   # Ikaalinen
-    (62.86, 27.38),   # Kuopio
-    (61.81, 22.40),   # Kankaanpää
-    (63.10, 23.82),   # Vimpeli
-    (64.78, 26.32),   # Utajärvi
-    (67.14, 26.90),   # Luosto
-    (62.30, 25.44),   # Petäjävesi
-    # Denmark (DMI) - 5 radars
-    (55.33, 12.45),   # Stevns
-    (57.49, 10.14),   # Sindal
-    (55.17, 8.55),    # Rømø
-    (56.02, 10.02),   # Virring
-    (55.11, 14.88),   # Bornholm
+
+# ECCC Canadian weather radar network.  32 S-band dual-pol stations
+# (METEOR 1700S) operated by Environment and Climate Change Canada
+# after the 2023 network modernization.  Coordinates from the Canadian
+# Weather Radar Network Wikipedia article, cross-referenced with ECCC
+# station pages.  Needed because MSC's RADAR_1KM_RRAI composite covers
+# the whole CACOMP bbox but only has actual data within ~240 km of
+# these stations — without a mask, the ECMWF fallback is suppressed
+# over huge empty regions (open Pacific, Arctic, Atlantic).
+CANADA_STATIONS: list[tuple[float, float]] = [
+    (49.01662, -122.48698),    # CASAG Aldergrove, BC
+    (50.57118, -105.18290),    # CASBE Bethune, SK
+    (45.70634, -73.85852),     # CASBV Blainville, QC
+    (45.79317, -80.53385),     # CASBI Britt, ON
+    (53.56056, -114.14495),    # CASCV Carvel, AB
+    (46.22232, -65.69924),     # CASCM Chipman, NB
+    (54.3785, -110.061378),    # CASCL Cold Lake, AB
+    (49.85823, -92.79698),     # CASDR Dryden, ON
+    (44.2305662, -79.78033),   # CASTS Egbert, ON
+    (43.37243, -81.38070),     # CASET Exeter, ON
+    (56.375642, -111.215177),  # CASFM Fort McMurray, AB
+    (50.54887, -101.08570),    # CASFW Foxwarren, MB
+    (45.04101, -76.11617),     # CASFT Franktown, ON
+    (45.09850, -63.70433),     # CASGO Gore, NS
+    (49.527017, -123.853583),  # CASHP Halfmoon Peak, BC
+    (47.32644, -53.12658),     # CASHR Holyrood, NL
+    (43.96393, -79.57388),     # CASKR King City, ON
+    (48.55136, -77.80809),     # CASLA Landrienne, QC
+    (48.93028, -57.83417),     # CASMM Marble Mountain, NL
+    (45.94972, -60.20521),     # CASMB Marion Bridge, NS
+    (47.977908, -71.430833),   # CASMA Mont Apica, QC
+    (47.24773, -84.59652),     # CASMR Montreal River, ON
+    (50.36950, -119.06436),    # CASSS Mount Silver Star, BC
+    (53.61308, -122.95441),    # CASPG Prince George, BC
+    (52.52048, -107.44269),    # CASRA Radisson, SK
+    (46.449556, -71.913831),   # CASSF Sainte-Françoise, QC
+    (50.31250, -110.19556),    # CASSU Schuler, AB
+    (49.28146, -81.79406),     # CASRF Smooth Rock Falls, ON
+    (55.69494, -119.23043),    # CASSR Spirit River, AB
+    (51.20613, -113.39937),    # CASSM Strathmore, AB
+    (48.595876, -89.100129),   # CASSN Shuniah, ON
+    (48.48028, -67.60111),     # CASVD Val d'Irène, QC
+    (50.15389, -97.77833),     # CASWL Woodlands, MB
 ]
 
-# Germany (DWD) radar network — 17 C-band stations.
-# The DWD composite is delivered on a large polar-stereographic grid whose
-# bbox extends into France, Benelux, Czech, Poland, Austria, etc., so a
-# station-based coverage mask is needed to keep the ECMWF fallback from
-# being suppressed across that rectangle.
-GERMANY_STATIONS: list[tuple[float, float]] = [
-    (54.004, 10.047),   # Boostedt
-    (52.648, 13.858),   # Prötzel
-    (52.160, 11.176),   # Ummendorf
-    (51.124, 13.769),   # Dresden
-    (51.405, 6.967),    # Essen
-    (50.500, 11.135),   # Neuhaus
-    (50.110, 8.714),    # Offenthal
-    (49.985, 8.712),    # Offenbach (FBG candidate)
-    (49.541, 12.403),   # Eisberg
-    (49.541, 6.548),    # Neuheilenbach
-    (48.175, 12.101),   # Isen
-    (48.585, 9.783),    # Türkheim
-    (47.874, 8.006),    # Feldberg
-    (54.173, 12.058),   # Rostock
-    (53.339, 7.024),    # Emden
-    (52.460, 9.694),    # Hannover
-    (51.311, 8.802),    # Flechtdorf
+
+# OPERA pan-European CIRRUS composite radar network (~155 stations).
+# Coordinates from MeteoGate /locations API and national met services.
+# Used for station-circle coverage masks to prevent ECMWF fallback
+# suppression across the entire LAEA grid bbox.
+OPERA_STATIONS: list[tuple[float, float]] = [
+    # Austria (AT) - 5 radars
+    (47.0785, 15.4554),   # atfuh Feldkirchen/Graz
+    (46.0428, 14.566),    # atljs Ljubljana (SI shared)
+    (47.8383, 13.0061),   # atpat Patscherkofel/Salzburg
+    (48.1133, 16.5517),   # atrau Wien/Rauchenwarth
+    (47.3264, 11.3813),   # atvls Valluga
+    # Belgium (BE) - 2 radars
+    (51.1919, 3.0644),    # bejab Jabbeke
+    (50.1138, 5.5049),    # bewid Wideumont
+    # Bulgaria (BG) - 3 radars
+    (42.653, 25.556),     # bgbot Botev Peak
+    (42.65, 23.39),       # bgvar Varna approach
+    (43.41, 27.89),       # bgvrs Varna/Shabla
+    # Croatia (HR) - 3 radars
+    (43.7525, 16.4622),   # hrbiok Biokovo
+    (44.884, 13.921),     # hrpun Puntijarka
+    (45.6, 16.05),        # hrlip Lipik
+    # Cyprus (CY) - 1 radar
+    (34.8833, 32.65),     # cynic Nicosia
+    # Czech Republic (CZ) - 2 radars
+    (49.658, 15.847),     # czbrd Brdy
+    (49.7308, 13.818),    # czska Skalky
+    # Denmark (DK) - 5 radars
+    (55.3261, 12.4494),   # dkste Stevns
+    (57.4872, 10.1389),   # dksin Sindal
+    (55.1731, 8.5521),    # dkrom Rømø
+    (56.0178, 10.0213),   # dkvir Virring
+    (55.1128, 14.8821),   # dkbor Bornholm
+    # Estonia (EE) - 2 radars
+    (58.4819, 24.4831),   # eesur Sürgavere
+    (57.8124, 26.6524),   # eehar Harku area
+    # Finland (FI) - 10 radars
+    (60.2706, 24.8694),   # fivan Vantaa
+    (60.1285, 21.6434),   # fikor Korppoo
+    (60.9039, 26.9611),   # fianj Anjalankoski
+    (61.7673, 23.0764),   # fiika Ikaalinen
+    (62.8626, 27.3815),   # fikuo Kuopio
+    (63.104, 23.822),     # fivim Vimpeli
+    (64.7749, 26.3189),   # fiuta Utajärvi
+    (67.1386, 26.8969),   # filuo Luosto
+    (62.3045, 25.4413),   # fipet Petäjävesi
+    (69.3209, 25.7819),   # fikil Kilpisjärvi area
+    # France (FR) - 7 radars
+    (49.2147, 2.6336),    # frtro Trappes
+    (48.7108, -3.5669),   # frtpz Plouzané
+    (43.9403, 3.0178),    # frnms Nîmes
+    (43.629, 1.3814),     # frtls Toulouse/Blagnac
+    (44.83, -0.691),      # frbdx Bordeaux/Mérignac
+    (47.3514, 2.2633),    # frbou Bourges
+    (48.447, 7.636),      # frstg Strasbourg
+    # Germany (DE) - 17 radars
+    (54.004, 10.047),     # deBoo Boostedt
+    (52.648, 13.858),     # dePro Prötzel
+    (52.160, 11.176),     # deUmm Ummendorf
+    (51.124, 13.769),     # deDrs Dresden
+    (51.405, 6.967),      # deEss Essen
+    (50.500, 11.135),     # deNeu Neuhaus
+    (50.110, 8.714),      # deOff Offenthal
+    (49.541, 12.403),     # deEis Eisberg
+    (49.541, 6.548),      # deNhb Neuheilenbach
+    (48.175, 12.101),     # deIse Isen
+    (48.585, 9.783),      # deTur Türkheim
+    (47.874, 8.006),      # deFdb Feldberg
+    (54.173, 12.058),     # deRos Rostock
+    (53.339, 7.024),      # deEmd Emden
+    (52.460, 9.694),      # deHan Hannover
+    (51.311, 8.802),      # deFle Flechtdorf
+    (49.985, 8.712),      # deOfb Offenbach
+    # Greece (GR) - 3 radars
+    (40.5817, 22.9833),   # grthe Thessaloniki
+    (38.035, 23.875),     # graeg Aegina area
+    (35.3333, 24.4),      # grcre Crete
+    # Hungary (HU) - 5 radars
+    (47.4294, 19.1817),   # hubud Budapest
+    (46.1775, 18.3372),   # huhar Harkány
+    (47.9622, 21.8867),   # hunap Napkor
+    (46.6604, 17.0624),   # hupog Pogányvár
+    (46.6397, 20.4325),   # husze Szeged
+    # Iceland (IS) - 1 radar
+    (63.965, -22.455),    # iskef Keflavík
+    # Ireland (IE) - 2 radars
+    (53.4264, -6.2569),   # iedub Dublin
+    (51.9411, -8.2031),   # iesha Shannon
+    # Italy (IT) - 5 radars
+    (44.6547, 11.6236),   # itspc S. Pietro Capofiume
+    (40.625, 16.2656),    # itmtm Monte Macchia/Matera
+    (38.3075, 16.0644),   # itlam Lamezia Terme
+    (41.8736, 12.6506),   # itrom Roma Pratica
+    (45.3458, 11.425),    # ittes Teolo area
+    # Latvia (LV) - 1 radar
+    (56.9628, 24.1208),   # lvrig Riga
+    # Lithuania (LT) - 1 radar
+    (55.7028, 23.8825),   # ltlau Laukuva
+    # Netherlands (NL) - 2 radars
+    (51.8371, 5.1381),    # nldbl De Bilt
+    (52.9528, 4.7906),    # nldhl Den Helder
+    # Norway (NO) - 11 radars
+    (59.79, 5.23),        # nobml Bømlo
+    (61.21, 11.50),       # nohhf Hafjell
+    (63.69, 10.20),       # norsa Rissa
+    (70.86, 29.02),       # nober Berlevåg
+    (69.26, 16.01),       # noand Andøya
+    (59.62, 10.55),       # nohur Hurum
+    (62.10, 5.11),        # nostad Stad
+    (59.38, 10.78),       # noryg Rygge
+    (67.53, 12.10),       # norost Røst
+    (70.58, 22.13),       # nohas Hasvik
+    (65.37, 12.22),       # nosom Sømna
+    # Poland (PL) - 8 radars
+    (53.7914, 15.8311),   # plpas Pastewnik
+    (51.1133, 16.0394),   # plram Ramża
+    (50.1142, 20.9606),   # plbrz Brzuchania
+    (51.7831, 19.8367),   # plleg Legionowo area
+    (53.5314, 18.5297),   # plpoz Poznań area
+    (50.1181, 22.7044),   # plrze Rzeszów
+    (54.3828, 18.4561),   # plgda Gdańsk
+    (52.4222, 20.9611),   # plwar Warsaw area
+    # Portugal (PT) - 3 radars
+    (37.27, -7.97),       # ptfar Faro
+    (39.0714, -8.4001),   # ptlis Lisbon/Coruche
+    (40.845, -8.2797),    # ptprt Porto/Arouca
+    # Romania (RO) - 5 radars
+    (45.503, 25.367),     # robog Bobohalma
+    (44.486, 26.077),     # robuc Bucharest
+    (47.247, 23.744),     # rotgm Târgu Mureș
+    (44.713, 21.333),     # roors Oravița
+    (47.533, 25.917),     # robar Bărăbanț
+    # Serbia (RS) - 4 radars
+    (43.5558, 20.7006),   # rsval Valjevo area
+    (44.7558, 20.9378),   # rsbeo Belgrade
+    (44.17, 22.56),       # rsnel Negotin area
+    (45.2372, 19.7856),   # rsnsa Novi Sad area
+    # Slovakia (SK) - 4 radars
+    (48.2558, 17.1524),   # skjav Javorniky/Bratislava
+    (48.7822, 20.9881),   # skkoj Kojšovská hoľa
+    (49.2757, 19.2823),   # skkub Kubínska hoľa
+    (48.2331, 19.2561),   # sklaz Lazy pod Makytou
+    # Slovenia (SI) - 1 radar
+    (46.0667, 14.2167),   # silis Lisca
+    # Spain (ES) - 15 radars
+    (43.49, -8.42),       # eslcd La Coruña
+    (39.9311, -4.0356),   # esccl Cáceres area
+    (41.8767, -3.27),     # eslab Labastida area
+    (38.8919, -1.1756),   # esval Valencia area
+    (37.88, -3.63),       # esalm Almería approach
+    (36.61, -4.66),       # esahr Alhaurín el Grande (Málaga)
+    (41.41, 1.88),        # esgld El Grao/Lleida area
+    (43.44, -6.30),       # essan Santander area
+    (39.43, -6.29),       # essft San Fernando de Henares
+    (43.39, -2.84),       # essse San Sebastián
+    (40.18, -3.71),       # estjv Torrejón de Velasco
+    (39.16, -0.25),       # esval Valencia
+    (28.5, -16.1),        # esizn Izaña (Tenerife)
+    (39.56, 2.63),        # espal Palma de Mallorca
+    (42.47, -7.86),       # esour Ourense
+    # Sweden (SE) - 12 radars
+    (67.85, 20.42),       # sekir Kiruna
+    (65.43, 22.13),       # selul Luleå
+    (63.30, 14.50),       # seosd Östersund
+    (61.58, 16.72),       # sehud Hudiksvall
+    (60.72, 14.88),       # selek Leksand
+    (63.40, 18.60),       # seorn Örnsköldsvik
+    (59.65, 17.95),       # searl Arlanda
+    (56.30, 15.61),       # sekar Karlskrona
+    (58.25, 12.83),       # sevar Vara
+    (58.11, 15.95),       # sevil Vilebo
+    (56.37, 12.85),       # seang Ängelholm
+    (57.25, 16.15),       # seasi Ase
+    # Switzerland (CH) - 5 radars
+    (46.0408, 8.8331),    # chmon Monte Lema
+    (46.425, 6.1006),     # chdol La Dôle
+    (46.3706, 7.4869),    # chple Plaine Morte
+    (46.8131, 9.7944),    # chwea Weissfluh
+    (47.2842, 8.512),     # chalb Albis
+    # Turkey (TR) - 4 radars
+    (41.19, 32.95),       # trbal Ankara/Bala
+    (40.96, 27.97),       # trist Istanbul
+    (38.48, 27.15),       # trzm Izmir
+    (36.95, 35.40),       # trade Adana
+    # United Kingdom (UK) - 16 radars
+    (54.50, -6.34),       # ukcas Castor Bay
+    (51.6892, -0.5306),   # ukche Chenies
+    (52.3981, -2.5969),   # ukcle Clee Hill
+    (50.9633, -3.4528),   # ukcob Cobbacombe
+    (51.9797, -4.4447),   # ukcyg Crug-y-Gorllwyn
+    (51.0306, -1.6544),   # ukdea Dean Hill
+    (57.4308, -2.0361),   # ukdud Dudwick
+    (53.7547, -2.2886),   # ukham Hameldon Hill
+    (56.0183, -4.2189),   # ukhhd High Moorsley
+    (54.8056, -1.4756),   # ukhmy Holme Moss
+    (53.335, -0.5592),    # uking Ingham
+    (49.2094, -2.1989),   # ukjer Jersey
+    (58.2111, -6.1831),   # uklew Stornoway
+    (56.2147, -3.3106),   # ukmun Munduff Hill
+    (50.0033, -5.2225),   # ukpre Predannack
+    (51.2947, 0.6042),    # ukthu Thurnham
 ]
 
 
@@ -282,6 +468,6 @@ REGION_STATIONS: dict[str, list[tuple[float, float]]] = {
     "HICOMP": NEXRAD_HAWAII,
     "PRCOMP": NEXRAD_PUERTO_RICO,
     "GUCOMP": NEXRAD_GUAM,
-    "NORDIC": NORDIC_STATIONS,
-    "GERMANY": GERMANY_STATIONS,
+"CACOMP": CANADA_STATIONS,
+    "OPERA": OPERA_STATIONS,
 }

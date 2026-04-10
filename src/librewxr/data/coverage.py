@@ -17,7 +17,11 @@ import math
 
 import numpy as np
 
-from librewxr.data.radar_stations import RADAR_RANGE_KM, REGION_STATIONS
+from librewxr.data.radar_stations import (
+    RADAR_RANGE_KM,
+    REGION_RADAR_RANGE,
+    REGION_STATIONS,
+)
 from librewxr.data.regions import REGIONS, RegionDef
 
 logger = logging.getLogger(__name__)
@@ -52,7 +56,8 @@ def _build_region_mask(region: RegionDef, stations: list[tuple[float, float]]) -
     lat_grid, lon_grid = np.meshgrid(lat_axis, lon_axis, indexing="ij")
 
     mask = np.zeros((ny, nx), dtype=bool)
-    range_km_sq = RADAR_RANGE_KM * RADAR_RANGE_KM
+    range_km = REGION_RADAR_RANGE.get(region.name, RADAR_RANGE_KM)
+    range_km_sq = range_km * range_km
 
     for st_lat, st_lon in stations:
         dlat_km = (lat_grid - st_lat) * 111.0

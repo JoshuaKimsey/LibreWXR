@@ -168,11 +168,27 @@ def _composite_regions(
 ) -> np.ndarray:
     """Composite values from multiple overlapping regions.
 
-    Regions are processed in order (finest resolution first).
-    Later regions fill in zeros left by earlier ones.
+    Regions are processed in order (finest resolution first).  Each
+    region claims the pixels within its own coverage mask; lower-
+    priority regions can only fill pixels that no higher-priority
+    region has claimed.  This prevents coarser composites from
+    overwriting authoritative "no echo" zeros inside a higher-priority
+    region's coverage area — e.g. MSC Canada won't spill light-rain
+    returns across the border into NEXRAD-covered Maine.
     """
     out_size = tile_size + 2 * pad if pad > 0 else tile_size
     values = np.zeros((out_size, out_size), dtype=np.uint8)
+    # Pixels already authoritatively covered by a higher-priority region.
+    claimed = np.zeros((out_size, out_size), dtype=bool)
+
+    # Tile lat/lon grid for coverage-mask lookups (matches the output
+    # buffer, including padding when smoothing is enabled).
+    if pad > 0:
+        tile_lats, tile_lons = tile_pixel_latlons_padded(
+            z, x, y, tile_size, pad
+        )
+    else:
+        tile_lats, tile_lons = tile_pixel_latlons(z, x, y, tile_size)
 
     for region in regions:
         data = frame_regions.get(region.name)
@@ -189,9 +205,17 @@ def _composite_regions(
         padded = np.pad(data, ((0, 1), (0, 1)), constant_values=0)
         region_values = padded[row_idx, col_idx]
 
-        # Fill zeros in output with this region's data
-        fill_mask = (values == 0) & (region_values > 0)
+        # Fill: only where no higher-priority region has claimed the
+        # pixel AND this region actually has data there.
+        fill_mask = ~claimed & (region_values > 0)
         values[fill_mask] = region_values[fill_mask]
+
+        # Mark pixels inside this region's coverage as claimed so
+        # lower-priority regions can't overwrite them — even the zeros.
+        region_coverage = sample_coverage(
+            region.name, tile_lats, tile_lons
+        )
+        claimed |= region_coverage
 
     return values
 

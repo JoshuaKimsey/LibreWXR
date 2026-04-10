@@ -26,8 +26,8 @@ class Settings(BaseSettings):
     warmer_threads: int = 4  # Thread pool size for background tile warming
     enabled_regions: str = "CONUS"  # Region spec: CONUS, US, ALL, or comma-separated region names
     iem_base_url: str = "https://mesonet.agron.iastate.edu"
-    met_nordic_base_url: str = "https://thredds.met.no"
-    dwd_base_url: str = "https://opendata.dwd.de"
+    msc_canada_base_url: str = "https://geo.weather.gc.ca"
+    opera_base_url: str = "https://s3.waw3-1.cloudferro.com"
     ecmwf_s3_bucket: str = "openmeteo"
     ecmwf_s3_region: str = "us-west-2"
     ecmwf_s3_prefix: str = "data_spatial/ecmwf_ifs"
