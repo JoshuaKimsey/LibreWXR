@@ -17,6 +17,7 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Smoothing** — zoom-adaptive Gaussian blur with seamless tile boundaries
 - **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Europe (OPERA pan-European composite, ~155 radars across 24 countries), and Canada
 - **ECMWF IFS global fallback** — ECMWF IFS 9km precipitation data fills in worldwide coverage where no radar composite exists (~3x higher resolution than previous GFS fallback), with multi-timestep animation that auto-scales to match radar history length
+- **Optical flow interpolation** — hourly ECMWF IFS frames are interpolated to 10-minute steps using dense motion vectors, so global fallback areas animate smoothly like real radar data instead of jumping hour-to-hour (configurable, enabled by default)
 - **Snow detection** — per-pixel snow/rain classification using ECMWF IFS snowfall data
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
 - **Tile cache warming** — background pre-rendering for smooth animation playback
@@ -174,8 +175,8 @@ All settings are configured via environment variables (or a `.env` file). Copy `
 | `LIBREWXR_PUBLIC_URL` | `http://localhost:8080` | Public URL for metadata responses |
 | `LIBREWXR_PORT` | `8080` | Server listen port |
 | `LIBREWXR_MAX_ZOOM` | `12` | Maximum tile zoom level |
-| `LIBREWXR_FETCH_INTERVAL` | `300` | Seconds between radar data fetches |
-| `LIBREWXR_MAX_FRAMES` | `12` | Radar frames in memory (~96 MB each with ALL regions) |
+| `LIBREWXR_FETCH_INTERVAL` | `600` | Seconds between radar data fetches (10 min, clock-aligned) |
+| `LIBREWXR_MAX_FRAMES` | `12` | Radar frames in memory (2h at default 10-min cadence) |
 | `LIBREWXR_COORD_CACHE_SIZE` | `2048` | Coordinate cache entries per cache (lower = less RAM) |
 | `LIBREWXR_TILE_CACHE_MB` | `200` | Max tile cache size in MB (byte-capped) |
 | `LIBREWXR_MEMORY_LIMIT_MB` | `0` | Memory limit in MB (0 = auto-detect from Docker/cgroup) |
@@ -186,6 +187,7 @@ All settings are configured via environment variables (or a `.env` file). Copy `
 | `LIBREWXR_WORKERS` | `1` | Uvicorn worker processes |
 | `LIBREWXR_ENABLED_REGIONS` | `CONUS` | Radar region spec (see below) |
 | `LIBREWXR_WARMER_THREADS` | `4` | Background tile warming threads |
+| `LIBREWXR_ECMWF_INTERPOLATION` | `true` | Optical flow interpolation of IFS hourly data to 10-min frames |
 
 **Radar regions:**
 
@@ -243,16 +245,16 @@ Tiles are served with `Cache-Control: public, max-age=300`, so any caching rever
 ```
 [IEM NEXRAD Fetcher]      --> [In-Memory Frame Store] --> [FastAPI + Tile Renderer]
 [MSC Canada WMS Fetcher]  -->   (N frames, multi-region)    (LRU cache + tile warmer)
-[OPERA S3 Fetcher]        -->     (every 5 min)
+[OPERA S3 Fetcher]        -->     (every 10 min)
 
-[Open-Meteo S3] --> [ECMWF Grid]  --> [Per-pixel snow/rain classification]
-  (every 5 min)    (IFS 9km)      --> [Global fallback where no radar exists]
+[Open-Meteo S3] --> [ECMWF Grid]  --> [Optical Flow Interpolation] --> [Per-pixel snow/rain classification]
+  (every 10 min)   (IFS 9km)      (hourly → 10-min frames)     --> [Global fallback where no radar exists]
 ```
 
 - **US data source:** IEM NEXRAD N0Q composites — 8-bit reflectivity, multiple regions (CONUS, Alaska, Hawaii, Puerto Rico, Guam)
 - **Canada data source:** ECCC MSC GeoMet WMS — pre-colored PNG precipitation composite, decoded via palette reverse-engineering back to dBZ
 - **Europe data source:** EUMETNET OPERA CIRRUS composite via MeteoGate S3 — ODIM HDF5, 3800×4400 at 1km (LAEA projection), ~155 radars across 24 countries
-- **ECMWF IFS global fallback:** ECMWF IFS at native 9km resolution via [Open-Meteo](https://open-meteo.com/) S3 — precipitation rate converted to pseudo-reflectivity via Marshall-Palmer Z-R relationship, with direct snow/rain classification from snowfall ratio
+- **ECMWF IFS global fallback:** ECMWF IFS at native 9km resolution via [Open-Meteo](https://open-meteo.com/) S3 — precipitation rate converted to pseudo-reflectivity via Marshall-Palmer Z-R relationship, with direct snow/rain classification from snowfall ratio. Hourly IFS frames are interpolated to 10-minute steps via OpenCV Farneback optical flow, so fallback areas animate smoothly
 - **Tile rendering:** On-demand with LRU caching. Web Mercator reprojection via pure numpy (no GDAL required)
 - **Tile warming:** Background thread pool pre-renders tiles for all timestamps when a new tile position is requested, ensuring smooth animation playback
 - **No external dependencies beyond pip** — no GDAL, rasterio, or system geo libraries needed

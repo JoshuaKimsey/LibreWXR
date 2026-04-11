@@ -19,6 +19,7 @@ dependencies = [
     "omfiles[fsspec,grids]>=0.4",
     "earthkit-regrid>=0.4",
     "s3fs>=2024.0",
+    "opencv-python-headless>=4.8",
 ]
 
 [project.optional-dependencies]

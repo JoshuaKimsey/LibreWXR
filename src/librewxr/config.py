@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8080
     public_url: str = "http://localhost:8080"
-    fetch_interval: int = 300  # seconds between fetches
+    fetch_interval: int = 600  # seconds between fetches (10 min = radar frame cadence)
     max_frames: int = 12
     max_zoom: int = 12
     tile_cache_mb: int = 200  # Max tile cache size in MB (byte-capped)
@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     ecmwf_s3_prefix: str = "data_spatial/ecmwf_ifs"
     ecmwf_snow_ratio_threshold: float = 0.5
     ecmwf_max_timesteps: int = 0  # 0 = auto (derived from max_frames)
+    ecmwf_interpolation: bool = True  # Optical flow interpolation of IFS hourly data to 10-min frames
     cors_origins: list[str] = ["*"]
 
     def get_ecmwf_max_timesteps(self) -> int:

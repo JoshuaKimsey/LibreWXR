@@ -382,8 +382,12 @@ class OperaSource:
     async def fetch_frame(
         self, region: RegionDef, minutes_ago: int
     ) -> np.ndarray | None:
+        # OPERA composites are published every 5 minutes; round to nearest
+        # 5-min slot so the fallback chain finds the right file.
         now_rounded = int(time.time() // 300) * 300
         target_ts = now_rounded - minutes_ago * 60
+        # Snap to the nearest 5-min slot for the target as well
+        target_ts = int(target_ts // 300) * 300
         return await self._fetch_hdf5(target_ts)
 
     async def fetch_archive_frame(

@@ -91,14 +91,22 @@ class RadarFetcher:
         logger.info("Radar fetcher stopped")
 
     async def _backfill_then_loop(self) -> None:
-        """Backfill historical frames, then enter the regular refresh loop."""
+        """Backfill historical frames, then enter the regular refresh loop.
+
+        The loop sleeps until the next clock-aligned boundary (e.g. the next
+        :x0 minute mark when fetch_interval=600) so that frame timestamps are
+        always on clean multiples regardless of when the server started.
+        """
         try:
             await self._fetch_all_frames()
         except Exception:
             logger.exception("Error in initial backfill")
 
+        interval = settings.fetch_interval
         while True:
-            await asyncio.sleep(settings.fetch_interval)
+            now = time.time()
+            next_boundary = (int(now // interval) + 1) * interval
+            await asyncio.sleep(max(next_boundary - now, 1.0))
             try:
                 await self._fetch_all_frames()
             except Exception:
@@ -108,7 +116,8 @@ class RadarFetcher:
         """Quick startup: fetch auxiliary grids and latest radar frame only."""
         await self._fetch_auxiliary_grids()
 
-        now_rounded = int(time.time() // 300) * 300
+        interval = settings.fetch_interval
+        now_rounded = int(time.time() // interval) * interval
         await self._fetch_timestamps([(now_rounded, "live", 0)])
 
     async def _fetch_auxiliary_grids(self) -> None:
@@ -120,27 +129,35 @@ class RadarFetcher:
                 logger.warning("ECMWF IFS fetch failed, global fallback may be stale")
 
     async def _fetch_all_frames(self) -> None:
-        """Fetch frames for all enabled regions to fill the store."""
+        """Fetch frames for all enabled regions to fill the store.
+
+        Timestamps are aligned to ``fetch_interval`` boundaries (e.g. every
+        10 minutes on the :x0 mark) so frames land on clean clock positions
+        regardless of when the server was started.
+
+        IEM's live endpoint serves the last 12 five-minute composites
+        (indices 0–11, covering 0–55 min ago).  At 10-min spacing, frames
+        0–50 min ago map to live indices 0, 2, 4, 6, 8, 10.  Older frames
+        fall back to the archive endpoint.
+        """
         await self._fetch_auxiliary_grids()
 
-        now = time.time()
-        now_rounded = int(now // 300) * 300
+        interval = settings.fetch_interval
+        interval_min = interval // 60
+        now_rounded = int(time.time() // interval) * interval
 
-        # Build timestamp list: live frames (10-min spacing) + archive frames
-        live_indices = list(range(0, 12, 2))
         ts_and_sources: list[tuple[int, str, int | datetime]] = []
 
-        for idx in live_indices:
-            minutes_ago = idx * 5
-            ts = now_rounded - minutes_ago * 60
-            ts_and_sources.append((ts, "live", minutes_ago))
+        for i in range(settings.max_frames):
+            minutes_ago = i * interval_min
+            ts = now_rounded - i * interval
 
-        remaining = settings.max_frames - len(live_indices)
-        for i in range(remaining):
-            minutes_ago = 60 + (i + 1) * 10
-            ts = now_rounded - minutes_ago * 60
-            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-            ts_and_sources.append((ts, "archive", dt))
+            # IEM live endpoint covers 0-55 min ago
+            if minutes_ago <= 55:
+                ts_and_sources.append((ts, "live", minutes_ago))
+            else:
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                ts_and_sources.append((ts, "archive", dt))
 
         await self._fetch_timestamps(ts_and_sources)
 

@@ -236,6 +236,12 @@ class ECMWFGrid:
             logger.warning("No ECMWF timesteps fetched successfully")
             return False
 
+        # Optionally interpolate between hourly frames to produce 10-min steps
+        if settings.ecmwf_interpolation and len(new_timesteps) >= 2:
+            from librewxr.data.ecmwf_interpolation import interpolate_timesteps
+
+            new_timesteps = interpolate_timesteps(new_timesteps)
+
         self._timesteps = new_timesteps
         self._sorted_timestamps = sorted(new_timesteps.keys())
         self._reference_time = ref_time
