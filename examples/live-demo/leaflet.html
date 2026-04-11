@@ -31,6 +31,14 @@
             font-weight: 600;
             color: #333;
         }
+        #timestamp.nowcast {
+            color: #0077cc;
+        }
+        #timestamp.nowcast::after {
+            content: ' (Forecast)';
+            font-size: 12px;
+            font-weight: 400;
+        }
         .buttons {
             display: flex;
             gap: 8px;
@@ -82,11 +90,13 @@ var LIBREWXR_URL = "https://api.librewxr.net";
 var TILE_SIZE = window.devicePixelRatio >= 2 ? 512 : 256;
 var RADAR_OPACITY = 0.8;
 var ANIMATION_DELAY_MS = 500;
+var ANIMATION_PAUSE_MS = 1500;  // Pause at past/nowcast boundary and end
 var API_URL = LIBREWXR_URL + "/public/weather-maps.json";
 
 // === STATE ===
 var apiData = {};
 var mapFrames = [];
+var nowcastStartIndex = -1;  // Index where nowcast frames begin (-1 = none)
 var animationPosition = 0;
 var animationTimer = false;
 var currentLayer = null;
@@ -158,8 +168,25 @@ function playStop() {
 }
 
 // === DISPLAY ===
-function updateTimestamp(frame) {
-    document.getElementById("timestamp").innerHTML = formatTime(frame.time);
+function isNowcastFrame(position) {
+    return nowcastStartIndex >= 0 && position >= nowcastStartIndex;
+}
+
+function getAnimationDelay(position) {
+    // Pause longer at the past/nowcast boundary and at the end of the loop
+    if (position === nowcastStartIndex - 1) return ANIMATION_PAUSE_MS;
+    if (position === mapFrames.length - 1) return ANIMATION_PAUSE_MS;
+    return ANIMATION_DELAY_MS;
+}
+
+function updateTimestamp(frame, position) {
+    var el = document.getElementById("timestamp");
+    el.innerHTML = formatTime(frame.time);
+    if (isNowcastFrame(position)) {
+        el.classList.add('nowcast');
+    } else {
+        el.classList.remove('nowcast');
+    }
 }
 
 function showFrame(position) {
@@ -168,7 +195,7 @@ function showFrame(position) {
     position = wrapPosition(position);
     var frame = mapFrames[position];
 
-    updateTimestamp(frame);
+    updateTimestamp(frame, position);
 
     var oldLayer = currentLayer;
 
@@ -181,7 +208,7 @@ function showFrame(position) {
         animationPosition = position;
 
         if (animationTimer) {
-            animationTimer = setTimeout(play, ANIMATION_DELAY_MS);
+            animationTimer = setTimeout(play, getAnimationDelay(position));
         }
         return;
     }
@@ -201,7 +228,7 @@ function showFrame(position) {
         isLoading = false;
 
         if (animationTimer) {
-            animationTimer = setTimeout(play, ANIMATION_DELAY_MS);
+            animationTimer = setTimeout(play, getAnimationDelay(position));
         }
     });
 
@@ -213,6 +240,7 @@ function initialize(api) {
     clearLayerCache();
     currentLayer = null;
     mapFrames = [];
+    nowcastStartIndex = -1;
     animationPosition = 0;
 
     if (!api || !api.radar || !api.radar.past) {
@@ -220,7 +248,15 @@ function initialize(api) {
     }
 
     mapFrames = api.radar.past;
-    showFrame(mapFrames.length - 1);
+
+    // Append nowcast frames if available
+    if (api.radar.nowcast && api.radar.nowcast.length > 0) {
+        nowcastStartIndex = mapFrames.length;
+        mapFrames = mapFrames.concat(api.radar.nowcast);
+    }
+
+    // Start on the last past frame (most recent real radar)
+    showFrame(nowcastStartIndex >= 0 ? nowcastStartIndex - 1 : mapFrames.length - 1);
 }
 
 function loadApiData() {
