@@ -2,12 +2,13 @@
 # Copyright (C) 2026 Joshua Kimsey
 import io
 
+import cv2
 import numpy as np
 from PIL import Image, ImageFilter
 
 from librewxr.colors.schemes import colorize
 from librewxr.config import settings
-from librewxr.data.coverage import sample_coverage
+from librewxr.data.coverage import sample_coverage, sample_feather
 from librewxr.data.regions import RegionDef
 from librewxr.tiles.coordinates import (
     overlapping_regions,
@@ -32,6 +33,7 @@ def render_tile(
     ecmwf_grid=None,
     enabled_regions: list[str] | None = None,
     frame_timestamp: int | None = None,
+    nowcast_blend: float | None = None,
 ) -> bytes:
     """Render a single map tile from composite radar data.
 
@@ -46,6 +48,11 @@ def render_tile(
         ecmwf_grid: ECMWFGrid for global fallback coverage and snow classification
         enabled_regions: list of enabled region names (for overlap check)
         frame_timestamp: Unix timestamp of the radar frame being rendered
+        nowcast_blend: If not None, this is a nowcast frame. Value 0.0–1.0
+            indicates how much to trust the extrapolated radar (1.0 = trust
+            radar fully, 0.0 = trust IFS fully). The renderer blends
+            extrapolated radar with IFS forecast, feathered at coverage
+            boundaries.
 
     Returns:
         Encoded image bytes.
@@ -86,12 +93,20 @@ def render_tile(
             smooth, use_blur, pad,
         )
 
-    # Fill uncovered pixels from ECMWF precipitation data
+    # Fill uncovered pixels from ECMWF precipitation data.
+    # For nowcast frames, blend extrapolated radar with IFS forecast
+    # using temporal weight + spatial feathering at coverage boundaries.
     if ecmwf_grid is not None and ecmwf_grid.data is not None:
-        values = _fill_ecmwf_fallback(
-            values, regions, z, x, y, tile_size, pad, ecmwf_grid,
-            frame_timestamp, smooth,
-        )
+        if nowcast_blend is not None:
+            values = _blend_nowcast(
+                values, regions, z, x, y, tile_size, pad, ecmwf_grid,
+                frame_timestamp, smooth, nowcast_blend,
+            )
+        else:
+            values = _fill_ecmwf_fallback(
+                values, regions, z, x, y, tile_size, pad, ecmwf_grid,
+                frame_timestamp, smooth,
+            )
 
     # Apply noise floor
     if settings.noise_floor_dbz > -32:
@@ -296,6 +311,66 @@ def _fill_ecmwf_fallback(
 
     result = values.copy()
     result[uncovered] = ecmwf_values[uncovered]
+    return result
+
+
+def _blend_nowcast(
+    radar_values: np.ndarray,
+    regions: list[RegionDef],
+    z: int, x: int, y: int,
+    tile_size: int, pad: int,
+    ecmwf_grid,
+    frame_timestamp: int | None = None,
+    smooth: bool = False,
+    blend_weight: float = 1.0,
+) -> np.ndarray:
+    """Blend extrapolated radar with IFS forecast for nowcast frames.
+
+    Uses a combination of temporal and spatial weighting:
+
+    - **Temporal** (``blend_weight``): 1.0 at T+10 min (trust radar),
+      fading to 0.0 at the last nowcast step (trust IFS).
+    - **Spatial** (feather mask): 1.0 deep inside radar coverage, fading
+      to 0.0 at coverage boundaries to prevent hard seams.
+
+    The effective per-pixel radar weight is ``blend_weight × feather``.
+    Outside radar coverage, IFS is used directly (same as past frames).
+    """
+    if pad > 0:
+        lat_grid, lon_grid = tile_pixel_latlons_padded(z, x, y, tile_size, pad)
+    else:
+        lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
+
+    # Sample IFS for ALL pixels (not just uncovered)
+    ifs_values = ecmwf_grid.sample(
+        lat_grid, lon_grid, frame_timestamp, bilinear=smooth,
+    )
+
+    # Soften IFS before blending to reduce spatial mismatch artifacts.
+    # IFS at 9km resolution has precipitation in slightly different locations
+    # than radar — blurring smooths the IFS contribution so the transition
+    # looks like a gradual handoff rather than ghosting/doubling.
+    ifs_f = ifs_values.astype(np.float32)
+    ksize = 5 if tile_size <= 256 else 7
+    ifs_f = cv2.GaussianBlur(ifs_f, (ksize, ksize), 0)
+
+    # Build the spatial feather weight: union across all overlapping regions
+    feather = np.zeros(lat_grid.shape, dtype=np.float32)
+    for region in regions:
+        feather = np.maximum(feather, sample_feather(region.name, lat_grid, lon_grid))
+
+    # Per-pixel effective radar weight
+    effective_w = blend_weight * feather
+
+    # Blend: extrapolated radar × weight + IFS × (1 − weight)
+    radar_f = radar_values.astype(np.float32)
+    blended = effective_w * radar_f + (1.0 - effective_w) * ifs_f
+
+    # Don't hallucinate precipitation where neither source has any
+    both_zero = (radar_values == 0) & (ifs_values == 0)
+    result = np.clip(blended + 0.5, 0, 255).astype(np.uint8)
+    result[both_zero] = 0
+
     return result
 
 

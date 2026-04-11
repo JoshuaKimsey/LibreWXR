@@ -9,9 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from librewxr.api import routes
 from librewxr.config import settings
-from librewxr.data.coverage import build_coverage_masks
+from librewxr.data.coverage import build_coverage_masks, build_feather_masks
 from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.fetcher import RadarFetcher
+from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.store import FrameStore
 from librewxr.memory import MemoryMonitor, detect_memory_limit_mb
 from librewxr.tiles.cache import TileCache
@@ -57,11 +58,21 @@ async def lifespan(app: FastAPI):
     # Precompute radar station coverage masks used by the ECMWF fallback
     # to distinguish "outside radar range" from "clear sky within range".
     build_coverage_masks()
+    build_feather_masks()
+
+    # Nowcast store and generator
+    nowcast_store = None
+    nowcast_generator = None
+    if settings.nowcast_enabled:
+        nowcast_store = NowcastStore()
+        nowcast_generator = NowcastGenerator(store, nowcast_store, cache=cache)
+        logger.info("Nowcast enabled: %d frames", settings.nowcast_frames)
 
     warmer = TileWarmer(
         store, cache,
         max_workers=settings.warmer_threads,
         enabled_regions=enabled,
+        nowcast_store=nowcast_store,
     )
 
     # Memory pressure monitor
@@ -78,21 +89,24 @@ async def lifespan(app: FastAPI):
     routes.tile_cache = cache
     routes.ecmwf_grid = ecmwf_grid
     routes.tile_warmer = warmer
+    routes.nowcast_store = nowcast_store
     routes.start_time = time.time()
     routes.enabled_regions = enabled
 
     fetcher = RadarFetcher(
         store, cache,
         ecmwf_grid=ecmwf_grid,
+        nowcast_generator=nowcast_generator,
     )
     logger.info(
         "Starting LibreWXR (public_url=%s, max_zoom=%d, regions=%s, "
-        "tile_cache=%d MB, memory_limit=%d MB)",
+        "tile_cache=%d MB, memory_limit=%d MB, nowcast=%s)",
         settings.public_url,
         settings.max_zoom,
         ", ".join(enabled),
         settings.tile_cache_mb,
         mem_limit,
+        f"{settings.nowcast_frames} frames" if settings.nowcast_enabled else "off",
     )
     await fetcher.start()
     await monitor.start()
@@ -102,6 +116,8 @@ async def lifespan(app: FastAPI):
     await monitor.stop()
     await fetcher.stop()
     warmer.shutdown()
+    if nowcast_store is not None:
+        nowcast_store.clear()
     cache.clear()
     store.cleanup()
     logger.info("LibreWXR shutdown complete")

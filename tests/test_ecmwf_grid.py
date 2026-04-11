@@ -197,15 +197,42 @@ class TestECMWFGrid:
 
         # now=06:30Z, max_ts=3 → first vt >= now is 07Z → window [05, 06, 07]
         mock_now = datetime(2026, 4, 5, 6, 30, tzinfo=timezone.utc)
-        with patch("librewxr.data.ecmwf_grid.datetime") as mock_dt:
+        with patch("librewxr.data.ecmwf_grid.datetime") as mock_dt, \
+             patch("librewxr.data.ecmwf_grid.settings") as mock_settings:
             mock_dt.now.return_value = mock_now
             mock_dt.fromisoformat = datetime.fromisoformat
+            mock_settings.nowcast_enabled = False
             result = ECMWFGrid._select_valid_times(vt_list, max_ts=3)
 
         assert result == [
             "2026-04-05T05:00Z",
             "2026-04-05T06:00Z",
             "2026-04-05T07:00Z",
+        ]
+
+    def test_select_valid_times_nowcast_shifts_anchor(self):
+        """When nowcast is enabled, anchor shifts forward by nowcast duration."""
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+
+        vt_list = [f"2026-04-05T{h:02d}:00Z" for h in range(1, 13)]
+
+        # now=06:30Z, nowcast=6×600s=3600s → anchor at 07:30Z
+        # first vt >= 07:30 is 08Z → window [06, 07, 08]
+        mock_now = datetime(2026, 4, 5, 6, 30, tzinfo=timezone.utc)
+        with patch("librewxr.data.ecmwf_grid.datetime") as mock_dt, \
+             patch("librewxr.data.ecmwf_grid.settings") as mock_settings:
+            mock_dt.now.return_value = mock_now
+            mock_dt.fromisoformat = datetime.fromisoformat
+            mock_settings.nowcast_enabled = True
+            mock_settings.nowcast_frames = 6
+            mock_settings.fetch_interval = 600
+            result = ECMWFGrid._select_valid_times(vt_list, max_ts=3)
+
+        assert result == [
+            "2026-04-05T06:00Z",
+            "2026-04-05T07:00Z",
+            "2026-04-05T08:00Z",
         ]
 
     def test_select_valid_times_all_future(self):
@@ -216,9 +243,11 @@ class TestECMWFGrid:
         # IFS run just released — all valid_times are after now
         vt_list = [f"2026-04-05T{h:02d}:00Z" for h in range(7, 19)]
         mock_now = datetime(2026, 4, 5, 6, 30, tzinfo=timezone.utc)
-        with patch("librewxr.data.ecmwf_grid.datetime") as mock_dt:
+        with patch("librewxr.data.ecmwf_grid.datetime") as mock_dt, \
+             patch("librewxr.data.ecmwf_grid.settings") as mock_settings:
             mock_dt.now.return_value = mock_now
             mock_dt.fromisoformat = datetime.fromisoformat
+            mock_settings.nowcast_enabled = False
             result = ECMWFGrid._select_valid_times(vt_list, max_ts=3)
 
         # First vt >= now is 07Z (idx 0), window shifts forward to fill
@@ -235,9 +264,11 @@ class TestECMWFGrid:
 
         vt_list = [f"2026-04-05T{h:02d}:00Z" for h in range(1, 5)]
         mock_now = datetime(2026, 4, 5, 12, 0, tzinfo=timezone.utc)
-        with patch("librewxr.data.ecmwf_grid.datetime") as mock_dt:
+        with patch("librewxr.data.ecmwf_grid.datetime") as mock_dt, \
+             patch("librewxr.data.ecmwf_grid.settings") as mock_settings:
             mock_dt.now.return_value = mock_now
             mock_dt.fromisoformat = datetime.fromisoformat
+            mock_settings.nowcast_enabled = False
             result = ECMWFGrid._select_valid_times(vt_list, max_ts=3)
 
         # No vt >= now → anchor at last index → window [02, 03, 04]

@@ -29,10 +29,12 @@ class RadarFetcher:
         store: FrameStore,
         cache: TileCache,
         ecmwf_grid: ECMWFGrid | None = None,
+        nowcast_generator=None,
     ):
         self._store = store
         self._cache = cache
         self._ecmwf_grid = ecmwf_grid
+        self._nowcast_generator = nowcast_generator
         self._task: asyncio.Task | None = None
         self._enabled_regions = [
             REGIONS[name] for name in settings.get_enabled_regions()
@@ -99,6 +101,7 @@ class RadarFetcher:
         """
         try:
             await self._fetch_all_frames()
+            await self._run_nowcast()
         except Exception:
             logger.exception("Error in initial backfill")
 
@@ -109,6 +112,7 @@ class RadarFetcher:
             await asyncio.sleep(max(next_boundary - now, 1.0))
             try:
                 await self._fetch_all_frames()
+                await self._run_nowcast()
             except Exception:
                 logger.exception("Error in fetch loop")
 
@@ -119,6 +123,15 @@ class RadarFetcher:
         interval = settings.fetch_interval
         now_rounded = int(time.time() // interval) * interval
         await self._fetch_timestamps([(now_rounded, "live", 0)])
+        await self._run_nowcast()
+
+    async def _run_nowcast(self) -> None:
+        """Trigger nowcast generation if enabled."""
+        if self._nowcast_generator is not None:
+            try:
+                await self._nowcast_generator.generate()
+            except Exception:
+                logger.exception("Nowcast generation failed")
 
     async def _fetch_auxiliary_grids(self) -> None:
         """Fetch ECMWF IFS precipitation grid."""

@@ -27,6 +27,7 @@ frame_store: FrameStore | None = None
 tile_cache: TileCache | None = None
 ecmwf_grid = None  # ECMWFGrid | None
 tile_warmer = None  # TileWarmer | None
+nowcast_store = None  # NowcastStore | None
 start_time: float = 0.0
 enabled_regions: list[str] | None = None
 
@@ -66,6 +67,11 @@ async def health():
             "reference_time": ecmwf_grid.reference_time if ecmwf_grid else None,
             "timesteps": ecmwf_grid.timestep_count if ecmwf_grid else 0,
         },
+        "nowcast": {
+            "enabled": settings.nowcast_enabled,
+            "frames": await nowcast_store.get_timestamps() if nowcast_store else [],
+            "count": len(await nowcast_store.get_timestamps()) if nowcast_store else 0,
+        },
         "enabled_regions": enabled_regions or [],
     }
 
@@ -85,11 +91,19 @@ async def weather_maps() -> WeatherMapsResponse:
         for ts in sorted(timestamps)
     ]
 
+    nowcast = []
+    if nowcast_store is not None:
+        nc_timestamps = await nowcast_store.get_timestamps()
+        nowcast = [
+            RadarTimestamp(time=ts, path=f"/v2/radar/{ts}")
+            for ts in nc_timestamps
+        ]
+
     return WeatherMapsResponse(
         version="2.0",
         generated=int(time.time()),
         host=host,
-        radar=RadarData(past=past, nowcast=[]),
+        radar=RadarData(past=past, nowcast=nowcast),
         satellite=SatelliteData(infrared=[]),
     )
 
@@ -130,6 +144,11 @@ async def radar_tile(
         )
 
     frame = await frame_store.get_frame(timestamp)
+    nowcast_blend = None
+    if frame is None and nowcast_store is not None:
+        nc_frame, nowcast_blend = await nowcast_store.get_frame(timestamp)
+        if nc_frame is not None:
+            frame = nc_frame
     if frame is None:
         raise HTTPException(status_code=404, detail="Frame not found")
 
@@ -144,6 +163,7 @@ async def radar_tile(
         ecmwf_grid=ecmwf_grid,
         enabled_regions=enabled_regions,
         frame_timestamp=timestamp,
+        nowcast_blend=nowcast_blend,
     )
 
     tile_cache.put(cache_key, tile_bytes)

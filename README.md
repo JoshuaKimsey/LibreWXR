@@ -18,6 +18,7 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Europe (OPERA pan-European composite, ~155 radars across 24 countries), and Canada
 - **ECMWF IFS global fallback** — ECMWF IFS 9km precipitation data fills in worldwide coverage where no radar composite exists (~3x higher resolution than previous GFS fallback), with multi-timestep animation that auto-scales to match radar history length
 - **Optical flow interpolation** — hourly ECMWF IFS frames are interpolated to 10-minute steps using dense motion vectors, so global fallback areas animate smoothly like real radar data instead of jumping hour-to-hour (configurable, enabled by default)
+- **Precipitation nowcasting (experimental)** — 60-minute short-range forecast by extrapolating recent radar forward using optical flow, smoothly blended with ECMWF IFS forecast (radar-weighted near-term, IFS-weighted far-term, with spatial feathering at radar coverage boundaries to prevent hard seams). Quality varies by weather pattern — works best for steady, organized precipitation; less reliable for fast-developing convection
 - **Snow detection** — per-pixel snow/rain classification using ECMWF IFS snowfall data
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
 - **Tile cache warming** — background pre-rendering for smooth animation playback
@@ -188,6 +189,8 @@ All settings are configured via environment variables (or a `.env` file). Copy `
 | `LIBREWXR_ENABLED_REGIONS` | `CONUS` | Radar region spec (see below) |
 | `LIBREWXR_WARMER_THREADS` | `4` | Background tile warming threads |
 | `LIBREWXR_ECMWF_INTERPOLATION` | `true` | Optical flow interpolation of IFS hourly data to 10-min frames |
+| `LIBREWXR_NOWCAST_ENABLED` | `true` | Enable precipitation nowcasting (experimental — radar extrapolation + IFS blending) |
+| `LIBREWXR_NOWCAST_FRAMES` | `6` | Number of nowcast frames (6 × 10 min = 60 min forecast) |
 
 **Radar regions:**
 
@@ -249,6 +252,9 @@ Tiles are served with `Cache-Control: public, max-age=300`, so any caching rever
 
 [Open-Meteo S3] --> [ECMWF Grid]  --> [Optical Flow Interpolation] --> [Per-pixel snow/rain classification]
   (every 10 min)   (IFS 9km)      (hourly → 10-min frames)     --> [Global fallback where no radar exists]
+
+[Latest 2 Radar Frames] --> [Optical Flow Nowcast] --> [Nowcast Store] --> [Blended with IFS in Renderer]
+                            (extrapolate forward)      (6 frames, 60 min)   (spatial feathering at boundaries)
 ```
 
 - **US data source:** IEM NEXRAD N0Q composites — 8-bit reflectivity, multiple regions (CONUS, Alaska, Hawaii, Puerto Rico, Guam)
@@ -284,7 +290,7 @@ All sources are provided by government-funded institutions and are freely availa
 ## Current Limitations
 
 - **Limited high-resolution coverage** — real radar composites cover the US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Canada, and Europe (via OPERA); the rest of the world uses ECMWF IFS 9km precipitation data as a fallback
-- **No nowcast/forecast** — only past radar frames are available; precipitation prediction is not yet implemented
+- **Experimental nowcasting** — precipitation nowcast uses optical flow extrapolation blended with ECMWF IFS, which works well for steady, organized precipitation but is less reliable for fast-developing convection, cell initiation/dissipation, or complex terrain effects
 - **No satellite imagery** — the satellite infrared endpoint returns empty data
 
 ## License

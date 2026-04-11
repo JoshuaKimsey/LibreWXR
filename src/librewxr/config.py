@@ -34,17 +34,23 @@ class Settings(BaseSettings):
     ecmwf_snow_ratio_threshold: float = 0.5
     ecmwf_max_timesteps: int = 0  # 0 = auto (derived from max_frames)
     ecmwf_interpolation: bool = True  # Optical flow interpolation of IFS hourly data to 10-min frames
+    nowcast_enabled: bool = True  # Generate precipitation nowcast via radar extrapolation + IFS
+    nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
     cors_origins: list[str] = ["*"]
 
     def get_ecmwf_max_timesteps(self) -> int:
         """Return effective ECMWF timestep count.
 
         If ecmwf_max_timesteps > 0, use it as-is (user override).
-        Otherwise auto-derive from max_frames: ceil(max_frames / 6) + 1.
+        Otherwise auto-derive from max_frames, plus extra future hours
+        when nowcast is enabled to cover the forecast window.
         """
         if self.ecmwf_max_timesteps > 0:
             return self.ecmwf_max_timesteps
-        return math.ceil(self.max_frames / 6) + 1
+        base = math.ceil(self.max_frames / 6) + 1
+        if self.nowcast_enabled:
+            base += math.ceil(self.nowcast_frames * self.fetch_interval / 3600)
+        return base
 
     def get_enabled_regions(self) -> list[str]:
         """Resolve the region spec into individual region names."""

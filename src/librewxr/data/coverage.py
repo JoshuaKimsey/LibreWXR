@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import math
 
+import cv2
 import numpy as np
 
 from librewxr.data.radar_stations import (
@@ -108,3 +109,64 @@ def sample_coverage(
     row_c = np.clip(row, 0, ny - 1)
     result = mask[row_c, col_c]
     return result & in_bounds
+
+
+# ---------------------------------------------------------------------------
+# Feather masks: distance-transform gradient at coverage boundaries
+# ---------------------------------------------------------------------------
+# Used by nowcast blending to smoothly transition between extrapolated radar
+# and IFS forecast at the edge of radar coverage, preventing hard seams.
+
+# Distance (in coverage mask pixels) over which the feather ramps from 0 to 1.
+# At MASK_RESOLUTION_DEG=0.05°, 15 pixels ≈ 0.75° ≈ 80 km at mid-latitudes.
+FEATHER_DISTANCE_PX = 15
+
+# Feather mask cache: region name -> (feather, west, south, dx, dy)
+_FEATHER_MASKS: dict[str, tuple[np.ndarray, float, float, float, float]] = {}
+
+
+def build_feather_masks() -> None:
+    """Build feather masks from existing coverage masks.
+
+    Must be called after ``build_coverage_masks()``.  For each region
+    with a coverage mask, computes a distance transform from the mask
+    boundary inward and normalizes to 0–1 over ``FEATHER_DISTANCE_PX``.
+    """
+    for region_name, (mask, west, south, dx, dy) in _COVERAGE_MASKS.items():
+        # cv2.distanceTransform needs uint8: 255 inside coverage, 0 outside
+        mask_uint8 = mask.astype(np.uint8) * 255
+        dist = cv2.distanceTransform(mask_uint8, cv2.DIST_L2, 5)
+        feather = np.clip(dist / FEATHER_DISTANCE_PX, 0.0, 1.0).astype(np.float32)
+        _FEATHER_MASKS[region_name] = (feather, west, south, dx, dy)
+        logger.info(
+            "feather mask %s: %dx%d, feather_px=%d",
+            region_name, feather.shape[0], feather.shape[1], FEATHER_DISTANCE_PX,
+        )
+
+
+def sample_feather(
+    region_name: str, lat_grid: np.ndarray, lon_grid: np.ndarray,
+) -> np.ndarray:
+    """Return a float array 0–1: how far inside radar coverage each point is.
+
+    0.0 = at the coverage boundary or outside,
+    1.0 = well inside coverage (≥ ``FEATHER_DISTANCE_PX`` mask pixels from edge).
+
+    If no feather mask exists for the region, returns all-ones (no feathering).
+    """
+    entry = _FEATHER_MASKS.get(region_name)
+    if entry is None:
+        return np.ones(lat_grid.shape, dtype=np.float32)
+
+    feather, west, south, dx, dy = entry
+    ny, nx = feather.shape
+
+    col = np.floor((lon_grid - west) / dx).astype(np.int32)
+    row = np.floor((lat_grid - south) / dy).astype(np.int32)
+
+    in_bounds = (col >= 0) & (col < nx) & (row >= 0) & (row < ny)
+    col_c = np.clip(col, 0, nx - 1)
+    row_c = np.clip(row, 0, ny - 1)
+    result = feather[row_c, col_c]
+    result[~in_bounds] = 0.0
+    return result

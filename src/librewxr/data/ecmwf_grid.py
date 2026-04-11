@@ -108,25 +108,30 @@ class ECMWFGrid:
         """Pick valid_times that best bracket the current radar window.
 
         Radar frames span roughly (now - radar_history) to now.  We pick
-        ``max_ts`` consecutive IFS hours such that the latest hour is
-        the smallest valid_time >= now (i.e. the first hour at or after
-        the current time).  This ensures the most recent radar frames
-        fall *between* IFS hours rather than off the trailing edge.
+        ``max_ts`` consecutive IFS hours such that the trailing edge
+        covers both the current time and any nowcast lookahead.
 
-        Example: now=06:30, IFS hours=[01..12], max_ts=3
-        → first vt >= 06:30 is 07Z (idx 6) → window [05, 06, 07]
+        When nowcast is enabled, the anchor is shifted forward by the
+        nowcast duration so that the window includes enough future IFS
+        hours for forecast blending.
 
-        Note: this only ever fetches from a single model run.  If the
-        latest run was just released (e.g. now=06:30 and the only run
-        available is 06Z with valid_times starting at 07Z), all stored
-        IFS hours will be in the future of the radar window and the
-        oldest radar frames will all snap to the earliest stored hour
-        until the next fetch picks up later valid_times.
+        Example (no nowcast): now=06:30, IFS hours=[01..12], max_ts=3
+        → anchor at first vt >= 06:30 = 07Z → window [05, 06, 07]
+
+        Example (60-min nowcast): now=06:30, max_ts=4
+        → anchor at first vt >= 07:30 = 08Z → window [05, 06, 07, 08]
         """
         if len(valid_times) <= max_ts:
             return valid_times
 
         now_ts = int(datetime.now(timezone.utc).timestamp())
+
+        # When nowcast is enabled, look further ahead so the fetched
+        # window includes future IFS hours for forecast blending.
+        if settings.nowcast_enabled:
+            anchor_target = now_ts + settings.nowcast_frames * settings.fetch_interval
+        else:
+            anchor_target = now_ts
 
         # Parse valid_time strings to Unix timestamps
         vt_unix = []
@@ -136,16 +141,14 @@ class ECMWFGrid:
                 vt_dt = vt_dt.replace(tzinfo=timezone.utc)
             vt_unix.append(int(vt_dt.timestamp()))
 
-        # Find the first vt that is at or after "now".  That hour
-        # becomes the trailing edge of our window so it brackets the
-        # current time rather than ending one hour early.
+        # Find the first vt at or after the anchor target.
         anchor_idx = None
         for i, t in enumerate(vt_unix):
-            if t >= now_ts:
+            if t >= anchor_target:
                 anchor_idx = i
                 break
         if anchor_idx is None:
-            # All valid_times are in the past — take the most recent ones.
+            # All valid_times are before the target — take the most recent.
             anchor_idx = len(valid_times) - 1
 
         end = anchor_idx + 1  # exclusive
