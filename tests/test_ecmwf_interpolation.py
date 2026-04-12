@@ -4,6 +4,8 @@
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.ecmwf
+
 from librewxr.data.ecmwf_interpolation import (
     _compute_flow,
     _interpolate_frame,

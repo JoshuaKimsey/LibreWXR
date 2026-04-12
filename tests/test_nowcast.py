@@ -6,6 +6,8 @@ import asyncio
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.nowcast
+
 from librewxr.data.nowcast import (
     NowcastFrame,
     NowcastGenerator,

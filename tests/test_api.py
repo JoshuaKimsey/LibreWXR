@@ -4,42 +4,52 @@ import time
 
 import numpy as np
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+pytestmark = pytest.mark.api
 
 from librewxr.api import routes
 from librewxr.data.store import FrameStore, RadarFrame
-from librewxr.main import app
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
 
 
-@pytest.fixture
-def populated_store():
-    """Create a frame store with test data."""
+def _make_test_app() -> tuple[FastAPI, FrameStore, TileCache, int]:
+    """Create a minimal FastAPI app with just the router — no lifespan."""
     store = FrameStore(max_frames=12)
+    cache = TileCache(max_mb=10)
+    ts = int(time.time() // 300) * 300
+
     data = np.zeros((COMPOSITE_HEIGHT, COMPOSITE_WIDTH), dtype=np.uint8)
-    # Add some radar returns
     data[2500:2700, 6000:6200] = 128
 
     import asyncio
-    ts = int(time.time() // 300) * 300
     frame = RadarFrame(timestamp=ts, regions={"USCOMP": data})
     asyncio.run(store.add_frame(frame))
-    return store, ts
+
+    # Wire shared state directly — same as main.py does after lifespan init
+    routes.frame_store = store
+    routes.tile_cache = cache
+    routes.ecmwf_grid = None
+    routes.tile_warmer = None
+    routes.nowcast_store = None
+    routes.start_time = time.time()
+    routes.enabled_regions = ["USCOMP"]
+
+    test_app = FastAPI()
+    test_app.include_router(routes.router)
+    return test_app, store, cache, ts
 
 
-@pytest.fixture
-def client(populated_store):
-    """Create a test client with pre-populated data (no background fetcher)."""
-    store, ts = populated_store
-    cache = TileCache(max_mb=10)
+# Module-scoped: built once, shared across all tests in this file
+_app, _store, _cache, _ts = _make_test_app()
 
-    with TestClient(app, raise_server_exceptions=False) as c:
-        # Override after lifespan sets its own store/cache
-        routes.frame_store = store
-        routes.tile_cache = cache
-        routes.enabled_regions = ["USCOMP"]
-        yield c, ts
+
+@pytest.fixture(scope="module")
+def client():
+    with TestClient(_app, raise_server_exceptions=False) as c:
+        yield c, _ts
 
 
 class TestWeatherMapsEndpoint:

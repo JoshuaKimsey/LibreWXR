@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
+pytestmark = pytest.mark.ecmwf
+
 from librewxr.data.ecmwf_grid import (
     GRID_HEIGHT,
     GRID_WIDTH,

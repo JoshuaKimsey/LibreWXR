@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
+pytestmark = pytest.mark.sources
+
 from librewxr.data.regions import REGIONS, resolve_regions
 from librewxr.data.sources import (
     _MSC_CANADA_PALETTE,

@@ -32,3 +32,11 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "api: API endpoint tests",
+    "ecmwf: ECMWF grid, interpolation, and fallback rendering tests",
+    "nowcast: Precipitation nowcasting tests",
+    "sources: Radar source parsing tests (Canada, OPERA)",
+    "tiles: Tile rendering, coordinates, and color scheme tests",
+    "store: Frame store and tile cache tests",
+]

@@ -3,7 +3,10 @@
 import io
 
 import numpy as np
+import pytest
 from PIL import Image
+
+pytestmark = pytest.mark.tiles
 
 from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
 from librewxr.tiles.renderer import render_coverage_tile, render_tile

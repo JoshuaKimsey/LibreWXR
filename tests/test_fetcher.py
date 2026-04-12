@@ -5,6 +5,8 @@ import asyncio
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.store
+
 from librewxr.data.store import FrameStore, RadarFrame
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH

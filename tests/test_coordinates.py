@@ -5,6 +5,8 @@ import math
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.tiles
+
 from librewxr.tiles.coordinates import (
     COMPOSITE_HEIGHT,
     COMPOSITE_WIDTH,

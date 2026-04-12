@@ -7,6 +7,8 @@ import h5py
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.sources
+
 from librewxr.data.regions import REGIONS, resolve_regions
 from librewxr.data.sources import OperaSource, _parse_opera_hdf5
 from librewxr.tiles.coordinates import tile_overlaps_region

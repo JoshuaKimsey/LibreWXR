@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 import numpy as np
+import pytest
+
+pytestmark = pytest.mark.tiles
 
 from librewxr.colors.schemes import colorize, get_lut, SCHEME_NAMES
 
