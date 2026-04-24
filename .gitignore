@@ -23,6 +23,9 @@ htmlcov/
 # Duplicate data file (canonical copy in src/librewrx/colors/)
 /color_table.csv
 
+# Persistent satellite grid cache (local dev)
+cache/
+
 # Claude Code
 .claude/
 .claude-context/

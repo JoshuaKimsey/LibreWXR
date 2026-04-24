@@ -5,6 +5,10 @@ services:
       - "${LIBREWXR_PORT:-8080}:8080"
     env_file:
       - .env
+    environment:
+      LIBREWXR_CACHE_DIR: /data/cache
+    volumes:
+      - librewxr-cache:/data/cache
     restart: unless-stopped
     logging:
       driver: json-file
@@ -27,3 +31,6 @@ services:
           #   12 frames: ~3 GB
           #   20 frames: ~4 GB
           memory: 7G
+
+volumes:
+  librewxr-cache:

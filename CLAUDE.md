@@ -43,8 +43,11 @@ src/librewxr/
     ecmwf_grid.py    # ECMWF IFS global precipitation grid
     ecmwf_interpolation.py  # Optical flow interpolation (hourly -> 10-min)
     nowcast.py       # Nowcast generation (radar extrapolation + IFS blend)
+    cloud_grid.py    # IFS-derived cloud cover (satellite layer)
+    cloud_cache.py   # Persistent disk cache for cloud grids
   tiles/
     renderer.py      # On-demand tile rendering
+    satellite_renderer.py  # Cloud cover → IR-like satellite tiles
     cache.py         # Byte-capped LRU tile cache
     coordinates.py   # Tile/region coordinate transforms
     warmer.py        # Background tile pre-rendering
@@ -78,8 +81,10 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"`. Markers are defined in 
 - **RadarFrame.regions:** `dict[str, np.ndarray]` keyed by region name, uint8 dBZ encoding
 - **Projections:** RegionDef supports latlon, LCC (`proj="lcc"`), polar stereographic (`proj="stere"`), and LAEA
 - **Tile rendering:** On-demand with byte-capped LRU cache + background tile warmer
-- **ECMWF IFS:** 9km global precipitation from Open-Meteo S3; optical flow interpolation for 10-min frames
+- **ECMWF IFS:** 9km global precipitation from Open-Meteo S3; optical flow interpolation for 10-min frames; reference_time skip avoids redundant downloads
 - **Nowcasting:** Radar extrapolation + IFS blending with spatial feathering at radar boundaries
+- **Satellite:** IFS cloud cover (high/mid/low) composited into IR-like tiles; persistent disk cache with atomic writes and model-run backfill
+- **Memory management:** Radar frames, ECMWF grids, and nowcast data use numpy memmap (temp files); radar fetcher skips timestamps already in store
 
 ## Adding a New Region
 

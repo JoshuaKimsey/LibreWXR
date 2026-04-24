@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import numpy as np
 
 from librewxr.config import settings
+from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.data.sources import (
@@ -29,13 +30,16 @@ class RadarFetcher:
         store: FrameStore,
         cache: TileCache,
         ecmwf_grid: ECMWFGrid | None = None,
+        cloud_grid: CloudGrid | None = None,
         nowcast_generator=None,
     ):
         self._store = store
         self._cache = cache
         self._ecmwf_grid = ecmwf_grid
+        self._cloud_grid = cloud_grid
         self._nowcast_generator = nowcast_generator
         self._task: asyncio.Task | None = None
+        self._cloud_task: asyncio.Task | None = None
         self._enabled_regions = [
             REGIONS[name] for name in settings.get_enabled_regions()
         ]
@@ -134,12 +138,34 @@ class RadarFetcher:
                 logger.exception("Nowcast generation failed")
 
     async def _fetch_auxiliary_grids(self) -> None:
-        """Fetch ECMWF IFS precipitation grid."""
+        """Fetch ECMWF IFS precipitation grid and kick off background cloud fetch."""
         if self._ecmwf_grid is not None:
             try:
                 await self._ecmwf_grid.fetch()
             except Exception:
                 logger.warning("ECMWF IFS fetch failed, global fallback may be stale")
+
+        # Cloud data loads in the background — never blocks radar startup.
+        # Skip if a previous fetch is still running (downloading .om files
+        # takes ~40s each).  With disk caching, already-cached timestamps
+        # are free to check, so there's no cost to running every cycle.
+        if self._cloud_grid is not None:
+            already_running = (
+                self._cloud_task is not None and not self._cloud_task.done()
+            )
+            if already_running:
+                logger.debug("Cloud fetch still running, skipping")
+            else:
+                self._cloud_task = asyncio.create_task(
+                    self._fetch_cloud_background()
+                )
+
+    async def _fetch_cloud_background(self) -> None:
+        """Fetch cloud cover data without blocking the main fetch cycle."""
+        try:
+            await self._cloud_grid.fetch()
+        except Exception:
+            logger.warning("Cloud cover fetch failed, satellite layer may be stale")
 
     async def _fetch_all_frames(self) -> None:
         """Fetch frames for all enabled regions to fill the store.
@@ -159,11 +185,19 @@ class RadarFetcher:
         interval_min = interval // 60
         now_rounded = int(time.time() // interval) * interval
 
+        # Skip timestamps already in the store — only fetch new/missing ones.
+        # On a typical cycle only 1 of 12 timestamps is new, saving ~90% of
+        # radar download bandwidth (especially significant for OPERA HDF5).
+        existing_ts = set(await self._store.get_timestamps())
+
         ts_and_sources: list[tuple[int, str, int | datetime]] = []
 
         for i in range(settings.max_frames):
             minutes_ago = i * interval_min
             ts = now_rounded - i * interval
+
+            if ts in existing_ts:
+                continue
 
             # IEM live endpoint covers 0-55 min ago
             if minutes_ago <= 55:
@@ -171,6 +205,10 @@ class RadarFetcher:
             else:
                 dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                 ts_and_sources.append((ts, "archive", dt))
+
+        if not ts_and_sources:
+            logger.debug("All radar frames up to date, nothing to fetch")
+            return
 
         await self._fetch_timestamps(ts_and_sources)
 

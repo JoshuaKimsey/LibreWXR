@@ -287,7 +287,7 @@ var API_URL = "https://api.librewxr.net/public/weather-maps.json";
 
 This lets you verify your code works with LibreWXR before investing time in self-hosting. When ready, swap the URL to your own server.
 
-The `examples/live-demo/` directory in the repository also contains ready-to-open Leaflet and MapLibre examples pre-configured to use `https://api.librewxr.net`.
+The `examples/` directory in the repository contains ready-to-open Leaflet and MapLibre examples that auto-detect whether to use a local or public API endpoint.
 
 ---
 

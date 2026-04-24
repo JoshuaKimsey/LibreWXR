@@ -18,8 +18,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -62,13 +65,25 @@ class NowcastStore:
 
     Nowcast frames are regenerated every fetch cycle, so no persistence
     or max-frames eviction is needed — just an atomic swap of the frame
-    dict each cycle.
+    dict each cycle.  Region arrays and flow fields are backed by
+    memory-mapped temp files so the OS page cache manages physical RAM.
     """
 
     def __init__(self):
         self._frames: dict[int, NowcastFrame] = {}
         self._flows: dict[str, np.ndarray] = {}
         self._lock = asyncio.Lock()
+        self._memmap_dir = Path(tempfile.mkdtemp(prefix="librewxr_nowcast_"))
+        logger.info("Nowcast memmap directory: %s", self._memmap_dir)
+
+    def _to_memmap(self, name: str, data: np.ndarray) -> np.ndarray:
+        """Write array to disk and return a read-only memory-mapped view."""
+        path = self._memmap_dir / f"{name}.dat"
+        mm = np.memmap(path, dtype=data.dtype, mode="w+", shape=data.shape)
+        mm[:] = data
+        mm.flush()
+        del mm
+        return np.memmap(path, dtype=data.dtype, mode="r", shape=data.shape)
 
     async def replace_all(
         self, frames: list[NowcastFrame],
@@ -80,6 +95,21 @@ class NowcastStore:
         """
         async with self._lock:
             old_timestamps = list(self._frames.keys())
+
+            # Clean up old frame memmap files
+            for path in self._memmap_dir.glob("frame_*.dat"):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+            # Convert region arrays to memmaps
+            for frame in frames:
+                for name, data in list(frame.regions.items()):
+                    frame.regions[name] = self._to_memmap(
+                        f"frame_{frame.timestamp}_{name}", data
+                    )
+
             self._frames = {f.timestamp: f for f in frames}
             return old_timestamps
 
@@ -100,7 +130,16 @@ class NowcastStore:
     async def replace_flows(self, flows: dict[str, np.ndarray]) -> None:
         """Update the latest optical flow vectors."""
         async with self._lock:
-            self._flows = dict(flows)
+            # Clean up old flow memmap files
+            for path in self._memmap_dir.glob("flow_*.dat"):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+            for name, data in list(flows.items()):
+                flows[name] = self._to_memmap(f"flow_{name}", data)
+            self._flows = flows
 
     async def get_flows(self) -> dict[str, np.ndarray]:
         """Return the latest per-region optical flow vectors."""
@@ -110,6 +149,12 @@ class NowcastStore:
     def clear(self) -> None:
         self._frames.clear()
         self._flows.clear()
+
+    def cleanup(self) -> None:
+        """Clear data and remove the memmap temp directory."""
+        self.clear()
+        shutil.rmtree(self._memmap_dir, ignore_errors=True)
+        logger.info("Nowcast memmap directory cleaned up")
 
 
 # ---------------------------------------------------------------------------

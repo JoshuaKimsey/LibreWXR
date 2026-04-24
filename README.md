@@ -20,9 +20,13 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Optical flow interpolation** — hourly ECMWF IFS frames are interpolated to 10-minute steps using dense motion vectors, so global fallback areas animate smoothly like real radar data instead of jumping hour-to-hour (configurable, enabled by default)
 - **Precipitation nowcasting (experimental)** — 60-minute short-range forecast by extrapolating recent radar forward using optical flow, with configurable blend mode: pure radar extrapolation (default, closest to Rain Viewer), smooth radar-to-IFS blending, or pure IFS forecast. Beyond 60 minutes, always uses IFS. Quality varies by weather pattern — works best for steady, organized precipitation; less reliable for fast-developing convection
 - **Precipitation motion arrows** — optional Dark Sky-style arrows showing storm movement direction and speed, derived from optical flow. Available for both radar and ECMWF data globally. Supports light and dark styles for different map themes via `?arrows=light` or `?arrows=dark` query parameter
+- **IFS-derived satellite imagery** — global cloud cover tiles composited from ECMWF IFS high/mid/low cloud layers, approximating infrared satellite imagery. Up to 12 hours of hourly animation with persistent disk caching for instant restarts. Populates the Rain Viewer-compatible `satellite.infrared` endpoint
 - **Snow detection** — per-pixel snow/rain classification using ECMWF IFS snowfall data
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
 - **Tile cache warming** — background pre-rendering for smooth animation playback
+- **Persistent disk cache** — satellite cloud grids are cached to disk with atomic writes, surviving restarts and container recreation without re-downloading from S3. Configurable via `LIBREWXR_CACHE_DIR`
+- **Memory-efficient storage** — radar frames, ECMWF grids, and nowcast data are backed by memory-mapped files, letting the OS page cache manage physical RAM instead of pinning ~1 GB on the heap. Pages are reclaimed under memory pressure and re-faulted on access
+- **Smart fetch optimization** — radar sources skip re-downloading frames already in memory (only ~1 of 12 frames is new each cycle), and ECMWF IFS skips redundant S3 fetches when the model run hasn't changed (IFS updates every 6 hours, checks happen every 10 minutes)
 - **Health endpoint** — `/health` for monitoring uptime, RAM usage, frame count, and cache status
 - **Fully configurable** — all tunable parameters exposed via environment variables
 
@@ -115,9 +119,17 @@ Returns available radar timestamps and the host URL, matching Rain Viewer's resp
       {"time": 1773030600, "path": "/v2/radar/1773030600"},
       ...
     ],
-    "nowcast": []
+    "nowcast": [
+      {"time": 1773038400, "path": "/v2/radar/1773038400"},
+      ...
+    ]
   },
-  "satellite": {"infrared": []}
+  "satellite": {
+    "infrared": [
+      {"time": 1773030600, "path": "/v2/satellite/1773030600"},
+      ...
+    ]
+  }
 }
 ```
 
@@ -158,6 +170,21 @@ GET /v2/radar/{timestamp}/{size}/{z}/{x}/{y}/{color}/{smooth}_{snow}.{ext}
 | 8 | Dark Sky |
 | 255 | Raw (grayscale) |
 
+#### Satellite Tiles
+
+```
+GET /v2/satellite/{timestamp}/{size}/{z}/{x}/{y}/0/0_0.{ext}
+```
+
+| Parameter | Values | Description |
+|---|---|---|
+| `timestamp` | Unix timestamp | From `satellite.infrared` in the metadata endpoint |
+| `size` | `256`, `512` | Tile size in pixels |
+| `z`, `x`, `y` | integers | Standard slippy map tile coordinates |
+| `ext` | `png`, `webp` | Image format |
+
+Returns IFS-derived cloud cover tiles that approximate infrared satellite imagery. High clouds render bright white, mid clouds light gray, low clouds darker gray. Global coverage with hourly updates.
+
 #### Coverage Tiles
 
 ```
@@ -188,17 +215,21 @@ All settings are configured via environment variables (or a `.env` file). Copy `
 | `LIBREWXR_COORD_CACHE_SIZE` | `2048` | Coordinate cache entries per cache (lower = less RAM) |
 | `LIBREWXR_TILE_CACHE_MB` | `200` | Max tile cache size in MB (byte-capped) |
 | `LIBREWXR_MEMORY_LIMIT_MB` | `0` | Memory limit in MB (0 = auto-detect from Docker/cgroup) |
-| `LIBREWXR_SMOOTH_RADIUS` | `3.0` | Gaussian blur radius (0 = disabled) |
-| `LIBREWXR_NOISE_FLOOR_DBZ` | `5.0` | Min dBZ to display (-32 = disabled) |
+| `LIBREWXR_SMOOTH_RADIUS` | `2.0` | Gaussian blur radius (0 = disabled) |
+| `LIBREWXR_NOISE_FLOOR_DBZ` | `10.0` | Min dBZ to display (-32 = disabled) |
 | `LIBREWXR_DESPECKLE_MIN_NEIGHBORS` | `3` | Speckle filter strength (0 = disabled) |
-| `LIBREWXR_WEBP_QUALITY` | `100` | WebP quality (100 = lossless, <100 = lossy) |
+| `LIBREWXR_WEBP_QUALITY` | `80` | WebP quality (100 = lossless, <100 = lossy) |
 | `LIBREWXR_WORKERS` | `1` | Uvicorn worker processes |
-| `LIBREWXR_ENABLED_REGIONS` | `CONUS` | Radar region spec (see below) |
+| `LIBREWXR_ENABLED_REGIONS` | `ALL` | Radar region spec (see below) |
 | `LIBREWXR_WARMER_THREADS` | `4` | Background tile warming threads |
 | `LIBREWXR_ECMWF_INTERPOLATION` | `true` | Optical flow interpolation of IFS hourly data to 10-min frames |
 | `LIBREWXR_NOWCAST_ENABLED` | `true` | Enable precipitation nowcasting (experimental — radar extrapolation + IFS blending) |
 | `LIBREWXR_NOWCAST_FRAMES` | `6` | Number of nowcast frames (6 × 10 min = 60 min forecast) |
 | `LIBREWXR_NOWCAST_BLEND_MODE` | `radar` | Nowcast blend mode: `radar` (pure extrapolation), `blended` (radar→IFS transition), or `ifs` (pure IFS). Beyond 60 min always uses IFS |
+| `LIBREWXR_ECMWF_MAX_TIMESTEPS` | `0` | ECMWF IFS hourly timesteps (0 = auto, derived from max_frames + nowcast window) |
+| `LIBREWXR_SATELLITE_ENABLED` | `true` | Enable IFS-derived satellite (cloud cover) tiles |
+| `LIBREWXR_SATELLITE_MAX_FRAMES` | `12` | Hourly IFS cloud cover timesteps to keep (12 = 12 hours) |
+| `LIBREWXR_CACHE_DIR` | *(empty)* | Persistent cache directory for satellite grids. Set to a path to enable disk caching (survives restarts). Empty = in-memory only. Docker sets this automatically via a named volume |
 
 **Radar regions:**
 
@@ -217,12 +248,12 @@ You can also mix groups and individual regions: `CONUS,EUROPE,CANADA`.
 
 Examples:
 ```bash
-LIBREWXR_ENABLED_REGIONS=CONUS          # just continental US (default)
+LIBREWXR_ENABLED_REGIONS=CONUS          # just continental US
 LIBREWXR_ENABLED_REGIONS=US             # all US regions
 LIBREWXR_ENABLED_REGIONS=EUROPE         # Europe only (OPERA composite)
 LIBREWXR_ENABLED_REGIONS=CANADA         # Canada only
 LIBREWXR_ENABLED_REGIONS=CONUS,EUROPE   # continental US + Europe
-LIBREWXR_ENABLED_REGIONS=ALL            # everything available
+LIBREWXR_ENABLED_REGIONS=ALL            # everything available (default)
 ```
 
 **RAM requirements:**
@@ -254,35 +285,50 @@ Tiles are served with `Cache-Control: public, max-age=300`, so any caching rever
 ## Architecture
 
 ```
-[IEM NEXRAD Fetcher]      --> [In-Memory Frame Store] --> [FastAPI + Tile Renderer]
-[MSC Canada WMS Fetcher]  -->   (N frames, multi-region)    (LRU cache + tile warmer)
-[OPERA S3 Fetcher]        -->     (every 10 min)
+[IEM NEXRAD Fetcher]      --> [Frame Store (memmap)] --> [FastAPI + Tile Renderer]
+[MSC Canada WMS Fetcher]  -->  (N frames, multi-region)    (LRU cache + tile warmer)
+[OPERA S3 Fetcher]        -->    (smart skip: only new frames fetched)
 
-[Open-Meteo S3] --> [ECMWF Grid]  --> [Optical Flow Interpolation] --> [Per-pixel snow/rain classification]
-  (every 10 min)   (IFS 9km)      (hourly → 10-min frames)     --> [Global fallback where no radar exists]
+[Open-Meteo S3] --> [ECMWF Grid (memmap)]  --> [Optical Flow Interpolation] --> [Snow/rain classification]
+  (ref_time skip)   (IFS 9km)               (hourly → 10-min frames)      --> [Global fallback]
 
-[Latest 2 Radar Frames] --> [Optical Flow Nowcast] --> [Nowcast Store] --> [Blended with IFS in Renderer]
-                            (extrapolate forward)      (6 frames, 60 min)   (spatial feathering at boundaries)
+[Latest 2 Radar Frames] --> [Optical Flow Nowcast] --> [Nowcast Store (memmap)] --> [Blended with IFS]
+                            (extrapolate forward)      (6 frames, 60 min)         (spatial feathering)
+
+[Open-Meteo S3] --> [Cloud Grid] --> [Disk Cache] --> [Satellite Tile Renderer]
+  (IFS cloud cover)   (high/mid/low)   (atomic writes)   (IR-like cloud tiles)
 ```
 
 - **US data source:** IEM NEXRAD N0Q composites — 8-bit reflectivity, multiple regions (CONUS, Alaska, Hawaii, Puerto Rico, Guam)
 - **Canada data source:** ECCC MSC GeoMet WMS — pre-colored PNG precipitation composite, decoded via palette reverse-engineering back to dBZ
 - **Europe data source:** EUMETNET OPERA CIRRUS composite via MeteoGate S3 — ODIM HDF5, 3800×4400 at 1km (LAEA projection), ~155 radars across 24 countries
-- **ECMWF IFS global fallback:** ECMWF IFS at native 9km resolution via [Open-Meteo](https://open-meteo.com/) S3 — precipitation rate converted to pseudo-reflectivity via Marshall-Palmer Z-R relationship, with direct snow/rain classification from snowfall ratio. Hourly IFS frames are interpolated to 10-minute steps via OpenCV Farneback optical flow, so fallback areas animate smoothly
+- **ECMWF IFS global fallback:** ECMWF IFS at native 9km resolution via [Open-Meteo](https://open-meteo.com/) S3 — precipitation rate converted to pseudo-reflectivity via Marshall-Palmer Z-R relationship, with direct snow/rain classification from snowfall ratio. Hourly IFS frames are interpolated to 10-minute steps via OpenCV Farneback optical flow, so fallback areas animate smoothly. Skips redundant downloads when the IFS model run hasn't changed
+- **IFS-derived satellite:** Cloud cover (high/mid/low) from the same IFS data, composited into IR-like satellite tiles. Persistent disk cache with atomic writes survives restarts; backfills from previous model runs to provide continuous past coverage
+- **Memory-mapped storage:** Radar frames, ECMWF grids, and nowcast data use numpy memmap backed by temp files. The OS page cache manages physical RAM — pages are reclaimed under pressure and re-faulted on access, reducing heap usage by ~1 GB
 - **Tile rendering:** On-demand with LRU caching. Web Mercator reprojection via pure numpy (no GDAL required)
 - **Tile warming:** Background thread pool pre-renders tiles for all timestamps when a new tile position is requested, ensuring smooth animation playback
 - **No external dependencies beyond pip** — no GDAL, rasterio, or system geo libraries needed
 
 ## Examples
 
-The `examples/` directory contains ready-to-use HTML files for local development:
+The `examples/` directory contains two self-contained HTML files showcasing the full LibreWXR feature set:
 
-- **`leaflet.html`** — Leaflet-based radar map (connects to `localhost:8080`)
-- **`maplibre.html`** — MapLibre GL-based radar map (connects to `localhost:8080`)
+- **`leaflet.html`** — Leaflet-based weather map
+- **`maplibre.html`** — MapLibre GL JS-based weather map
 
-Both examples include animation controls, motion arrow toggles (off/light/dark), and nowcast support. Open either file in a browser while LibreWXR is running to see the radar overlay on an interactive map.
+Both examples include:
+- **Source selector** — switch between local (`localhost:8080`) and the public instance (`api.librewxr.net`) with auto-detection
+- **Layer modes** — Radar, Satellite, or Radar + Satellite (satellite as background under radar)
+- **Light/dark theme** — toggles both the base map and UI styling
+- **Color scheme selector** — all 10 color schemes
+- **Motion arrows** — off, light, or dark
+- **Scrubber bar** — draggable timeline with past/nowcast visual distinction and tick labels
+- **Background preloading** — pre-renders all frames with a progress indicator for smooth animation
+- **Keyboard shortcuts** — Space to play/pause, arrow keys to step through frames
+- **Locate Me** — geolocate and zoom to your position
+- **Auto-refresh** — metadata refreshes every 5 minutes to stay current
 
-The `examples/live-demo/` directory contains the same examples pre-configured to use the public LibreWXR instance at `api.librewxr.net` — no local server required. Just open them in a browser to try it out.
+Open either file in a browser — it auto-detects whether to use your local server or the public instance based on how the file is loaded.
 
 ## Data Sources
 
@@ -299,7 +345,7 @@ All sources are provided by government-funded institutions and are freely availa
 
 - **Limited high-resolution coverage** — real radar composites cover the US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Canada, and Europe (via OPERA); the rest of the world uses ECMWF IFS 9km precipitation data as a fallback
 - **Experimental nowcasting** — precipitation nowcast uses optical flow extrapolation blended with ECMWF IFS, which works well for steady, organized precipitation but is less reliable for fast-developing convection, cell initiation/dissipation, or complex terrain effects
-- **No satellite imagery** — the satellite infrared endpoint returns empty data
+- **Satellite is IFS-derived, not real imagery** — the satellite layer composites ECMWF IFS cloud cover fields rather than using actual satellite observations, so it reflects model output rather than real-time conditions. Update cadence is hourly (matching IFS), not the ~15-minute cadence of real geostationary satellites
 
 ## License
 

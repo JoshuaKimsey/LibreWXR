@@ -9,6 +9,7 @@ A tutorial for adding live weather radar to a website using LibreWXR. No prior e
 - [API Reference](#api-reference)
   - [Weather Maps Endpoint](#weather-maps-endpoint)
   - [Tile URL Format](#tile-url-format)
+  - [Satellite Tile URL Format](#satellite-tile-url-format)
   - [Coverage Tile Endpoint](#coverage-tile-endpoint)
   - [Health Endpoint](#health-endpoint)
 - [Step-by-Step: Leaflet Integration](#step-by-step-leaflet-integration)
@@ -19,10 +20,12 @@ A tutorial for adding live weather radar to a website using LibreWXR. No prior e
   - [5. Supporting HiDPI / Retina Displays](#5-supporting-hidpi--retina-displays)
   - [6. Adding Nowcast (Forecast) Frames](#6-adding-nowcast-forecast-frames)
   - [7. Precipitation Motion Arrows](#7-precipitation-motion-arrows)
+  - [8. Adding a Satellite Layer](#8-adding-a-satellite-layer)
 - [Step-by-Step: MapLibre GL JS Integration](#step-by-step-maplibre-gl-js-integration)
   - [1. Basic Map Setup](#1-basic-map-setup-1)
   - [2. Adding a Radar Layer](#2-adding-a-radar-layer)
   - [3. Animating Frames](#3-animating-frames)
+  - [4. Adding a Satellite Layer](#4-adding-a-satellite-layer)
 - [Tile URL Parameters In Depth](#tile-url-parameters-in-depth)
   - [Color Schemes](#color-schemes)
   - [Smoothing and Snow](#smoothing-and-snow)
@@ -47,6 +50,8 @@ The basic flow for displaying radar on a web page is:
 
 Each radar frame represents a 10-minute snapshot of precipitation. The API typically serves 12 past frames (2 hours of history) plus optional nowcast (forecast) frames up to 60 minutes into the future.
 
+LibreWXR also serves **satellite tiles** — IFS-derived cloud cover that approximates infrared satellite imagery. These work the same way (fetch timestamps, build URLs, add as a layer) but use a different URL pattern and update hourly instead of every 10 minutes.
+
 ---
 
 ## Prerequisites
@@ -65,7 +70,7 @@ If you want to experiment before setting up your own server, you can use the pub
 https://api.librewxr.net
 ```
 
-Just use this URL wherever you see `http://localhost:8080` in the examples below. The `examples/live-demo/` directory in the repository also contains ready-to-open HTML files pre-configured to use this endpoint — no setup needed.
+Just use this URL wherever you see `http://localhost:8080` in the examples below. The `examples/` directory in the repository contains ready-to-open HTML files that auto-detect whether to use a local or public API endpoint — no setup needed.
 
 When you're ready to self-host, swap the URL to your own server and everything works the same way.
 
@@ -100,7 +105,10 @@ This is the starting point for any integration. It returns metadata about all av
     ]
   },
   "satellite": {
-    "infrared": []
+    "infrared": [
+      { "time": 1699963200, "path": "/v2/satellite/1699963200" },
+      { "time": 1699966800, "path": "/v2/satellite/1699966800" }
+    ]
   }
 }
 ```
@@ -112,7 +120,8 @@ This is the starting point for any integration. It returns metadata about all av
 | `host` | The base URL of the server. Use this to construct full tile URLs. |
 | `radar.past` | Array of past (observed) radar frames, oldest first. |
 | `radar.nowcast` | Array of forecast frames, nearest future first. May be empty if nowcasting is disabled. |
-| `time` | Unix timestamp (seconds) of the radar frame. |
+| `satellite.infrared` | Array of satellite (cloud cover) frames, oldest first. Hourly cadence, up to 12 hours. May be empty if satellite is disabled or still loading. |
+| `time` | Unix timestamp (seconds) of the frame. |
 | `path` | Path prefix for tile requests for this frame. |
 
 ### Tile URL Format
@@ -149,6 +158,33 @@ http://localhost:8080/v2/radar/1700000400/256/5/8/12/7/1_0.png
 ```
 
 This requests a 256px PNG tile at zoom 5, column 8, row 12, using color scheme 7 (Rainbow @ Selex SI), with smoothing enabled and snow coloring disabled.
+
+### Satellite Tile URL Format
+
+```
+GET /v2/satellite/{timestamp}/{size}/{z}/{x}/{y}/0/0_0.{ext}
+```
+
+Satellite tiles use a simpler URL than radar — there are no color scheme, smoothing, or snow parameters. The `0/0_0` segment is fixed.
+
+**Path parameters:**
+
+| Parameter | Description | Values |
+|-----------|-------------|--------|
+| `timestamp` | Unix timestamp from `satellite.infrared` in the metadata response | Integer |
+| `size` | Tile pixel size | `256` or `512` |
+| `z` | Zoom level | `0` to `12` (configurable max) |
+| `x` | Tile column | `0` to `2^z - 1` |
+| `y` | Tile row | `0` to `2^z - 1` |
+| `ext` | Image format | `png` or `webp` |
+
+**Example tile URL:**
+
+```
+http://localhost:8080/v2/satellite/1700000400/256/5/8/12/0/0_0.png
+```
+
+The satellite layer renders IFS-derived cloud cover that approximates infrared satellite imagery. High clouds appear bright white, mid-altitude clouds light gray, and low clouds darker gray. Coverage is global with hourly updates.
 
 ### Coverage Tile Endpoint
 
@@ -462,6 +498,76 @@ The arrows are rendered server-side into the tile image. They show precipitation
 
 **Tip:** During animation playback, the arrows can be visually distracting. Consider hiding them while animating and only showing them on the static current frame. To do this, construct the URL without `?arrows=` during playback and add it back when paused.
 
+### 8. Adding a Satellite Layer
+
+LibreWXR can serve IFS-derived cloud cover tiles that approximate infrared satellite imagery. These use a different tile URL pattern than radar and are typically shown as a separate, toggleable layer.
+
+Satellite frames are listed under `satellite.infrared` in the metadata response. They use hourly timestamps (vs radar's 10-minute cadence) and can cover up to 12 hours of history.
+
+```javascript
+var satelliteLayer = null;
+var satelliteFrames = [];
+var satellitePosition = 0;
+
+function loadSatelliteFrames(apiData) {
+    satelliteFrames = apiData.satellite.infrared || [];
+}
+
+function showSatelliteFrame(apiData, position) {
+    if (satelliteFrames.length === 0) return;
+
+    position = ((position % satelliteFrames.length) + satelliteFrames.length) % satelliteFrames.length;
+    satellitePosition = position;
+
+    if (satelliteLayer) {
+        map.removeLayer(satelliteLayer);
+    }
+
+    var frame = satelliteFrames[position];
+
+    // Satellite URL: {host}{path}/{size}/{z}/{x}/{y}/0/0_0.{ext}
+    // Note: no color scheme, smoothing, or snow parameters — the path ends with /0/0_0
+    var tileUrl = apiData.host + frame.path + "/256/{z}/{x}/{y}/0/0_0.png";
+
+    satelliteLayer = L.tileLayer(tileUrl, {
+        tileSize: 256,
+        opacity: 0.6,
+        maxZoom: 12
+    }).addTo(map);
+}
+```
+
+**Key differences from radar tiles:**
+- URL path ends with `/0/0_0.{ext}` (fixed) instead of `/{color}/{smooth}_{snow}.{ext}`
+- No `?arrows=` query parameter
+- Lower opacity (0.5–0.6) works well since cloud cover is visually dense
+- Hourly cadence — animation is slower, so a longer delay between frames looks more natural
+
+To add a toggle button:
+
+```html
+<button id="sat-toggle" onclick="toggleSatellite()">Satellite</button>
+```
+
+```javascript
+var satelliteVisible = false;
+
+function toggleSatellite() {
+    satelliteVisible = !satelliteVisible;
+    if (satelliteVisible) {
+        showSatelliteFrame(apiData, satelliteFrames.length - 1);
+    } else if (satelliteLayer) {
+        map.removeLayer(satelliteLayer);
+        satelliteLayer = null;
+    }
+    document.getElementById("sat-toggle").style.opacity = satelliteVisible ? 1.0 : 0.5;
+}
+```
+
+**Animating satellite independently:** Since satellite updates hourly while radar updates every 10 minutes, you typically animate them on separate timers. The satellite animation loop is the same pattern as radar (section 4) but with a longer delay between frames (1–2 seconds) and using `satelliteFrames` instead of `frames`.
+
+**Layering order:** Add the satellite layer *before* the radar layer so radar overlays on top of clouds. In Leaflet, you can control this with `layer.setZIndex()` or by adding layers in the right order.
+
 ---
 
 ## Step-by-Step: MapLibre GL JS Integration
@@ -636,6 +742,62 @@ map.on('movestart', function () {
 });
 ```
 
+### 4. Adding a Satellite Layer
+
+Adding satellite in MapLibre follows the same source/layer pattern. The tile URL is simpler than radar — no color or smoothing parameters.
+
+```javascript
+var satelliteSourceId = 'satellite';
+var satelliteLayerId = 'satellite-layer';
+
+function showSatelliteLayer(apiData) {
+    var irFrames = apiData.satellite.infrared;
+    if (!irFrames || irFrames.length === 0) return;
+
+    // Show the most recent satellite frame
+    var latestFrame = irFrames[irFrames.length - 1];
+
+    // Remove existing satellite layer/source if present
+    if (map.getLayer(satelliteLayerId)) map.removeLayer(satelliteLayerId);
+    if (map.getSource(satelliteSourceId)) map.removeSource(satelliteSourceId);
+
+    // Satellite URL: {host}{path}/{size}/{z}/{x}/{y}/0/0_0.{ext}
+    map.addSource(satelliteSourceId, {
+        type: 'raster',
+        tiles: [apiData.host + latestFrame.path + '/256/{z}/{x}/{y}/0/0_0.png'],
+        tileSize: 256,
+        maxzoom: 12
+    });
+
+    // Insert satellite BEFORE radar so radar renders on top
+    map.addLayer({
+        id: satelliteLayerId,
+        type: 'raster',
+        source: satelliteSourceId,
+        paint: {
+            'raster-opacity': 0.6,
+            'raster-opacity-transition': { duration: 0, delay: 0 },
+            'raster-fade-duration': 0
+        }
+    }, 'radar-layer-0');  // 'beforeId' — places satellite below radar
+}
+```
+
+To toggle the satellite layer on and off:
+
+```javascript
+function toggleSatellite() {
+    if (!map.getLayer(satelliteLayerId)) {
+        showSatelliteLayer(apiData);
+    } else {
+        var current = map.getPaintProperty(satelliteLayerId, 'raster-opacity');
+        map.setPaintProperty(satelliteLayerId, 'raster-opacity', current > 0 ? 0 : 0.6);
+    }
+}
+```
+
+To animate through satellite frames, use the same pattern as radar animation (section 3) but with `satellite.infrared` as the frame source, a `'sat-'` prefix for source/layer IDs, and a longer frame delay (1–2 seconds) since satellite updates hourly.
+
 ---
 
 ## Tile URL Parameters In Depth
@@ -735,7 +897,7 @@ LibreWXR allows all origins by default (`LIBREWXR_CORS_ORIGINS=["*"]`). If you r
 
 ## Refreshing Data
 
-Radar data updates every 10 minutes. To keep your map current, re-fetch the metadata periodically and rebuild the frame list:
+Radar data updates every 10 minutes. Satellite data updates hourly. To keep your map current, re-fetch the metadata periodically and rebuild the frame lists:
 
 ```javascript
 // Refresh every 5 minutes (server fetches every 10, so 5 ensures prompt updates)
@@ -746,6 +908,8 @@ setInterval(function () {
         if (data.radar.nowcast && data.radar.nowcast.length > 0) {
             frames = frames.concat(data.radar.nowcast);
         }
+        // Update satellite frames too
+        satelliteFrames = data.satellite.infrared || [];
         // Optionally restart animation
     });
 }, 5 * 60 * 1000);
@@ -755,24 +919,24 @@ setInterval(function () {
 
 ## Complete Working Examples
 
-The `examples/` directory in the LibreWXR repository contains complete, ready-to-use HTML files:
+The `examples/` directory contains two self-contained HTML files that demonstrate every feature covered in this guide:
 
-- **`examples/leaflet.html`** — Full Leaflet integration with animation controls, nowcast support, HiDPI tiles, and precipitation arrows
-- **`examples/maplibre.html`** — Full MapLibre GL JS integration with the same feature set
+- **`examples/leaflet.html`** — Full Leaflet integration
+- **`examples/maplibre.html`** — Full MapLibre GL JS integration
+
+Both examples include:
+- **Source selector** — switch between your local server and the public instance (`api.librewxr.net`) without editing code. Auto-detects the best default based on how the file is opened.
+- **Layer modes** — Radar, Satellite, or Radar + Satellite (satellite as a cloud background under animated radar)
+- **Light/dark theme** — toggles both the base map style and UI colors
+- **Color scheme selector**, **motion arrows**, and **nowcast** with full animation support
+- **Draggable scrubber** — timeline with past/nowcast visual distinction and tick labels
+- **Background preloading** — pre-renders all frames with a progress indicator for smooth playback
+- **Keyboard shortcuts** — Space to play/pause, arrow keys to step through frames
+- **Auto-refresh** — metadata refreshes every 5 minutes to stay current
 
 To use them:
 
-1. Start your LibreWXR server
-2. Open either HTML file in your browser
-3. Edit the `LIBREWXR_URL` variable at the top of the `<script>` block to point to your server (defaults to `http://localhost:8080`)
+1. Open either HTML file in your browser — no server setup needed if using the public instance
+2. To use your local server, start LibreWXR and select "Local (localhost:8080)" from the source dropdown
 
-These examples include everything covered in this guide and serve as a reference implementation for production use.
-
-### Live demos (no server required)
-
-The `examples/live-demo/` directory contains the same Leaflet and MapLibre examples pre-configured to use the public LibreWXR instance at `https://api.librewxr.net`. Just open them in a browser — no local server setup needed:
-
-- **`examples/live-demo/leaflet.html`** — Leaflet live demo
-- **`examples/live-demo/maplibre.html`** — MapLibre GL JS live demo
-
-These are the fastest way to see LibreWXR in action and experiment with the API before committing to self-hosting.
+These examples serve as reference implementations for production web integrations.

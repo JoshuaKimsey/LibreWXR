@@ -3,8 +3,11 @@
 import asyncio
 import json
 import logging
+import shutil
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from pathlib import Path
 
 import fsspec
 import numpy as np
@@ -59,6 +62,25 @@ class ECMWFGrid:
         self._reference_time: str | None = None
         self._fs: fsspec.AbstractFileSystem | None = None
         self._flow: np.ndarray | None = None  # Global optical flow field
+        self._memmap_dir = Path(tempfile.mkdtemp(prefix="librewxr_ecmwf_"))
+        logger.info("ECMWF memmap directory: %s", self._memmap_dir)
+
+    def _to_memmap(self, name: str, data: np.ndarray) -> np.ndarray:
+        """Write array to disk and return a read-only memory-mapped view."""
+        path = self._memmap_dir / f"{name}.dat"
+        mm = np.memmap(path, dtype=data.dtype, mode="w+", shape=data.shape)
+        mm[:] = data
+        mm.flush()
+        del mm
+        return np.memmap(path, dtype=data.dtype, mode="r", shape=data.shape)
+
+    def _cleanup_memmap_files(self) -> None:
+        """Delete all memmap files from the previous cycle."""
+        for path in self._memmap_dir.glob("*.dat"):
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
     @property
     def data(self) -> np.ndarray | None:
@@ -186,6 +208,12 @@ class ECMWFGrid:
             return False
 
         ref_time = latest["reference_time"]
+
+        # Skip re-fetch if the model run hasn't changed (IFS updates every 6h)
+        if ref_time == self._reference_time and self._timesteps:
+            logger.debug("ECMWF IFS: same reference_time %s, skipping", ref_time)
+            return True
+
         valid_times = latest.get("valid_times", [])
         variables = latest.get("variables", [])
 
@@ -250,7 +278,19 @@ class ECMWFGrid:
             from librewxr.data.ecmwf_interpolation import interpolate_timesteps
 
             new_timesteps, ecmwf_flow = interpolate_timesteps(new_timesteps)
-            self._flow = ecmwf_flow
+        else:
+            ecmwf_flow = None
+
+        # Move all arrays to memory-mapped files so the OS page cache
+        # manages physical RAM instead of pinning ~284 MB on the heap.
+        self._cleanup_memmap_files()
+        for ts, (precip, snow) in list(new_timesteps.items()):
+            new_timesteps[ts] = (
+                self._to_memmap(f"{ts}_precip", precip),
+                self._to_memmap(f"{ts}_snow", snow),
+            )
+        if ecmwf_flow is not None:
+            self._flow = self._to_memmap("flow", ecmwf_flow)
         else:
             self._flow = None
 
@@ -458,5 +498,9 @@ class ECMWFGrid:
         return snow_mask[row, col]
 
     async def close(self) -> None:
-        """Clean up resources."""
+        """Clean up resources and remove memmap temp directory."""
+        self._timesteps.clear()
+        self._flow = None
         self._fs = None
+        shutil.rmtree(self._memmap_dir, ignore_errors=True)
+        logger.info("ECMWF memmap directory cleaned up")

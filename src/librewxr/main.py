@@ -11,6 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from librewxr.api import routes
 from librewxr.config import settings
+from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.coverage import build_coverage_masks, build_feather_masks
 from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.fetcher import RadarFetcher
@@ -55,6 +56,7 @@ async def lifespan(app: FastAPI):
     store = FrameStore(max_frames=settings.max_frames)
     cache = TileCache(max_mb=settings.tile_cache_mb)
     ecmwf_grid = ECMWFGrid()
+    cloud = CloudGrid() if settings.satellite_enabled else None
     enabled = settings.get_enabled_regions()
 
     # Precompute radar station coverage masks used by the ECMWF fallback
@@ -90,6 +92,7 @@ async def lifespan(app: FastAPI):
     routes.frame_store = store
     routes.tile_cache = cache
     routes.ecmwf_grid = ecmwf_grid
+    routes.cloud_grid = cloud
     routes.tile_warmer = warmer
     routes.nowcast_store = nowcast_store
     routes.start_time = time.time()
@@ -98,17 +101,21 @@ async def lifespan(app: FastAPI):
     fetcher = RadarFetcher(
         store, cache,
         ecmwf_grid=ecmwf_grid,
+        cloud_grid=cloud,
         nowcast_generator=nowcast_generator,
     )
     logger.info(
         "Starting LibreWXR (public_url=%s, max_zoom=%d, regions=%s, "
-        "tile_cache=%d MB, memory_limit=%d MB, nowcast=%s)",
+        "tile_cache=%d MB, memory_limit=%d MB, nowcast=%s, satellite=%s, "
+        "cache_dir=%s)",
         settings.public_url,
         settings.max_zoom,
         ", ".join(enabled),
         settings.tile_cache_mb,
         mem_limit,
         f"{settings.nowcast_frames} frames" if settings.nowcast_enabled else "off",
+        f"{settings.satellite_max_frames} frames" if settings.satellite_enabled else "off",
+        settings.cache_dir or "(none)",
     )
     await fetcher.start()
     await monitor.start()
@@ -119,7 +126,9 @@ async def lifespan(app: FastAPI):
     await fetcher.stop()
     warmer.shutdown()
     if nowcast_store is not None:
-        nowcast_store.clear()
+        nowcast_store.cleanup()
+    if cloud is not None:
+        await cloud.close()
     cache.clear()
     store.cleanup()
     logger.info("LibreWXR shutdown complete")

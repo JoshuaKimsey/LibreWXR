@@ -7,176 +7,611 @@
     <link href="https://unpkg.com/leaflet/dist/leaflet.css" rel="stylesheet"/>
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
     <style>
-        body { margin: 0; font-family: sans-serif; }
-        .controls {
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 50px;
+        /* === THEME VARIABLES === */
+        [data-theme="dark"] {
+            --bg: #0f1117;
+            --toolbar-bg: #161822;
+            --toolbar-border: #2a2d3a;
+            --replayer-bg: #1a1c28;
+            --text: #e0e0e0;
+            --text-secondary: #9ca3af;
+            --text-dim: #6b7280;
+            --accent: #4ea8de;
+            --accent-hover: #5bb8ee;
+            --input-bg: #1a1c28;
+            --input-border: #2a2d3a;
+            --input-text: #ccc;
+            --scrubber-rail: #3a3d4a;
+            --scrubber-nowcast: repeating-linear-gradient(90deg, #2a5a7a 0px, #2a5a7a 4px, #1a3a4a 4px, #1a3a4a 8px);
+            --btn-bg: rgba(22,24,34,0.92);
+            --btn-border: #2a2d3a;
+            --btn-hover: #2a2d3a;
+        }
+        [data-theme="light"] {
+            --bg: #f0f2f5;
+            --toolbar-bg: #ffffff;
+            --toolbar-border: #e0e0e0;
+            --replayer-bg: #f8f9fa;
+            --text: #333;
+            --text-secondary: #666;
+            --text-dim: #999;
+            --accent: #0077cc;
+            --accent-hover: #0088dd;
+            --input-bg: #fff;
+            --input-border: #ccc;
+            --input-text: #555;
+            --scrubber-rail: #d0d0d0;
+            --scrubber-nowcast: repeating-linear-gradient(90deg, #a0c4e0 0px, #a0c4e0 4px, #c0d8ec 4px, #c0d8ec 8px);
+            --btn-bg: rgba(255,255,255,0.92);
+            --btn-border: #ccc;
+            --btn-hover: #e8e8e8;
+        }
+
+        /* === BASE STYLES === */
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            overflow: hidden;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* === TOOLBAR === */
+        .toolbar {
             display: flex;
             align-items: center;
-            justify-content: space-between;
-            padding: 0 20px;
-            background: white;
+            gap: 10px;
+            padding: 8px 16px;
+            background: var(--toolbar-bg);
+            border-bottom: 1px solid var(--toolbar-border);
             z-index: 1000;
-            box-sizing: border-box;
+            flex-wrap: wrap;
+            flex-shrink: 0;
         }
-        .title {
-            font-weight: 400;
-            color: #333;
-        }
-        #timestamp {
-            font-size: 18px;
+        .toolbar-title {
             font-weight: 600;
-            color: #333;
-        }
-        #timestamp.nowcast {
-            color: #0077cc;
-        }
-        #timestamp.nowcast::after {
-            content: ' (Forecast)';
-            font-size: 12px;
-            font-weight: 400;
-        }
-        .buttons {
-            display: flex;
-            gap: 8px;
-        }
-        .buttons button {
-            width: 36px;
-            height: 36px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            background: #fff;
-            cursor: pointer;
-            font-size: 16px;
-        }
-        .buttons button:hover {
-            background: #f5f5f5;
-        }
-        .buttons select {
-            height: 36px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            background: #fff;
-            font-size: 13px;
-            color: #555;
-            cursor: pointer;
-            padding: 0 8px;
-        }
-        .buttons label {
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            font-size: 13px;
-            color: #555;
-            cursor: pointer;
+            font-size: 15px;
+            color: var(--text);
+            margin-right: 8px;
             white-space: nowrap;
         }
-        #mapid {
-            position: absolute;
-            top: 50px;
-            left: 0;
-            bottom: 0;
-            right: 0;
+        .toolbar select {
+            height: 32px;
+            border: 1px solid var(--input-border);
+            border-radius: 6px;
+            background: var(--input-bg);
+            font-size: 13px;
+            color: var(--input-text);
+            cursor: pointer;
+            padding: 0 8px;
+            outline: none;
         }
-        .leaflet-tile {
+        .toolbar select:hover {
+            border-color: var(--accent);
+        }
+
+        /* === MAP === */
+        #mapid {
+            flex: 1;
+            position: relative;
+            z-index: 1;
+        }
+        .leaflet-container img.leaflet-tile {
+            mix-blend-mode: plus-lighter;
+        }
+        .leaflet-tile.radar-tile {
             image-rendering: pixelated;
+            width: 256px !important;
+            height: 256px !important;
+        }
+        .leaflet-tile.satellite-tile {
+            width: 256px !important;
+            height: 256px !important;
+        }
+
+        /* === PRELOAD INDICATOR === */
+        .preload-indicator {
+            position: absolute;
+            top: 80px;
+            left: 10px;
+            z-index: 1000;
+            background: var(--btn-bg);
+            border: 1px solid var(--btn-border);
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        .preload-indicator.visible {
+            opacity: 1;
+        }
+        .preload-bar {
+            height: 3px;
+            background: var(--scrubber-rail);
+            border-radius: 2px;
+            margin-top: 4px;
+            overflow: hidden;
+        }
+        .preload-fill {
+            height: 100%;
+            background: var(--accent);
+            border-radius: 2px;
+            transition: width 0.2s ease;
+            width: 0%;
+        }
+
+        /* === LOCATE BUTTON === */
+        .locate-btn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            width: 34px;
+            height: 34px;
+            background: var(--btn-bg);
+            border: 1px solid var(--btn-border);
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .locate-btn:hover {
+            background: var(--btn-hover);
+        }
+        .locate-btn svg {
+            width: 18px;
+            height: 18px;
+            fill: none;
+            stroke: var(--text-secondary);
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        /* === REPLAYER / SCRUBBER === */
+        .replayer {
+            background: var(--replayer-bg);
+            border-top: 1px solid var(--toolbar-border);
+            padding: 10px 16px 8px;
+            z-index: 1000;
+            flex-shrink: 0;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        .replayer-top {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .play-btn {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            border: none;
+            background: var(--accent);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            transition: background 0.15s;
+        }
+        .play-btn:hover {
+            background: var(--accent-hover);
+        }
+        .play-btn svg {
+            width: 16px;
+            height: 16px;
+            fill: #fff;
+        }
+
+        /* Scrubber track */
+        .scrubber-wrap {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+        .scrubber-track {
+            position: relative;
+            height: 28px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+        }
+        .scrubber-rail {
+            position: absolute;
+            left: 0;
+            right: 0;
+            height: 4px;
+            border-radius: 2px;
+            overflow: hidden;
+            display: flex;
+        }
+        .rail-past {
+            background: var(--scrubber-rail);
+            height: 100%;
+        }
+        .rail-divider {
+            width: 2px;
+            height: 100%;
+            background: var(--accent);
+            flex-shrink: 0;
+        }
+        .rail-nowcast {
+            background: var(--scrubber-nowcast);
+            height: 100%;
+            flex: 1;
+        }
+        .scrubber-thumb {
+            position: absolute;
+            top: 50%;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: var(--accent);
+            border: 2px solid #fff;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            z-index: 2;
+            transition: left 0.15s ease;
+        }
+        .scrubber-thumb.dragging {
+            transition: none;
+            cursor: grabbing;
+        }
+
+        /* Tick labels */
+        .scrubber-ticks {
+            display: flex;
+            position: relative;
+            height: 18px;
+            margin-top: 2px;
+        }
+        .tick-label {
+            font-size: 10px;
+            color: var(--text-dim);
+            position: absolute;
+            transform: translateX(-50%);
+            white-space: nowrap;
+        }
+        .tick-label.nowcast-tick {
+            color: var(--accent);
+        }
+        .tick-label.active-tick {
+            color: var(--accent);
+            font-weight: 600;
+        }
+        .tick-divider {
+            position: absolute;
+            font-size: 10px;
+            color: var(--accent);
+            transform: translateX(-50%);
+            font-weight: 700;
+        }
+
+        /* Timestamp display */
+        .timestamp-display {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text);
+            white-space: nowrap;
+            min-width: 80px;
+            text-align: right;
+            flex-shrink: 0;
+        }
+        .timestamp-display .forecast-label {
+            font-size: 11px;
+            font-weight: 400;
+            color: var(--accent);
+            margin-left: 4px;
+        }
+
+        /* === RESPONSIVE === */
+        @media (max-width: 600px) {
+            .toolbar { padding: 6px 10px; gap: 6px; }
+            .toolbar-title { font-size: 13px; }
+            .toolbar select { height: 28px; font-size: 11px; padding: 0 4px; }
+            .replayer { padding: 8px 10px 6px; }
+            .play-btn { width: 32px; height: 32px; }
+            .timestamp-display { font-size: 12px; min-width: 60px; }
         }
     </style>
 </head>
-<body>
+<body data-theme="dark">
 
-<div class="controls">
-    <span class="title">Weather Radar (LibreWXR)</span>
-    <span id="timestamp">Loading...</span>
-    <div class="buttons">
-        <select id="colorScheme" onchange="changeColorScheme()">
-            <option value="7" selected>Rainbow</option>
-            <option value="4">The Weather Channel</option>
-            <option value="5">Meteored</option>
-            <option value="6">NEXRAD Level III</option>
-            <option value="2">Universal Blue</option>
-            <option value="8">Dark Sky</option>
-            <option value="0">Black &amp; White</option>
-            <option value="1">Original</option>
-            <option value="3">TITAN</option>
-            <option value="255">Raw Grayscale</option>
-        </select>
-        <select id="arrowsToggle" onchange="toggleArrows()">
-            <option value="">Arrows: Off</option>
-            <option value="light">Arrows: Light</option>
-            <option value="dark">Arrows: Dark</option>
-        </select>
-        <label id="hideAnimLabel" style="display:none"><input type="checkbox" id="hideAnimArrows" onchange="toggleHideAnimArrows()"> Hide during playback</label>
-        <button onclick="stop(); showFrame(animationPosition - 1);">&#x2039;</button>
-        <button id="playBtn" onclick="playStop();">&#x25B6;</button>
-        <button onclick="stop(); showFrame(animationPosition + 1);">&#x203A;</button>
+<!-- Toolbar -->
+<div class="toolbar">
+    <span class="toolbar-title">LibreWXR</span>
+    <select id="sourceSelect" onchange="changeSource()">
+        <option value="local">Local (localhost:8080)</option>
+        <option value="public">Public (api.librewxr.net)</option>
+    </select>
+    <select id="layerSelect" onchange="changeLayer()">
+        <option value="radar">Radar</option>
+        <option value="satellite">Satellite</option>
+        <option value="both">Radar + Satellite</option>
+    </select>
+    <select id="colorScheme" onchange="changeColorScheme()">
+        <option value="7" selected>Rainbow</option>
+        <option value="4">The Weather Channel</option>
+        <option value="5">Meteored</option>
+        <option value="6">NEXRAD Level III</option>
+        <option value="2">Universal Blue</option>
+        <option value="8">Dark Sky</option>
+        <option value="0">Black &amp; White</option>
+        <option value="1">Original</option>
+        <option value="3">TITAN</option>
+        <option value="255">Raw Grayscale</option>
+    </select>
+    <select id="arrowsToggle" onchange="changeArrows()">
+        <option value="">Arrows: Off</option>
+        <option value="light">Arrows: Light</option>
+        <option value="dark">Arrows: Dark</option>
+    </select>
+    <select id="themeSelect" onchange="changeTheme()">
+        <option value="dark">Dark Theme</option>
+        <option value="light">Light Theme</option>
+    </select>
+</div>
+
+<!-- Map -->
+<div id="mapid">
+    <div class="preload-indicator" id="preloadIndicator">
+        <span id="preloadText">Loading frames 0/0</span>
+        <div class="preload-bar"><div class="preload-fill" id="preloadFill"></div></div>
+    </div>
+    <button class="locate-btn" id="locateBtn" title="Locate me">
+        <svg viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="3"/>
+            <line x1="12" y1="2" x2="12" y2="6"/>
+            <line x1="12" y1="18" x2="12" y2="22"/>
+            <line x1="2" y1="12" x2="6" y2="12"/>
+            <line x1="18" y1="12" x2="22" y2="12"/>
+        </svg>
+    </button>
+</div>
+
+<!-- Replayer / Scrubber -->
+<div class="replayer">
+    <div class="replayer-top">
+        <button class="play-btn" id="playBtn" onclick="playStop()">
+            <svg id="playIcon" viewBox="0 0 16 16"><polygon points="4,2 14,8 4,14"/></svg>
+            <svg id="pauseIcon" viewBox="0 0 16 16" style="display:none"><rect x="3" y="2" width="3.5" height="12"/><rect x="9.5" y="2" width="3.5" height="12"/></svg>
+        </button>
+        <div class="scrubber-wrap" id="scrubberWrap">
+            <div class="scrubber-track" id="scrubberTrack">
+                <div class="scrubber-rail" id="scrubberRail">
+                    <div class="rail-past" id="railPast"></div>
+                    <div class="rail-divider" id="railDivider" style="display:none"></div>
+                    <div class="rail-nowcast" id="railNowcast" style="display:none"></div>
+                </div>
+                <div class="scrubber-thumb" id="scrubberThumb" style="left:0%"></div>
+            </div>
+            <div class="scrubber-ticks" id="scrubberTicks"></div>
+        </div>
+        <div class="timestamp-display" id="timestampDisplay">Loading...</div>
     </div>
 </div>
 
-<div id="mapid"></div>
-
 <script>
 // === CONFIGURATION ===
-// Change this to your LibreWXR server URL
-var LIBREWXR_URL = "http://localhost:8080";
-
-var TILE_SIZE = window.devicePixelRatio >= 2 ? 512 : 256;
+var TILE_SIZE = 512;
 var RADAR_OPACITY = 0.8;
-var ANIMATION_DELAY_MS = 500;
-var ANIMATION_PAUSE_MS = 1500;  // Pause at past/nowcast boundary and end
-var API_URL = LIBREWXR_URL + "/public/weather-maps.json";
+var SATELLITE_OPACITY = 0.8;
+var RADAR_ANIMATION_DELAY = 500;
+var RADAR_ANIMATION_PAUSE = 1500;
+var SAT_ANIMATION_DELAY = 800;
+var SAT_ANIMATION_PAUSE = 2000;
+var AUTO_REFRESH_MS = 5 * 60 * 1000; // 5 minutes
+
+var SOURCES = {
+    local: 'http://localhost:8080',
+    public: 'https://api.librewxr.net'
+};
 
 // === STATE ===
 var apiData = {};
 var mapFrames = [];
-var nowcastStartIndex = -1;  // Index where nowcast frames begin (-1 = none)
+var nowcastStartIndex = -1;
 var animationPosition = 0;
-var animationTimer = false;
+var animationTimer = null;
+var isPlaying = false;
 var currentLayer = null;
 var isLoading = false;
 var layerCache = {};
 var currentColorScheme = 7;
 var arrowsMode = '';
-var hideAnimArrows = false;
+var activeSource = 'local';
+var activeLayer = 'radar'; // 'radar' | 'satellite' | 'both'
+var activeTheme = 'dark';
+var satelliteBgLayer = null;
+var satelliteBgTimestamp = null;
+var preloadAbort = false;
+var preloadedCount = 0;
+var autoRefreshTimer = null;
+var isDragging = false;
+
+// === AUTO-DETECT SOURCE DEFAULT ===
+(function detectSource() {
+    var loc = window.location;
+    var isLocal = loc.protocol === 'file:' || loc.hostname === 'localhost' || loc.hostname === '127.0.0.1';
+    activeSource = isLocal ? 'local' : 'public';
+    document.getElementById('sourceSelect').value = activeSource;
+})();
 
 // === MAP SETUP ===
-var map = L.map('mapid', { maxZoom: 12 }).setView([39.8283, -98.5795], 5);
+var map = L.map('mapid', { maxZoom: 12, zoomControl: true }).setView([39.8283, -98.5795], 5);
 
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors'
-}).addTo(map);
+// Create custom panes for z-ordering
+map.createPane('satellite-pane');
+map.getPane('satellite-pane').style.zIndex = 350;
+map.createPane('radar-pane');
+map.getPane('radar-pane').style.zIndex = 450;
+
+var baseMaps = {
+    dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>'
+    }),
+    light: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors'
+    })
+};
+var currentBaseMap = null;
+
+function setBaseMap(theme) {
+    if (currentBaseMap) map.removeLayer(currentBaseMap);
+    currentBaseMap = baseMaps[theme];
+    currentBaseMap.addTo(map);
+    currentBaseMap.bringToBack();
+}
+
+// === THEME ===
+function changeTheme() {
+    activeTheme = document.getElementById('themeSelect').value;
+    document.body.setAttribute('data-theme', activeTheme);
+    setBaseMap(activeTheme);
+}
+
+// Initialize theme
+setBaseMap(activeTheme);
+
+// === SOURCE ===
+function changeSource() {
+    activeSource = document.getElementById('sourceSelect').value;
+    loadApiData();
+}
+
+function getApiUrl() {
+    return SOURCES[activeSource] + '/public/weather-maps.json';
+}
+
+function getHost() {
+    return apiData.host || SOURCES[activeSource];
+}
+
+// === LAYER MODE ===
+function changeLayer() {
+    activeLayer = document.getElementById('layerSelect').value;
+    var isSatOnly = (activeLayer === 'satellite');
+    document.getElementById('colorScheme').style.display = isSatOnly ? 'none' : '';
+    document.getElementById('arrowsToggle').style.display = isSatOnly ? 'none' : '';
+    reinitialize();
+}
+
+function changeColorScheme() {
+    currentColorScheme = parseInt(document.getElementById('colorScheme').value);
+    clearAllLayers();
+    showFrame(animationPosition);
+    startPreloading();
+}
+
+function changeArrows() {
+    arrowsMode = document.getElementById('arrowsToggle').value;
+    clearAllLayers();
+    showFrame(animationPosition);
+    startPreloading();
+}
 
 // === UTILITIES ===
-function wrapPosition(position) {
-    while (position >= mapFrames.length) {
-        position -= mapFrames.length;
-    }
-    while (position < 0) {
-        position += mapFrames.length;
-    }
+function clampPosition(position) {
+    if (mapFrames.length === 0) return 0;
+    while (position >= mapFrames.length) position -= mapFrames.length;
+    while (position < 0) position += mapFrames.length;
     return position;
 }
 
 function formatTime(timestamp) {
-    return new Date(timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return new Date(timestamp * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
-// === LAYER MANAGEMENT ===
-function createRadarLayer(frame) {
-    var useArrows = arrowsMode && !(hideAnimArrows && animationTimer);
-    var arrowsParam = useArrows ? '?arrows=' + arrowsMode : '';
-    return new L.TileLayer(apiData.host + frame.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/' + currentColorScheme + '/1_1.png' + arrowsParam, {
+function isNowcastFrame(position) {
+    return nowcastStartIndex >= 0 && position >= nowcastStartIndex;
+}
+
+function getAnimationDelay() {
+    if (activeLayer === 'satellite') {
+        return SAT_ANIMATION_DELAY;
+    }
+    return RADAR_ANIMATION_DELAY;
+}
+
+function getAnimationPause() {
+    if (activeLayer === 'satellite') {
+        return SAT_ANIMATION_PAUSE;
+    }
+    return RADAR_ANIMATION_PAUSE;
+}
+
+function getFrameDelay(position) {
+    // Pause at past/nowcast boundary and at end of loop
+    if (nowcastStartIndex >= 0 && position === nowcastStartIndex - 1) return getAnimationPause();
+    if (position === mapFrames.length - 1) return getAnimationPause();
+    return getAnimationDelay();
+}
+
+// === TILE LAYERS ===
+function createRadarLayer(frame, pane) {
+    var arrowsParam = arrowsMode ? '?arrows=' + arrowsMode : '';
+    var url = getHost() + frame.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/' + currentColorScheme + '/1_1.png' + arrowsParam;
+    var layer = new L.TileLayer(url, {
         tileSize: 256,
         opacity: 0.001,
-        maxZoom: 12
+        maxZoom: 12,
+        pane: pane || 'radar-pane'
     });
+    layer.createTile = function(coords, done) {
+        var tile = document.createElement('img');
+        tile.className = 'radar-tile';
+        tile.addEventListener('load', function() {
+            tile.style.width = '256px';
+            tile.style.height = '256px';
+            if (done) done(null, tile);
+        });
+        tile.onerror = function() {
+            if (done) done(new Error('Tile load failed'), tile);
+        };
+        tile.src = this.getTileUrl(coords);
+        return tile;
+    };
+    return layer;
 }
 
+function createSatelliteLayer(frame, pane) {
+    var url = getHost() + frame.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/0/0_0.png';
+    var layer = new L.TileLayer(url, {
+        tileSize: 256,
+        opacity: 0.001,
+        maxZoom: 12,
+        pane: pane || 'satellite-pane'
+    });
+    layer.createTile = function(coords, done) {
+        var tile = document.createElement('img');
+        tile.className = 'satellite-tile';
+        tile.addEventListener('load', function() {
+            tile.style.width = '256px';
+            tile.style.height = '256px';
+            if (done) done(null, tile);
+        });
+        tile.onerror = function() {
+            if (done) done(new Error('Tile load failed'), tile);
+        };
+        tile.src = this.getTileUrl(coords);
+        return tile;
+    };
+    return layer;
+}
+
+// === LAYER CACHE ===
 function clearLayerCache() {
-    stop();
     for (var pos in layerCache) {
         if (parseInt(pos) !== animationPosition) {
             map.removeLayer(layerCache[pos]);
@@ -185,34 +620,8 @@ function clearLayerCache() {
     }
 }
 
-// === ANIMATION CONTROL ===
-function stop() {
-    if (animationTimer) {
-        clearTimeout(animationTimer);
-        animationTimer = false;
-        document.getElementById("playBtn").innerHTML = "&#x25B6;";
-        return true;
-    }
-    return false;
-}
-
-function play() {
-    animationTimer = true;
-    document.getElementById("playBtn").innerHTML = "&#x23F8;";
-    showFrame(animationPosition + 1);
-}
-
-function playStop() {
-    if (!stop()) {
-        if (hideAnimArrows && arrowsMode) clearAllLayers();
-        play();
-    } else if (hideAnimArrows && arrowsMode) {
-        clearAllLayers();
-        showFrame(animationPosition);
-    }
-}
-
 function clearAllLayers() {
+    stopAnimation();
     isLoading = false;
     for (var pos in layerCache) {
         map.removeLayer(layerCache[pos]);
@@ -221,129 +630,490 @@ function clearAllLayers() {
     currentLayer = null;
 }
 
-function changeColorScheme() {
-    currentColorScheme = parseInt(document.getElementById('colorScheme').value);
-    stop();
-    clearAllLayers();
-    showFrame(animationPosition);
+function removeSatelliteBackground() {
+    if (satelliteBgLayer) {
+        map.removeLayer(satelliteBgLayer);
+        satelliteBgLayer = null;
+        satelliteBgTimestamp = null;
+    }
 }
 
-function toggleArrows() {
-    arrowsMode = document.getElementById('arrowsToggle').value;
-    document.getElementById('hideAnimLabel').style.display = arrowsMode ? '' : 'none';
-    stop();
-    clearAllLayers();
-    showFrame(animationPosition);
+// === SATELLITE BACKGROUND (for "both" mode) ===
+function updateSatelliteBackground() {
+    if (activeLayer !== 'both') {
+        removeSatelliteBackground();
+        return;
+    }
+    if (!apiData.satellite || !apiData.satellite.infrared || apiData.satellite.infrared.length === 0) return;
+
+    // Use the latest satellite frame
+    var latestSat = apiData.satellite.infrared[apiData.satellite.infrared.length - 1];
+    if (satelliteBgTimestamp === latestSat.time) return; // Already showing this one
+
+    removeSatelliteBackground();
+    satelliteBgLayer = createSatelliteLayer(latestSat, 'satellite-pane');
+    satelliteBgLayer.setOpacity(SATELLITE_OPACITY);
+    satelliteBgLayer.addTo(map);
+    satelliteBgTimestamp = latestSat.time;
 }
 
-function toggleHideAnimArrows() {
-    hideAnimArrows = document.getElementById('hideAnimArrows').checked;
+// === ANIMATION ===
+function stopAnimation() {
+    if (animationTimer) {
+        clearTimeout(animationTimer);
+        animationTimer = null;
+    }
+    if (isPlaying) {
+        isPlaying = false;
+        document.getElementById('playIcon').style.display = '';
+        document.getElementById('pauseIcon').style.display = 'none';
+    }
 }
 
-// === DISPLAY ===
-function isNowcastFrame(position) {
-    return nowcastStartIndex >= 0 && position >= nowcastStartIndex;
+function startAnimation() {
+    isPlaying = true;
+    document.getElementById('playIcon').style.display = 'none';
+    document.getElementById('pauseIcon').style.display = '';
+    showFrame(animationPosition + 1);
 }
 
-function getAnimationDelay(position) {
-    // Pause longer at the past/nowcast boundary and at the end of the loop
-    if (position === nowcastStartIndex - 1) return ANIMATION_PAUSE_MS;
-    if (position === mapFrames.length - 1) return ANIMATION_PAUSE_MS;
-    return ANIMATION_DELAY_MS;
-}
-
-function updateTimestamp(frame, position) {
-    var el = document.getElementById("timestamp");
-    el.innerHTML = formatTime(frame.time);
-    if (isNowcastFrame(position)) {
-        el.classList.add('nowcast');
+function playStop() {
+    if (isPlaying) {
+        // Stop: reset to latest past frame
+        stopAnimation();
+        var resetPos = nowcastStartIndex >= 0 ? nowcastStartIndex - 1 : mapFrames.length - 1;
+        showFrame(resetPos);
     } else {
-        el.classList.remove('nowcast');
+        startAnimation();
+    }
+}
+
+// === SCRUBBER ===
+function buildScrubber() {
+    var ticksEl = document.getElementById('scrubberTicks');
+    ticksEl.innerHTML = '';
+
+    if (mapFrames.length === 0) return;
+
+    // Determine which ticks to show (skip some if too many)
+    var total = mapFrames.length;
+    var step = 1;
+    if (total > 20) step = 3;
+    else if (total > 12) step = 2;
+
+    // Set rail proportions
+    var pastCount = nowcastStartIndex >= 0 ? nowcastStartIndex : total;
+    var pastPct = (pastCount / total) * 100;
+
+    document.getElementById('railPast').style.width = pastPct + '%';
+    if (nowcastStartIndex >= 0) {
+        document.getElementById('railDivider').style.display = '';
+        document.getElementById('railNowcast').style.display = '';
+    } else {
+        document.getElementById('railDivider').style.display = 'none';
+        document.getElementById('railNowcast').style.display = 'none';
+    }
+
+    // Add tick divider between past and nowcast
+    if (nowcastStartIndex >= 0) {
+        var divEl = document.createElement('span');
+        divEl.className = 'tick-divider';
+        divEl.style.left = pastPct + '%';
+        divEl.textContent = '|';
+        ticksEl.appendChild(divEl);
+    }
+
+    // Add tick labels
+    for (var i = 0; i < total; i += step) {
+        var pct = (i / (total - 1)) * 100;
+        var tick = document.createElement('span');
+        tick.className = 'tick-label';
+        if (isNowcastFrame(i)) tick.classList.add('nowcast-tick');
+        tick.style.left = pct + '%';
+        tick.textContent = formatTime(mapFrames[i].time);
+        tick.setAttribute('data-index', i);
+        ticksEl.appendChild(tick);
+    }
+
+    // Always show last tick if not already shown
+    var lastShown = total - 1 - ((total - 1) % step);
+    if (lastShown !== total - 1) {
+        var lastTick = document.createElement('span');
+        lastTick.className = 'tick-label';
+        if (isNowcastFrame(total - 1)) lastTick.classList.add('nowcast-tick');
+        lastTick.style.left = '100%';
+        lastTick.textContent = formatTime(mapFrames[total - 1].time);
+        lastTick.setAttribute('data-index', total - 1);
+        ticksEl.appendChild(lastTick);
+    }
+
+    updateScrubberPosition();
+}
+
+function updateScrubberPosition() {
+    if (mapFrames.length <= 1) {
+        document.getElementById('scrubberThumb').style.left = '0%';
+        return;
+    }
+    var pct = (animationPosition / (mapFrames.length - 1)) * 100;
+    document.getElementById('scrubberThumb').style.left = pct + '%';
+
+    // Highlight active tick
+    var ticks = document.querySelectorAll('.tick-label');
+    for (var i = 0; i < ticks.length; i++) {
+        var idx = parseInt(ticks[i].getAttribute('data-index'));
+        if (idx === animationPosition) {
+            ticks[i].classList.add('active-tick');
+        } else {
+            ticks[i].classList.remove('active-tick');
+        }
+    }
+}
+
+function positionFromScrubber(clientX) {
+    var track = document.getElementById('scrubberTrack');
+    var rect = track.getBoundingClientRect();
+    var pct = (clientX - rect.left) / rect.width;
+    pct = Math.max(0, Math.min(1, pct));
+    return Math.round(pct * (mapFrames.length - 1));
+}
+
+// Scrubber drag events
+(function initScrubberDrag() {
+    var track = document.getElementById('scrubberTrack');
+    var thumb = document.getElementById('scrubberThumb');
+
+    function onDragStart(e) {
+        e.preventDefault();
+        isDragging = true;
+        thumb.classList.add('dragging');
+        stopAnimation();
+        var clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        var pos = positionFromScrubber(clientX);
+        showFrame(pos);
+    }
+
+    function onDragMove(e) {
+        if (!isDragging) return;
+        e.preventDefault();
+        var clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        var pos = positionFromScrubber(clientX);
+        showFrame(pos);
+    }
+
+    function onDragEnd() {
+        if (!isDragging) return;
+        isDragging = false;
+        thumb.classList.remove('dragging');
+    }
+
+    track.addEventListener('mousedown', onDragStart);
+    track.addEventListener('touchstart', onDragStart, { passive: false });
+
+    document.addEventListener('mousemove', onDragMove);
+    document.addEventListener('touchmove', onDragMove, { passive: false });
+    document.addEventListener('mouseup', onDragEnd);
+    document.addEventListener('touchend', onDragEnd);
+})();
+
+// === FRAME DISPLAY ===
+function updateTimestamp(frame, position) {
+    var el = document.getElementById('timestampDisplay');
+    var timeStr = formatTime(frame.time);
+    if (isNowcastFrame(position)) {
+        el.innerHTML = timeStr + '<span class="forecast-label">Forecast</span>';
+    } else {
+        el.textContent = timeStr;
     }
 }
 
 function showFrame(position) {
-    if (isLoading) return;
+    if (isLoading || mapFrames.length === 0) return;
 
-    position = wrapPosition(position);
+    position = clampPosition(position);
     var frame = mapFrames[position];
 
     updateTimestamp(frame, position);
+    animationPosition = position;
+    updateScrubberPosition();
 
     var oldLayer = currentLayer;
 
+    // Check cache
     if (layerCache[position]) {
-        if (oldLayer) {
+        if (oldLayer && oldLayer !== layerCache[position]) {
             oldLayer.setOpacity(0);
         }
-        layerCache[position].setOpacity(RADAR_OPACITY);
+        var opacity = (activeLayer === 'satellite') ? SATELLITE_OPACITY : RADAR_OPACITY;
+        layerCache[position].setOpacity(opacity);
         currentLayer = layerCache[position];
-        animationPosition = position;
 
-        if (animationTimer) {
-            animationTimer = setTimeout(play, getAnimationDelay(position));
+        if (isPlaying) {
+            animationTimer = setTimeout(function() { showFrame(position + 1); }, getFrameDelay(position));
         }
         return;
     }
 
     isLoading = true;
 
-    var newLayer = createRadarLayer(frame);
+    var newLayer;
+    var targetOpacity;
+    if (activeLayer === 'satellite') {
+        newLayer = createSatelliteLayer(frame, 'satellite-pane');
+        targetOpacity = SATELLITE_OPACITY;
+    } else {
+        // 'radar' or 'both'
+        newLayer = createRadarLayer(frame, 'radar-pane');
+        targetOpacity = RADAR_OPACITY;
+    }
 
     newLayer.on('load', function() {
-        newLayer.setOpacity(RADAR_OPACITY);
-        if (oldLayer) {
+        newLayer.setOpacity(targetOpacity);
+        if (oldLayer && oldLayer !== newLayer) {
             oldLayer.setOpacity(0);
         }
         layerCache[position] = newLayer;
         currentLayer = newLayer;
-        animationPosition = position;
         isLoading = false;
 
-        if (animationTimer) {
-            animationTimer = setTimeout(play, getAnimationDelay(position));
+        if (isPlaying) {
+            animationTimer = setTimeout(function() { showFrame(position + 1); }, getFrameDelay(position));
         }
     });
 
     newLayer.addTo(map);
 }
 
+// === PRELOADING ===
+function showPreloadIndicator(loaded, total) {
+    var el = document.getElementById('preloadIndicator');
+    var text = document.getElementById('preloadText');
+    var fill = document.getElementById('preloadFill');
+    text.textContent = 'Loading frames ' + loaded + '/' + total;
+    fill.style.width = (total > 0 ? (loaded / total) * 100 : 0) + '%';
+    el.classList.add('visible');
+}
+
+function hidePreloadIndicator() {
+    document.getElementById('preloadIndicator').classList.remove('visible');
+}
+
+function startPreloading() {
+    preloadAbort = true; // Cancel any in-progress preload
+    setTimeout(function() {
+        preloadAbort = false;
+        doPreload();
+    }, 50);
+}
+
+function doPreload() {
+    if (mapFrames.length === 0) return;
+
+    var toLoad = [];
+    for (var i = 0; i < mapFrames.length; i++) {
+        if (!layerCache[i]) toLoad.push(i);
+    }
+
+    if (toLoad.length === 0) {
+        hidePreloadIndicator();
+        return;
+    }
+
+    var total = toLoad.length;
+    var loaded = 0;
+    showPreloadIndicator(loaded, total);
+
+    function loadNext(idx) {
+        if (preloadAbort || idx >= toLoad.length) {
+            hidePreloadIndicator();
+            return;
+        }
+
+        var pos = toLoad[idx];
+        if (layerCache[pos]) {
+            loaded++;
+            showPreloadIndicator(loaded, total);
+            loadNext(idx + 1);
+            return;
+        }
+
+        var frame = mapFrames[pos];
+        var layer;
+        if (activeLayer === 'satellite') {
+            layer = createSatelliteLayer(frame, 'satellite-pane');
+        } else {
+            layer = createRadarLayer(frame, 'radar-pane');
+        }
+
+        layer.on('load', function() {
+            if (preloadAbort) {
+                map.removeLayer(layer);
+                hidePreloadIndicator();
+                return;
+            }
+            layer.setOpacity(0);
+            layerCache[pos] = layer;
+            loaded++;
+            showPreloadIndicator(loaded, total);
+            loadNext(idx + 1);
+        });
+
+        layer.on('tileerror', function() {
+            loaded++;
+            showPreloadIndicator(loaded, total);
+            loadNext(idx + 1);
+        });
+
+        layer.addTo(map);
+    }
+
+    loadNext(0);
+}
+
 // === INITIALIZATION ===
-function initialize(api) {
-    clearLayerCache();
-    currentLayer = null;
+function reinitialize() {
+    clearAllLayers();
+    removeSatelliteBackground();
     mapFrames = [];
     nowcastStartIndex = -1;
     animationPosition = 0;
 
-    if (!api || !api.radar || !api.radar.past) {
+    if (!apiData || !apiData.radar) {
+        document.getElementById('timestampDisplay').textContent = 'No data';
+        buildScrubber();
         return;
     }
 
-    mapFrames = api.radar.past;
-
-    // Append nowcast frames if available
-    if (api.radar.nowcast && api.radar.nowcast.length > 0) {
-        nowcastStartIndex = mapFrames.length;
-        mapFrames = mapFrames.concat(api.radar.nowcast);
+    if (activeLayer === 'satellite') {
+        // Satellite mode: use satellite.infrared frames
+        if (!apiData.satellite || !apiData.satellite.infrared || apiData.satellite.infrared.length === 0) {
+            document.getElementById('timestampDisplay').textContent = 'No satellite data';
+            buildScrubber();
+            return;
+        }
+        mapFrames = apiData.satellite.infrared.slice();
+        nowcastStartIndex = -1;
+    } else {
+        // Radar or Both: use radar.past + radar.nowcast
+        if (!apiData.radar.past || apiData.radar.past.length === 0) {
+            document.getElementById('timestampDisplay').textContent = 'No radar data';
+            buildScrubber();
+            return;
+        }
+        mapFrames = apiData.radar.past.slice();
+        if (apiData.radar.nowcast && apiData.radar.nowcast.length > 0) {
+            nowcastStartIndex = mapFrames.length;
+            mapFrames = mapFrames.concat(apiData.radar.nowcast);
+        }
     }
 
-    // Start on the last past frame (most recent real radar)
-    showFrame(nowcastStartIndex >= 0 ? nowcastStartIndex - 1 : mapFrames.length - 1);
+    buildScrubber();
+
+    // For "both" mode, set up satellite background
+    if (activeLayer === 'both') {
+        updateSatelliteBackground();
+    }
+
+    // Start on the last past frame
+    var startPos;
+    if (activeLayer === 'satellite') {
+        startPos = mapFrames.length - 1;
+    } else {
+        startPos = nowcastStartIndex >= 0 ? nowcastStartIndex - 1 : mapFrames.length - 1;
+    }
+
+    showFrame(startPos);
+
+    // Start preloading after initial frame
+    setTimeout(startPreloading, 300);
 }
 
 function loadApiData() {
-    var apiRequest = new XMLHttpRequest();
-    apiRequest.open("GET", API_URL, true);
-    apiRequest.onload = function() {
-        apiData = JSON.parse(apiRequest.response);
-        initialize(apiData);
+    stopAnimation();
+    document.getElementById('timestampDisplay').textContent = 'Loading...';
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', getApiUrl(), true);
+    xhr.onload = function() {
+        if (xhr.status >= 200 && xhr.status < 300) {
+            apiData = JSON.parse(xhr.responseText);
+            reinitialize();
+        } else {
+            document.getElementById('timestampDisplay').textContent = 'API error';
+        }
     };
-    apiRequest.send();
+    xhr.onerror = function() {
+        document.getElementById('timestampDisplay').textContent = 'Connection failed';
+    };
+    xhr.send();
 }
 
-map.on('movestart', clearLayerCache);
+// === MAP CONTROLS ===
+document.getElementById('locateBtn').addEventListener('click', function() {
+    map.locate({ setView: true, maxZoom: 10 });
+});
+
+// Clean up on pan/zoom
+map.on('movestart', function() {
+    preloadAbort = true;
+    clearLayerCache();
+});
+
+map.on('moveend', function() {
+    // Restart preloading after pan/zoom ends
+    setTimeout(startPreloading, 200);
+    // Re-add satellite background if needed
+    if (activeLayer === 'both' && satelliteBgLayer) {
+        // The layer handles its own tiles on moveend, just make sure it is visible
+        satelliteBgLayer.setOpacity(SATELLITE_OPACITY);
+    }
+});
+
+// === AUTO-REFRESH ===
+function startAutoRefresh() {
+    if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+    autoRefreshTimer = setInterval(function() {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', getApiUrl(), true);
+        xhr.onload = function() {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                var newData = JSON.parse(xhr.responseText);
+                // Check if there are new frames
+                var oldPast = apiData.radar && apiData.radar.past ? apiData.radar.past : [];
+                var newPast = newData.radar && newData.radar.past ? newData.radar.past : [];
+                var oldLatest = oldPast.length > 0 ? oldPast[oldPast.length - 1].time : 0;
+                var newLatest = newPast.length > 0 ? newPast[newPast.length - 1].time : 0;
+
+                if (newLatest !== oldLatest) {
+                    apiData = newData;
+                    reinitialize();
+                }
+            }
+        };
+        xhr.send();
+    }, AUTO_REFRESH_MS);
+}
+
+// === KEYBOARD SHORTCUTS ===
+document.addEventListener('keydown', function(e) {
+    if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+    if (e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        playStop();
+    } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        stopAnimation();
+        showFrame(animationPosition - 1);
+    } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        stopAnimation();
+        showFrame(animationPosition + 1);
+    }
+});
+
+// === START ===
 loadApiData();
+startAutoRefresh();
 </script>
 
 </body>

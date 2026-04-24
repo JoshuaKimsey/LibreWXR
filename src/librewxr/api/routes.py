@@ -17,6 +17,7 @@ from librewxr.config import settings
 from librewxr.data.store import FrameStore
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.renderer import render_coverage_tile, render_tile
+from librewxr.tiles.satellite_renderer import render_satellite_tile
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ router = APIRouter()
 frame_store: FrameStore | None = None
 tile_cache: TileCache | None = None
 ecmwf_grid = None  # ECMWFGrid | None
+cloud_grid = None  # CloudGrid | None
 tile_warmer = None  # TileWarmer | None
 nowcast_store = None  # NowcastStore | None
 start_time: float = 0.0
@@ -72,6 +74,12 @@ async def health():
             "frames": await nowcast_store.get_timestamps() if nowcast_store else [],
             "count": len(await nowcast_store.get_timestamps()) if nowcast_store else 0,
         },
+        "satellite": {
+            "enabled": settings.satellite_enabled,
+            "loaded": cloud_grid is not None and cloud_grid.loaded,
+            "reference_time": cloud_grid.reference_time if cloud_grid else None,
+            "timesteps": cloud_grid.timestep_count if cloud_grid else 0,
+        },
         "enabled_regions": enabled_regions or [],
     }
 
@@ -99,12 +107,19 @@ async def weather_maps() -> WeatherMapsResponse:
             for ts in nc_timestamps
         ]
 
+    infrared = []
+    if cloud_grid is not None and cloud_grid.loaded:
+        infrared = [
+            RadarTimestamp(time=ts, path=f"/v2/satellite/{ts}")
+            for ts in cloud_grid.timestamps
+        ]
+
     return WeatherMapsResponse(
         version="2.0",
         generated=int(time.time()),
         host=host,
         radar=RadarData(past=past, nowcast=nowcast),
-        satellite=SatelliteData(infrared=[]),
+        satellite=SatelliteData(infrared=infrared),
     )
 
 
@@ -238,5 +253,53 @@ async def coverage_tile(
     return Response(
         content=tile_bytes,
         media_type="image/png",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@router.get("/v2/satellite/{timestamp}/{size}/{z}/{x}/{y}/0/0_0.{ext}")
+async def satellite_tile(
+    timestamp: int,
+    size: int = Path(ge=256, le=512),
+    z: int = Path(ge=0),
+    x: int = Path(ge=0),
+    y: int = Path(ge=0),
+    ext: str = Path(pattern=r"^(png|webp)$"),
+) -> Response:
+    """Satellite-like cloud cover tile from IFS cloud data."""
+    if cloud_grid is None or not cloud_grid.loaded:
+        raise HTTPException(status_code=503, detail="Satellite data not available")
+
+    if z > settings.max_zoom:
+        raise HTTPException(status_code=400, detail=f"Zoom {z} exceeds max {settings.max_zoom}")
+
+    max_tiles = 2**z
+    if x >= max_tiles or y >= max_tiles:
+        raise HTTPException(status_code=400, detail="Tile coordinates out of range")
+
+    tile_size = 512 if size >= 512 else 256
+
+    cache_key = ("sat", timestamp, z, x, y, tile_size, ext)
+    cached = tile_cache.get(cache_key)
+    if cached is not None:
+        return Response(
+            content=cached,
+            media_type=_content_type(ext),
+            headers={"Cache-Control": "public, max-age=300"},
+        )
+
+    tile_bytes = render_satellite_tile(
+        cloud_grid=cloud_grid,
+        z=z, x=x, y=y,
+        tile_size=tile_size,
+        timestamp=timestamp,
+        fmt=ext,
+    )
+
+    tile_cache.put(cache_key, tile_bytes)
+
+    return Response(
+        content=tile_bytes,
+        media_type=_content_type(ext),
         headers={"Cache-Control": "public, max-age=300"},
     )
