@@ -15,6 +15,7 @@ from librewxr.api.models import (
 )
 from librewxr.config import settings
 from librewxr.data.store import FrameStore
+from librewxr.memory import detect_memory_limit_mb
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.renderer import render_coverage_tile, render_tile
 from librewxr.tiles.satellite_renderer import render_satellite_tile
@@ -39,9 +40,11 @@ async def health():
     """Health and status endpoint."""
     now = int(time.time())
     uptime = now - int(start_time)
-    ram = psutil.virtual_memory()
-    ram_usage = ram.percent
-    ram_used = round(ram.used / 1e9, 2)
+    mem_limit_mb = detect_memory_limit_mb(settings.memory_limit_mb)
+    rss_bytes = psutil.Process().memory_info().rss
+    rss_mb = rss_bytes / (1024 * 1024)
+    ram_usage = round(rss_mb / mem_limit_mb * 100, 1)
+    ram_used = round(rss_mb / 1024, 2)
     frame_count = await frame_store.frame_count()
     timestamps = await frame_store.get_timestamps()
     latest_ts = max(timestamps) if timestamps else None
@@ -52,6 +55,7 @@ async def health():
         "uptime_seconds": uptime,
         "RAM Usage (%)": ram_usage,
         "RAM Used (GB)": ram_used,
+        "RAM Limit (GB)": round(mem_limit_mb / 1024, 2),
         "frames": {
             "count": frame_count,
             "max": settings.max_frames,
