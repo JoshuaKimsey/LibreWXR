@@ -146,6 +146,17 @@ class NowcastStore:
         async with self._lock:
             return dict(self._flows)
 
+    @property
+    def data_bytes(self) -> int:
+        """Total bytes across all nowcast frame arrays and flow fields."""
+        total = 0
+        for frame in self._frames.values():
+            for arr in frame.regions.values():
+                total += arr.nbytes
+        for arr in self._flows.values():
+            total += arr.nbytes
+        return total
+
     def clear(self) -> None:
         self._frames.clear()
         self._flows.clear()

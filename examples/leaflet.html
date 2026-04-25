@@ -341,16 +341,7 @@
         <option value="both">Radar + Satellite</option>
     </select>
     <select id="colorScheme" onchange="changeColorScheme()">
-        <option value="7" selected>Rainbow</option>
-        <option value="4">The Weather Channel</option>
-        <option value="5">Meteored</option>
-        <option value="6">NEXRAD Level III</option>
-        <option value="2">Universal Blue</option>
-        <option value="8">Dark Sky</option>
-        <option value="0">Black &amp; White</option>
-        <option value="1">Original</option>
-        <option value="3">TITAN</option>
-        <option value="255">Raw Grayscale</option>
+        <option value="7">Loading...</option>
     </select>
     <select id="arrowsToggle" onchange="changeArrows()">
         <option value="">Arrows: Off</option>
@@ -512,14 +503,12 @@ function changeColorScheme() {
     currentColorScheme = parseInt(document.getElementById('colorScheme').value);
     clearAllLayers();
     showFrame(animationPosition);
-    startPreloading();
 }
 
 function changeArrows() {
     arrowsMode = document.getElementById('arrowsToggle').value;
     clearAllLayers();
     showFrame(animationPosition);
-    startPreloading();
 }
 
 // === UTILITIES ===
@@ -1004,10 +993,26 @@ function doPreload() {
     loadNext(0);
 }
 
+// === COLOR SCHEME DROPDOWN ===
+function populateColorSchemes() {
+    if (!apiData || !apiData.radar || !apiData.radar.colorSchemes) return;
+    var select = document.getElementById('colorScheme');
+    var schemes = apiData.radar.colorSchemes;
+    select.innerHTML = '';
+    for (var i = 0; i < schemes.length; i++) {
+        var opt = document.createElement('option');
+        opt.value = schemes[i].id;
+        opt.textContent = schemes[i].name;
+        if (schemes[i].id === currentColorScheme) opt.selected = true;
+        select.appendChild(opt);
+    }
+}
+
 // === INITIALIZATION ===
 function reinitialize() {
     clearAllLayers();
     removeSatelliteBackground();
+    populateColorSchemes();
     mapFrames = [];
     nowcastStartIndex = -1;
     animationPosition = 0;

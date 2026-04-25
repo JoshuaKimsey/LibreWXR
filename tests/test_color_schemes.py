@@ -36,9 +36,9 @@ class TestGetLut:
             assert lut[0, 3] == 0, f"Scheme {scheme_id}: pixel 0 should be transparent"
 
     def test_invalid_scheme_defaults(self):
-        """Unknown scheme ID should fall back to Universal Blue."""
+        """Unknown scheme ID should fall back to Rainbow @ Selex SI."""
         lut = get_lut(99)
-        expected = get_lut(2)
+        expected = get_lut(7)
         np.testing.assert_array_equal(lut, expected)
 
 

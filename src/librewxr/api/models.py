@@ -8,9 +8,15 @@ class RadarTimestamp(BaseModel):
     path: str
 
 
+class ColorScheme(BaseModel):
+    id: int
+    name: str
+
+
 class RadarData(BaseModel):
     past: list[RadarTimestamp]
     nowcast: list[RadarTimestamp]
+    colorSchemes: list[ColorScheme]
 
 
 class SatelliteData(BaseModel):

@@ -8,7 +8,7 @@ import numpy as np
 # Scheme ID -> column index in color_table.csv
 SCHEME_NAMES = {
     0: "Black and White",
-    1: "Original",
+    1: "Rainviewer Original",
     2: "Universal Blue",
     3: "Titan",
     4: "The Weather Channel (TWC)",
@@ -92,7 +92,7 @@ def get_lut(scheme: int, snow: bool = False) -> np.ndarray:
 
     luts = _snow_luts if snow else _rain_luts
     if scheme not in luts:
-        scheme = 2  # default to Universal Blue
+        scheme = 7  # default to Rainbow @ Selex SI
     return luts[scheme]
 
 

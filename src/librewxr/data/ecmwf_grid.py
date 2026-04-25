@@ -98,6 +98,16 @@ class ECMWFGrid:
         return len(self._timesteps)
 
     @property
+    def data_bytes(self) -> int:
+        """Total bytes across all timestep arrays and flow field."""
+        total = 0
+        for precip_dbz, snow_mask in self._timesteps.values():
+            total += precip_dbz.nbytes + snow_mask.nbytes
+        if self._flow is not None:
+            total += self._flow.nbytes
+        return total
+
+    @property
     def flow(self) -> np.ndarray | None:
         """The latest global optical flow field, or None if not available."""
         return self._flow

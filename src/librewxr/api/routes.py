@@ -8,11 +8,13 @@ import psutil
 from fastapi import APIRouter, HTTPException, Path, Query, Response
 
 from librewxr.api.models import (
+    ColorScheme,
     RadarData,
     RadarTimestamp,
     SatelliteData,
     WeatherMapsResponse,
 )
+from librewxr.colors.schemes import SCHEME_NAMES
 from librewxr.config import settings
 from librewxr.data.store import FrameStore
 from librewxr.memory import detect_memory_limit_mb
@@ -44,18 +46,36 @@ async def health():
     rss_bytes = psutil.Process().memory_info().rss
     rss_mb = rss_bytes / (1024 * 1024)
     ram_usage = round(rss_mb / mem_limit_mb * 100, 1)
-    ram_used = round(rss_mb / 1024, 2)
     frame_count = await frame_store.frame_count()
     timestamps = await frame_store.get_timestamps()
     latest_ts = max(timestamps) if timestamps else None
     oldest_ts = min(timestamps) if timestamps else None
 
+    # Per-component memory breakdown
+    radar_bytes = frame_store.data_bytes
+    tile_cache_bytes = tile_cache.total_bytes
+    ecmwf_bytes = ecmwf_grid.data_bytes if ecmwf_grid else 0
+    nowcast_bytes = nowcast_store.data_bytes if nowcast_store else 0
+    satellite_bytes = cloud_grid.data_bytes if cloud_grid else 0
+    tracked_bytes = radar_bytes + tile_cache_bytes + ecmwf_bytes + nowcast_bytes + satellite_bytes
+    other_bytes = max(0, rss_bytes - tracked_bytes)
+
     return {
         "status": "ok" if frame_count > 0 else "degraded",
         "uptime_seconds": uptime,
-        "RAM Usage (%)": ram_usage,
-        "RAM Used (GB)": ram_used,
-        "RAM Limit (GB)": round(mem_limit_mb / 1024, 2),
+        "memory": {
+            "resident_mb": round(rss_mb, 1),
+            "limit_mb": round(mem_limit_mb, 1),
+            "usage_pct": ram_usage,
+            "breakdown": {
+                "radar_frames_mb": round(radar_bytes / (1024 * 1024), 1),
+                "tile_cache_mb": round(tile_cache_bytes / (1024 * 1024), 1),
+                "ecmwf_grid_mb": round(ecmwf_bytes / (1024 * 1024), 1),
+                "nowcast_mb": round(nowcast_bytes / (1024 * 1024), 1),
+                "satellite_mb": round(satellite_bytes / (1024 * 1024), 1),
+                "other_mb": round(other_bytes / (1024 * 1024), 1),
+            },
+        },
         "frames": {
             "count": frame_count,
             "max": settings.max_frames,
@@ -118,11 +138,16 @@ async def weather_maps() -> WeatherMapsResponse:
             for ts in cloud_grid.timestamps
         ]
 
+    color_schemes = [
+        ColorScheme(id=sid, name=name)
+        for sid, name in SCHEME_NAMES.items()
+    ]
+
     return WeatherMapsResponse(
         version="2.0",
         generated=int(time.time()),
         host=host,
-        radar=RadarData(past=past, nowcast=nowcast),
+        radar=RadarData(past=past, nowcast=nowcast, colorSchemes=color_schemes),
         satellite=SatelliteData(infrared=infrared),
     )
 

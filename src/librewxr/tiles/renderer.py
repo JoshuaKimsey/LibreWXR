@@ -27,7 +27,7 @@ def render_tile(
     x: int,
     y: int,
     tile_size: int = 256,
-    color_scheme: int = 2,
+    color_scheme: int = 7,
     smooth: bool = False,
     snow: bool = False,
     fmt: str = "png",

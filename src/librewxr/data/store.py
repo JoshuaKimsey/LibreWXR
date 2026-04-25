@@ -102,6 +102,15 @@ class FrameStore:
         async with self._lock:
             return len(self._frames)
 
+    @property
+    def data_bytes(self) -> int:
+        """Total bytes across all region arrays in all frames."""
+        total = 0
+        for frame in self._frames:
+            for arr in frame.regions.values():
+                total += arr.nbytes
+        return total
+
     def cleanup(self) -> None:
         """Remove all memmap files and the temporary directory."""
         shutil.rmtree(self._memmap_dir, ignore_errors=True)

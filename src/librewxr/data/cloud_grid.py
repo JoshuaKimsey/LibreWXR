@@ -85,6 +85,14 @@ class CloudGrid:
         return len(self._timesteps)
 
     @property
+    def data_bytes(self) -> int:
+        """Total bytes across all cloud cover arrays."""
+        total = 0
+        for high, mid, low in self._timesteps.values():
+            total += high.nbytes + mid.nbytes + low.nbytes
+        return total
+
+    @property
     def loaded(self) -> bool:
         return len(self._timesteps) > 0
 
