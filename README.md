@@ -11,7 +11,7 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 ## Features
 
 - **Rain Viewer v2 API compatible** — drop-in replacement, no client changes needed
-- **All 9 color schemes** — Black & White, Original, Universal Blue, TITAN, TWC, Meteored, NEXRAD III, Rainbow, Dark Sky, plus raw grayscale
+- **All 9 color schemes** — Black & White, Rainviewer Original, Universal Blue, TITAN, TWC, Meteored, NEXRAD III, Rainbow, Dark Sky, plus raw grayscale
 - **Tile sizes** — 256px and 512px
 - **Image formats** — PNG and WebP (with configurable lossy/lossless quality)
 - **Smoothing** — zoom-adaptive Gaussian blur with seamless tile boundaries
@@ -27,7 +27,7 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Persistent disk cache** — satellite cloud grids are cached to disk with atomic writes, surviving restarts and container recreation without re-downloading from S3. Configurable via `LIBREWXR_CACHE_DIR`
 - **Memory-efficient storage** — radar frames, ECMWF grids, and nowcast data are backed by memory-mapped files, letting the OS page cache manage physical RAM instead of pinning ~1 GB on the heap. Pages are reclaimed under memory pressure and re-faulted on access
 - **Smart fetch optimization** — radar sources skip re-downloading frames already in memory (only ~1 of 12 frames is new each cycle), and ECMWF IFS skips redundant S3 fetches when the model run hasn't changed (IFS updates every 6 hours, checks happen every 10 minutes)
-- **Health endpoint** — `/health` for monitoring uptime, RAM usage, frame count, and cache status
+- **Health endpoint** — `/health` for monitoring uptime, per-component memory breakdown, frame count, and cache status
 - **Fully configurable** — all tunable parameters exposed via environment variables
 
 ## Quick Start
@@ -122,6 +122,11 @@ Returns available radar timestamps and the host URL, matching Rain Viewer's resp
     "nowcast": [
       {"time": 1773038400, "path": "/v2/radar/1773038400"},
       ...
+    ],
+    "colorSchemes": [
+      {"id": 0, "name": "Black and White"},
+      {"id": 7, "name": "Rainbow @ Selex SI"},
+      ...
     ]
   },
   "satellite": {
@@ -160,7 +165,7 @@ GET /v2/radar/{timestamp}/{size}/{z}/{x}/{y}/{color}/{smooth}_{snow}.{ext}
 | ID | Name |
 |---|---|
 | 0 | Black and White |
-| 1 | Original |
+| 1 | Rainviewer Original |
 | 2 | Universal Blue |
 | 3 | TITAN |
 | 4 | The Weather Channel |

@@ -102,6 +102,11 @@ This is the starting point for any integration. It returns metadata about all av
     "nowcast": [
       { "time": 1700001000, "path": "/v2/radar/1700001000" },
       { "time": 1700001600, "path": "/v2/radar/1700001600" }
+    ],
+    "colorSchemes": [
+      { "id": 0, "name": "Black and White" },
+      { "id": 1, "name": "Rainviewer Original" },
+      { "id": 7, "name": "Rainbow @ Selex SI" }
     ]
   },
   "satellite": {
@@ -120,6 +125,7 @@ This is the starting point for any integration. It returns metadata about all av
 | `host` | The base URL of the server. Use this to construct full tile URLs. |
 | `radar.past` | Array of past (observed) radar frames, oldest first. |
 | `radar.nowcast` | Array of forecast frames, nearest future first. May be empty if nowcasting is disabled. |
+| `radar.colorSchemes` | Array of available color schemes (`id` and `name`). Use for dynamically populating UI dropdowns. |
 | `satellite.infrared` | Array of satellite (cloud cover) frames, oldest first. Hourly cadence, up to 12 hours. May be empty if satellite is disabled or still loading. |
 | `time` | Unix timestamp (seconds) of the frame. |
 | `path` | Path prefix for tile requests for this frame. |
@@ -809,7 +815,7 @@ LibreWXR supports all 9 Rain Viewer color schemes plus a raw grayscale mode:
 | ID | Name | Description |
 |----|------|-------------|
 | 0 | Black and White | Grayscale intensity |
-| 1 | Original | Classic Rain Viewer colors |
+| 1 | Rainviewer Original | Classic Rain Viewer colors |
 | 2 | Universal Blue | Blue-to-red gradient |
 | 3 | Titan | High-contrast scheme |
 | 4 | The Weather Channel (TWC) | Matches TWC broadcast colors |
@@ -819,7 +825,7 @@ LibreWXR supports all 9 Rain Viewer color schemes plus a raw grayscale mode:
 | 8 | Dark Sky | Muted, minimal style |
 | 255 | Raw | Grayscale proportional to dBZ — useful for custom client-side coloring |
 
-Use the scheme ID as the `{color}` path parameter. If an invalid ID is provided, the server falls back to Universal Blue (2).
+Use the scheme ID as the `{color}` path parameter. If an invalid ID is provided, the server falls back to Rainbow @ Selex SI (7).
 
 ### Smoothing and Snow
 
