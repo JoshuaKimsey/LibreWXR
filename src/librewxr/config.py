@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     despeckle_min_neighbors: int = 3  # Min non-zero neighbors (of 8) to keep a pixel; 0 to disable
     webp_quality: int = 80  # WebP quality: 100 = lossless, 1-99 = lossy at that quality
     workers: int = 1  # Number of uvicorn worker processes
-    warmer_threads: int = 4  # Thread pool size for background tile warming
+    warmer_threads: int = 0  # Render thread pool size (0 = CPU count - 1)
     enabled_regions: str = "ALL"  # Region spec: CONUS, US, ALL, or comma-separated region names
     iem_base_url: str = "https://mesonet.agron.iastate.edu"
     msc_canada_base_url: str = "https://geo.weather.gc.ca"

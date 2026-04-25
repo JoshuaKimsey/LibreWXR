@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
+import asyncio
 import logging
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -72,9 +75,19 @@ async def lifespan(app: FastAPI):
         nowcast_generator = NowcastGenerator(store, nowcast_store, cache=cache)
         logger.info("Nowcast enabled: %d frames", settings.nowcast_frames)
 
+    # Separate thread pools for direct requests and background warming.
+    # Direct requests get their own pool so they are never queued behind
+    # warming tasks.  The warmer gets an equal-sized pool so it can use
+    # all cores when no requests are active.  Brief over-subscription
+    # when both are active is handled well by the OS scheduler.
+    pool_size = settings.warmer_threads or max((os.cpu_count() or 4) - 1, 1)
+    request_executor = ThreadPoolExecutor(max_workers=pool_size)
+    warmer_executor = ThreadPoolExecutor(max_workers=pool_size)
+    asyncio.get_running_loop().set_default_executor(request_executor)
+
     warmer = TileWarmer(
         store, cache,
-        max_workers=settings.warmer_threads,
+        executor=warmer_executor,
         enabled_regions=enabled,
         nowcast_store=nowcast_store,
     )
@@ -125,6 +138,8 @@ async def lifespan(app: FastAPI):
     await monitor.stop()
     await fetcher.stop()
     warmer.shutdown()
+    warmer_executor.shutdown(wait=False)
+    request_executor.shutdown(wait=False)
     if nowcast_store is not None:
         nowcast_store.cleanup()
     if cloud is not None:

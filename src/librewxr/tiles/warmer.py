@@ -18,13 +18,13 @@ class TileWarmer:
         self,
         store: FrameStore,
         cache: TileCache,
-        max_workers: int = 4,
+        executor: ThreadPoolExecutor,
         enabled_regions: list[str] | None = None,
         nowcast_store=None,
     ):
         self._store = store
         self._cache = cache
-        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._executor = executor
         self._pending: set[tuple] = set()
         self._lock = asyncio.Lock()
         self._enabled_regions = enabled_regions
@@ -117,6 +117,9 @@ class TileWarmer:
     ) -> None:
         """Render a tile and store it in the cache (runs in thread pool)."""
         try:
+            # A direct request may have cached this tile while we were queued
+            if self._cache.get(cache_key) is not None:
+                return
             tile_bytes = render_tile(
                 frame_regions=frame_regions,
                 z=z, x=x, y=y,
@@ -138,4 +141,4 @@ class TileWarmer:
             self._pending.discard(cache_key)
 
     def shutdown(self) -> None:
-        self._executor.shutdown(wait=False)
+        pass  # Executor is shared; lifecycle managed by main.py
