@@ -31,9 +31,10 @@ class TestFrameStore:
 
         await store.add_frame(RadarFrame(timestamp=100, regions={"USCOMP": data}))
         await store.add_frame(RadarFrame(timestamp=200, regions={"USCOMP": data}))
-        evicted_ts = await store.add_frame(RadarFrame(timestamp=300, regions={"USCOMP": data}))
+        evicted_ts, merged = await store.add_frame(RadarFrame(timestamp=300, regions={"USCOMP": data}))
 
         assert evicted_ts == 100
+        assert merged is False
         assert await store.get_frame(100) is None
         assert await store.get_frame(200) is not None
         assert await store.get_frame(300) is not None
@@ -44,9 +45,11 @@ class TestFrameStore:
         data1 = np.zeros((COMPOSITE_HEIGHT, COMPOSITE_WIDTH), dtype=np.uint8)
         data2 = np.ones((100, 100), dtype=np.uint8)
 
-        await store.add_frame(RadarFrame(timestamp=100, regions={"USCOMP": data1}))
-        await store.add_frame(RadarFrame(timestamp=100, regions={"AKCOMP": data2}))
+        _, merged1 = await store.add_frame(RadarFrame(timestamp=100, regions={"USCOMP": data1}))
+        _, merged2 = await store.add_frame(RadarFrame(timestamp=100, regions={"AKCOMP": data2}))
 
+        assert merged1 is False
+        assert merged2 is True
         assert await store.frame_count() == 1
         frame = await store.get_frame(100)
         assert "USCOMP" in frame.regions

@@ -51,11 +51,11 @@ class FrameStore:
             except OSError:
                 pass
 
-    async def add_frame(self, frame: RadarFrame) -> int | None:
+    async def add_frame(self, frame: RadarFrame) -> tuple[int | None, bool]:
         """Add a frame, evicting the oldest if at capacity.
 
         If a frame with the same timestamp exists, merge the region data.
-        Returns the timestamp of the evicted frame, or None.
+        Returns (evicted_timestamp | None, was_merged).
         """
         async with self._lock:
             # Convert regions to memory-mapped files
@@ -66,7 +66,7 @@ class FrameStore:
             for existing in self._frames:
                 if existing.timestamp == frame.timestamp:
                     existing.regions.update(frame.regions)
-                    return None
+                    return None, True
 
             evicted_ts = None
             if len(self._frames) >= self._max_frames:
@@ -76,7 +76,7 @@ class FrameStore:
 
             self._frames.append(frame)
             self._frames.sort(key=lambda f: f.timestamp)
-            return evicted_ts
+            return evicted_ts, False
 
     async def get_frame(self, timestamp: int) -> RadarFrame | None:
         async with self._lock:
@@ -92,6 +92,11 @@ class FrameStore:
     async def get_timestamps(self) -> list[int]:
         async with self._lock:
             return [f.timestamp for f in self._frames]
+
+    async def get_region_keys(self) -> dict[int, set[str]]:
+        """Return a mapping of timestamp -> set of region names present."""
+        async with self._lock:
+            return {f.timestamp: set(f.regions.keys()) for f in self._frames}
 
     async def frame_count(self) -> int:
         async with self._lock:

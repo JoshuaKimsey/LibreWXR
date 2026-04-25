@@ -186,7 +186,8 @@ async def radar_tile(
         if ecmwf_grid is not None and ecmwf_grid.flow is not None:
             ecmwf_flow = ecmwf_grid.flow
 
-    tile_bytes = render_tile(
+    tile_bytes = await asyncio.to_thread(
+        render_tile,
         frame_regions=frame.regions,
         z=z, x=x, y=y,
         tile_size=tile_size,
@@ -247,7 +248,8 @@ async def coverage_tile(
     if frame is None:
         raise HTTPException(status_code=503, detail="No radar data available")
 
-    tile_bytes = render_coverage_tile(
+    tile_bytes = await asyncio.to_thread(
+        render_coverage_tile,
         frame_regions=frame.regions,
         z=z, x=x, y=y,
         tile_size=tile_size,
@@ -292,7 +294,8 @@ async def satellite_tile(
             headers={"Cache-Control": "public, max-age=300"},
         )
 
-    tile_bytes = render_satellite_tile(
+    tile_bytes = await asyncio.to_thread(
+        render_satellite_tile,
         cloud_grid=cloud_grid,
         z=z, x=x, y=y,
         tile_size=tile_size,

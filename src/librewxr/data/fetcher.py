@@ -185,10 +185,11 @@ class RadarFetcher:
         interval_min = interval // 60
         now_rounded = int(time.time() // interval) * interval
 
-        # Skip timestamps already in the store — only fetch new/missing ones.
-        # On a typical cycle only 1 of 12 timestamps is new, saving ~90% of
-        # radar download bandwidth (especially significant for OPERA HDF5).
-        existing_ts = set(await self._store.get_timestamps())
+        # Skip timestamps that already have all enabled regions.
+        # Incomplete frames (e.g. a region fetch failed transiently) are
+        # re-fetched so the missing regions can be merged in.
+        existing_frames = await self._store.get_region_keys()
+        enabled_names = {r.name for r in self._enabled_regions}
 
         ts_and_sources: list[tuple[int, str, int | datetime]] = []
 
@@ -196,7 +197,7 @@ class RadarFetcher:
             minutes_ago = i * interval_min
             ts = now_rounded - i * interval
 
-            if ts in existing_ts:
+            if ts in existing_frames and enabled_names <= existing_frames[ts]:
                 continue
 
             # IEM live endpoint covers 0-55 min ago
@@ -210,18 +211,30 @@ class RadarFetcher:
             logger.debug("All radar frames up to date, nothing to fetch")
             return
 
-        await self._fetch_timestamps(ts_and_sources)
+        await self._fetch_timestamps(ts_and_sources, skip_regions=existing_frames)
 
     async def _fetch_timestamps(
-        self, ts_and_sources: list[tuple[int, str, int | datetime]]
+        self,
+        ts_and_sources: list[tuple[int, str, int | datetime]],
+        skip_regions: dict[int, set[str]] | None = None,
     ) -> None:
-        """Fetch all enabled regions for the given timestamps."""
-        # For each timestamp, fetch all enabled regions in parallel
+        """Fetch enabled regions for the given timestamps.
+
+        Args:
+            skip_regions: Optional mapping of timestamp -> region names to
+                skip (already present in the store).  Only missing regions
+                are fetched, saving bandwidth on retries for incomplete frames.
+        """
+        # For each timestamp, fetch regions in parallel (skipping any
+        # already present from a previous partial fetch).
         tasks = []
         task_meta: list[tuple[int, RegionDef]] = []
 
         for ts, source_type, source_arg in ts_and_sources:
+            have = skip_regions.get(ts, set()) if skip_regions else set()
             for region in self._enabled_regions:
+                if region.name in have:
+                    continue
                 source = self._sources[region.name]
                 if source_type == "live":
                     tasks.append(source.fetch_frame(region, source_arg))
@@ -253,9 +266,13 @@ class RadarFetcher:
         added = 0
         for ts, regions_data in frames_by_ts.items():
             frame = RadarFrame(timestamp=ts, regions=regions_data)
-            evicted_ts = await self._store.add_frame(frame)
+            evicted_ts, merged = await self._store.add_frame(frame)
             if evicted_ts is not None:
                 self._cache.invalidate_timestamp(evicted_ts)
+            if merged:
+                # Region data was merged into an existing frame — flush
+                # stale tiles that were rendered without the new regions.
+                self._cache.invalidate_timestamp(ts)
             added += 1
 
         count = await self._store.frame_count()
