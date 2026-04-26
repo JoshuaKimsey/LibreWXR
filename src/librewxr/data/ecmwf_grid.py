@@ -142,6 +142,14 @@ class ECMWFGrid:
         return after
 
     @staticmethod
+    def _vt_to_unix(vt: str) -> int:
+        """Parse an IFS valid_time string (``YYYY-MM-DDTHH:MM:SSZ``) to Unix seconds."""
+        vt_dt = datetime.fromisoformat(vt.replace("Z", "+00:00"))
+        if vt_dt.tzinfo is None:
+            vt_dt = vt_dt.replace(tzinfo=timezone.utc)
+        return int(vt_dt.timestamp())
+
+    @staticmethod
     def _select_valid_times(valid_times: list[str], max_ts: int) -> list[str]:
         """Pick valid_times that best bracket the current radar window.
 
@@ -171,13 +179,7 @@ class ECMWFGrid:
         else:
             anchor_target = now_ts
 
-        # Parse valid_time strings to Unix timestamps
-        vt_unix = []
-        for vt in valid_times:
-            vt_dt = datetime.fromisoformat(vt.replace("Z", "+00:00"))
-            if vt_dt.tzinfo is None:
-                vt_dt = vt_dt.replace(tzinfo=timezone.utc)
-            vt_unix.append(int(vt_dt.timestamp()))
+        vt_unix = [ECMWFGrid._vt_to_unix(vt) for vt in valid_times]
 
         # Find the first vt at or after the anchor target.
         anchor_idx = None
@@ -218,12 +220,6 @@ class ECMWFGrid:
             return False
 
         ref_time = latest["reference_time"]
-
-        # Skip re-fetch if the model run hasn't changed (IFS updates every 6h)
-        if ref_time == self._reference_time and self._timesteps:
-            logger.debug("ECMWF IFS: same reference_time %s, skipping", ref_time)
-            return True
-
         valid_times = latest.get("valid_times", [])
         variables = latest.get("variables", [])
 
@@ -241,6 +237,20 @@ class ECMWFGrid:
             return False
 
         vt_to_fetch = self._select_valid_times(valid_times[1:], max_ts)
+
+        # Skip re-fetch only when both the model run AND the desired window
+        # are unchanged.  IFS reruns every 6h, but the window slides forward
+        # with `now()` — so a stable reference_time alone isn't enough; we
+        # also need every hourly timestep in the new window already loaded.
+        if ref_time == self._reference_time and self._timesteps:
+            desired_hourly = {self._vt_to_unix(vt) for vt in vt_to_fetch}
+            stored_hourly = {ts for ts in self._timesteps if ts % 3600 == 0}
+            if desired_hourly <= stored_hourly:
+                logger.debug(
+                    "ECMWF IFS: ref %s and window unchanged, skipping",
+                    ref_time,
+                )
+                return True
         has_snow = "snowfall_water_equivalent" in variables
         ref_dt = datetime.fromisoformat(ref_time.replace("Z", "+00:00"))
         run_prefix = (
@@ -271,11 +281,7 @@ class ECMWFGrid:
                 vt = future_to_vt[future]
                 try:
                     precip_dbz, snow_mask = future.result()
-                    vt_dt = datetime.fromisoformat(vt.replace("Z", "+00:00"))
-                    if vt_dt.tzinfo is None:
-                        vt_dt = vt_dt.replace(tzinfo=timezone.utc)
-                    unix_ts = int(vt_dt.timestamp())
-                    new_timesteps[unix_ts] = (precip_dbz, snow_mask)
+                    new_timesteps[self._vt_to_unix(vt)] = (precip_dbz, snow_mask)
                 except Exception:
                     logger.warning("Failed to fetch ECMWF timestep %s", vt, exc_info=True)
 
