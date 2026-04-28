@@ -223,10 +223,12 @@ All settings are configured via environment variables (or a `.env` file). Copy `
 | `LIBREWXR_SMOOTH_RADIUS` | `2.0` | Gaussian blur radius (0 = disabled) |
 | `LIBREWXR_NOISE_FLOOR_DBZ` | `10.0` | Min dBZ to display (-32 = disabled) |
 | `LIBREWXR_DESPECKLE_MIN_NEIGHBORS` | `3` | Speckle filter strength (0 = disabled) |
-| `LIBREWXR_WEBP_QUALITY` | `80` | WebP quality (100 = lossless, <100 = lossy) |
+| `LIBREWXR_WEBP_QUALITY` | `65` | WebP quality (100 = lossless, <100 = lossy) |
 | `LIBREWXR_WORKERS` | `1` | Uvicorn worker processes |
 | `LIBREWXR_ENABLED_REGIONS` | `ALL` | Radar region spec (see below) |
-| `LIBREWXR_WARMER_THREADS` | `4` | Background tile warming threads |
+| `LIBREWXR_WARMER_THREADS` | `0` | Background tile warming threads (0 = auto: CPU count - 1) |
+| `LIBREWXR_WARM_COORD_ZOOM` | `6` | Pre-warm coordinate caches up to this zoom at startup (0 = disable) |
+| `LIBREWXR_WARM_OVERVIEW_ZOOM` | `4` | Pre-render overview tiles up to this zoom after each fetch (-1 = disable) |
 | `LIBREWXR_ECMWF_INTERPOLATION` | `true` | Optical flow interpolation of IFS hourly data to 10-min frames |
 | `LIBREWXR_NOWCAST_ENABLED` | `true` | Enable precipitation nowcasting (experimental — radar extrapolation + IFS blending) |
 | `LIBREWXR_NOWCAST_FRAMES` | `6` | Number of nowcast frames (6 × 10 min = 60 min forecast) |

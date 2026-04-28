@@ -354,6 +354,8 @@ def warm_coordinate_caches(
     Returns the number of unique (region, z, x, y, tile_size) cache
     entries warmed.
     """
+    if max_zoom <= 0:
+        return 0
     warmed = 0
     for z in range(max_zoom + 1):
         n = 2**z

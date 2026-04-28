@@ -17,6 +17,7 @@ from librewxr.tiles.coordinates import (
     tile_bounds,
     tile_overlaps_composite,
     tile_pixel_indices,
+    warm_coordinate_caches,
 )
 
 
@@ -105,3 +106,15 @@ class TestTilePixelIndices:
     def test_512_tile_size(self):
         row_idx, col_idx = tile_pixel_indices(3, 1, 3, 512)
         assert row_idx.shape == (512, 512)
+
+
+class TestWarmCoordinateCaches:
+    def test_warms_at_least_one_entry(self):
+        """warm_coordinate_caches should populate caches and return a positive count."""
+        count = warm_coordinate_caches(["USCOMP"], max_zoom=2, tile_size=256)
+        assert count > 0
+
+    def test_zero_max_zoom_returns_zero(self):
+        """max_zoom=0 should disable warming."""
+        count = warm_coordinate_caches(["USCOMP"], max_zoom=0, tile_size=256)
+        assert count == 0
