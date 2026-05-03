@@ -2,6 +2,7 @@
 # Copyright (C) 2026 Joshua Kimsey
 import asyncio
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from librewxr.data.store import FrameStore
@@ -26,8 +27,9 @@ class TileWarmer:
         self._store = store
         self._cache = cache
         self._executor = executor
-        self._pending: set[tuple] = set()
+        self._pending: dict[tuple, float] = {}
         self._lock = asyncio.Lock()
+        self._pending_ttl = 300.0  # seconds before a pending entry expires
         self._enabled_regions = enabled_regions
         self._nowcast_store = nowcast_store
 
@@ -54,7 +56,7 @@ class TileWarmer:
             nc_ts = await self._nowcast_store.get_timestamps()
             nowcast_timestamps = set(nc_ts)
             timestamps = list(set(timestamps) | nowcast_timestamps)
-            timestamps.sort()
+            timestamps.sort(reverse=True)
 
         loop = asyncio.get_running_loop()
 
@@ -69,8 +71,9 @@ class TileWarmer:
 
             async with self._lock:
                 if cache_key in self._pending:
-                    continue
-                self._pending.add(cache_key)
+                    if time.monotonic() - self._pending[cache_key] < self._pending_ttl:
+                        continue
+                self._pending[cache_key] = time.monotonic()
 
             # Try radar store first, then nowcast store
             nowcast_blend = None
@@ -81,7 +84,7 @@ class TileWarmer:
                     frame = nc_frame
             if frame is None:
                 async with self._lock:
-                    self._pending.discard(cache_key)
+                    self._pending.pop(cache_key, None)
                 continue
 
             frame_regions = frame.regions
@@ -132,7 +135,7 @@ class TileWarmer:
         except Exception:
             logger.debug("Warm render failed for key %s", cache_key[:5])
         finally:
-            self._pending.discard(cache_key)
+            self._pending.pop(cache_key, None)
 
     async def warm_overview(
         self,
@@ -160,7 +163,7 @@ class TileWarmer:
         if self._nowcast_store is not None:
             nc_ts = await self._nowcast_store.get_timestamps()
             timestamps = list(set(timestamps) | set(nc_ts))
-            timestamps.sort()
+            timestamps.sort(reverse=True)
 
         max_zoom_total = max(max_zoom, max_zoom_regional)
         if max_zoom_total < 0 or not timestamps:
@@ -193,15 +196,20 @@ class TileWarmer:
                 continue
             frame_regions = frame.regions
 
+            submitted = 0
             for z in range(max_zoom_total + 1):
                 for x, y in tiles_by_zoom[z]:
+                    submitted += 1
+                    if submitted % 500 == 0:
+                        await asyncio.sleep(0)
                     cache_key = (ts, z, x, y, tile_size, color, smooth, snow, ext, "")
                     if self._cache.get(cache_key) is not None:
                         continue
                     async with self._lock:
                         if cache_key in self._pending:
-                            continue
-                        self._pending.add(cache_key)
+                            if time.monotonic() - self._pending[cache_key] < self._pending_ttl:
+                                continue
+                        self._pending[cache_key] = time.monotonic()
                     self._submit_render(
                         loop, cache_key, frame_regions,
                         z, x, y, tile_size, color, smooth, snow, ext,

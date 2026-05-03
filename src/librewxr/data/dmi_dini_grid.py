@@ -523,14 +523,16 @@ class DMIDiniGrid:
         l0, l1, _ = bracket_lead_seconds(lead)
         return ((run, l0) in self._frames) and ((run, l1) in self._frames)
 
+    @property
+    def supports_snow(self) -> bool:
+        return False
+
     def get_snow_mask(
         self,
         lat: np.ndarray,
         lon: np.ndarray,
         timestamp: int | None = None,
     ) -> np.ndarray:
-        # Snow classification deferred to the next chain source (typically
-        # IFS) — same approach as ICONEUGrid Phase 4 v1.
         return np.zeros(lat.shape, dtype=bool)
 
     def sample(

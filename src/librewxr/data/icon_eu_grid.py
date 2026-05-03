@@ -381,13 +381,16 @@ class ICONEUGrid:
         l0, l1, _ = bracket_lead_seconds(lead)
         return ((run, l0) in self._frames) and ((run, l1) in self._frames)
 
+    @property
+    def supports_snow(self) -> bool:
+        return False
+
     def get_snow_mask(
         self,
         lat: np.ndarray,
         lon: np.ndarray,
         timestamp: int | None = None,
     ) -> np.ndarray:
-        # Phase 4 v1: defer to next chain source (IFS) for snow classification.
         return np.zeros(lat.shape, dtype=bool)
 
     def sample(

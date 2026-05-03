@@ -571,17 +571,16 @@ class HRRRGrid:
         l0, l1, _ = bracket_subh_leads(lead)
         return ((run, l0) in self._frames) and ((run, l1) in self._frames)
 
+    @property
+    def supports_snow(self) -> bool:
+        return False
+
     def get_snow_mask(
         self,
         lat: np.ndarray,
         lon: np.ndarray,
         timestamp: int | None = None,
     ) -> np.ndarray:
-        # Phase 2 v1: HRRR doesn't surface a precomputed snow ratio.  The
-        # chain falls through to ECMWF for snow classification, which
-        # already gets it right at IFS resolution.  Returning all-False
-        # here means the chain dispatcher will skip HRRR for snow_mask
-        # and use the next source (IFS) — exactly what we want.
         return np.zeros(lat.shape, dtype=bool)
 
     def sample(

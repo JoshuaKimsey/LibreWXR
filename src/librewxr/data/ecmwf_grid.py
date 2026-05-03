@@ -487,6 +487,10 @@ class ECMWFGrid:
         result = np.where(any_zero, v00, interp)
         return np.clip(result + 0.5, 0, 255).astype(np.uint8)
 
+    @property
+    def supports_snow(self) -> bool:
+        return True
+
     def get_snow_mask(
         self, lat: np.ndarray, lon: np.ndarray, timestamp: int | None = None,
     ) -> np.ndarray:

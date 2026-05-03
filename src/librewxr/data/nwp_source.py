@@ -36,6 +36,16 @@ class NWPSource(Protocol):
         """
         ...
 
+    @property
+    def supports_snow(self) -> bool:
+        """Whether this source can classify precipitation as rain vs. snow.
+
+        Sources that lack a snow-ratio field (e.g. HRRR, DMI DINI, ICON-EU)
+        return ``False`` so the chain dispatcher skips their expensive
+        ``domain_mask`` and falls through to a source that can (IFS).
+        """
+        ...
+
     def get_snow_mask(
         self,
         lat: np.ndarray,
@@ -110,6 +120,8 @@ class NWPChain:
         out = np.zeros(lat.shape, dtype=np.float32)
         remaining = np.ones(lat.shape, dtype=np.float32)
         for src in self._sources:
+            if not (remaining > 0.0).any():
+                break
             if timestamp is not None and not src.has_data_at(timestamp):
                 continue
             if timestamp is None and not src.has_data():
@@ -126,8 +138,6 @@ class NWPChain:
             contribution[relevant] = sample_vals.astype(np.float32, copy=False)
             out += weight * contribution
             remaining *= 1.0 - feather
-            if not (remaining > 0.0).any():
-                break
         return np.clip(out + 0.5, 0, 255).astype(np.uint8)
 
     def get_snow_mask(
@@ -139,6 +149,10 @@ class NWPChain:
         out = np.zeros(lat.shape, dtype=bool)
         unfilled = np.ones(lat.shape, dtype=bool)
         for src in self._sources:
+            if not unfilled.any():
+                break
+            if not src.supports_snow:
+                continue
             if timestamp is not None and not src.has_data_at(timestamp):
                 continue
             if timestamp is None and not src.has_data():
@@ -151,6 +165,4 @@ class NWPChain:
             sub_lon = lon[mask]
             out[mask] = src.get_snow_mask(sub_lat, sub_lon, timestamp)
             unfilled &= ~domain
-            if not unfilled.any():
-                break
         return out
