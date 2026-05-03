@@ -240,8 +240,8 @@ class TestNowcastGeneratorSync:
         assert frames[0].blend_weight > frames[1].blend_weight
         assert frames[1].blend_weight > frames[2].blend_weight
         # With 3 steps at 600s, max_blend_steps=6, so step 3 is mid-curve
-        # t=3/6=0.5 → 0.30 + 0.70*(0.5)^1.1 ≈ 0.63
-        assert 0.55 < frames[2].blend_weight < 0.70
+        # t=3/6=0.5 → 0.20 + 0.80*(0.5)^1.4 ≈ 0.50
+        assert 0.45 < frames[2].blend_weight < 0.55
 
         # Each frame should have the region
         for f in frames:

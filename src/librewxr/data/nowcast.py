@@ -268,8 +268,14 @@ class NowcastGenerator:
             elif blend_mode == "ifs":
                 blend_weight = 0.0
             else:  # "blended" (default)
+                # Tuned for HRRR's native-resolution, dBZ-matched output.
+                # Starts at ~82% radar at T+10 for a smooth transition off
+                # the live frame, crosses to model-dominant by T+40, lands
+                # at 80% HRRR by T+60.  When the chain falls back to IFS
+                # (outside HRRR's CONUS domain) the same curve still
+                # applies — radar dominance early, model dominance late.
                 t = step / max_blend_steps
-                blend_weight = 0.30 + 0.70 * (1.0 - t) ** 1.1
+                blend_weight = 0.20 + 0.80 * (1.0 - t) ** 1.4
 
             regions: dict[str, np.ndarray] = {}
             for region_name, flow in flows.items():
