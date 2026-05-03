@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     hrrr_s3_bucket: str = "noaa-hrrr-bdp-pds"
     hrrr_s3_region: str = "us-east-1"
     hrrr_publish_delay_minutes: int = 55  # subh files typically publish ~55 min after run init
+    # European NWP source for the chain. "ifs" leaves IFS as the only
+    # source over Europe. "icon_eu" prepends DWD ICON-EU (~7 km, 3-hourly
+    # cycles) ahead of IFS for the European OPERA radar region.
+    eu_nwp_source: Literal["ifs", "icon_eu"] = "ifs"
+    icon_eu_base_url: str = "https://opendata.dwd.de/weather/nwp/icon-eu/grib"
+    icon_eu_publish_delay_minutes: int = 240  # main runs typically publish ~3-4h after init; 4h is conservative
     nowcast_enabled: bool = True  # Generate precipitation nowcast via radar extrapolation + IFS
     nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
     nowcast_blend_mode: str = "radar"  # "radar", "blended", or "model"

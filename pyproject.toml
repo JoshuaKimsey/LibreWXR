@@ -43,4 +43,5 @@ markers = [
     "tiles: Tile rendering, coordinates, and color scheme tests",
     "store: Frame store and tile cache tests",
     "hrrr: HRRR grid, projection, and fetch tests",
+    "icon_eu: ICON-EU grid, lat/lon, and fetch tests",
 ]

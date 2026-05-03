@@ -12,6 +12,7 @@ from librewxr.memory import release_memory
 from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.hrrr_grid import HRRRGrid
+from librewxr.data.icon_eu_grid import ICONEUGrid
 from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.data.sources import (
     IEMSource,
@@ -41,6 +42,7 @@ class RadarFetcher:
         cache: TileCache,
         ecmwf_grid: ECMWFGrid | None = None,
         hrrr_grid: HRRRGrid | None = None,
+        icon_eu_grid: ICONEUGrid | None = None,
         cloud_grid: CloudGrid | None = None,
         nowcast_generator=None,
         warmer=None,
@@ -50,6 +52,7 @@ class RadarFetcher:
         self._cache = cache
         self._ecmwf_grid = ecmwf_grid
         self._hrrr_grid = hrrr_grid
+        self._icon_eu_grid = icon_eu_grid
         self._cloud_grid = cloud_grid
         self._nowcast_generator = nowcast_generator
         self._warmer = warmer
@@ -159,6 +162,8 @@ class RadarFetcher:
             await self._ecmwf_grid.close()
         if self._hrrr_grid:
             await self._hrrr_grid.close()
+        if self._icon_eu_grid:
+            await self._icon_eu_grid.close()
         logger.info("Radar fetcher stopped")
 
     async def _backfill_then_loop(self) -> None:
@@ -253,6 +258,19 @@ class RadarFetcher:
                 )
             except Exception:
                 logger.warning("HRRR fetch failed, CONUS NWP layer may be stale")
+
+        # ICON-EU follows the same pattern — same active window, walks
+        # back through 3-hourly DWD cycles instead of HRRR's hourly ones.
+        if self._icon_eu_grid is not None:
+            try:
+                horizon = settings.nowcast_frames * settings.fetch_interval
+                history = settings.max_frames * settings.fetch_interval
+                await self._icon_eu_grid.fetch(
+                    history_seconds=history,
+                    horizon_seconds=horizon,
+                )
+            except Exception:
+                logger.warning("ICON-EU fetch failed, EU NWP layer may be stale")
 
         # Cloud data loads in the background — never blocks radar startup.
         # Skip if a previous fetch is still running (downloading .om files

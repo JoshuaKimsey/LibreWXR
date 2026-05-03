@@ -20,6 +20,7 @@ from librewxr.data.coverage import build_coverage_masks, build_feather_masks
 from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.fetcher import RadarFetcher
 from librewxr.data.hrrr_grid import HRRRGrid
+from librewxr.data.icon_eu_grid import ICONEUGrid
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.radar_stations import MRMS_STATIONS
@@ -50,6 +51,7 @@ _LOG_TAGS = {
     "librewxr.data.ecmwf_grid": "ifs",
     "librewxr.data.ecmwf_interpolation": "ifs",
     "librewxr.data.hrrr_grid": "hrrr",
+    "librewxr.data.icon_eu_grid": "icon-eu",
     "librewxr.data.cloud_grid": "cloud",
     "librewxr.data.cloud_cache": "cloud",
     "librewxr.data.nowcast": "nowcast",
@@ -93,13 +95,23 @@ async def lifespan(app: FastAPI):
     store = FrameStore(max_frames=settings.max_frames)
     cache = TileCache(max_mb=settings.tile_cache_mb)
     ecmwf_grid = ECMWFGrid()
+    from pathlib import Path
+    nwp_cache_dir = Path(settings.cache_dir) if settings.cache_dir else None
     if settings.na_nwp_source == "hrrr":
-        from pathlib import Path
-        hrrr_cache_dir = Path(settings.cache_dir) if settings.cache_dir else None
-        hrrr_grid = HRRRGrid(cache_dir=hrrr_cache_dir)
+        hrrr_grid = HRRRGrid(cache_dir=nwp_cache_dir)
     else:
         hrrr_grid = None
-    chain_sources = [hrrr_grid] if hrrr_grid else []
+    if settings.eu_nwp_source == "icon_eu":
+        icon_eu_grid = ICONEUGrid(cache_dir=nwp_cache_dir)
+    else:
+        icon_eu_grid = None
+    # Chain order = specificity (narrowest domain first), so HRRR fills
+    # CONUS, ICON-EU fills Europe, IFS catches everything else.
+    chain_sources = []
+    if hrrr_grid:
+        chain_sources.append(hrrr_grid)
+    if icon_eu_grid:
+        chain_sources.append(icon_eu_grid)
     chain_sources.append(ecmwf_grid)
     nwp_chain = NWPChain(chain_sources)
     logger.info("NWP chain: [%s]", ", ".join(s.name for s in nwp_chain.sources))
@@ -166,6 +178,7 @@ async def lifespan(app: FastAPI):
     routes.tile_cache = cache
     routes.ecmwf_grid = ecmwf_grid
     routes.hrrr_grid = hrrr_grid
+    routes.icon_eu_grid = icon_eu_grid
     routes.nwp_chain = nwp_chain
     routes.cloud_grid = cloud
     routes.tile_warmer = warmer
@@ -198,6 +211,7 @@ async def lifespan(app: FastAPI):
         store, cache,
         ecmwf_grid=ecmwf_grid,
         hrrr_grid=hrrr_grid,
+        icon_eu_grid=icon_eu_grid,
         cloud_grid=cloud,
         nowcast_generator=nowcast_generator,
         warmer=warmer,
