@@ -49,6 +49,19 @@ class NWPSource(Protocol):
         """Return bool mask: True where this source has coverage. Shape == lat.shape."""
         ...
 
+    def feather_mask(self, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+        """Return float32 mask in [0, 1] for soft chain blending.
+
+        Values close to 1.0 mean "trust this source fully here"; values
+        close to 0.0 hand control to the next source in the chain.
+        Sources with a hard boundary (e.g., the global IFS fallback)
+        return ``domain_mask(lat, lon).astype(float32)``.  Sources with
+        a finite domain (HRRR, future regional NWP) return a smooth
+        taper to 0 at the boundary so chain blending produces a
+        continuous transition instead of a visible seam.
+        """
+        ...
+
     def has_data_at(self, timestamp: int) -> bool:
         """Whether this source can answer for the given valid time right now."""
         ...
@@ -59,15 +72,21 @@ class NWPSource(Protocol):
 
 
 class NWPChain:
-    """Dispatches sample/snow_mask queries across NWP sources in priority order.
+    """Dispatches sample / snow_mask queries across NWP sources in priority order.
 
-    For each pixel, the first source with both coverage AND data fills it.
-    Pixels not covered by any source remain at the default fill value
-    (0 = no precipitation in dBZ encoding, False in the snow mask).
+    ``sample`` does a soft, weight-accumulating blend across sources.
+    Each source contributes ``remaining_weight × its_feather`` of its
+    sampled values, with ``remaining`` decreasing as preceding sources
+    fill up.  When a source's feather is binary (1 inside / 0 outside,
+    e.g. the global IFS fallback) the blend collapses to a hard fill —
+    so a chain of binary-feather sources behaves identically to a
+    first-fill dispatcher.  When a source's feather tapers smoothly
+    near its boundary (e.g. HRRR's LCC edge), the chain produces a
+    continuous transition into the next source instead of a visible
+    seam.
 
-    A chain with a single source behaves identically to calling that source
-    directly — Phase 1 wraps ECMWFGrid in a one-element chain to introduce
-    the abstraction without changing behavior.
+    ``get_snow_mask`` stays a hard first-fill: blending booleans is
+    meaningless and the snow flag is per-pixel categorical.
     """
 
     def __init__(self, sources: list[NWPSource]):
@@ -88,24 +107,28 @@ class NWPChain:
         timestamp: int | None = None,
         bilinear: bool = False,
     ) -> np.ndarray:
-        out = np.zeros(lat.shape, dtype=np.uint8)
-        unfilled = np.ones(lat.shape, dtype=bool)
+        out = np.zeros(lat.shape, dtype=np.float32)
+        remaining = np.ones(lat.shape, dtype=np.float32)
         for src in self._sources:
             if timestamp is not None and not src.has_data_at(timestamp):
                 continue
             if timestamp is None and not src.has_data():
                 continue
-            domain = src.domain_mask(lat, lon)
-            mask = unfilled & domain
-            if not mask.any():
+            feather = src.feather_mask(lat, lon).astype(np.float32, copy=False)
+            weight = remaining * feather
+            relevant = weight > 0.0
+            if not relevant.any():
                 continue
-            sub_lat = lat[mask]
-            sub_lon = lon[mask]
-            out[mask] = src.sample(sub_lat, sub_lon, timestamp, bilinear)
-            unfilled &= ~domain
-            if not unfilled.any():
+            sub_lat = lat[relevant]
+            sub_lon = lon[relevant]
+            sample_vals = src.sample(sub_lat, sub_lon, timestamp, bilinear)
+            contribution = np.zeros(lat.shape, dtype=np.float32)
+            contribution[relevant] = sample_vals.astype(np.float32, copy=False)
+            out += weight * contribution
+            remaining *= 1.0 - feather
+            if not (remaining > 0.0).any():
                 break
-        return out
+        return np.clip(out + 0.5, 0, 255).astype(np.uint8)
 
     def get_snow_mask(
         self,

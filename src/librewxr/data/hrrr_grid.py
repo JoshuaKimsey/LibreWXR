@@ -121,6 +121,36 @@ def domain_mask(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
     )
 
 
+# ── Boundary feathering ───────────────────────────────────────────────
+#
+# Width of the soft transition zone at the HRRR LCC domain edge, in
+# metres.  Inside the inner region (≥ FEATHER_DISTANCE_M from any edge)
+# HRRR is trusted at full weight; over the feather zone the weight
+# tapers linearly to 0 at the edge so chain blending hands control to
+# IFS smoothly instead of leaving a visible seam.
+
+HRRR_FEATHER_DISTANCE_M = 75_000.0  # 75 km ≈ 25 grid cells
+
+
+def feather_mask(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+    """Return float32 weights in [0, 1]: 1 deep inside HRRR, 0 outside.
+
+    Tapers linearly over ``HRRR_FEATHER_DISTANCE_M`` from the nearest
+    LCC grid edge.  Out-of-domain points return 0.  Used by ``NWPChain``
+    to soft-blend HRRR with the next source in the chain (typically IFS).
+    """
+    row, col = grid_indices(lat, lon)
+    # Distance to nearest edge in grid cells (negative if outside).
+    dist_cells = np.minimum(
+        np.minimum(row, (HRRR_GRID_HEIGHT - 1) - row),
+        np.minimum(col, (HRRR_GRID_WIDTH - 1) - col),
+    )
+    # Convert to metres using HRRR's grid spacing.
+    dist_m = dist_cells * HRRR_GRID_DX
+    weight = np.clip(dist_m / HRRR_FEATHER_DISTANCE_M, 0.0, 1.0)
+    return weight.astype(np.float32, copy=False)
+
+
 # ── GRIB2 byte-range fetch ─────────────────────────────────────────────
 #
 # HRRR is published as multi-message GRIB2 files alongside an ``.idx``
@@ -455,6 +485,9 @@ class HRRRGrid:
 
     def domain_mask(self, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
         return domain_mask(lat, lon)
+
+    def feather_mask(self, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+        return feather_mask(lat, lon)
 
     def has_data(self) -> bool:
         return bool(self._frames)

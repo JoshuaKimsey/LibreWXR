@@ -519,6 +519,10 @@ class ECMWFGrid:
         """IFS is global. All pixels covered."""
         return np.ones(lat.shape, dtype=bool)
 
+    def feather_mask(self, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+        """IFS is global with no soft boundary — all pixels at full weight."""
+        return np.ones(lat.shape, dtype=np.float32)
+
     def has_data_at(self, timestamp: int) -> bool:
         """True if any loaded timestep covers this valid time."""
         return self._nearest_timestamp(timestamp) is not None
