@@ -20,6 +20,15 @@ dependencies = [
     "omfiles[fsspec,grids]>=0.4",
     "earthkit-regrid>=0.4",
     "s3fs>=2024.0",
+    # Pinned to match aiobotocore's allowed botocore range.  Without these
+    # pins, an installed ``awscli`` (or any other package with a hard
+    # ``botocore==X`` pin newer than aiobotocore's ceiling) will drag
+    # botocore forward and break the ECMWF IFS S3 fetch path with
+    # ``TypeError: ... compute_endpoint_resolver_builtin_defaults()``.
+    # See aiobotocore release notes for compatible (botocore, aiobotocore)
+    # ranges before bumping these.
+    "aiobotocore>=3.5,<3.7",
+    "botocore>=1.42.90,<1.43.1",
     "opencv-python-headless>=4.8",
     "cfgrib>=0.9.14",
     "xarray>=2024.1.0",
