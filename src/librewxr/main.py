@@ -111,19 +111,38 @@ async def _wait_for_state(cache_dir, timeout: float) -> None:
     A render-only worker is useless without a snapshot to read.  Polling
     rather than inotify keeps the implementation portable to Docker
     bind-mounts and shared NFS volumes.
+
+    During cold start the pipeline takes minutes to complete its first
+    fetch cycle, so we poll lazily (every 2 s) and only log on entry +
+    every 30 s — N workers each polling at 1 Hz produces real log spam.
     """
     deadline = time.time() + timeout if timeout > 0 else None
-    poll = max(settings.state_poll_interval, 0.25)
+    poll = max(settings.state_poll_interval, 2.0)
+    log_every = 30.0
+    started = time.time()
+    last_logged = 0.0
+    if state_mtime(cache_dir) is not None:
+        return
+    logger.info("Waiting for pipeline state.json under %s …", cache_dir)
     while True:
+        await asyncio.sleep(poll)
         if state_mtime(cache_dir) is not None:
+            logger.info(
+                "Pipeline state.json appeared after %.0fs",
+                time.time() - started,
+            )
             return
         if deadline is not None and time.time() > deadline:
             raise RuntimeError(
                 f"Timed out after {timeout:.0f}s waiting for state.json "
                 f"under {cache_dir}.  Is the data pipeline running?"
             )
-        logger.info("Waiting for pipeline state.json under %s …", cache_dir)
-        await asyncio.sleep(poll)
+        elapsed = time.time() - started
+        if elapsed - last_logged >= log_every:
+            logger.info(
+                "Still waiting for state.json (%.0fs elapsed) …", elapsed,
+            )
+            last_logged = elapsed
 
 
 @asynccontextmanager

@@ -201,6 +201,8 @@ class RadarFetcher:
         :x0 minute mark when fetch_interval=600) so that frame timestamps are
         always on clean multiples regardless of when the server started.
         """
+        cycle_start = time.time()
+        logger.info("─── fetch cycle start (initial backfill) ───")
         try:
             await self._fetch_all_frames()
             await self._run_nowcast()
@@ -210,6 +212,10 @@ class RadarFetcher:
             self._schedule_warm()
         except Exception:
             logger.exception("Error in initial backfill")
+        logger.info(
+            "─── fetch cycle complete in %.1fs (initial backfill) ───",
+            time.time() - cycle_start,
+        )
         release_memory()
 
         interval = settings.fetch_interval
@@ -217,6 +223,11 @@ class RadarFetcher:
             now = time.time()
             next_boundary = (int(now // interval) + 1) * interval
             await asyncio.sleep(max(next_boundary - now, 1.0))
+            cycle_start = time.time()
+            boundary_iso = datetime.fromtimestamp(
+                next_boundary, tz=timezone.utc,
+            ).strftime("%Y-%m-%d %H:%M UTC")
+            logger.info("─── fetch cycle start (boundary %s) ───", boundary_iso)
             try:
                 await self._fetch_all_frames()
                 await self._run_nowcast()
@@ -224,6 +235,10 @@ class RadarFetcher:
                 self._schedule_warm()
             except Exception:
                 logger.exception("Error in fetch loop")
+            logger.info(
+                "─── fetch cycle complete in %.1fs (boundary %s) ───",
+                time.time() - cycle_start, boundary_iso,
+            )
             release_memory()
 
     async def _fire_cycle_complete(self) -> None:
@@ -410,12 +425,22 @@ class RadarFetcher:
                 )
 
     async def _fetch_cloud_background(self) -> None:
-        """Fetch cloud cover data without blocking the main fetch cycle."""
+        """Fetch cloud cover data without blocking the main fetch cycle.
+
+        Cloud is the slowest auxiliary fetch (~40 s per .om file), so it
+        runs detached and the main cycle dumps ``state.json`` without
+        waiting.  We re-fire the cycle-complete hook here on success so
+        render-only workers pick up the new cloud grid mid-cycle instead
+        of waiting for the next :x0 boundary.
+        """
         try:
             await self._cloud_grid.fetch()
         except Exception:
             logger.warning("Cloud cover fetch failed, satellite layer may be stale")
+            release_memory()
+            return
         release_memory()
+        await self._fire_cycle_complete()
 
     async def _fetch_all_frames(self) -> None:
         """Fetch frames for all enabled regions to fill the store.
