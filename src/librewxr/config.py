@@ -146,6 +146,20 @@ class Settings(BaseSettings):
     satellite_max_frames: int = 12  # Number of hourly IFS cloud timesteps to keep
     cache_dir: str = ""  # Persistent cache directory for satellite grids; empty = in-memory only
 
+    # Multi-worker tile-server split.  When render_only is True, this
+    # process skips fetcher / NWP grid / cloud / nowcast initialisation
+    # and instead memory-maps an existing snapshot under cache_dir
+    # written by ``python -m librewxr.data_pipeline``.  cache_dir is
+    # required in render-only mode.
+    render_only: bool = False
+    # Seconds between state.json mtime polls in render-only mode.  The
+    # file is rewritten once per fetch_interval (default 600 s) so a 1 s
+    # poll is responsive without burning CPU.
+    state_poll_interval: float = 1.0
+    # Seconds to wait for the data pipeline to write its first state.json
+    # before failing loudly.  0 = wait forever.
+    state_wait_timeout: float = 300.0
+
     # WMO CAP Weather Alerts
     alerts_enabled: bool = True
     alerts_fetch_interval: int = 300  # 5 minutes, aligned to clock boundaries

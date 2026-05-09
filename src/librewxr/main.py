@@ -26,6 +26,7 @@ from librewxr.data.hrdps_grid import HRDPSGrid
 from librewxr.data.hrrr_alaska_grid import HRRRAlaskaGrid
 from librewxr.data.hrrr_grid import HRRRGrid
 from librewxr.data.icon_eu_grid import ICONEUGrid
+from librewxr.data.master_state import apply_state, load_state, state_mtime
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.radar_stations import MRMS_STATIONS
@@ -104,8 +105,232 @@ def _clear_coord_caches() -> None:
     logger.info("Coordinate caches cleared by memory monitor")
 
 
+async def _wait_for_state(cache_dir, timeout: float) -> None:
+    """Block until state.json exists under cache_dir, or fail loudly.
+
+    A render-only worker is useless without a snapshot to read.  Polling
+    rather than inotify keeps the implementation portable to Docker
+    bind-mounts and shared NFS volumes.
+    """
+    deadline = time.time() + timeout if timeout > 0 else None
+    poll = max(settings.state_poll_interval, 0.25)
+    while True:
+        if state_mtime(cache_dir) is not None:
+            return
+        if deadline is not None and time.time() > deadline:
+            raise RuntimeError(
+                f"Timed out after {timeout:.0f}s waiting for state.json "
+                f"under {cache_dir}.  Is the data pipeline running?"
+            )
+        logger.info("Waiting for pipeline state.json under %s …", cache_dir)
+        await asyncio.sleep(poll)
+
+
+@asynccontextmanager
+async def _render_only_lifespan(app: FastAPI):
+    """Lifespan for tile-server workers in the multi-worker split.
+
+    Pulls all radar / NWP / cloud data from the snapshot the data
+    pipeline writes, and refreshes it in place every time
+    ``state.json``'s mtime advances.  No fetcher, no NWP HTTP clients,
+    no nowcast computation — just rendering.
+    """
+    if not settings.cache_dir:
+        raise RuntimeError(
+            "LIBREWXR_RENDER_ONLY=1 requires LIBREWXR_CACHE_DIR to be set "
+            "(it's the shared volume the pipeline writes state.json into)."
+        )
+    from pathlib import Path
+    cache_dir = Path(settings.cache_dir)
+
+    await _wait_for_state(cache_dir, settings.state_wait_timeout)
+
+    # Empty stores; __setstate__ wires up cache_dir and reopens memmaps.
+    # We construct the same superset the pipeline can dump so apply_state
+    # picks up whichever entries are present in the snapshot.
+    store = FrameStore(max_frames=settings.max_frames, cache_dir=cache_dir)
+    cache = TileCache(max_mb=settings.tile_cache_mb)
+    ecmwf_grid = ECMWFGrid(cache_dir=cache_dir)
+    hrrr_grid = HRRRGrid(cache_dir=cache_dir)
+    hrrr_alaska_grid = HRRRAlaskaGrid(cache_dir=cache_dir)
+    hrdps_grid = HRDPSGrid(cache_dir=cache_dir)
+    arome_antilles_grid = AROMEAntillesGrid(cache_dir=cache_dir)
+    wrf_smn_grid = WRFSMNGrid(cache_dir=cache_dir)
+    icon_eu_grid = ICONEUGrid(cache_dir=cache_dir)
+    dmi_dini_grid = DMIDiniGrid(cache_dir=cache_dir)
+    cloud_grid = CloudGrid(cache_dir=cache_dir) if settings.satellite_enabled else None
+    nowcast_store = NowcastStore(cache_dir=cache_dir) if settings.nowcast_enabled else None
+
+    stores = {
+        "frame_store": store,
+        "ecmwf_grid": ecmwf_grid,
+        "hrrr_grid": hrrr_grid,
+        "hrrr_alaska_grid": hrrr_alaska_grid,
+        "hrdps_grid": hrdps_grid,
+        "arome_antilles_grid": arome_antilles_grid,
+        "wrf_smn_grid": wrf_smn_grid,
+        "icon_eu_grid": icon_eu_grid,
+        "dmi_dini_grid": dmi_dini_grid,
+        "cloud_grid": cloud_grid,
+        "nowcast_store": nowcast_store,
+    }
+
+    payload = load_state(cache_dir)
+    if payload is None:
+        raise RuntimeError(
+            f"state.json disappeared between mtime check and load — "
+            f"is something else writing to {cache_dir}?"
+        )
+    refreshed = apply_state(payload, stores)
+    logger.info(
+        "Render-only worker loaded snapshot: %s",
+        ", ".join(refreshed) if refreshed else "(empty)",
+    )
+
+    # Stores that didn't appear in the snapshot are useless (e.g. ICON-EU
+    # in a CONUS-only deployment) — drop the references so the NWP chain
+    # and routes don't dispatch to empty grids.
+    for name in list(stores.keys()):
+        if name not in refreshed and name != "frame_store":
+            stores[name] = None
+    ecmwf_grid = stores["ecmwf_grid"]
+    hrrr_grid = stores["hrrr_grid"]
+    hrrr_alaska_grid = stores["hrrr_alaska_grid"]
+    hrdps_grid = stores["hrdps_grid"]
+    arome_antilles_grid = stores["arome_antilles_grid"]
+    wrf_smn_grid = stores["wrf_smn_grid"]
+    icon_eu_grid = stores["icon_eu_grid"]
+    dmi_dini_grid = stores["dmi_dini_grid"]
+    cloud_grid = stores["cloud_grid"]
+    nowcast_store = stores["nowcast_store"]
+
+    enabled = settings.get_enabled_regions()
+    coverage_overrides = (
+        MRMS_STATIONS if settings.na_source in ("mrms", "mrms_fallback") else None
+    )
+    build_coverage_masks(station_overrides=coverage_overrides)
+    build_feather_masks()
+
+    chain_sources = []
+    for grid in (
+        hrrr_grid, hrrr_alaska_grid, hrdps_grid,
+        arome_antilles_grid, dmi_dini_grid, icon_eu_grid,
+        wrf_smn_grid, ecmwf_grid,
+    ):
+        if grid is not None:
+            chain_sources.append(grid)
+    nwp_chain = NWPChain(chain_sources)
+    logger.info(
+        "Render-only NWP chain: [%s]",
+        ", ".join(s.name for s in nwp_chain.sources),
+    )
+
+    pool_size = settings.warmer_threads or max((os.cpu_count() or 4) - 1, 1)
+    request_executor = ThreadPoolExecutor(max_workers=pool_size)
+    asyncio.get_running_loop().set_default_executor(request_executor)
+
+    mem_limit = detect_memory_limit_mb(settings.memory_limit_mb)
+    monitor = MemoryMonitor(
+        tile_cache=cache,
+        coord_cache_clear_fn=_clear_coord_caches,
+        memory_limit_mb=mem_limit,
+        check_interval=settings.memory_pressure_check_interval,
+    )
+
+    tile_request_tracker = (
+        TileRequestTracker(
+            min_zoom=settings.tile_tracking_min_zoom,
+            max_entries=settings.tile_tracking_max_entries,
+        )
+        if settings.tile_tracking_enabled
+        else None
+    )
+
+    routes.frame_store = store
+    routes.tile_cache = cache
+    routes.ecmwf_grid = ecmwf_grid
+    routes.hrrr_grid = hrrr_grid
+    routes.hrrr_alaska_grid = hrrr_alaska_grid
+    routes.hrdps_grid = hrdps_grid
+    routes.arome_antilles_grid = arome_antilles_grid
+    routes.wrf_smn_grid = wrf_smn_grid
+    routes.icon_eu_grid = icon_eu_grid
+    routes.dmi_dini_grid = dmi_dini_grid
+    routes.nwp_chain = nwp_chain
+    routes.cloud_grid = cloud_grid
+    routes.tile_warmer = None
+    routes.nowcast_store = nowcast_store
+    routes.tile_request_tracker = tile_request_tracker
+    routes.start_time = time.time()
+    routes.enabled_regions = enabled
+    routes.radar_cache = None
+    routes.radar_fetcher = None
+    routes.alerts_enabled = False  # alerts ride the pipeline; render-only is read-only
+
+    last_mtime = state_mtime(cache_dir)
+    poller_stop = asyncio.Event()
+
+    async def _poll_state() -> None:
+        nonlocal last_mtime
+        while not poller_stop.is_set():
+            try:
+                await asyncio.wait_for(
+                    poller_stop.wait(), timeout=settings.state_poll_interval,
+                )
+                return
+            except asyncio.TimeoutError:
+                pass
+            mtime = state_mtime(cache_dir)
+            if mtime is None or mtime == last_mtime:
+                continue
+            try:
+                payload = load_state(cache_dir)
+                if payload is None:
+                    continue
+                refreshed = apply_state(payload, stores)
+                last_mtime = mtime
+                logger.debug(
+                    "Render worker refreshed: %s", ", ".join(refreshed),
+                )
+                # Newly-loaded frames may have invalidated cached tiles —
+                # safest to clear, the worker will repopulate on demand.
+                cache.clear()
+            except Exception:
+                logger.exception("Failed to refresh state from %s", cache_dir)
+
+    poller_task = asyncio.create_task(_poll_state())
+    await monitor.start()
+    logger.info(
+        "Render-only worker ready (cache_dir=%s, regions=%s, tile_cache=%d MB)",
+        cache_dir, ", ".join(enabled), settings.tile_cache_mb,
+    )
+
+    try:
+        yield
+    finally:
+        poller_stop.set()
+        try:
+            await poller_task
+        except Exception:
+            logger.exception("Poller shutdown error")
+        await monitor.stop()
+        request_executor.shutdown(wait=False)
+        cache.clear()
+        store.cleanup()
+        if nowcast_store is not None:
+            nowcast_store.cleanup()
+        if cloud_grid is not None:
+            await cloud_grid.close()
+        logger.info("Render-only worker shutdown complete")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if settings.render_only:
+        async with _render_only_lifespan(app):
+            yield
+        return
+
     store = FrameStore(max_frames=settings.max_frames)
     cache = TileCache(max_mb=settings.tile_cache_mb)
     ecmwf_grid = ECMWFGrid() if settings.ecmwf_enabled else None

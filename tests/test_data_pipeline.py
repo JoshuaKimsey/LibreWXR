@@ -108,3 +108,71 @@ def test_pipeline_writes_state_json_via_hook(tmp_path, monkeypatch):
     # Disabled stores should be absent — render workers shouldn't try to
     # __setstate__ on a None entry.
     assert "ecmwf_grid" not in payload["stores"]
+
+
+@pytest.mark.asyncio
+async def test_render_only_lifespan_picks_up_snapshot(tmp_path, monkeypatch):
+    # Pipeline-side: write a state.json with one frame.  Render-only-side:
+    # spin up _render_only_lifespan and confirm the FrameStore came back
+    # populated and routes were wired.
+    from librewxr.config import settings
+    from librewxr.data.master_state import dump_state
+    from librewxr.data.store import FrameStore, RadarFrame
+    from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+
+    # Producer side
+    producer = FrameStore(max_frames=4, cache_dir=cache_dir)
+    arr = np.zeros((COMPOSITE_HEIGHT, COMPOSITE_WIDTH), dtype=np.uint8)
+    await producer.add_frame(RadarFrame(timestamp=42, regions={"USCOMP": arr}))
+    dump_state({"frame_store": producer}, cache_dir)
+
+    monkeypatch.setattr(settings, "render_only", True)
+    monkeypatch.setattr(settings, "cache_dir", str(cache_dir))
+    # Disable optional stores that don't appear in the snapshot — keeps
+    # the render-only path from spinning up Cloud / Nowcast plumbing
+    # this smoke test doesn't care about.
+    monkeypatch.setattr(settings, "satellite_enabled", False)
+    monkeypatch.setattr(settings, "nowcast_enabled", False)
+    monkeypatch.setattr(settings, "alerts_enabled", False)
+    monkeypatch.setattr(settings, "state_wait_timeout", 5.0)
+    monkeypatch.setattr(settings, "state_poll_interval", 0.1)
+
+    from librewxr import main as main_module
+    from librewxr.api import routes
+
+    # FastAPI app stub — _render_only_lifespan only takes app for symmetry.
+    class _StubApp:
+        pass
+
+    async with main_module._render_only_lifespan(_StubApp()):
+        # Frame store should have been populated from the snapshot.
+        assert routes.frame_store is not None
+        timestamps = await routes.frame_store.get_timestamps()
+        assert timestamps == [42]
+        # Render-only workers must not have a fetcher or radar_cache.
+        assert routes.radar_fetcher is None
+        assert routes.radar_cache is None
+        # Disabled stores should be absent (snapshot didn't include them).
+        assert routes.ecmwf_grid is None
+
+    # cleanup happens inside the lifespan __aexit__; nothing to assert.
+
+
+@pytest.mark.asyncio
+async def test_render_only_requires_cache_dir(monkeypatch):
+    from librewxr.config import settings
+
+    monkeypatch.setattr(settings, "render_only", True)
+    monkeypatch.setattr(settings, "cache_dir", "")
+
+    from librewxr import main as main_module
+
+    class _StubApp:
+        pass
+
+    with pytest.raises(RuntimeError, match="LIBREWXR_CACHE_DIR"):
+        async with main_module._render_only_lifespan(_StubApp()):
+            pass
