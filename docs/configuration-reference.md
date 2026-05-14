@@ -527,7 +527,7 @@ Adds ~130 MB RAM for synthetic frames and ~5-10 seconds of compute per IFS fetch
 
 ## Regional NWP Sources
 
-LibreWXR layers a chain of regional rapid-refresh NWP models on top of the global ECMWF IFS layer. At each pixel, the chain dispatches to the **narrowest** model whose domain covers it, soft-feathering at every domain edge so seams don't show.
+LibreWXR layers a chain of regional rapid-refresh NWP models on top of the global ECMWF IFS layer. At each pixel, the chain dispatches to the **narrowest** model whose domain covers it, soft-feathering at every domain edge so seams don't show. See [`coverage.md`](coverage.md) for visual maps of every radar + NWP domain.
 
 Most regional sources also classify each pixel as snow vs rain from their own 2-metre temperature field. The threshold is shared across all of them via [`LIBREWXR_REGIONAL_SNOW_TEMP_THRESHOLD`](#librewxr_regional_snow_temp_threshold). HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, and ICON-EU all classify natively; HRDPS and AROME Antilles fall through to IFS for snow detection (HRDPS is expected to be replaced by RRFSv1 mid-2026; AROME Antilles is tropical so the question rarely matters).
 
