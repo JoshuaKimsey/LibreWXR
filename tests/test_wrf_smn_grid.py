@@ -403,8 +403,244 @@ class TestNWPSourceProtocol:
         assert out.shape == (1,)
         assert out[0] == 0  # no data loaded
 
-    def test_supports_snow_false(self):
+    def test_supports_snow_is_true(self):
+        # WRF-SMN now classifies snow natively from its T2 field.
         grid = WRFSMNGrid()
-        assert grid.supports_snow is False
+        assert grid.supports_snow is True
+
+    def test_no_loaded_masks_returns_all_false(self):
+        # Without any T2 data loaded, get_snow_mask falls through so the
+        # chain dispatcher reaches the next snow-capable source.
+        grid = WRFSMNGrid()
         out = grid.get_snow_mask(np.array([-34.61]), np.array([-58.38]))
-        assert (out == False).all()
+        assert out.dtype == np.bool_
+        assert not out.any()
+
+
+# ── Snow mask ─────────────────────────────────────────────────────────
+
+
+def _inject_frame_and_snow(
+    grid: WRFSMNGrid,
+    run_ts: int,
+    lead_seconds: int,
+    *,
+    snow_value: int | None = None,
+) -> None:
+    """Inject a uniform precip frame, optionally with a parallel snow mask.
+
+    ``snow_value`` of None means no snow mask is stored — useful for
+    testing the "frame loaded but no snow mask" fallthrough path.
+    """
+    fake = np.zeros(
+        (WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH), dtype=np.uint8,
+    )
+    grid._frames[(run_ts, lead_seconds)] = fake
+    if grid._latest_run_ts is None or run_ts > grid._latest_run_ts:
+        grid._latest_run_ts = run_ts
+    if snow_value is not None:
+        snow = np.full(
+            (WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH),
+            snow_value & 0x01,
+            dtype=np.uint8,
+        )
+        grid._snow_masks[(run_ts, lead_seconds)] = snow
+
+
+class TestSnowMask:
+    """WRFSMNGrid.get_snow_mask end-to-end behaviour."""
+
+    def test_uniform_snow_returns_true_in_domain(self):
+        grid = WRFSMNGrid()
+        run = int(datetime(2026, 5, 8, 12, tzinfo=timezone.utc).timestamp())
+        _inject_frame_and_snow(grid, run, 3 * 3600, snow_value=1)
+        _inject_frame_and_snow(grid, run, 4 * 3600, snow_value=1)
+
+        # Bariloche (Patagonia) — inside WRF-SMN's domain
+        out = grid.get_snow_mask(
+            np.array([-41.13]), np.array([-71.30]),
+            timestamp=run + 3 * 3600 + 1800,
+        )
+        assert out.tolist() == [True]
+
+    def test_uniform_rain_returns_false_in_domain(self):
+        grid = WRFSMNGrid()
+        run = int(datetime(2026, 5, 8, 12, tzinfo=timezone.utc).timestamp())
+        _inject_frame_and_snow(grid, run, 3 * 3600, snow_value=0)
+        _inject_frame_and_snow(grid, run, 4 * 3600, snow_value=0)
+
+        # Buenos Aires — sub-tropical, should rarely see snow
+        out = grid.get_snow_mask(
+            np.array([-34.61]), np.array([-58.38]),
+            timestamp=run + 3 * 3600 + 1800,
+        )
+        assert out.tolist() == [False]
+
+    def test_outside_domain_returns_false(self):
+        grid = WRFSMNGrid()
+        run = int(datetime(2026, 5, 8, 12, tzinfo=timezone.utc).timestamp())
+        _inject_frame_and_snow(grid, run, 3 * 3600, snow_value=1)
+        _inject_frame_and_snow(grid, run, 4 * 3600, snow_value=1)
+
+        # London — outside WRF-SMN
+        out = grid.get_snow_mask(
+            np.array([51.5]), np.array([-0.1]),
+            timestamp=run + 3 * 3600 + 1800,
+        )
+        assert out.tolist() == [False]
+
+    def test_lerp_bracket_majority_at_midpoint(self):
+        grid = WRFSMNGrid()
+        run = int(datetime(2026, 5, 8, 12, tzinfo=timezone.utc).timestamp())
+        _inject_frame_and_snow(grid, run, 3 * 3600, snow_value=0)  # L0: rain
+        _inject_frame_and_snow(grid, run, 4 * 3600, snow_value=1)  # L1: snow
+
+        # alpha=0.25 → L0 wins
+        out_low = grid.get_snow_mask(
+            np.array([-41.13]), np.array([-71.30]),
+            timestamp=run + 3 * 3600 + 15 * 60,
+        )
+        assert out_low.tolist() == [False]
+
+        # alpha=0.75 → L1 wins
+        out_high = grid.get_snow_mask(
+            np.array([-41.13]), np.array([-71.30]),
+            timestamp=run + 3 * 3600 + 45 * 60,
+        )
+        assert out_high.tolist() == [True]
+
+    def test_partial_bracket_returns_false(self):
+        # Frames at both leads, but only L0 has a snow mask.
+        grid = WRFSMNGrid()
+        run = int(datetime(2026, 5, 8, 12, tzinfo=timezone.utc).timestamp())
+        _inject_frame_and_snow(grid, run, 3 * 3600, snow_value=1)
+        _inject_frame_and_snow(grid, run, 4 * 3600, snow_value=None)
+
+        out = grid.get_snow_mask(
+            np.array([-41.13]), np.array([-71.30]),
+            timestamp=run + 3 * 3600 + 1800,
+        )
+        assert not out.any()
+
+
+class TestSnowMaskPersistence:
+    """Snow masks are atomic-write parallel files alongside precip frames."""
+
+    @pytest.mark.asyncio
+    async def test_snow_mask_round_trips_through_disk(self, tmp_path):
+        run_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
+
+        g1 = WRFSMNGrid(cache_dir=tmp_path)
+        fake_precip = np.zeros(
+            (WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH), dtype=np.uint8,
+        )
+        fake_snow = np.ones(
+            (WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH), dtype=np.uint8,
+        )
+        for lead in (3 * 3600, 4 * 3600):
+            mm = g1._to_memmap(f"r{run_ts}_l{lead}", fake_precip)
+            g1._frames[(run_ts, lead)] = mm
+            mm_s = g1._to_memmap(f"r{run_ts}_l{lead}_snow", fake_snow)
+            g1._snow_masks[(run_ts, lead)] = mm_s
+        g1._latest_run_ts = run_ts
+        await g1.close()
+
+        cache_dir = tmp_path / "wrf_smn"
+        assert (cache_dir / f"r{run_ts}_l{3*3600}.dat").exists()
+        assert (cache_dir / f"r{run_ts}_l{3*3600}_snow.dat").exists()
+
+        g2 = WRFSMNGrid(cache_dir=tmp_path)
+        assert g2.frame_count == 2
+        assert g2.snow_mask_count == 2
+        assert (run_ts, 3 * 3600) in g2._snow_masks
+        assert (run_ts, 4 * 3600) in g2._snow_masks
+
+        sample_ts = run_ts + 3 * 3600 + 1800
+        out = g2.get_snow_mask(
+            np.array([-41.13]), np.array([-71.30]),
+            timestamp=sample_ts,
+        )
+        assert out.tolist() == [True]
+        await g2.close()
+
+    @pytest.mark.asyncio
+    async def test_orphan_snow_mask_is_removed(self, tmp_path):
+        cache_dir = tmp_path / "wrf_smn"
+        cache_dir.mkdir(parents=True)
+        orphan = cache_dir / "r1234_l3600_snow.dat"
+        size = WRF_SMN_GRID_HEIGHT * WRF_SMN_GRID_WIDTH
+        orphan.write_bytes(b"\x00" * size)
+        assert orphan.exists()
+
+        g = WRFSMNGrid(cache_dir=tmp_path)
+        assert not orphan.exists()
+        assert g.snow_mask_count == 0
+        await g.close()
+
+    @pytest.mark.asyncio
+    async def test_eviction_removes_snow_files_too(self, tmp_path):
+        run_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
+        g = WRFSMNGrid(cache_dir=tmp_path)
+        fake_precip = np.zeros(
+            (WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH), dtype=np.uint8,
+        )
+        fake_snow = np.ones(
+            (WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH), dtype=np.uint8,
+        )
+        g._to_memmap(f"r{run_ts}_l3600", fake_precip)
+        g._to_memmap(f"r{run_ts}_l3600_snow", fake_snow)
+        # Re-mount so the in-memory dicts know about them.
+        mm = np.memmap(
+            tmp_path / "wrf_smn" / f"r{run_ts}_l3600.dat",
+            dtype=np.uint8, mode="r",
+            shape=(WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH),
+        )
+        g._frames[(run_ts, 3600)] = mm
+        mm_s = np.memmap(
+            tmp_path / "wrf_smn" / f"r{run_ts}_l3600_snow.dat",
+            dtype=np.uint8, mode="r",
+            shape=(WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH),
+        )
+        g._snow_masks[(run_ts, 3600)] = mm_s
+
+        far_future = run_ts + 7 * 24 * 3600
+        g._evict_outside_window(far_future, far_future + 600)
+        assert (run_ts, 3600) not in g._frames
+        assert (run_ts, 3600) not in g._snow_masks
+        assert not (tmp_path / "wrf_smn" / f"r{run_ts}_l3600.dat").exists()
+        assert not (tmp_path / "wrf_smn" / f"r{run_ts}_l3600_snow.dat").exists()
+        await g.close()
+
+
+class TestChainSnowMaskWithWRFSMN:
+    def test_chain_prefers_wrf_smn_snow_inside_domain(self):
+        from librewxr.data.ecmwf_grid import ECMWFGrid
+        from librewxr.data.ecmwf_grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
+
+        # IFS says snow everywhere; WRF-SMN says rain inside its
+        # domain.  Inside the SMN domain, SMN wins → rain.  Outside,
+        # IFS wins → snow.
+        ifs = ECMWFGrid()
+        ifs_dbz = np.full((IFS_H, IFS_W), int((10 + 32) * 2), dtype=np.uint8)
+        ifs_snow = np.ones((IFS_H, IFS_W), dtype=bool)
+        ifs._timesteps[1000000] = (ifs_dbz, ifs_snow)
+        ifs._sorted_timestamps = [1000000]
+
+        smn = WRFSMNGrid()
+        run = 1000000 - 1800  # target lead = 30 min inside (0, 3600) bracket
+        _inject_frame_and_snow(smn, run, 0, snow_value=0)
+        _inject_frame_and_snow(smn, run, 3600, snow_value=0)
+
+        chain = NWPChain([smn, ifs])
+
+        # Bariloche: SMN says rain → False
+        out = chain.get_snow_mask(
+            np.array([-41.13]), np.array([-71.30]), timestamp=1000000,
+        )
+        assert out.tolist() == [False]
+
+        # Outside SMN domain (London): IFS wins → True
+        out = chain.get_snow_mask(
+            np.array([51.5]), np.array([-0.1]), timestamp=1000000,
+        )
+        assert out.tolist() == [True]

@@ -50,6 +50,7 @@ import httpx
 import numpy as np
 
 from librewxr.config import settings
+from librewxr.data.hrrr_grid import compute_snow_mask
 
 logger = logging.getLogger(__name__)
 
@@ -348,6 +349,63 @@ def decode_pp_message(nc_bytes: bytes) -> np.ndarray | None:
                 pass
 
 
+def decode_t2_message(nc_bytes: bytes) -> np.ndarray | None:
+    """Decode the ``T2`` field from a WRFDETAR NetCDF4 buffer to °C float32.
+
+    SMN's WRF-DET output already stores 2-metre temperature in degrees
+    Celsius (the per-file ``T2:units`` attribute is ``"C"``), so no
+    Kelvin conversion is needed.  Returns ``None`` on parse failure.
+    Output shape and orientation match ``decode_pp_message``: shape
+    ``(WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH)`` with row 0 = north.
+    """
+    import h5py
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as tmp:
+            tmp.write(nc_bytes)
+            tmp_path = tmp.name
+        with h5py.File(tmp_path, "r") as f:
+            if "T2" not in f:
+                logger.warning(
+                    "WRF-SMN file has no 'T2' dataset (vars=%s)",
+                    list(f.keys())[:10],
+                )
+                return None
+            t2 = np.asarray(f["T2"])
+            if t2.ndim == 3 and t2.shape[0] == 1:
+                t2 = t2[0]
+            t2 = np.where(np.isfinite(t2) & (t2 < 1e10), t2, np.nan).astype(np.float32)
+
+            if t2.shape != (WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH):
+                logger.warning(
+                    "WRF-SMN T2 has unexpected shape %s (expected %s); skipping",
+                    t2.shape, (WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH),
+                )
+                return None
+
+            # Self-correcting orientation: row 0 = north.
+            needs_flip = True
+            if "lat" in f:
+                lat_arr = np.asarray(f["lat"])
+                if lat_arr.ndim == 2 and lat_arr.shape[0] > 1:
+                    needs_flip = lat_arr[0, 0] < lat_arr[-1, 0]
+                elif lat_arr.ndim == 1 and lat_arr.size > 1:
+                    needs_flip = lat_arr[0] < lat_arr[-1]
+            if needs_flip:
+                t2 = np.flipud(t2)
+            return np.ascontiguousarray(t2)
+    except Exception:
+        logger.exception("Failed to decode WRF-SMN T2 NetCDF4 buffer")
+        return None
+    finally:
+        if tmp_path is not None:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 # ── WRFSMNGrid: the public NWPSource implementation ───────────────────
 
 
@@ -361,6 +419,11 @@ class WRFSMNGrid:
         # Raw accumulated PP values keyed by (run_ts, step_hour); kept
         # only long enough to compute the rate at the next step.
         self._accum: dict[tuple[int, int], np.ndarray] = {}
+        # Per-frame snow mask (1 = snow, 0 = rain) keyed by the same
+        # (run_ts, lead_seconds) as ``_frames``.  Populated alongside
+        # accum decode in ``_fetch_accum`` since T2 lives in the same
+        # NetCDF4 file as PP; no separate fetch round-trip.
+        self._snow_masks: dict[tuple[int, int], np.ndarray] = {}
         self._client: httpx.AsyncClient | None = None
         self._latest_run_ts: int | None = None
         self._fetch_lock = asyncio.Lock()
@@ -386,6 +449,9 @@ class WRFSMNGrid:
     def _frame_path(self, run_ts: int, lead_seconds: int) -> Path:
         return self._memmap_dir / f"r{run_ts}_l{lead_seconds}.dat"
 
+    def _snow_frame_path(self, run_ts: int, lead_seconds: int) -> Path:
+        return self._memmap_dir / f"r{run_ts}_l{lead_seconds}_snow.dat"
+
     def _to_memmap(self, name: str, data: np.ndarray) -> np.ndarray:
         final = self._memmap_dir / f"{name}.dat"
         tmp = final.with_suffix(".dat.tmp")
@@ -404,6 +470,8 @@ class WRFSMNGrid:
         for path in self._memmap_dir.glob("r*_l*.dat"):
             m = pat.match(path.stem)
             if m is None:
+                # Skip snow files ("rNNN_lNNN_snow") and any other
+                # parallel-field files we may add later.
                 continue
             run_ts = int(m.group(1))
             lead_s = int(m.group(2))
@@ -422,6 +490,38 @@ class WRFSMNGrid:
             loaded += 1
         if loaded:
             logger.info("WRF-SMN: loaded %d cached frame(s) from disk", loaded)
+
+        # Second pass: snow masks.  Orphans (no matching frame) are
+        # removed so they don't accumulate.
+        snow_pat = re.compile(r"^r(\d+)_l(\d+)_snow$")
+        snow_loaded = 0
+        for path in self._memmap_dir.glob("r*_l*_snow.dat"):
+            m = snow_pat.match(path.stem)
+            if m is None:
+                continue
+            run_ts = int(m.group(1))
+            lead_s = int(m.group(2))
+            if (run_ts, lead_s) not in self._frames:
+                path.unlink(missing_ok=True)
+                continue
+            try:
+                mm = np.memmap(
+                    path, dtype=np.uint8, mode="r",
+                    shape=(WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to memmap cached snow %s, removing", path,
+                )
+                path.unlink(missing_ok=True)
+                continue
+            self._snow_masks[(run_ts, lead_s)] = mm
+            snow_loaded += 1
+        if snow_loaded:
+            logger.info(
+                "WRF-SMN: loaded %d cached snow mask(s) from disk",
+                snow_loaded,
+            )
 
     def __getstate__(self) -> dict:
         """Serialize state for cross-process reload (multi-worker mode).
@@ -443,12 +543,17 @@ class WRFSMNGrid:
         self._client = None
         self._fetch_lock = asyncio.Lock()
         self._frames = {}
+        self._accum = {}
+        self._snow_masks = {}
         self._latest_run_ts = None
         self._load_cached_frames()
 
     @property
     def data_bytes(self) -> int:
-        return sum(arr.nbytes for arr in self._frames.values())
+        return (
+            sum(arr.nbytes for arr in self._frames.values())
+            + sum(arr.nbytes for arr in self._snow_masks.values())
+        )
 
     @property
     def latest_run_iso(self) -> str | None:
@@ -461,6 +566,10 @@ class WRFSMNGrid:
     @property
     def frame_count(self) -> int:
         return len(self._frames)
+
+    @property
+    def snow_mask_count(self) -> int:
+        return len(self._snow_masks)
 
     # ── NWPSource Protocol ────────────────────────────────────────────
 
@@ -483,7 +592,7 @@ class WRFSMNGrid:
 
     @property
     def supports_snow(self) -> bool:
-        return False
+        return True
 
     def get_snow_mask(
         self,
@@ -491,7 +600,38 @@ class WRFSMNGrid:
         lon: np.ndarray,
         timestamp: int | None = None,
     ) -> np.ndarray:
-        return np.zeros(lat.shape, dtype=bool)
+        """Sample the snow / rain classification at each (lat, lon, ts).
+
+        Mirrors ``sample`` for the parallel T2-derived snow mask: same
+        run picker, same hourly bracket-lerp, then re-binarise at 0.5.
+        Returns False everywhere if no snow mask is loaded for the
+        bracket — the chain dispatcher falls through to the next
+        snow-capable source for those pixels (IFS, in WRF-SMN's
+        region this means falling back to global IFS snow detection).
+        """
+        if timestamp is None or not self._snow_masks:
+            return np.zeros(lat.shape, dtype=bool)
+        run = self._pick_run(timestamp)
+        if run is None:
+            return np.zeros(lat.shape, dtype=bool)
+        lead = timestamp - run
+        l0, l1, alpha = bracket_lead_seconds(lead)
+        s0 = self._snow_masks.get((run, l0))
+        s1 = self._snow_masks.get((run, l1))
+        if s0 is None or s1 is None:
+            return np.zeros(lat.shape, dtype=bool)
+        if alpha == 0.0:
+            grid = s0
+        elif alpha == 1.0:
+            grid = s1
+        else:
+            lerped = (
+                (1.0 - alpha) * s0.astype(np.float32)
+                + alpha * s1.astype(np.float32)
+            )
+            grid = (lerped >= 0.5).astype(np.uint8)
+        sampled = _sample_grid(grid, lat, lon, bilinear=False)
+        return sampled.astype(bool)
 
     def sample(
         self,
@@ -680,6 +820,13 @@ class WRFSMNGrid:
     ) -> int:
         """Network half of the fetch pipeline: download + decode → ``_accum``.
 
+        Also decodes T2 from the same NetCDF4 file and writes the
+        derived snow mask to disk parallel to the accum store — both
+        fields come from a single HTTP GET, so there's no extra
+        network round-trip vs. the precip-only path.  T2 decode
+        failures are non-fatal: the precip frame still lands and
+        ``get_snow_mask`` falls through to the next chain source.
+
         Returns 1 on a fresh successful fetch, 0 if already cached, -1
         on fetch/decode error.  No diff, no frame creation — that's
         ``_compute_frame``'s job.
@@ -724,6 +871,21 @@ class WRFSMNGrid:
             return -1
 
         self._accum[(run_ts, step_hour)] = accum
+
+        # Decode T2 from the same buffer and write the snow mask to
+        # disk.  T2 is the instantaneous 2-m temperature at the step's
+        # lead time, so no diff against prior step is needed.  Already
+        # in °C in the source file; threshold matches the other regional
+        # NWP sources.
+        if (run_ts, lead_seconds) not in self._snow_masks:
+            t2 = decode_t2_message(resp.content)
+            if t2 is not None:
+                threshold = settings.regional_snow_temp_threshold
+                snow = compute_snow_mask(t2, threshold)
+                mm = self._to_memmap(
+                    f"r{run_ts}_l{lead_seconds}_snow", snow,
+                )
+                self._snow_masks[(run_ts, lead_seconds)] = mm
         return 1
 
     def _compute_frame(self, run_ts: int, step_hour: int) -> int:
@@ -768,8 +930,28 @@ class WRFSMNGrid:
                 stale_frames.append(key)
         for key in stale_frames:
             self._frames.pop(key, None)
+            self._snow_masks.pop(key, None)
             try:
                 self._frame_path(*key).unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                self._snow_frame_path(*key).unlink(missing_ok=True)
+            except OSError:
+                pass
+        # Also evict orphan snow masks whose precip frame is gone — can
+        # happen if T2 decoded successfully but PP for step F-1 was
+        # never fetched (no precip frame at lead F).
+        stale_orphan_snow = []
+        for key in self._snow_masks:
+            run_ts, lead = key
+            valid_time = run_ts + lead
+            if valid_time < ws or valid_time > we:
+                stale_orphan_snow.append(key)
+        for key in stale_orphan_snow:
+            self._snow_masks.pop(key, None)
+            try:
+                self._snow_frame_path(*key).unlink(missing_ok=True)
             except OSError:
                 pass
         stale_accums = []
@@ -790,6 +972,7 @@ class WRFSMNGrid:
     async def close(self) -> None:
         self._frames.clear()
         self._accum.clear()
+        self._snow_masks.clear()
         if self._client is not None and not self._client.is_closed:
             await self._client.aclose()
         self._client = None
