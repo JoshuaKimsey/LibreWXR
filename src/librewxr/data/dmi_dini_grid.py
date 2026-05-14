@@ -44,6 +44,7 @@ import httpx
 import numpy as np
 
 from librewxr.config import settings
+from librewxr.data.hrrr_grid import compute_snow_mask
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +296,17 @@ _TP_DISCIPLINE = 0
 _TP_CATEGORY = 1
 _TP_PARAMETER = 52
 
+# 2-metre temperature lives at discipline=0 category=0 (Temperature)
+# parameter=0 (TMP) — the same triplet as soil / surface / pressure-level
+# temperatures.  To pick the 2-m field specifically we also check the
+# Product Definition Template 4.0 fixed-surface fields: type=103
+# (specified height above ground), scaled value=2 (metres).
+_T2_DISCIPLINE = 0
+_T2_CATEGORY = 0
+_T2_PARAMETER = 0
+_T2_FIXED_SURFACE_TYPE = 103
+_T2_FIXED_SURFACE_VALUE = 2
+
 
 async def find_tp_message_offset(
     url: str,
@@ -356,6 +368,82 @@ async def find_tp_message_offset(
     logger.warning(
         "DMI DINI: scanned %d messages without finding tp (discipline=%d cat=%d num=%d)",
         max_messages, _TP_DISCIPLINE, _TP_CATEGORY, _TP_PARAMETER,
+    )
+    return None
+
+
+async def find_2t_message_offset(
+    url: str,
+    client: httpx.AsyncClient,
+    *,
+    max_messages: int = 200,
+) -> tuple[int, int] | None:
+    """Walk GRIB headers via byte-range to locate the 2-m temperature message.
+
+    Same shape as ``find_tp_message_offset`` but matches on the
+    Temperature parameter (discipline=0 cat=0 num=0) AND on the fixed-
+    surface descriptor (type=103 = "specified height above ground",
+    scaled value=2 metres) to disambiguate 2-m TMP from surface / soil /
+    pressure-level TMP messages, all of which share the same parameter
+    triplet.  Returns ``(byte_offset, byte_length)`` or ``None``.
+    """
+    from librewxr.data.retry import retry_get
+
+    offset = 0
+    for _ in range(max_messages):
+        resp = await retry_get(
+            client, url, headers={"Range": f"bytes={offset}-{offset + 511}"},
+            log_name="DMI DINI 2t header",
+        )
+        if resp is None:
+            return None
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError:
+            logger.warning("DMI DINI 2t header walk HTTP error at offset %d", offset)
+            return None
+        chunk = resp.content
+        if len(chunk) < 16 or chunk[:4] != b"GRIB":
+            return None
+        if chunk[7] != 2:
+            logger.warning("DMI DINI: unexpected GRIB edition %d at offset %d", chunk[7], offset)
+            return None
+        msg_len = struct.unpack(">Q", chunk[8:16])[0]
+        discipline = chunk[6]
+        cur = 16
+        while cur < len(chunk) - 5:
+            if cur + 4 > len(chunk):
+                break
+            sec_len = struct.unpack(">I", chunk[cur:cur + 4])[0]
+            if sec_len == 0 or sec_len > msg_len:
+                break
+            sec_num = chunk[cur + 4]
+            if sec_num == 4:
+                # Need cat (cur+9), num (cur+10), fixed-surface type
+                # (cur+22) and scaled value (cur+24..27) to fully
+                # qualify the 2-m TMP field.
+                if cur + 28 <= len(chunk):
+                    cat = chunk[cur + 9]
+                    num = chunk[cur + 10]
+                    fs_type = chunk[cur + 22]
+                    fs_value = struct.unpack(">i", chunk[cur + 24:cur + 28])[0]
+                    if (
+                        discipline == _T2_DISCIPLINE
+                        and cat == _T2_CATEGORY
+                        and num == _T2_PARAMETER
+                        and fs_type == _T2_FIXED_SURFACE_TYPE
+                        and fs_value == _T2_FIXED_SURFACE_VALUE
+                    ):
+                        return offset, msg_len
+                break
+            if sec_num >= 5:
+                break
+            cur += sec_len
+        offset += msg_len
+    logger.warning(
+        "DMI DINI: scanned %d messages without finding 2t (discipline=%d cat=%d num=%d type=%d value=%d)",
+        max_messages, _T2_DISCIPLINE, _T2_CATEGORY, _T2_PARAMETER,
+        _T2_FIXED_SURFACE_TYPE, _T2_FIXED_SURFACE_VALUE,
     )
     return None
 
@@ -436,6 +524,78 @@ def decode_tp_message(grib_bytes: bytes) -> np.ndarray | None:
     return np.ascontiguousarray(arr, dtype=np.float32)
 
 
+def decode_2t_message(grib_bytes: bytes) -> np.ndarray | None:
+    """Decode a single GRIB2 2-m temperature message into Celsius float32.
+
+    Returns ``None`` on parse failure.  Output shape is
+    ``(DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH)`` with row 0 at the
+    NORTHERN edge.  HARMONIE GRIB encodes 2-m TMP in Kelvin per the
+    GRIB convention; we subtract 273.15 before returning so the
+    threshold comparison in ``compute_snow_mask`` runs in °C, matching
+    every other regional NWP source in the chain.
+    """
+    import xarray as xr
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".grib2", delete=False) as tmp:
+            tmp.write(grib_bytes)
+            tmp_path = tmp.name
+        with _suppress_eccodes_stderr():
+            ds = xr.open_dataset(
+                tmp_path,
+                engine="cfgrib",
+                backend_kwargs={"indexpath": ""},
+            )
+        ds = ds.compute()
+    except Exception:
+        logger.exception("Failed to decode DMI DINI 2t GRIB2 message")
+        return None
+    finally:
+        if tmp_path is not None:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    if "t2m" in ds.data_vars:
+        arr = ds["t2m"].values
+    elif "2t" in ds.data_vars:
+        arr = ds["2t"].values
+    else:
+        for name, da in ds.data_vars.items():
+            if da.ndim == 2 and da.shape == (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH):
+                logger.warning(
+                    "DMI DINI 2t variable not named 't2m' (got %r); using fallback",
+                    name,
+                )
+                arr = da.values
+                break
+        else:
+            logger.warning("DMI DINI GRIB had no recognised 2t field")
+            return None
+
+    if arr.shape != (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH):
+        logger.warning(
+            "DMI DINI 2t has unexpected shape %s (expected %s); skipping",
+            arr.shape, (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH),
+        )
+        return None
+
+    if "latitude" in ds.coords:
+        lat_first = float(np.asarray(ds["latitude"].values).flat[0])
+        lat_last = float(np.asarray(ds["latitude"].values).flat[-1])
+        needs_flip = lat_first < lat_last
+    else:
+        needs_flip = True
+    if needs_flip:
+        arr = np.flipud(arr)
+
+    # cfgrib returns 2t in Kelvin; convert to Celsius for the threshold.
+    celsius = np.ascontiguousarray(arr, dtype=np.float32) - 273.15
+    return celsius
+
+
 # ── DMIDiniGrid: the public NWPSource implementation ─────────────────
 
 
@@ -450,10 +610,17 @@ class DMIDiniGrid:
         # Raw accumulated tp values keyed by (run_ts, step_hour); kept
         # only long enough to compute the rate at the next step.
         self._accum: dict[tuple[int, int], np.ndarray] = {}
+        # Per-frame snow mask (1 = snow, 0 = rain) keyed by the same
+        # (run_ts, lead_seconds) as ``_frames``.  Derived from the 2-m
+        # temperature message inside the same per-run HARMONIE GRIB
+        # file; the 2t byte offset is cached per run in ``_t2_offsets``.
+        self._snow_masks: dict[tuple[int, int], np.ndarray] = {}
         # Per-run cache of (tp_byte_offset, tp_byte_length).  Stable
         # across all leadtimes within a run, so the header walk runs
         # exactly once per new run we encounter.
         self._tp_offsets: dict[int, tuple[int, int]] = {}
+        # Parallel per-run cache of (2t_byte_offset, 2t_byte_length).
+        self._t2_offsets: dict[int, tuple[int, int]] = {}
         self._client: httpx.AsyncClient | None = None
         self._latest_run_ts: int | None = None
         self._fetch_lock = asyncio.Lock()
@@ -477,6 +644,9 @@ class DMIDiniGrid:
     def _frame_path(self, run_ts: int, lead_seconds: int) -> Path:
         return self._memmap_dir / f"r{run_ts}_l{lead_seconds}.dat"
 
+    def _snow_frame_path(self, run_ts: int, lead_seconds: int) -> Path:
+        return self._memmap_dir / f"r{run_ts}_l{lead_seconds}_snow.dat"
+
     def _to_memmap(self, name: str, data: np.ndarray) -> np.ndarray:
         final = self._memmap_dir / f"{name}.dat"
         tmp = final.with_suffix(".dat.tmp")
@@ -495,6 +665,8 @@ class DMIDiniGrid:
         for path in self._memmap_dir.glob("r*_l*.dat"):
             m = pat.match(path.stem)
             if m is None:
+                # Skip snow files ("rNNN_lNNN_snow"); they're loaded in
+                # the second pass below alongside their precip parents.
                 continue
             run_ts = int(m.group(1))
             lead_s = int(m.group(2))
@@ -513,6 +685,38 @@ class DMIDiniGrid:
             loaded += 1
         if loaded:
             logger.info("DMI DINI: loaded %d cached frame(s) from disk", loaded)
+
+        # Second pass: snow masks.  Orphans (no matching precip frame)
+        # are removed so they don't accumulate across restarts.
+        snow_pat = re.compile(r"^r(\d+)_l(\d+)_snow$")
+        snow_loaded = 0
+        for path in self._memmap_dir.glob("r*_l*_snow.dat"):
+            m = snow_pat.match(path.stem)
+            if m is None:
+                continue
+            run_ts = int(m.group(1))
+            lead_s = int(m.group(2))
+            if (run_ts, lead_s) not in self._frames:
+                path.unlink(missing_ok=True)
+                continue
+            try:
+                mm = np.memmap(
+                    path, dtype=np.uint8, mode="r",
+                    shape=(DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to memmap cached snow %s, removing", path,
+                )
+                path.unlink(missing_ok=True)
+                continue
+            self._snow_masks[(run_ts, lead_s)] = mm
+            snow_loaded += 1
+        if snow_loaded:
+            logger.info(
+                "DMI DINI: loaded %d cached snow mask(s) from disk",
+                snow_loaded,
+            )
 
     def __getstate__(self) -> dict:
         """Serialize state for cross-process reload (multi-worker mode).
@@ -534,12 +738,19 @@ class DMIDiniGrid:
         self._client = None
         self._fetch_lock = asyncio.Lock()
         self._frames = {}
+        self._accum = {}
+        self._snow_masks = {}
+        self._tp_offsets = {}
+        self._t2_offsets = {}
         self._latest_run_ts = None
         self._load_cached_frames()
 
     @property
     def data_bytes(self) -> int:
-        return sum(arr.nbytes for arr in self._frames.values())
+        return (
+            sum(arr.nbytes for arr in self._frames.values())
+            + sum(arr.nbytes for arr in self._snow_masks.values())
+        )
 
     @property
     def latest_run_iso(self) -> str | None:
@@ -550,6 +761,10 @@ class DMIDiniGrid:
     @property
     def frame_count(self) -> int:
         return len(self._frames)
+
+    @property
+    def snow_mask_count(self) -> int:
+        return len(self._snow_masks)
 
     # ── NWPSource Protocol ────────────────────────────────────────────
 
@@ -580,7 +795,7 @@ class DMIDiniGrid:
 
     @property
     def supports_snow(self) -> bool:
-        return False
+        return True
 
     def get_snow_mask(
         self,
@@ -588,7 +803,38 @@ class DMIDiniGrid:
         lon: np.ndarray,
         timestamp: int | None = None,
     ) -> np.ndarray:
-        return np.zeros(lat.shape, dtype=bool)
+        """Sample the snow / rain classification at each (lat, lon, ts).
+
+        Mirrors ``sample`` for the parallel 2t-derived snow mask: same
+        run picker, same bracket-lerp, then re-binarise at 0.5.  Returns
+        ``False`` everywhere if no snow mask is loaded for the bracket —
+        the chain dispatcher then falls through to the next snow-capable
+        source (typically ICON-EU for the southern fringe of DINI, then
+        IFS globally).
+        """
+        if timestamp is None or not self._snow_masks:
+            return np.zeros(lat.shape, dtype=bool)
+        run = self._pick_run(timestamp)
+        if run is None:
+            return np.zeros(lat.shape, dtype=bool)
+        lead = timestamp - run
+        l0, l1, alpha = bracket_lead_seconds(lead, self._bracket_interval())
+        s0 = self._snow_masks.get((run, l0))
+        s1 = self._snow_masks.get((run, l1))
+        if s0 is None or s1 is None:
+            return np.zeros(lat.shape, dtype=bool)
+        if alpha == 0.0:
+            grid = s0
+        elif alpha == 1.0:
+            grid = s1
+        else:
+            lerped = (
+                (1.0 - alpha) * s0.astype(np.float32)
+                + alpha * s1.astype(np.float32)
+            )
+            grid = (lerped >= 0.5).astype(np.uint8)
+        sampled = _sample_grid(grid, lat, lon, bilinear=False)
+        return sampled.astype(bool)
 
     def sample(
         self,
@@ -733,15 +979,14 @@ class DMIDiniGrid:
     def _interpolate_run_frames(self, run_ts: int) -> int:
         """Fill 10-min synthetic frames between hourly originals for one run.
 
-        Pulls this run's hourly precip frames out of ``self._frames``,
-        delegates to the shared Farneback warper, and memmap-writes the
-        synthetic frames back into ``self._frames`` at the new
-        ``lead_seconds`` keys.  DMI DINI does not yet derive a snow
-        mask (that's a Phase 9 follow-up), so we pass ``None`` for the
-        snow side — only precip frames get interpolated.
+        Pulls this run's hourly precip + snow frames out of
+        ``self._frames`` / ``self._snow_masks``, delegates to the shared
+        Farneback warper, and memmap-writes the synthetic frames (precip
+        and snow side-by-side) back into the in-memory dicts at the new
+        ``lead_seconds`` keys.
 
-        Returns the number of synthetic frames added.  Idempotent: if
-        the run already has stored-interval spacing, no work is done.
+        Returns the number of synthetic precip frames added.  Idempotent:
+        if the run already has stored-interval spacing, no work is done.
         """
         from librewxr.data.nwp_interpolation import interpolate_run
 
@@ -752,10 +997,17 @@ class DMIDiniGrid:
         }
         if len(frames_by_lead) < 2:
             return 0
+        snow_by_lead: dict[int, np.ndarray] | None = {
+            lead: arr
+            for (r, lead), arr in self._snow_masks.items()
+            if r == run_ts
+        }
+        if not snow_by_lead:
+            snow_by_lead = None
 
-        aug_frames, _aug_snow, _flow = interpolate_run(
+        aug_frames, aug_snow, _flow = interpolate_run(
             frames_by_lead,
-            snow_masks_by_ts=None,
+            snow_masks_by_ts=snow_by_lead,
             target_interval_seconds=STORED_INTERVAL_SECONDS,
             log_label=f"DMI DINI interpolation (run {run_ts})",
         )
@@ -767,6 +1019,21 @@ class DMIDiniGrid:
             mm = self._to_memmap(f"r{run_ts}_l{lead}", arr)
             self._frames[(run_ts, lead)] = mm
             added += 1
+        if aug_snow is not None:
+            for lead, snow_arr in aug_snow.items():
+                if (run_ts, lead) in self._snow_masks:
+                    continue
+                if (run_ts, lead) not in self._frames:
+                    continue
+                snow_uint8 = (
+                    snow_arr.astype(np.uint8)
+                    if snow_arr.dtype != np.uint8
+                    else snow_arr
+                )
+                mm = self._to_memmap(
+                    f"r{run_ts}_l{lead}_snow", snow_uint8,
+                )
+                self._snow_masks[(run_ts, lead)] = mm
         return added
 
     async def _fetch_one_step(
@@ -852,7 +1119,77 @@ class DMIDiniGrid:
         self._frames[(run_ts, lead_seconds)] = mm
         self._accum[(run_ts, step_hour)] = accum
 
+        # Snow side: a second byte-range fetch for the 2t message from
+        # the same per-(run, step) GRIB file.  Each step's 2t message is
+        # at a different byte offset than tp, but the per-run offset is
+        # stable across leadtimes — cached in ``_t2_offsets``.  Decode
+        # failures here are non-fatal: the precip frame still lands and
+        # ``get_snow_mask`` falls through to the next chain source for
+        # this bracket.
+        if (run_ts, lead_seconds) not in self._snow_masks:
+            await self._fetch_and_store_snow(run, step_hour, url, client)
+
         return 1
+
+    async def _fetch_and_store_snow(
+        self,
+        run: datetime,
+        step_hour: int,
+        url: str,
+        client: httpx.AsyncClient,
+    ) -> None:
+        """Byte-range fetch + decode the 2t message and store its snow mask.
+
+        Locates the 2t byte offset (cached per run) and pulls just that
+        message via Range request, decodes Kelvin → Celsius, classifies
+        via the shared ``compute_snow_mask`` helper, and memmap-writes
+        the result alongside the precip frame.  All failures log a
+        warning and return without storing — the chain dispatcher will
+        fall through to the next snow-capable source for the affected
+        bracket.
+        """
+        from librewxr.data.retry import retry_get
+
+        run_ts = int(run.timestamp())
+        lead_seconds = step_hour * BRACKET_INTERVAL_SECONDS
+
+        t2_loc = self._t2_offsets.get(run_ts)
+        if t2_loc is None:
+            t2_loc = await find_2t_message_offset(url, client)
+            if t2_loc is None:
+                logger.warning(
+                    "DMI DINI: unable to locate 2t message for run %s step %d",
+                    run.isoformat(), step_hour,
+                )
+                return
+            self._t2_offsets[run_ts] = t2_loc
+            logger.info(
+                "DMI DINI: 2t message located for run %s at byte offset %d (size %.2f MB)",
+                run.isoformat(), t2_loc[0], t2_loc[1] / 1e6,
+            )
+
+        offset, size = t2_loc
+        resp = await retry_get(
+            client, url,
+            headers={"Range": f"bytes={offset}-{offset + size - 1}"},
+            log_name="DMI DINI 2t data",
+        )
+        if resp is None:
+            return
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            logger.warning("DMI DINI 2t fetch failed for %s: %s", url, e)
+            return
+
+        t2_celsius = decode_2t_message(resp.content)
+        if t2_celsius is None:
+            return
+
+        threshold = settings.regional_snow_temp_threshold
+        snow = compute_snow_mask(t2_celsius, threshold)
+        mm = self._to_memmap(f"r{run_ts}_l{lead_seconds}_snow", snow)
+        self._snow_masks[(run_ts, lead_seconds)] = mm
 
     # ── Eviction ──────────────────────────────────────────────────────
 
@@ -868,8 +1205,27 @@ class DMIDiniGrid:
                 stale_frames.append(key)
         for key in stale_frames:
             self._frames.pop(key, None)
+            self._snow_masks.pop(key, None)
             try:
                 self._frame_path(*key).unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                self._snow_frame_path(*key).unlink(missing_ok=True)
+            except OSError:
+                pass
+        # Also evict orphan snow masks whose precip frame is gone (could
+        # happen if 2t decoded but tp's prior-step accum was missing).
+        stale_orphan_snow = []
+        for key in self._snow_masks:
+            run_ts, lead = key
+            valid_time = run_ts + lead
+            if valid_time < ws or valid_time > we:
+                stale_orphan_snow.append(key)
+        for key in stale_orphan_snow:
+            self._snow_masks.pop(key, None)
+            try:
+                self._snow_frame_path(*key).unlink(missing_ok=True)
             except OSError:
                 pass
         stale_accums = []
@@ -879,12 +1235,15 @@ class DMIDiniGrid:
                 stale_accums.append((run_ts, step_h))
         for k in stale_accums:
             self._accum.pop(k, None)
-        # Drop tp-offset cache entries for runs whose every frame has
-        # been evicted (i.e. that run is no longer in the active window).
+        # Drop tp / 2t offset cache entries for runs whose every frame
+        # has been evicted (i.e. that run is no longer in the window).
         live_runs = {r for (r, _) in self._frames}
         stale_runs = [r for r in self._tp_offsets if r not in live_runs]
         for r in stale_runs:
             self._tp_offsets.pop(r, None)
+        stale_t2_runs = [r for r in self._t2_offsets if r not in live_runs]
+        for r in stale_t2_runs:
+            self._t2_offsets.pop(r, None)
         if stale_frames:
             logger.info(
                 "DMI DINI: evicted %d out-of-window frame(s)", len(stale_frames),
@@ -895,7 +1254,9 @@ class DMIDiniGrid:
     async def close(self) -> None:
         self._frames.clear()
         self._accum.clear()
+        self._snow_masks.clear()
         self._tp_offsets.clear()
+        self._t2_offsets.clear()
         if self._client is not None and not self._client.is_closed:
             await self._client.aclose()
         self._client = None
