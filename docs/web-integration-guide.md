@@ -975,7 +975,7 @@ The `{smooth}_{snow}` path segment controls two independent features:
 
 - **Smooth** (`1` = on, `0` = off): Applies a Gaussian blur to soften the pixelated edges of radar data. Especially useful at higher zoom levels. The blur radius is configurable server-side via `LIBREWXR_SMOOTH_RADIUS`.
 
-- **Snow** (`1` = on, `0` = off): When enabled and ECMWF data is available, areas classified as snowfall use an alternate color palette (typically blues/purples instead of greens/yellows). Requires the server to have ECMWF IFS data loaded.
+- **Snow** (`1` = on, `0` = off): When enabled, areas classified as snowfall use an alternate color palette (typically blues/purples instead of greens/yellows). Classification comes from the regional NWP source covering each pixel (HRRR-CONUS / HRRR-Alaska / WRF-SMN / DMI DINI / ICON-EU each classify natively from their own 2-metre temperature field), or from ECMWF IFS snowfall ratio everywhere else.
 
 Common combinations:
 - `0_0` — raw, no smoothing, rain colors only

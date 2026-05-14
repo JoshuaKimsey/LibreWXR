@@ -529,6 +529,8 @@ Adds ~130 MB RAM for synthetic frames and ~5-10 seconds of compute per IFS fetch
 
 LibreWXR layers a chain of regional rapid-refresh NWP models on top of the global ECMWF IFS layer. At each pixel, the chain dispatches to the **narrowest** model whose domain covers it, soft-feathering at every domain edge so seams don't show.
 
+Most regional sources also classify each pixel as snow vs rain from their own 2-metre temperature field. The threshold is shared across all of them via [`LIBREWXR_REGIONAL_SNOW_TEMP_THRESHOLD`](#librewxr_regional_snow_temp_threshold). HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, and ICON-EU all classify natively; HRDPS and AROME Antilles fall through to IFS for snow detection (HRDPS is expected to be replaced by RRFSv1 mid-2026; AROME Antilles is tropical so the question rarely matters).
+
 Each regional source supports the same set of advanced tuning knobs:
 
 - `<SOURCE>_PUBLISH_DELAY_MINUTES` — how long after a model run's init time its files become available upstream. The fetcher won't try to read a run published more recently than this.
@@ -777,6 +779,29 @@ Full 0..72h files publish ~3-4 h after init; 4 h is conservative.
 | **Default** | `6.0` |
 | **Type** | float |
 | **Unit** | dBZ |
+
+### `LIBREWXR_REGIONAL_SNOW_TEMP_THRESHOLD`
+
+Temperature threshold for native snow/rain classification across every regional NWP source that derives a snow mask from its own 2-metre temperature field (HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, ICON-EU). Pixels colder than this threshold are tagged as snow and rendered with the snow palette when `snow=1` is set on the tile URL.
+
+| | |
+|---|---|
+| **Default** | `1.5` |
+| **Type** | float |
+| **Unit** | degrees Celsius |
+
+1.5 °C is a typical near-surface snow-vs-rain transition line. Drop towards 0 °C for a stricter "only true freezing" definition; raise to 2-3 °C to catch wet snow / sleet conditions that visually behave like snow on the ground.
+
+### `LIBREWXR_REGIONAL_INTERPOLATION`
+
+Enable optical-flow temporal interpolation of hourly regional NWP frames to 10-minute steps. Uses the same OpenCV Farneback dense flow we apply to ECMWF IFS, applied at the end of each fetch cycle to every regional source whose native cadence is hourly (currently WRF-SMN, DMI DINI, ICON-EU).
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+Without this, a moving precip cell appears to cross-fade between hourly bracket frames at intermediate query times, producing a visible "two faint copies" ghost. With it, the cell translates smoothly along motion vectors. Adds ~2-10 s of CPU per source per fetch cycle (smallest grid ~2 s, largest ~10 s). Snow masks ride alongside precip through the same interpolation step.
 
 ### `LIBREWXR_NWP_FETCH_CONCURRENCY`
 

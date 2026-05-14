@@ -27,7 +27,7 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Precipitation motion arrows** — optional Dark Sky-style arrows showing storm movement direction and speed, derived from optical flow. Available for both radar and ECMWF data globally. Supports light and dark styles for different map themes via `?arrows=light` or `?arrows=dark` query parameter
 - **IFS-derived satellite imagery** — global cloud cover tiles composited from ECMWF IFS high/mid/low cloud layers, approximating infrared satellite imagery. Up to 12 hours of hourly animation with persistent disk caching for instant restarts. Populates the Rain Viewer-compatible `satellite.infrared` endpoint
 - **Weather alerts (WMO CAP)** — global weather alerts polled every 5 minutes from severeweather.wmo.int, with MeteoAlarm geocodes for European polygon resolution. Surfaced through a Rain Viewer-extension alerts API (`/v2/alerts/...`). Configurable via `LIBREWXR_ALERTS_ENABLED`
-- **Snow detection** — per-pixel snow/rain classification using ECMWF IFS snowfall data
+- **Snow detection** — per-pixel snow/rain classification. Regional NWP sources classify natively from their own 2-metre temperature field (HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, ICON-EU); ECMWF IFS snowfall ratio fills everywhere else
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
 - **Tile cache warming** — background pre-rendering for smooth animation playback
 - **Multi-worker tile-server split** — optional production deployment splits the data pipeline from a pool of render workers that share state via memmap files. Lets every core actually do work instead of being GIL-bound at one. Run with `docker-compose.multiworker.yml`
