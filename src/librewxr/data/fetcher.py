@@ -86,12 +86,18 @@ class RadarFetcher:
 
         # Build a source for each enabled region based on its group
         # and the na_source setting.
+        #
+        # Group → source class dispatch (kept alphabetical; extend by
+        # adding a new ``elif region.group == "X":`` branch below):
+        #   CANADA  → MSCCanadaSource
+        #   EUROPE  → OperaSource
+        #   US      → MRMSSource (when na_source uses mrms) or IEMSource
         self._sources: dict[
             str,
-            IEMSource | MSCCanadaSource | OperaSource | MRMSSource,
+            IEMSource | MRMSSource | MSCCanadaSource | OperaSource,
         ] = {}
-        iem_source: IEMSource | None = None
         canada_source: MSCCanadaSource | None = None
+        iem_source: IEMSource | None = None
         opera_source: OperaSource | None = None
         # Keyed by MRMS product path so regions sharing a product (e.g.
         # USCOMP and CACOMP both use the bare CONUS path) share one
@@ -101,6 +107,8 @@ class RadarFetcher:
 
         use_mrms = self._na_source in ("mrms", "mrms_fallback")
         for region in self._enabled_regions:
+            # MRMS routes by region.name (one product path per region),
+            # so it's checked first as an override for US-group regions.
             if use_mrms and region.name in self._MRMS_REGIONS:
                 product = MRMS_PRODUCTS[region.name]
                 if product not in mrms_sources:
@@ -117,6 +125,7 @@ class RadarFetcher:
                     opera_source = OperaSource(settings.opera_base_url)
                 self._sources[region.name] = opera_source
             else:
+                # Default for US-group regions when not using MRMS.
                 if iem_source is None:
                     iem_source = IEMSource(settings.iem_base_url)
                 self._sources[region.name] = iem_source

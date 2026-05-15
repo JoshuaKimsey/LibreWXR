@@ -113,12 +113,14 @@ REGIONS: dict[str, RegionDef] = {
     ),
 }
 
-# Group aliases: shorthand names that expand to multiple regions
+# Group aliases: shorthand names that expand to multiple regions.
+# Keep entries in alphabetical order so the list stays scannable as new
+# groups are added.
 REGION_GROUPS: dict[str, list[str]] = {
+    "CANADA": ["CACOMP"],
     "CONUS": ["USCOMP"],
-    "US": ["USCOMP", "AKCOMP", "HICOMP", "PRCOMP", "GUCOMP"],
-"CANADA": ["CACOMP"],
     "EUROPE": ["OPERA"],
+    "US": ["USCOMP", "AKCOMP", "HICOMP", "PRCOMP", "GUCOMP"],
 }
 
 
