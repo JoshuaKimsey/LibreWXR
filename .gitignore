@@ -36,5 +36,8 @@ cache/
 # Site (managed separately, not part of the API repo)
 librewxr-site/
 
+# Outgoing correspondence drafts (kept local, sent manually)
+emails/
+
 # OpenCode example (not ready for release)
 examples/opencode-example.html

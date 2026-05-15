@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     # SOUTHEAST_ASIA.  Note: the historical ``cdn.neaaws.com`` CDN no
     # longer resolves (verified 2026-05-15); origin is the only host.
     mss_base_url: str = "https://www.weather.gov.sg/files/rainarea/480km"
+    # MSS Singapore publishes its 480 km product on a 30-min native
+    # cadence — three times slower than our 10-min frame cadence.
+    # Without interpolation the store ends up holding three identical
+    # copies of each native frame and the animation steps in chunks.
+    # With this on, MSSSource fetches the bracketing 30-min natives
+    # and warps + blends them with Farneback optical flow (same
+    # machinery the regional NWP path uses), so the in-between 10-min
+    # slots become genuine intermediate frames.  Set to False to fall
+    # back to native-frame-hold behaviour.
+    mss_interpolation: bool = True
     ecmwf_s3_bucket: str = "openmeteo"
     ecmwf_s3_region: str = "us-west-2"
     ecmwf_s3_prefix: str = "data_spatial/ecmwf_ifs"

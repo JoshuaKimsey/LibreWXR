@@ -139,7 +139,10 @@ class RadarFetcher:
                 self._sources[region.name] = opera_source
             elif region.group == "SOUTHEAST_ASIA":
                 if mss_source is None:
-                    mss_source = MSSSource(settings.mss_base_url)
+                    mss_source = MSSSource(
+                        settings.mss_base_url,
+                        interpolation=settings.mss_interpolation,
+                    )
                 self._sources[region.name] = mss_source
             elif region.group == "TAIWAN":
                 if cwa_source is None:

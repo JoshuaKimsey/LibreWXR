@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 import io
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
@@ -53,27 +53,45 @@ class TestSeacompRegion:
 
 
 class TestUrlForTimestamp:
+    """MSS publishes filenames in Singapore local time (UTC+8) even
+    though the request API is UTC.  These tests pin that conversion
+    explicitly — the original implementation silently served 8-hour
+    stale frames because it formatted the UTC timestamp directly into
+    the filename instead of shifting to SGT first.
+    """
+
     def _src(self) -> MSSSource:
         return MSSSource("https://example.test/files/rainarea/480km")
 
     def test_rounds_down_to_30_min_boundary(self):
-        # 2026-05-15 10:47:32 UTC → 10:30 slot
+        # 2026-05-15 10:47:32 UTC → 10:30 UTC native → 18:30 SGT filename
         src = self._src()
         ts = int(datetime(2026, 5, 15, 10, 47, 32, tzinfo=timezone.utc).timestamp())
         url = src._url_for_timestamp(ts)
-        assert url.endswith("dpsri_480km_2026051510300000dBR.dpsri.png"), url
+        assert url.endswith("dpsri_480km_2026051518300000dBR.dpsri.png"), url
 
     def test_exact_boundary_kept(self):
+        # 10:30 UTC → 18:30 SGT
         src = self._src()
         ts = int(datetime(2026, 5, 15, 10, 30, 0, tzinfo=timezone.utc).timestamp())
         url = src._url_for_timestamp(ts)
-        assert url.endswith("dpsri_480km_2026051510300000dBR.dpsri.png")
+        assert url.endswith("dpsri_480km_2026051518300000dBR.dpsri.png")
 
     def test_top_of_hour_kept(self):
+        # 11:00 UTC → 19:00 SGT
         src = self._src()
         ts = int(datetime(2026, 5, 15, 11, 0, 0, tzinfo=timezone.utc).timestamp())
         url = src._url_for_timestamp(ts)
-        assert url.endswith("dpsri_480km_2026051511000000dBR.dpsri.png")
+        assert url.endswith("dpsri_480km_2026051519000000dBR.dpsri.png")
+
+    def test_utc_evening_crosses_to_next_day_in_sgt(self):
+        # 18:30 UTC = 02:30 SGT the NEXT day — verifies the date in the
+        # filename rolls over correctly (any UTC after 16:00 lands in
+        # tomorrow's SGT date).
+        src = self._src()
+        ts = int(datetime(2026, 5, 15, 18, 30, 0, tzinfo=timezone.utc).timestamp())
+        url = src._url_for_timestamp(ts)
+        assert url.endswith("dpsri_480km_2026051602300000dBR.dpsri.png"), url
 
     def test_base_url_is_preserved(self):
         src = self._src()
@@ -160,6 +178,222 @@ class TestPaletteDecode:
 
     def test_bad_png_returns_none(self):
         assert _decode_mss_png(b"not a png", self._fake_region(1)) is None
+
+
+class _FakeResp:
+    """Minimal stand-in for the httpx.Response shape MSSSource expects."""
+
+    def __init__(self, status_code: int, content: bytes = b""):
+        self.status_code = status_code
+        self.content = content
+
+
+def _make_native_png(value: int = 26) -> bytes:
+    """Render a 480x480 RGBA PNG using one stop from the MSS palette.
+
+    *value* indexes into _MSS_PALETTE so different natives can be
+    visually distinct (which is what we need to verify interpolation
+    actually warps between them rather than copying one side through).
+    """
+    r, g, b, _ = _MSS_PALETTE[value]
+    arr = np.zeros((480, 480, 4), dtype=np.uint8)
+    arr[..., 0] = r
+    arr[..., 1] = g
+    arr[..., 2] = b
+    arr[..., 3] = 255
+    # Add a small variation so the optical-flow pass has something to
+    # actually track (uniform frames produce zero-flow).
+    arr[200:280, 200:280, :3] = _MSS_PALETTE[value + 4][:3]
+    img = Image.fromarray(arr, mode="RGBA")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+class TestNativeTsRounding:
+    """Bracket pair derivation — the math underneath fetch_for_ts."""
+
+    def test_aligned_30_min_is_its_own_native(self):
+        ts = int(datetime(2026, 5, 15, 10, 30, 0, tzinfo=timezone.utc).timestamp())
+        assert MSSSource._native_ts_for(ts) == ts
+
+    def test_10_min_offset_rounds_down(self):
+        prev = datetime(2026, 5, 15, 10, 0, 0, tzinfo=timezone.utc)
+        for minute in (0, 10, 20):
+            ts = int(prev.replace(minute=minute).timestamp())
+            assert MSSSource._native_ts_for(ts) == int(prev.timestamp())
+
+    def test_just_past_30_rounds_to_30(self):
+        anchor = int(datetime(2026, 5, 15, 10, 30, 0, tzinfo=timezone.utc).timestamp())
+        for minute in (30, 40, 50):
+            ts = int(datetime(2026, 5, 15, 10, minute, 0, tzinfo=timezone.utc).timestamp())
+            assert MSSSource._native_ts_for(ts) == anchor
+
+
+class TestBracketPairFetch:
+    """Verify fetch_archive_frame dispatches correctly to native vs interp.
+
+    All HTTP calls are stubbed; the test exercises the routing + caching
+    logic rather than the network or the optical-flow output quality.
+    """
+
+    @pytest.fixture
+    def src(self, monkeypatch) -> MSSSource:
+        src = MSSSource(interpolation=True)
+        # Track per-native-ts fetch counts to assert deduplication.
+        src._fetch_log: dict[int, int] = {}
+
+        async def fake_get_client():
+            return None  # never actually used — retry_get is stubbed
+
+        async def fake_retry_get(client, url, log_name=None):
+            # URL filename is in SGT (UTC+8) — see MSSSource._LOCAL_TZ_OFFSET.
+            # Subtract 8h to recover the UTC native_ts the source asked for.
+            fname = url.rsplit("/", 1)[-1]
+            ts_str = fname.split("_")[2][:12]
+            sgt = datetime.strptime(ts_str, "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+            utc_native_ts = int((sgt - timedelta(hours=8)).timestamp())
+            src._fetch_log[utc_native_ts] = src._fetch_log.get(utc_native_ts, 0) + 1
+            # Use the half-hour-of-day as a value index into the palette
+            # so consecutive natives differ visually.
+            idx = (sgt.minute // 30) + sgt.hour * 2
+            return _FakeResp(200, _make_native_png(value=idx % 20))
+
+        monkeypatch.setattr(src, "_get_client", fake_get_client)
+        monkeypatch.setattr(
+            "librewxr.data.sources.retry_get", fake_retry_get,
+        )
+        return src
+
+    async def test_aligned_request_returns_native_only(self, src: MSSSource):
+        region = REGIONS["SEACOMP"]
+        dt = datetime(2026, 5, 15, 10, 30, 0, tzinfo=timezone.utc)
+        frame = await src.fetch_archive_frame(region, dt)
+        assert frame is not None
+        # Only the 10:30 native was fetched — no bracket pair work.
+        assert list(src._fetch_log.keys()) == [int(dt.timestamp())]
+        # No flow computation for an aligned request.
+        assert len(src._flow_cache) == 0
+
+    async def test_sub_interval_fetches_both_brackets(self, src: MSSSource):
+        region = REGIONS["SEACOMP"]
+        # 10:10 sits between native 10:00 and native 10:30.
+        dt = datetime(2026, 5, 15, 10, 10, 0, tzinfo=timezone.utc)
+        frame = await src.fetch_archive_frame(region, dt)
+        assert frame is not None
+        ts_prev = int(datetime(2026, 5, 15, 10, 0, 0, tzinfo=timezone.utc).timestamp())
+        ts_next = int(datetime(2026, 5, 15, 10, 30, 0, tzinfo=timezone.utc).timestamp())
+        assert set(src._fetch_log.keys()) == {ts_prev, ts_next}
+        # Flow between this pair should be cached.
+        assert (ts_prev, ts_next) in src._flow_cache
+
+    async def test_two_sub_interval_slots_share_one_flow_compute(self, src: MSSSource):
+        region = REGIONS["SEACOMP"]
+        # 10:10 and 10:20 both bracket the same 10:00 → 10:30 pair.
+        for minute in (10, 20):
+            dt = datetime(2026, 5, 15, 10, minute, 0, tzinfo=timezone.utc)
+            f = await src.fetch_archive_frame(region, dt)
+            assert f is not None
+        ts_prev = int(datetime(2026, 5, 15, 10, 0, 0, tzinfo=timezone.utc).timestamp())
+        ts_next = int(datetime(2026, 5, 15, 10, 30, 0, tzinfo=timezone.utc).timestamp())
+        # Each native was fetched exactly once, not twice.
+        assert src._fetch_log[ts_prev] == 1
+        assert src._fetch_log[ts_next] == 1
+        # Exactly one flow pair cached.
+        assert len(src._flow_cache) == 1
+
+    async def test_three_consecutive_slots_produce_three_distinct_frames(
+        self, src: MSSSource,
+    ):
+        """The bug we're fixing: 10:00 / 10:10 / 10:20 used to be identical.
+
+        After the refactor they must be three distinct frames — the
+        native at 10:00 plus two genuinely interpolated frames.
+        """
+        region = REGIONS["SEACOMP"]
+        frames = []
+        for minute in (0, 10, 20):
+            dt = datetime(2026, 5, 15, 10, minute, 0, tzinfo=timezone.utc)
+            f = await src.fetch_archive_frame(region, dt)
+            assert f is not None
+            frames.append(f)
+        # No pair should be byte-identical.
+        assert not np.array_equal(frames[0], frames[1])
+        assert not np.array_equal(frames[1], frames[2])
+        assert not np.array_equal(frames[0], frames[2])
+
+    async def test_interpolation_off_holds_last_frame(self, monkeypatch):
+        """With interpolation disabled, sub-interval slots return the
+        same earlier-native data — the explicit hold-last-frame
+        fallback documented for the config knob."""
+        src = MSSSource(interpolation=False)
+        src._fetch_log = {}
+
+        async def fake_get_client():
+            return None
+
+        async def fake_retry_get(client, url, log_name=None):
+            # Filename is SGT; convert back to UTC native_ts for logging.
+            fname = url.rsplit("/", 1)[-1]
+            ts_str = fname.split("_")[2][:12]
+            sgt = datetime.strptime(ts_str, "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+            utc_native_ts = int((sgt - timedelta(hours=8)).timestamp())
+            src._fetch_log[utc_native_ts] = (
+                src._fetch_log.get(utc_native_ts, 0) + 1
+            )
+            idx = (sgt.minute // 30) + sgt.hour * 2
+            return _FakeResp(200, _make_native_png(value=idx % 20))
+
+        monkeypatch.setattr(src, "_get_client", fake_get_client)
+        monkeypatch.setattr(
+            "librewxr.data.sources.retry_get", fake_retry_get,
+        )
+
+        region = REGIONS["SEACOMP"]
+        frames = []
+        for minute in (0, 10, 20):
+            dt = datetime(2026, 5, 15, 10, minute, 0, tzinfo=timezone.utc)
+            f = await src.fetch_archive_frame(region, dt)
+            frames.append(f)
+        # All three slots resolve to the native at 10:00, so the frames
+        # are byte-identical AND only one native was fetched.
+        assert np.array_equal(frames[0], frames[1])
+        assert np.array_equal(frames[1], frames[2])
+        ts_prev = int(datetime(2026, 5, 15, 10, 0, 0, tzinfo=timezone.utc).timestamp())
+        assert list(src._fetch_log.keys()) == [ts_prev]
+
+    async def test_next_bracket_404_falls_back_to_prev_native(self, monkeypatch):
+        """If the future bracket end isn't published yet (common for
+        the most-recent slot), the source returns the earlier native
+        rather than a hole in the timeline."""
+        src = MSSSource(interpolation=True)
+
+        async def fake_get_client():
+            return None
+
+        async def fake_retry_get(client, url, log_name=None):
+            # Filename is SGT; convert back to UTC for the comparison.
+            fname = url.rsplit("/", 1)[-1]
+            ts_str = fname.split("_")[2][:12]
+            sgt = datetime.strptime(ts_str, "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+            utc_native = sgt - timedelta(hours=8)
+            # Pretend everything at or after the future bracket (10:30 UTC) is unpublished.
+            if utc_native >= datetime(2026, 5, 15, 10, 30, 0, tzinfo=timezone.utc):
+                return _FakeResp(404)
+            return _FakeResp(200, _make_native_png(value=5))
+
+        monkeypatch.setattr(src, "_get_client", fake_get_client)
+        monkeypatch.setattr(
+            "librewxr.data.sources.retry_get", fake_retry_get,
+        )
+
+        region = REGIONS["SEACOMP"]
+        # Ask for 10:20: bracket pair is (10:00, 10:30). 10:30 is 404.
+        # Expect 10:00 native returned, no flow computed.
+        dt = datetime(2026, 5, 15, 10, 20, 0, tzinfo=timezone.utc)
+        frame = await src.fetch_archive_frame(region, dt)
+        assert frame is not None
+        assert len(src._flow_cache) == 0  # no interp without both ends
 
 
 class TestSeacompTileOverlap:

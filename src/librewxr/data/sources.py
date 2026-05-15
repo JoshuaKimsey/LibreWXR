@@ -1421,23 +1421,75 @@ class MSSSource:
     via discrete palette → dBZ lookup (treating dBR as dBZ for our
     visualisation purposes).
 
+    The fetcher calls this source once per 10-min slot, but the native
+    cadence is 30 min — so for every native frame, two of the requested
+    10-min slots fall strictly between bracketing natives.  Rather than
+    storing three identical copies of each native frame (which would
+    make the animation step in chunks and miss real motion), we fetch
+    the bracket pair ``(T_prev, T_next)``, compute Farneback flow
+    between them, and warp + blend at the appropriate sub-interval
+    fraction.  Native frames pass through unchanged at ``t == 0``.
+
+    Two internal caches keep this cheap:
+      * ``_native_cache`` keys decoded native frames by native ts so
+        the bracket pair is fetched once per cycle even when the
+        fetcher issues parallel requests for the three 10-min slots
+        that share it.
+      * ``_flow_cache`` keys computed Farneback flow fields by the
+        ``(ts_prev, ts_next)`` pair so the optical-flow compute pass
+        (the expensive step) runs once per native pair.
+
+    Interpolation can be turned off via ``LIBREWXR_MSS_INTERPOLATION``,
+    in which case the source falls back to native-frame-hold (same
+    grid replicated across the three 10-min slots within each 30-min
+    window).
+
     License: Singapore Open Data Licence v1.0 (data.gov.sg / MSS /
     NEA).  Attribution recorded in README and docs/coverage.md.
     """
 
-    _CADENCE_SEC = 1800        # 30 minutes
-    # Native cadence is 30 min but we fetch on the 10-min radar cycle,
-    # so we round the target down to the most recent 30-min slot and
-    # walk back up to 4 prior slots (= 2 h) before giving up — covers
-    # transient outages without spamming an unfindable archive.
+    _CADENCE_SEC = 1800        # 30 minutes (native)
+    _STORE_INTERVAL_SEC = 600  # 10 minutes (LibreWXR frame cadence)
+    # MSS filename timestamps are in Singapore local time (UTC+8,
+    # no DST), not UTC.  This was empirically confirmed by matching
+    # the rendered page labels — filename ``_202605152030_`` is
+    # labelled "8.30 pm Fri 15 May" on the public viewer, which is
+    # 20:30 SGT = 12:30 UTC.  The original implementation assumed
+    # UTC filenames and silently served frames 8 hours stale (the
+    # SGT-UTC offset).  Same convention as CWA Taiwan (UTC+8) and
+    # MARN El Salvador (UTC-6) — local time is the norm for
+    # national met service products, NOT UTC.
+    _LOCAL_TZ_OFFSET = 8       # SGT is UTC+8 year-round
+    # Walk back up to 4 prior native slots (= 2 h) before giving up —
+    # covers transient outages without spamming an unfindable archive.
     _MAX_FALLBACK_STEPS = 4
+    # Soft caps on the native + flow caches.  Each native frame is
+    # 480x480 uint8 ≈ 230 KB; each flow field is 480x480x2 float32 ≈
+    # 1.8 MB.  At 12 native frames + 8 flow pairs the cap is well
+    # under 20 MB total — generous for our 12-frame ring buffer.
+    _NATIVE_CACHE_MAX = 12
+    _FLOW_CACHE_MAX = 8
 
     def __init__(
         self,
         base_url: str = "https://www.weather.gov.sg/files/rainarea/480km",
+        interpolation: bool = True,
     ):
         self._base_url = base_url.rstrip("/")
+        self._interpolation = interpolation
         self._client: httpx.AsyncClient | None = None
+        # native_ts -> decoded uint8 grid; populated lazily.  A None
+        # sentinel records a confirmed 404 so adjacent slots don't
+        # re-attempt the same dead URL inside one cycle.
+        self._native_cache: dict[int, np.ndarray | None] = {}
+        # Per-ts asyncio.Lock so concurrent requests for the same
+        # native ts coalesce into one fetch.
+        self._native_locks: dict[int, asyncio.Lock] = {}
+        # (ts_prev, ts_next) -> flow field; computed lazily.
+        self._flow_cache: dict[tuple[int, int], np.ndarray] = {}
+        # Insertion-order tracking for FIFO eviction on cache caps.
+        self._native_order: list[int] = []
+        self._flow_order: list[tuple[int, int]] = []
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -1447,66 +1499,228 @@ class MSSSource:
             )
         return self._client
 
-    def _url_for_timestamp(self, ts: int) -> str:
-        """Build the PNG URL for a unix timestamp.
+    @classmethod
+    def _native_ts_for(cls, ts: int) -> int:
+        """Round *ts* down to its native-cadence (30 min) anchor."""
+        return (ts // cls._CADENCE_SEC) * cls._CADENCE_SEC
 
-        Rounds *ts* down to the nearest 30-min slot and formats as
-        ``dpsri_480km_YYYYMMDDHHMM0000dBR.dpsri.png`` (UTC, with a
-        fixed 4-zero pad after the 12-digit timestamp).
+    def _url_for_native_ts(self, native_ts: int) -> str:
+        """Build the PNG URL for a *native* 30-min unix timestamp.
+
+        Caller is responsible for passing a 30-min-aligned ts (use
+        :meth:`_native_ts_for`).  ``native_ts`` is a UTC unix epoch;
+        the filename uses Singapore local time (UTC+8) — see
+        :attr:`_LOCAL_TZ_OFFSET` for why.
         """
-        rounded = (ts // self._CADENCE_SEC) * self._CADENCE_SEC
-        dt = datetime.fromtimestamp(rounded, tz=timezone.utc)
+        sgt = datetime.fromtimestamp(
+            native_ts, tz=timezone.utc,
+        ) + timedelta(hours=self._LOCAL_TZ_OFFSET)
         fname = (
-            f"dpsri_480km_{dt.strftime('%Y%m%d%H%M')}0000dBR.dpsri.png"
+            f"dpsri_480km_{sgt.strftime('%Y%m%d%H%M')}0000dBR.dpsri.png"
         )
         return f"{self._base_url}/{fname}"
+
+    # Backwards-compat alias kept for tests that exercise the URL
+    # builder via the older entry point name.  Equivalent to
+    # ``_url_for_native_ts(_native_ts_for(ts))``.
+    def _url_for_timestamp(self, ts: int) -> str:
+        return self._url_for_native_ts(self._native_ts_for(ts))
 
     async def fetch_frame(
         self, region: RegionDef, minutes_ago: int
     ) -> np.ndarray | None:
+        # The fetcher feeds clock-aligned 10-min slots, so use the
+        # current 10-min boundary as the anchor rather than the
+        # 30-min one — otherwise minutes_ago=0 would silently snap
+        # to the most recent 30-min boundary even when a closer
+        # 10-min slot is what the store actually wants.
         now_rounded = (
-            int(time.time() // self._CADENCE_SEC) * self._CADENCE_SEC
+            int(time.time() // self._STORE_INTERVAL_SEC)
+            * self._STORE_INTERVAL_SEC
         )
         target_ts = now_rounded - minutes_ago * 60
-        return await self._fetch_png(target_ts, region)
+        return await self._fetch_for_ts(target_ts, region)
 
     async def fetch_archive_frame(
         self, region: RegionDef, dt: datetime
     ) -> np.ndarray | None:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return await self._fetch_png(int(dt.timestamp()), region)
+        return await self._fetch_for_ts(int(dt.timestamp()), region)
 
-    async def _fetch_png(
+    async def _fetch_for_ts(
         self, ts: int, region: RegionDef
     ) -> np.ndarray | None:
-        """Download and decode, falling back to older 30-min slots on 404."""
-        client = await self._get_client()
-        for step in range(self._MAX_FALLBACK_STEPS + 1):
-            url = self._url_for_timestamp(ts - step * self._CADENCE_SEC)
-            resp = await retry_get(client, url, log_name="MSS")
-            if resp is None:
-                return None
-            if resp.status_code == 200:
-                arr = _decode_mss_png(resp.content, region)
-                if arr is not None and step > 0:
-                    logger.debug(
-                        "MSS fallback succeeded at step %d: %s",
-                        step, url.rsplit("/", 1)[-1],
-                    )
-                return arr
-            if resp.status_code == 404 and step < self._MAX_FALLBACK_STEPS:
-                continue
-            logger.warning(
-                "MSS fetch failed: HTTP %d (%s)",
-                resp.status_code, url.rsplit("/", 1)[-1],
+        """Return the frame for a single 10-min store slot.
+
+        For ts aligned with a native 30-min anchor, returns the
+        decoded native frame (with the fallback walk-back if that
+        slot is 404).  For ts strictly between two natives, fetches
+        the bracket pair and either:
+          - returns the optical-flow-blended frame (if
+            ``self._interpolation`` is True and both natives are
+            available), or
+          - returns the earlier native (hold-last-frame fallback).
+        """
+        ts_prev = self._native_ts_for(ts)
+        offset_within_window = ts - ts_prev
+
+        # Aligned case: just the native (with walk-back on 404).
+        if offset_within_window == 0:
+            return await self._fetch_native_with_fallback(ts_prev, region)
+
+        # Sub-interval case.  Try the bracket pair.
+        ts_next = ts_prev + self._CADENCE_SEC
+        if self._interpolation:
+            prev_frame, next_frame = await asyncio.gather(
+                self._fetch_native_cached(ts_prev, region),
+                self._fetch_native_cached(ts_next, region),
             )
-            return None
+
+            if prev_frame is not None and next_frame is not None:
+                t = offset_within_window / self._CADENCE_SEC
+                return self._interpolate(ts_prev, ts_next, prev_frame, next_frame, t)
+
+            # Bracket-pair incomplete (most-recent slot not yet
+            # published, or transient miss).  Fall back to whichever
+            # bracket end exists, walking older slots if needed.
+            if prev_frame is not None:
+                return prev_frame
+            if next_frame is not None:
+                return next_frame
+            # Both missing → walk back from ts_prev like a normal
+            # native fetch would.
+            return await self._fetch_native_with_fallback(ts_prev, region)
+
+        # Interpolation disabled → hold-last-frame: return whichever
+        # native covers this 10-min slot's window.
+        return await self._fetch_native_with_fallback(ts_prev, region)
+
+    async def _fetch_native_with_fallback(
+        self, native_ts: int, region: RegionDef
+    ) -> np.ndarray | None:
+        """Fetch a native 30-min frame, walking back on 404.
+
+        Used both for aligned requests and as the fallback path when
+        a bracket pair is incomplete.  The walk-back returns the
+        OLDER frame's data even though the caller asked for
+        ``native_ts``; this is intentional — the fetcher prefers
+        slightly-stale-but-real data over a hole in the timeline.
+        """
+        for step in range(self._MAX_FALLBACK_STEPS + 1):
+            candidate_ts = native_ts - step * self._CADENCE_SEC
+            frame = await self._fetch_native_cached(candidate_ts, region)
+            if frame is not None:
+                if step > 0:
+                    logger.debug(
+                        "MSS fallback succeeded at step %d for native_ts=%d",
+                        step, native_ts,
+                    )
+                return frame
         return None
+
+    async def _fetch_native_cached(
+        self, native_ts: int, region: RegionDef
+    ) -> np.ndarray | None:
+        """Return the decoded native frame for *native_ts*, cached.
+
+        Concurrent calls for the same ``native_ts`` coalesce: only
+        the first acquirer of the per-ts lock issues the HTTP fetch;
+        subsequent callers wait on the lock and read the populated
+        cache entry.  404s are also cached (as ``None``) so a missed
+        slot doesn't retrigger on every adjacent fetch within a
+        cycle.
+        """
+        if native_ts in self._native_cache:
+            return self._native_cache[native_ts]
+
+        lock = self._native_locks.setdefault(native_ts, asyncio.Lock())
+        async with lock:
+            # Re-check after acquiring the lock — another coroutine
+            # may have populated the cache while we were waiting.
+            if native_ts in self._native_cache:
+                return self._native_cache[native_ts]
+
+            client = await self._get_client()
+            url = self._url_for_native_ts(native_ts)
+            resp = await retry_get(client, url, log_name="MSS")
+
+            frame: np.ndarray | None = None
+            if resp is None:
+                # Treat retry exhaustion the same as a 404 — record
+                # the miss so peer requests in this cycle don't retry
+                # the same dead URL.
+                frame = None
+            elif resp.status_code == 200:
+                frame = _decode_mss_png(resp.content, region)
+            elif resp.status_code == 404:
+                frame = None
+            else:
+                logger.warning(
+                    "MSS fetch failed: HTTP %d (%s)",
+                    resp.status_code, url.rsplit("/", 1)[-1],
+                )
+                frame = None
+
+            self._cache_native(native_ts, frame)
+            # Lock dict entry only useful while a fetch is in
+            # flight; drop it once cached to avoid unbounded growth.
+            self._native_locks.pop(native_ts, None)
+            return frame
+
+    def _cache_native(self, native_ts: int, frame: np.ndarray | None) -> None:
+        """Insert into the native cache, evicting oldest on overflow."""
+        self._native_cache[native_ts] = frame
+        self._native_order.append(native_ts)
+        while len(self._native_order) > self._NATIVE_CACHE_MAX:
+            evict = self._native_order.pop(0)
+            self._native_cache.pop(evict, None)
+            # Invalidate any flow entries that referenced the evicted
+            # native — keeping a stale flow against a missing frame
+            # buys nothing and clouds the cache.
+            for key in list(self._flow_cache.keys()):
+                if evict in key:
+                    self._flow_cache.pop(key, None)
+                    if key in self._flow_order:
+                        self._flow_order.remove(key)
+
+    def _interpolate(
+        self,
+        ts_prev: int,
+        ts_next: int,
+        prev_frame: np.ndarray,
+        next_frame: np.ndarray,
+        t: float,
+    ) -> np.ndarray:
+        """Warp + blend the bracket pair at fraction *t* ∈ (0, 1).
+
+        Caches the Farneback flow field per ``(ts_prev, ts_next)``
+        pair, so the second sub-interval slot in a window reuses the
+        flow computed for the first.
+        """
+        from librewxr.data.nwp_interpolation import interpolate_pair_at_fraction
+
+        key = (ts_prev, ts_next)
+        flow = self._flow_cache.get(key)
+        interp, computed_flow = interpolate_pair_at_fraction(
+            prev_frame, next_frame, t, flow=flow,
+        )
+        if flow is None:
+            self._flow_cache[key] = computed_flow
+            self._flow_order.append(key)
+            while len(self._flow_order) > self._FLOW_CACHE_MAX:
+                evict = self._flow_order.pop(0)
+                self._flow_cache.pop(evict, None)
+        return interp
 
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
+        self._native_cache.clear()
+        self._native_locks.clear()
+        self._flow_cache.clear()
+        self._native_order.clear()
+        self._flow_order.clear()
 
 
 def _decode_mss_png(data: bytes, region: RegionDef) -> np.ndarray | None:

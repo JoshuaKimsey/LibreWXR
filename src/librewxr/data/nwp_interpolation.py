@@ -159,6 +159,53 @@ def interpolate_run(
     return result_frames, result_snow, last_flow
 
 
+def interpolate_pair_at_fraction(
+    frame0: np.ndarray,
+    frame1: np.ndarray,
+    t: float,
+    flow: np.ndarray | None = None,
+    downscale: int = _DEFAULT_DOWNSCALE,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Synthesize a single intermediate frame between two native frames.
+
+    Companion to :func:`interpolate_run` for callers that have one pair
+    of frames and need one synthetic frame at a known time fraction
+    (e.g. radar sources whose native cadence is wider than the stored
+    cadence).  Returns both the warped frame and the computed flow
+    field, so callers caching the flow for adjacent fractions can pass
+    it back in via the ``flow`` argument and skip recomputation.
+
+    Args:
+        frame0: Earlier native frame (uint8 dBZ-encoded).
+        frame1: Later native frame (uint8 dBZ-encoded).
+        t: Position between the two, in (0, 1).  ``t=0`` returns
+            ``frame0`` unchanged; ``t=1`` returns ``frame1`` unchanged.
+        flow: Optional pre-computed Farneback flow field from a prior
+            call on the same pair.  Skips the compute pass if supplied.
+        downscale: Same as :func:`interpolate_run`.
+
+    Returns:
+        ``(interp_frame, flow)``.  Caller may reuse ``flow`` for other
+        fractions of the same pair.
+    """
+    if t <= 0.0:
+        return frame0.copy(), flow if flow is not None else np.zeros(
+            frame0.shape + (2,), dtype=np.float32,
+        )
+    if t >= 1.0:
+        return frame1.copy(), flow if flow is not None else np.zeros(
+            frame0.shape + (2,), dtype=np.float32,
+        )
+
+    if flow is None:
+        flow = _compute_flow(frame0, frame1, downscale)
+
+    h, w = frame0.shape
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    interp = _interpolate_precip(frame0, frame1, flow, t, xs, ys)
+    return interp, flow
+
+
 def _compute_flow(
     frame0: np.ndarray,
     frame1: np.ndarray,
