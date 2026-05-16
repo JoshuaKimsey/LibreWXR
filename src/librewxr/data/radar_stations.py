@@ -45,6 +45,21 @@ REGION_RADAR_RANGE: dict[str, float] = {
     # (negligible visual impact) and avoids any IFS bleed inside
     # the radar's real coverage.
     "TWCOMP": 550.0,
+    # MET Malaysia CAPPI composite extends well past the standard
+    # 240 km Doppler range — empirically measured 372 km max extent
+    # over Peninsular Malaysia and 332 km over East Malaysia from the
+    # nearest station, with p99 distances of 313 km and 302 km
+    # respectively.  The default 240 km would clip ~10% of legitimate
+    # radar data (visible as IFS bleed at frame T+0 and a "chunk of
+    # radar rain blinking out" at the first nowcast frame as the
+    # blend switches to model outside the mask).  Ranges chosen to
+    # snugly cover the measured max with small margin: a looser fit
+    # would help if maxes fluctuate day-to-day, but it would also
+    # hide IFS precipitation over the South China Sea / Celebes Sea
+    # (which, unlike CWA's open Pacific halo, gets real rain).  If
+    # clipping reappears on a heavy convective day, bump by 25 km.
+    "MYPENINSULAR": 375.0,
+    "MYEAST": 350.0,
 }
 
 # NEXRAD WSR-88D stations covering USCOMP (continental US).
