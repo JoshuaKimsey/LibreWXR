@@ -25,6 +25,7 @@ from librewxr.data.sources import (
     CWASource,
     IEMSource,
     MARNSource,
+    MMDSource,
     MRMS_EXTENTS,
     MRMS_PRODUCTS,
     MRMSSource,
@@ -83,6 +84,14 @@ class RadarFetcher:
         self._cloud_task: asyncio.Task | None = None
         self._enabled_regions = [
             REGIONS[name] for name in settings.get_enabled_regions()
+            # Honour mmd_enabled (default True) — when off, drop the MET
+            # Malaysia regions even if the user's region spec is a group
+            # alias (e.g. SOUTHEAST_ASIA, ALL) that would otherwise pull
+            # them in.  SGCOMP (MSS Singapore) stays unaffected.
+            if not (
+                name in ("MYPENINSULAR", "MYEAST")
+                and not settings.mmd_enabled
+            )
         ]
 
         self._na_source = settings.na_source
@@ -95,17 +104,18 @@ class RadarFetcher:
         #   CANADA           → MSCCanadaSource
         #   CENTRAL_AMERICA  → MARNSource
         #   EUROPE           → OperaSource
-        #   SOUTHEAST_ASIA   → MSSSource
+        #   SOUTHEAST_ASIA   → MSSSource (SGCOMP) + MMDSource (MYPENINSULAR, MYEAST)
         #   TAIWAN           → CWASource
         #   US               → MRMSSource (when na_source uses mrms) or IEMSource
         self._sources: dict[
             str,
-            CWASource | IEMSource | MARNSource | MRMSSource | MSCCanadaSource | MSSSource | OperaSource,
+            CWASource | IEMSource | MARNSource | MMDSource | MRMSSource | MSCCanadaSource | MSSSource | OperaSource,
         ] = {}
         canada_source: MSCCanadaSource | None = None
         cwa_source: CWASource | None = None
         marn_source: MARNSource | None = None
         mss_source: MSSSource | None = None
+        mmd_source: MMDSource | None = None
         iem_source: IEMSource | None = None
         opera_source: OperaSource | None = None
         # Keyed by MRMS product path so regions sharing a product (e.g.
@@ -138,12 +148,22 @@ class RadarFetcher:
                     opera_source = OperaSource(settings.opera_base_url)
                 self._sources[region.name] = opera_source
             elif region.group == "SOUTHEAST_ASIA":
-                if mss_source is None:
-                    mss_source = MSSSource(
-                        settings.mss_base_url,
-                        interpolation=settings.mss_interpolation,
-                    )
-                self._sources[region.name] = mss_source
+                # SGCOMP rides on MSS Singapore (50 km, 5-min cadence);
+                # MYPENINSULAR + MYEAST ride on MET Malaysia (peer
+                # sources covering different sub-domains within the SE
+                # Asia group).  The ``mmd_enabled`` toggle is enforced
+                # upstream in ``self._enabled_regions``.
+                if region.name == "SGCOMP":
+                    if mss_source is None:
+                        mss_source = MSSSource(settings.mss_base_url)
+                    self._sources[region.name] = mss_source
+                elif region.name in ("MYPENINSULAR", "MYEAST"):
+                    if mmd_source is None:
+                        mmd_source = MMDSource(
+                            settings.mmd_base_url,
+                            publish_lag_sec=settings.mmd_publish_lag_sec,
+                        )
+                    self._sources[region.name] = mmd_source
             elif region.group == "TAIWAN":
                 if cwa_source is None:
                     cwa_source = CWASource(settings.cwa_base_url)

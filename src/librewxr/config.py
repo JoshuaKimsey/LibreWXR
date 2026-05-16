@@ -51,21 +51,33 @@ class Settings(BaseSettings):
     cwa_base_url: str = (
         "https://cwaopendata.s3.ap-northeast-1.amazonaws.com"
     )
-    # Singapore MSS 480 km radar via anonymous HTTPS at weather.gov.sg.
-    # 30-min cadence, RGBA PNG palette decode.  Region group:
-    # SOUTHEAST_ASIA.  Note: the historical ``cdn.neaaws.com`` CDN no
-    # longer resolves (verified 2026-05-15); origin is the only host.
-    mss_base_url: str = "https://www.weather.gov.sg/files/rainarea/480km"
-    # MSS Singapore publishes its 480 km product on a 30-min native
-    # cadence — three times slower than our 10-min frame cadence.
-    # Without interpolation the store ends up holding three identical
-    # copies of each native frame and the animation steps in chunks.
-    # With this on, MSSSource fetches the bracketing 30-min natives
-    # and warps + blends them with Farneback optical flow (same
-    # machinery the regional NWP path uses), so the in-between 10-min
-    # slots become genuine intermediate frames.  Set to False to fall
-    # back to native-frame-hold behaviour.
-    mss_interpolation: bool = True
+    # Singapore MSS 50 km rectangular rain-area radar via anonymous
+    # HTTPS at weather.gov.sg.  5-min native cadence, RGBA PNG palette
+    # decode (same 31-stop palette as the older 480 km product).
+    # Replaces the 480 km super-regional product (which had a 30-min
+    # native cadence and overlapped redundantly with MET Malaysia
+    # coverage).  Region group: SOUTHEAST_ASIA (peer to MET Malaysia).
+    # The path uses ``dpsri_70km`` despite the marketing name "50 km"
+    # — that's the upstream product's actual radial range, cropped to
+    # a horizontal display rectangle ≈ 108×60 km around Changi.
+    mss_base_url: str = "https://www.weather.gov.sg/files/rainarea/50km/v2"
+    # MET Malaysia (Jabatan Meteorologi Malaysia) radar composite via
+    # anonymous HTTPS at ``api.met.gov.my``.  10-min native cadence — one
+    # animated GIF per fetch carries 6 frames (~60 min of backfill).
+    # Decoded via 18-stop palette → dBZ table, sub-rectangle split into
+    # MYPENINSULAR + MYEAST regions.  CC-BY-4.0 licensed.  Region group:
+    # SOUTHEAST_ASIA (peer to MSS Singapore).
+    mmd_base_url: str = "https://api.met.gov.my"
+    mmd_enabled: bool = True
+    # Publication lag (seconds) between a radar frame's data time and when
+    # the GIF carrying it lands at the API endpoint.  The animated GIF
+    # carries no per-frame timestamps (only burned-in chrome text), so we
+    # anchor the newest frame's timestamp by snapping
+    # ``Last-Modified - mmd_publish_lag_sec`` down to the 10-min grid, then
+    # derive the other 5 frames by subtracting 10 min each.  Default of
+    # 600 s (10 min) covers MET's observed ~11-min lag with a small safety
+    # margin — bump if you ever see the latest store slot stuck behind.
+    mmd_publish_lag_sec: int = 600
     ecmwf_s3_bucket: str = "openmeteo"
     ecmwf_s3_region: str = "us-west-2"
     ecmwf_s3_prefix: str = "data_spatial/ecmwf_ifs"

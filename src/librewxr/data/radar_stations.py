@@ -45,11 +45,14 @@ REGION_RADAR_RANGE: dict[str, float] = {
     # (negligible visual impact) and avoids any IFS bleed inside
     # the radar's real coverage.
     "TWCOMP": 550.0,
-    # MSS Singapore Changi radar publishes the 480 km super-regional
-    # product — full radial extent, so the default 240 km would
-    # cover less than a third of the actual product footprint and
-    # leave the global IFS layer painting over the Strait of Malacca.
-    "SEACOMP": 480.0,
+    # MSS Singapore Changi radar 50 km product — actual upstream
+    # filename uses "dpsri_70km", so 70 km is the radial range.  The
+    # 480 km super-regional version was retired when MET Malaysia
+    # coverage landed: MET Malaysia already covers Peninsular
+    # Malaysia and Borneo, and the 30-min cadence on the 480 km
+    # version animated poorly.  70 km gives clean Singapore-specific
+    # detail with no interpolation needed (5-min native cadence).
+    "SGCOMP": 70.0,
 }
 
 # NEXRAD WSR-88D stations covering USCOMP (continental US).
@@ -530,12 +533,39 @@ SNET_STATIONS: list[tuple[float, float]] = [
 ]
 
 # MSS Singapore — single S-band radar at MSS Changi.  Coordinates are
-# the published siting of the operational radar; the 480 km product is
-# centred on this point.  Range override above applies to the SEACOMP
-# mask.
+# the published siting of the operational radar; the 50 km display
+# product is centred on this point with a 70 km effective radial
+# range.  Range override above applies to the SGCOMP mask.
 MSS_STATIONS: list[tuple[float, float]] = [
     (1.3521, 103.8198),  # MSS Changi
 ]
+
+# MET Malaysia — 12-radar national network feeding the combined
+# Peninsular + East composite GIF.  Coordinates are approximate (taken
+# from each radar's host airport / city — the operational siting is
+# usually co-located or within a few km).  Default 240 km Doppler range.
+# Cross-checked against the station inventory on
+# rainviewer.com/radars/malaysia.html (12 stations: MY2809-MY2819,
+# MY2865).
+MMD_PENINSULAR_STATIONS: list[tuple[float, float]] = [
+    (6.20, 100.40),    # MY2810 Alor Setar
+    (5.47, 100.39),    # MY2819 Butterworth
+    (2.04, 103.32),    # MY2818 Kluang
+    (6.17, 102.29),    # MY2815 Kota Bharu
+    (3.78, 103.21),    # MY2817 Kuantan
+    (3.13, 101.55),    # MY2816 Subang
+    (2.74, 101.71),    # MY2865 TDR KLIA
+]
+MMD_EAST_STATIONS: list[tuple[float, float]] = [
+    (3.16, 113.05),    # MY2812 Bintulu
+    (5.94, 116.05),    # MY2809 Kota Kinabalu
+    (1.48, 110.34),    # MY2814 Kuching
+    (4.32, 113.99),    # MY2813 Miri
+    (5.90, 118.06),    # MY2811 Sandakan
+]
+MMD_STATIONS: list[tuple[float, float]] = (
+    MMD_PENINSULAR_STATIONS + MMD_EAST_STATIONS
+)
 
 # Per-region station mapping for coverage mask generation.
 # Regions not listed here skip mask generation (full-region coverage assumed).
@@ -549,7 +579,9 @@ REGION_STATIONS: dict[str, list[tuple[float, float]]] = {
     "SVCOMP": SNET_STATIONS,
     "OPERA": OPERA_STATIONS,
     "TWCOMP": CWA_STATIONS,
-    "SEACOMP": MSS_STATIONS,
+    "SGCOMP": MSS_STATIONS,
+    "MYPENINSULAR": MMD_PENINSULAR_STATIONS,
+    "MYEAST": MMD_EAST_STATIONS,
 }
 
 # MRMS ingests both NEXRAD (US) and ECCC (Canadian) radar networks.

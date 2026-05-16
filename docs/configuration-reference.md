@@ -185,12 +185,39 @@ Base URL for the Taiwan CWA QPESUMS composite bucket on AWS S3 (`cwaopendata` in
 
 ### `LIBREWXR_MSS_BASE_URL`
 
-Base URL for the Singapore MSS 480 km rain area product. Files publish anonymously as RGBA PNGs at `{base}/dpsri_480km_{YYYYMMDDHHMM}0000dBR.dpsri.png` (UTC, 30-min aligned). The historical `cdn.neaaws.com` CDN documented in older references no longer resolves (verified 2026-05-15) — origin is the only available host. Only used when `SEACOMP` or the `SOUTHEAST_ASIA` group is in `LIBREWXR_ENABLED_REGIONS`.
+Base URL for the Singapore MSS 50 km high-resolution rain area product. Files publish anonymously as RGBA PNGs at `{base}/dpsri_70km_{YYYYMMDDHHMM}0000dBR.dpsri.png` (Singapore local time, UTC+8, 5-min aligned). Despite the marketing name "50 km", the upstream filename uses `dpsri_70km` (the radar's actual radial range, cropped to a horizontal display rectangle ~108×60 km around MSS Changi). Only used when `SGCOMP` or the `SOUTHEAST_ASIA` group is in `LIBREWXR_ENABLED_REGIONS`.
 
 | | |
 |---|---|
-| **Default** | `https://www.weather.gov.sg/files/rainarea/480km` |
+| **Default** | `https://www.weather.gov.sg/files/rainarea/50km/v2` |
 | **Type** | string |
+
+### `LIBREWXR_MMD_BASE_URL`
+
+Base URL for the MET Malaysia radar composite endpoint. The animated GIF at `{base}/static/images/radar-latest.gif` carries 6 frames at 10-min cadence (~60 min of backfill per fetch). CC-BY-4.0 — attribution required. Only used when `MYPENINSULAR`, `MYEAST`, or the `SOUTHEAST_ASIA` group is in `LIBREWXR_ENABLED_REGIONS`.
+
+| | |
+|---|---|
+| **Default** | `https://api.met.gov.my` |
+| **Type** | string |
+
+### `LIBREWXR_MMD_ENABLED`
+
+Master toggle for the MET Malaysia source. When `false`, drops `MYPENINSULAR` and `MYEAST` from the active region set even if a group alias (`SOUTHEAST_ASIA`, `ALL`) would otherwise pull them in.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+### `LIBREWXR_MMD_PUBLISH_LAG_SEC`
+
+Estimated publication lag (seconds) between a MET Malaysia frame's data time and when the carrying GIF lands at `api.met.gov.my`. The GIF carries no structured per-frame timestamps, so the newest frame's UTC time is derived from `floor(Last-Modified - mmd_publish_lag_sec, 10min)`. The empirically observed lag is ~11 min; 600 s gives a safe rounding margin. Bump if you observe the latest store slot stuck behind by one frame.
+
+| | |
+|---|---|
+| **Default** | `600` |
+| **Type** | integer (seconds) |
 
 ---
 
@@ -214,7 +241,7 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `CANADA` | `CACOMP` | Canada |
 | `CENTRAL_AMERICA` | `SVCOMP` | El Salvador + W. Honduras + S. Guatemala + offshore Pacific |
 | `EUROPE` | `OPERA` | Pan-European composite (~155 radars, 24 countries) |
-| `SOUTHEAST_ASIA` | `SEACOMP` | Strait of Malacca / Peninsular Malaysia / Singapore / Sumatra / W. Borneo (MSS Changi, 480 km) |
+| `SOUTHEAST_ASIA` | `SGCOMP`, `MYPENINSULAR`, `MYEAST` | Singapore (MSS Changi 50 km) + Peninsular Malaysia + N. Sumatra + all of Borneo + Brunei (MET Malaysia 12-radar composite) |
 | `TAIWAN` | `TWCOMP` | Taiwan + W. Pacific buffer (CWA QPESUMS 7-radar composite) |
 | `ALL` | All of the above | Every available region |
 
@@ -231,7 +258,9 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `SVCOMP` | El Salvador + neighbours | MARN/SNET (San Andrés, 120 km) | 409 x 342 | 0.00926° (~1km) | <1 MB |
 | `OPERA` | Europe | EUMETNET OPERA (MeteoGate S3) | 3800 x 4400 | 1km (LAEA) | ~16 MB |
 | `TWCOMP` | Taiwan + W. Pacific | CWA QPESUMS (cwaopendata S3) | 921 x 881 | 0.0125° (~1.4km) | ~3 MB |
-| `SEACOMP` | Strait of Malacca / Peninsular Malaysia / Singapore / Sumatra | MSS Singapore (Changi, 480 km) | 480 x 480 | 0.018° (~2km) | <1 MB |
+| `SGCOMP` | Singapore + immediate Strait | MSS Singapore (Changi, 50 km / 5-min) | 217 x 120 | 0.0045° (~0.5km) | <1 MB |
+| `MYPENINSULAR` | Peninsular Malaysia + N. Sumatra | MET Malaysia (12-radar composite) | 424 x 551 | 0.022° lon / 0.019° lat (~2.5km) | <1 MB |
+| `MYEAST` | East Malaysia (Borneo) + Brunei | MET Malaysia (12-radar composite) | 640 x 570 | 0.022° lon / 0.019° lat (~2.5km) | <1 MB |
 
 **Examples:**
 ```bash

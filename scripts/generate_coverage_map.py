@@ -59,6 +59,8 @@ from librewxr.data.radar_stations import (  # noqa: E402
     NEXRAD_GUAM,
     CANADA_STATIONS,
     CWA_STATIONS,
+    MMD_PENINSULAR_STATIONS,
+    MMD_EAST_STATIONS,
     MSS_STATIONS,
     SNET_STATIONS,
     OPERA_STATIONS,
@@ -286,12 +288,28 @@ def build_radar_sources() -> list[Source]:
     for poly in union_of_radar_circles(CWA_STATIONS, range_for("TWCOMP")):
         radar.append(Source("CWA / QPESUMS (Taiwan)", "#e377c2", poly))
 
-    # MSS Singapore — single S-band radar at Changi publishing a 480 km
-    # super-regional rain area product.  Single-station footprint that
-    # reaches across the Strait of Malacca into Peninsular Malaysia,
-    # Sumatra, and parts of W. Borneo.
-    for poly in union_of_radar_circles(MSS_STATIONS, range_for("SEACOMP")):
+    # MSS Singapore — single S-band radar at Changi publishing the
+    # 50 km high-resolution rain area product (70 km effective radial
+    # range).  Tight footprint over Singapore + immediate strait;
+    # MET Malaysia handles the wider region.
+    for poly in union_of_radar_circles(MSS_STATIONS, range_for("SGCOMP")):
         radar.append(Source("MSS (Singapore)", "#8c564b", poly))
+
+    # MET Malaysia — 12-radar S-band network split across Peninsular
+    # Malaysia (7 stations) and East Malaysia / Borneo (5 stations),
+    # both feeding a single combined composite GIF.  Stations are
+    # presented per-region so the legend matches the two LibreWXR
+    # regions (MYPENINSULAR + MYEAST), but they share one upstream
+    # operator and one swatch.
+    mmd_color = "#2ca02c"
+    for poly in union_of_radar_circles(
+        MMD_PENINSULAR_STATIONS, range_for("MYPENINSULAR"),
+    ):
+        radar.append(Source("MET Malaysia (Peninsular)", mmd_color, poly))
+    for poly in union_of_radar_circles(
+        MMD_EAST_STATIONS, range_for("MYEAST"),
+    ):
+        radar.append(Source("MET Malaysia (East / Borneo)", mmd_color, poly))
 
     return radar
 
@@ -563,7 +581,7 @@ if __name__ == "__main__":
         sources=build_radar_sources(),
         output_path=RADAR_OUTPUT,
         title="LibreWXR — Radar Composite Coverage",
-        subtitle="NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe · CWA / QPESUMS Taiwan · MSS Singapore",
+        subtitle="NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe · CWA / QPESUMS Taiwan · MSS Singapore · MET Malaysia",
         legend_title="Radar composites",
         alpha_fill=0.40,
         hatch="//",

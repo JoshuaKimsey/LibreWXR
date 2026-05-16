@@ -40,7 +40,8 @@ box that would have implied coverage where none exists.
 | EUMETNET OPERA | C-band (~155, 24 countries) | 300 km | 5 min | 1 km LAEA |
 | MARN El Salvador | S-band (1, San Andrés) | 120 km | 5 min | ~0.009° (~1 km) |
 | CWA Taiwan QPESUMS | S/C-band (7) | 240 km | 10 min | ~0.0125° (~1.4 km) |
-| MSS Singapore | S-band (1, Changi) | 480 km | 30 min | ~0.018° (~2 km) |
+| MSS Singapore | S-band (1, Changi) | 70 km | 5 min | ~0.0045° (~0.5 km) |
+| MET Malaysia | S-band (12, national network) | 240 km | 10 min | ~0.022° lon / 0.019° lat (~2.5 km) |
 
 MRMS and MSC ingest each other's stations along the US/Canada border,
 so the cross-border zone has overlap rather than a hard seam.
