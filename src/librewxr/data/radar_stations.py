@@ -566,26 +566,6 @@ MMD_STATIONS: list[tuple[float, float]] = (
     MMD_PENINSULAR_STATIONS + MMD_EAST_STATIONS
 )
 
-# PAGASA (Philippines) — 8 contributing radars feeding the PANAHON
-# national mosaic.  Coordinates are the centres of each station's
-# rendering rectangle in the PANAHON JS bundle (which closely matches
-# the documented siting at airports and PAGASA observation posts).
-# Three radars (Echague, Kabacan, Panabo) publish at a ~80 km range
-# rather than the standard 240 km — at the default range their masks
-# over-extend slightly into terrain they can't actually see, but this
-# is preferable to under-masking the longer-range stations which
-# would let IFS bleed through real radar coverage.
-PAGASA_STATIONS: list[tuple[float, float]] = [
-    (15.744, 121.632),   # Baler, Aurora
-    (16.351, 120.559),   # Baguio, Benguet
-    (16.716, 121.684),   # Echague, Isabela (80 km local product)
-    (14.124, 122.983),   # Daet, Camarines Norte
-    (11.044, 125.754),   # Guiuan, Eastern Samar
-    (10.770, 122.580),   # Iloilo, Iloilo
-    (7.100, 124.834),    # Kabacan, North Cotabato (80 km local)
-    (7.316, 125.634),    # Panabo, Davao del Norte (80 km local)
-]
-
 # Per-region station mapping for coverage mask generation.
 # Regions not listed here skip mask generation (full-region coverage assumed).
 REGION_STATIONS: dict[str, list[tuple[float, float]]] = {
@@ -600,7 +580,6 @@ REGION_STATIONS: dict[str, list[tuple[float, float]]] = {
     "TWCOMP": CWA_STATIONS,
     "MYPENINSULAR": MMD_PENINSULAR_STATIONS,
     "MYEAST": MMD_EAST_STATIONS,
-    "PHCOMP": PAGASA_STATIONS,
 }
 
 # MRMS ingests both NEXRAD (US) and ECCC (Canadian) radar networks.

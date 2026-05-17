@@ -61,7 +61,6 @@ from librewxr.data.radar_stations import (  # noqa: E402
     CWA_STATIONS,
     MMD_PENINSULAR_STATIONS,
     MMD_EAST_STATIONS,
-    PAGASA_STATIONS,
     SNET_STATIONS,
     OPERA_STATIONS,
     RADAR_RANGE_KM,
@@ -303,18 +302,6 @@ def build_radar_sources() -> list[Source]:
         MMD_EAST_STATIONS, range_for("MYEAST"),
     ):
         radar.append(Source("MET Malaysia (East / Borneo)", mmd_color, poly))
-
-    # PAGASA Philippines — 8-radar national mosaic covering Luzon,
-    # Visayas, Mindanao, and the surrounding seas.  Three radars
-    # (Echague, Kabacan, Panabo) publish at ~80 km range vs the
-    # standard 240 km, but the coverage mask uses the regional default
-    # for all stations — over-extension of those three is preferable
-    # to under-masking the longer-range stations.
-    pagasa_color = "#8c564b"
-    for poly in union_of_radar_circles(
-        PAGASA_STATIONS, range_for("PHCOMP"),
-    ):
-        radar.append(Source("PAGASA (Philippines)", pagasa_color, poly))
 
     return radar
 
@@ -586,7 +573,7 @@ if __name__ == "__main__":
         sources=build_radar_sources(),
         output_path=RADAR_OUTPUT,
         title="LibreWXR — Radar Composite Coverage",
-        subtitle="NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe · CWA / QPESUMS Taiwan · MET Malaysia · PAGASA Philippines",
+        subtitle="NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe · CWA / QPESUMS Taiwan · MET Malaysia",
         legend_title="Radar composites",
         alpha_fill=0.40,
         hatch="//",

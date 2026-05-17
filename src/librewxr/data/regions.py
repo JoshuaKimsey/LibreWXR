@@ -174,32 +174,6 @@ REGIONS: dict[str, RegionDef] = {
         group="SOUTHEAST_ASIA",
         grid_width=640, grid_height=570,
     ),
-    # PAGASA (Philippine Atmospheric, Geophysical and Astronomical
-    # Services Administration) PANAHON composite — 8-radar national
-    # mosaic covering Luzon, Visayas, Mindanao, and the surrounding
-    # waters out past Palawan and into the W. Pacific.  Anonymous
-    # fetch from CloudFront-fronted ``cdn.panahon.gov.ph/api/v1`` —
-    # JSON timeline endpoint returns 6 frames at 15-min cadence with
-    # explicit UTC ``observed_at_unix`` timestamps, paired with
-    # 2048×2048 RGBA PNGs in EPSG:4326 equirectangular projection.
-    # Public domain per Philippine IP code RA 8293 §176 (government-
-    # works exception) — attribution to PAGASA recorded in README.
-    #
-    # Bounds and grid size match the JS bundle's OpenLayers extent
-    # exactly (``leftBottom: [129.5173, 3.8017], rightTop: [115.4155,
-    # 22.4585]`` in the bundle's reversed-axis encoding).  Native
-    # resolution is anisotropic (~0.00689°/px lon × ~0.00911°/px lat)
-    # because the 2048×2048 PNG covers a wider lat span than lon span;
-    # ``pixel_size_y`` captures the lat axis separately.
-    "PHCOMP": RegionDef(
-        name="PHCOMP",
-        west=115.4154914129329, east=129.51727937415484,
-        south=3.8016540706290445, north=22.458510294136033,
-        pixel_size=(129.51727937415484 - 115.4154914129329) / 2048,    # 0.006886°/px (lon)
-        pixel_size_y=(22.458510294136033 - 3.8016540706290445) / 2048, # 0.009110°/px (lat)
-        group="SOUTHEAST_ASIA",
-        grid_width=2048, grid_height=2048,
-    ),
 }
 
 # Group aliases: shorthand names that expand to multiple regions.
@@ -210,7 +184,7 @@ REGION_GROUPS: dict[str, list[str]] = {
     "CENTRAL_AMERICA": ["SVCOMP"],
     "CONUS": ["USCOMP"],
     "EUROPE": ["OPERA"],
-    "SOUTHEAST_ASIA": ["MYPENINSULAR", "MYEAST", "PHCOMP"],
+    "SOUTHEAST_ASIA": ["MYPENINSULAR", "MYEAST"],
     "TAIWAN": ["TWCOMP"],
     "US": ["USCOMP", "AKCOMP", "HICOMP", "PRCOMP", "GUCOMP"],
 }

@@ -1350,4 +1350,3 @@ def _parse_cwa_xml(data: bytes, region: RegionDef) -> np.ndarray | None:
 # sources.  Inline sources (IEM, MRMS, MSC, OPERA, CWA, MARN) stay in
 # this file until they're next touched.
 from librewxr.data.mmd_source import MMDSource  # noqa: E402,F401
-from librewxr.data.pagasa_source import PAGASASource  # noqa: E402,F401

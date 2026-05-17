@@ -68,15 +68,6 @@ class Settings(BaseSettings):
     # response whose ``Last-Modified`` is more than this far behind wall
     # clock is treated as legitimately old data, not relabelled forward.
     mmd_publish_lag_sec: int = 600
-    # PAGASA (Philippine Atmospheric, Geophysical and Astronomical
-    # Services Administration) PANAHON radar mosaic via anonymous
-    # CloudFront-fronted JSON+PNG API.  15-min native cadence (the
-    # store grid is 10 min, so the source rounds each requested slot
-    # to the nearest native frame, ≤7.5 min off — invisible in
-    # animation).  Public domain license per Philippine IP code
-    # RA 8293 §176; attribution to PAGASA in README.
-    pagasa_base_url: str = "https://cdn.panahon.gov.ph"
-    pagasa_enabled: bool = True
     ecmwf_s3_bucket: str = "openmeteo"
     ecmwf_s3_region: str = "us-west-2"
     ecmwf_s3_prefix: str = "data_spatial/ecmwf_ifs"

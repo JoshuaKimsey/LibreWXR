@@ -41,7 +41,6 @@ box that would have implied coverage where none exists.
 | MARN El Salvador | S-band (1, San Andrés) | 120 km | 5 min | ~0.009° (~1 km) |
 | CWA Taiwan QPESUMS | S/C-band (7) | 240 km | 10 min | ~0.0125° (~1.4 km) |
 | MET Malaysia | S-band (12, national network) | 240 km | 10 min | ~0.022° lon / 0.019° lat (~2.5 km) |
-| PAGASA Philippines | S-band (8, national mosaic) | 240 km | 15 min | ~0.0069° lon / 0.0091° lat (~770 m) |
 
 MRMS and MSC ingest each other's stations along the US/Canada border,
 so the cross-border zone has overlap rather than a hard seam.

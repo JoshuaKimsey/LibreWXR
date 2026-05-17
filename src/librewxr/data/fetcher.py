@@ -31,7 +31,6 @@ from librewxr.data.sources import (
     MRMSSource,
     MSCCanadaSource,
     OperaSource,
-    PAGASASource,
 )
 from librewxr.data.store import FrameStore, RadarFrame
 from librewxr.tiles.cache import TileCache
@@ -92,11 +91,6 @@ class RadarFetcher:
                 name in ("MYPENINSULAR", "MYEAST")
                 and not settings.mmd_enabled
             )
-            # Same toggle pattern for PAGASA Philippines.
-            and not (
-                name == "PHCOMP"
-                and not settings.pagasa_enabled
-            )
         ]
 
         self._na_source = settings.na_source
@@ -110,12 +104,11 @@ class RadarFetcher:
         #   CENTRAL_AMERICA  → MARNSource
         #   EUROPE           → OperaSource
         #   SOUTHEAST_ASIA   → MMDSource (MYPENINSULAR, MYEAST)
-        #                      PAGASASource (PHCOMP) — per-region peer
         #   TAIWAN           → CWASource
         #   US               → MRMSSource (when na_source uses mrms) or IEMSource
         self._sources: dict[
             str,
-            CWASource | IEMSource | MARNSource | MMDSource | MRMSSource | MSCCanadaSource | OperaSource | PAGASASource,
+            CWASource | IEMSource | MARNSource | MMDSource | MRMSSource | MSCCanadaSource | OperaSource,
         ] = {}
         canada_source: MSCCanadaSource | None = None
         cwa_source: CWASource | None = None
@@ -123,7 +116,6 @@ class RadarFetcher:
         mmd_source: MMDSource | None = None
         iem_source: IEMSource | None = None
         opera_source: OperaSource | None = None
-        pagasa_source: PAGASASource | None = None
         # Keyed by MRMS product path so regions sharing a product (e.g.
         # USCOMP and CACOMP both use the bare CONUS path) share one
         # MRMSSource — one HTTP client, one directory cache, one GRIB2
@@ -154,23 +146,16 @@ class RadarFetcher:
                     opera_source = OperaSource(settings.opera_base_url)
                 self._sources[region.name] = opera_source
             elif region.group == "SOUTHEAST_ASIA":
-                # SOUTHEAST_ASIA hosts two independent source feeds.
-                # MET Malaysia (MMDSource) services MYPENINSULAR +
-                # MYEAST via a shared GIF fetch; PAGASA (PAGASASource)
-                # services the Philippines.  ``mmd_enabled`` and
-                # ``pagasa_enabled`` toggles are enforced upstream in
-                # ``self._enabled_regions``.
-                if region.name == "PHCOMP":
-                    if pagasa_source is None:
-                        pagasa_source = PAGASASource(settings.pagasa_base_url)
-                    self._sources[region.name] = pagasa_source
-                else:
-                    if mmd_source is None:
-                        mmd_source = MMDSource(
-                            settings.mmd_base_url,
-                            publish_lag_sec=settings.mmd_publish_lag_sec,
-                        )
-                    self._sources[region.name] = mmd_source
+                # MYPENINSULAR + MYEAST both ride on MET Malaysia's
+                # combined GIF (peer regions, one HTTP fetch per cycle
+                # shared across both).  The ``mmd_enabled`` toggle is
+                # enforced upstream in ``self._enabled_regions``.
+                if mmd_source is None:
+                    mmd_source = MMDSource(
+                        settings.mmd_base_url,
+                        publish_lag_sec=settings.mmd_publish_lag_sec,
+                    )
+                self._sources[region.name] = mmd_source
             elif region.group == "TAIWAN":
                 if cwa_source is None:
                     cwa_source = CWASource(settings.cwa_base_url)

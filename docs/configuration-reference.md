@@ -210,24 +210,6 @@ Estimated publication lag (seconds) between a MET Malaysia frame's data time and
 | **Default** | `600` |
 | **Type** | integer (seconds) |
 
-### `LIBREWXR_PAGASA_BASE_URL`
-
-Base URL for the PAGASA PANAHON radar API. The JSON timeline endpoint at `{base}/api/v1/radar/timeline` returns 6 frames at 15-min cadence with explicit UTC timestamps; the image endpoint at `{base}/api/v1/radar-image?sublayer=hybrid-reflectivity&index=N` serves the corresponding 2048×2048 RGBA PNGs. Public domain per Philippine IP code RA 8293 §176. Only used when `PHCOMP` or the `SOUTHEAST_ASIA` group is in `LIBREWXR_ENABLED_REGIONS`.
-
-| | |
-|---|---|
-| **Default** | `https://cdn.panahon.gov.ph` |
-| **Type** | string |
-
-### `LIBREWXR_PAGASA_ENABLED`
-
-Master toggle for the PAGASA Philippines source. When `false`, drops `PHCOMP` from the active region set even if a group alias (`SOUTHEAST_ASIA`, `ALL`) would otherwise pull it in.
-
-| | |
-|---|---|
-| **Default** | `true` |
-| **Type** | boolean |
-
 ---
 
 ## Regions
@@ -250,7 +232,7 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `CANADA` | `CACOMP` | Canada |
 | `CENTRAL_AMERICA` | `SVCOMP` | El Salvador + W. Honduras + S. Guatemala + offshore Pacific |
 | `EUROPE` | `OPERA` | Pan-European composite (~155 radars, 24 countries) |
-| `SOUTHEAST_ASIA` | `MYPENINSULAR`, `MYEAST`, `PHCOMP` | Peninsular Malaysia + N. Sumatra + Borneo + Brunei + Singapore (MET Malaysia 12-radar composite) + the Philippines (PAGASA PANAHON 8-radar mosaic) |
+| `SOUTHEAST_ASIA` | `MYPENINSULAR`, `MYEAST` | Peninsular Malaysia + N. Sumatra + all of Borneo + Brunei + Singapore (MET Malaysia 12-radar composite) |
 | `TAIWAN` | `TWCOMP` | Taiwan + W. Pacific buffer (CWA QPESUMS 7-radar composite) |
 | `ALL` | All of the above | Every available region |
 
@@ -269,7 +251,6 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `TWCOMP` | Taiwan + W. Pacific | CWA QPESUMS (cwaopendata S3) | 921 x 881 | 0.0125° (~1.4km) | ~3 MB |
 | `MYPENINSULAR` | Peninsular Malaysia + N. Sumatra | MET Malaysia (12-radar composite) | 424 x 551 | 0.022° lon / 0.019° lat (~2.5km) | <1 MB |
 | `MYEAST` | East Malaysia (Borneo) + Brunei | MET Malaysia (12-radar composite) | 640 x 570 | 0.022° lon / 0.019° lat (~2.5km) | <1 MB |
-| `PHCOMP` | Philippines (Luzon, Visayas, Mindanao) | PAGASA PANAHON (8-radar mosaic) | 2048 x 2048 | 0.0069° lon / 0.0091° lat (~770m) | ~4 MB |
 
 **Examples:**
 ```bash
