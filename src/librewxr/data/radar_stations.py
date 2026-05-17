@@ -35,16 +35,23 @@ REGION_RADAR_RANGE: dict[str, float] = {
     # into Honduras / Nicaragua where no actual returns exist.
     "SVCOMP": 120.0,
     # CWA QPESUMS publishes coverage out to its full bbox edges
-    # (~550 km east of Hualien) for typhoon tracking — empirically
+    # (~565 km from the nearest station) for typhoon tracking, as
     # verified from the ``-999`` sentinel pattern in a real frame.
-    # The default 240 km under-covers by ~2× and lets IFS bleed
-    # through over the western Pacific where the radar actually has
-    # data.  550 km gives 99%+ agreement with the data's own
-    # coverage shape; a small western/southern halo over-extends
-    # into open ocean where IFS would only show very faint cells
-    # (negligible visual impact) and avoids any IFS bleed inside
-    # the radar's real coverage.
-    "TWCOMP": 550.0,
+    # We previously used 550 km to match that "claimed" reach, but
+    # Taiwan's western and southern stations are close enough to
+    # land that the resulting circles bleed visibly onto Fujian /
+    # Hong Kong (Qigu's 550 km reach hit 114.7°E) and over the
+    # northern tip of Luzon (Kenting's reach hit 17°N, past Cape
+    # Bojeador).  At 450 km the mask still covers ~94% of CWA's
+    # claimed in-range area and ~450 km of Pacific buffer east of
+    # Hualien (well into the typhoon corridor); the trimmed halo
+    # over the SCS / W. Pacific gets filled by IFS instead, which
+    # resolves typhoons at 9 km perfectly well.  Per-station ranges
+    # are the proper long-term fix (small western stations could go
+    # to ~150 km, eastern stations could keep ~450 km) but
+    # ``REGION_RADAR_RANGE`` is per-region today.  Tighten further
+    # to 300 km if bleed onto Fujian / Luzon is still visible.
+    "TWCOMP": 450.0,
     # MET Malaysia CAPPI composite extends well past the standard
     # 240 km Doppler range — empirically measured 372 km max extent
     # over Peninsular Malaysia and 332 km over East Malaysia from the
