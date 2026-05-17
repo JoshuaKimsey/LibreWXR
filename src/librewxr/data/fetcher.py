@@ -33,6 +33,7 @@ from librewxr.data.sources import (
     OperaSource,
 )
 from librewxr.data.store import FrameStore, RadarFrame
+from librewxr.sources import RADAR_PROVIDERS
 from librewxr.tiles.cache import TileCache
 
 logger = logging.getLogger(__name__)
@@ -165,6 +166,26 @@ class RadarFetcher:
                 if iem_source is None:
                     iem_source = IEMSource(settings.iem_base_url)
                 self._sources[region.name] = iem_source
+
+        # Merge in sources contributed via the auto-discovery registry
+        # under ``librewxr.sources``.  Phase 0 of the refactor (2026-05-17):
+        # no source packages have been migrated yet, so this loop is a
+        # no-op.  As sources migrate in Phase 1, the legacy dispatch
+        # above is removed in the same commit each source gains a
+        # provider, so there's never a moment when both paths populate
+        # the same region.  The ``setdefault`` is belt-and-braces.
+        enabled_names = {r.name for r in self._enabled_regions}
+        for provider in RADAR_PROVIDERS:
+            try:
+                contribution = provider(settings)
+            except Exception:
+                logger.exception("Radar source provider %r raised", provider)
+                continue
+            if contribution is None:
+                continue
+            for region in contribution.regions:
+                if region.name in enabled_names:
+                    self._sources.setdefault(region.name, contribution.instance)
 
         # MSC blending for CACOMP: only in mrms_fallback mode.
         self._cacomp_msc_source: MSCCanadaSource | None = None

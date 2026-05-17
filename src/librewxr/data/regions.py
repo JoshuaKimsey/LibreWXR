@@ -190,6 +190,42 @@ REGION_GROUPS: dict[str, list[str]] = {
 }
 
 
+def _merge_discovered_regions() -> None:
+    """Merge regions contributed by source packages into the global maps.
+
+    Each source package may expose a module-level ``REGIONS`` list (of
+    ``RegionDef``) and a ``REGION_GROUP`` string.  We pick them up here
+    so that adding a new source = creating one directory; nothing in
+    this file needs to change.
+
+    The import is deferred to avoid a circular import: ``librewxr.sources``
+    pulls in source subpackages, which in turn import ``RegionDef`` from
+    this module.  Doing the walk after ``RegionDef``/``REGIONS`` are
+    already defined keeps the cycle broken.
+
+    Phase 0 (2026-05-17): no source packages contribute regions yet, so
+    this is a no-op exercising only the wiring.
+    """
+    from librewxr.sources import iter_source_packages
+
+    for mod in iter_source_packages():
+        contributed = getattr(mod, "REGIONS", None)
+        group = getattr(mod, "REGION_GROUP", None)
+        if not contributed:
+            continue
+        for region in contributed:
+            REGIONS.setdefault(region.name, region)
+        if group:
+            bucket = REGION_GROUPS.setdefault(group, [])
+            for region in contributed:
+                if region.name not in bucket:
+                    bucket.append(region.name)
+            bucket.sort()
+
+
+_merge_discovered_regions()
+
+
 def resolve_regions(spec: str) -> list[str]:
     """Resolve a region spec string into a list of individual region names.
 
