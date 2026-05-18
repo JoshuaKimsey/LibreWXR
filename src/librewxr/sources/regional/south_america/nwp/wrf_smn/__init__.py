@@ -18,7 +18,7 @@ __all__ = ["WRFSMNGrid", "nwp_provider"]
 
 def nwp_provider(settings, cache_dir) -> NWPContribution | None:
     """Return a WRF-SMN contribution when enabled."""
-    if not getattr(settings, "wrf_smn_enabled", False):
+    if not getattr(settings, "wrf_smn_enabled", True):
         return None
     return NWPContribution(
         instance=WRFSMNGrid(cache_dir=cache_dir),

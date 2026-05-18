@@ -212,6 +212,7 @@ async def health():
         "enabled_regions": enabled_regions or [],
         "sources": {
             "na_source": settings.na_source,
+            "ca_source": settings.ca_source,
             # CACOMP MSC blending state: True/False once observed,
             # None if blending isn't configured for this region set.
             "cacomp_msc_blending": (

@@ -48,15 +48,19 @@ __all__ = [
 
 
 def radar_provider(settings) -> RadarSourceContribution | None:
-    """Return an MSC Canada contribution.
+    """Return an MSC Canada contribution when MSC is the CACOMP primary.
 
-    Like CWA / MARN / OPERA, MSC Canada has no enable toggle — user
-    controls inclusion via region selection
-    (``LIBREWXR_ENABLED_REGIONS=CANADA`` or similar).  The fetcher only
-    assigns the source to ``CACOMP`` when the user actually enabled it,
-    so eager instantiation here is cheap (HTTP client opens lazily on
-    first fetch).
+    Active only when ``ca_source == "msc"`` (MSC standalone covers all
+    of Canada).  In ``mrms_with_msc_blend`` mode MRMS owns the CACOMP
+    dispatch slot via its own provider and a separate MSC instance is
+    created in ``data/fetcher.py`` as the blend partner — this keeps
+    the discovery dispatch single-winner-per-region while letting the
+    fetcher's cross-source policy use both.  In ``mrms`` mode no MSC
+    is fetched at all.
     """
+    ca_source = getattr(settings, "ca_source", "mrms_with_msc_blend")
+    if ca_source != "msc":
+        return None
     instance = MSCCanadaSource(settings.msc_canada_base_url)
     return RadarSourceContribution(
         regions=list(REGIONS),

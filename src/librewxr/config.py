@@ -29,14 +29,26 @@ class Settings(BaseSettings):
     warm_overview_zoom: int = 4  # Pre-render ALL tiles up to this zoom on each fetch (-1 = disable)
     warm_overview_zoom_regional: int = 6  # Pre-render tiles overlapping enabled regions up to this zoom (-1 = disable)
     enabled_regions: str = "ALL"  # Region spec: CONUS, US, ALL, or comma-separated region names
-    # North American radar data source.  Three modes:
-    #   mrms_fallback  - (default) MRMS primary + IEM fallback for USCOMP + MSC
-    #                    blending for CACOMP.  Best coverage, slightly more bandwidth.
-    #   mrms           - MRMS only, no fallback/blending.  Pure MRMS where available,
+    # US-side radar data source (USCOMP / AKCOMP / HICOMP / PRCOMP / GUCOMP).
+    # Three modes:
+    #   mrms_fallback  - (default) MRMS primary + IEM fallback when MRMS fails.
+    #                    Best coverage, slightly more bandwidth.
+    #   mrms           - MRMS only, no fallback.  Pure MRMS where available,
     #                    gaps show as empty (IFS fills in).  Least bandwidth.
-    #   iem            - Legacy IEM N0Q for USCOMP, MSC standalone for CACOMP.
-    #                    NEXRAD-only, no Canadian radar ingest.
+    #   iem            - Legacy IEM N0Q.  NEXRAD-only.
+    # Canada-side (CACOMP) is controlled independently by ``ca_source``.
     na_source: Literal["mrms", "mrms_fallback", "iem"] = "mrms_fallback"
+    # Canada-side radar data source (CACOMP).  Three modes, fully independent
+    # of ``na_source``:
+    #   mrms_with_msc_blend - (default) MRMS primary covering southern Canada,
+    #                         MSC Canada blended in to fill gaps north of MRMS's
+    #                         bbox, MSC fallback if MRMS fails.  Best coverage.
+    #   mrms                - MRMS only.  Southern Canada covered by MRMS's CONUS
+    #                         product; northern Canada (outside MRMS bbox) falls
+    #                         through to IFS.  No MSC fetched at all.
+    #   msc                 - MSC Canada standalone.  Native ECCC composite for
+    #                         all of Canada, no MRMS contribution to CACOMP.
+    ca_source: Literal["msc", "mrms", "mrms_with_msc_blend"] = "mrms_with_msc_blend"
     iem_base_url: str = "https://mesonet.agron.iastate.edu"
     msc_canada_base_url: str = "https://geo.weather.gc.ca"
     mrms_base_url: str = "https://mrms.ncep.noaa.gov/2D"
@@ -158,7 +170,7 @@ class Settings(BaseSettings):
     # builder appends the date-prefixed archive path so we can fetch
     # runs from yesterday across midnight UTC without the ``/today/``
     # tree rolling out from under us.
-    hrdps_enabled: bool = False
+    hrdps_enabled: bool = True
     hrdps_base_url: str = "https://dd.weather.gc.ca"
     hrdps_publish_delay_minutes: int = 240   # ~3.5-4 h after init; 4 h conservative
     hrdps_dbz_offset: float = 6.0            # same Marshall-Palmer caveat as DINI/ICON-EU

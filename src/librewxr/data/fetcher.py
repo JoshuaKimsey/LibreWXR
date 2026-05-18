@@ -90,6 +90,7 @@ class RadarFetcher:
         ]
 
         self._na_source = settings.na_source
+        self._ca_source = settings.ca_source
 
         # All radar source wiring now flows through the discovery
         # registry under ``librewxr.sources``.  Each source package
@@ -134,11 +135,15 @@ class RadarFetcher:
                 r for r in self._enabled_regions if r.name in self._sources
             ]
 
-        # MSC blending for CACOMP: only in mrms_fallback mode.  In this
-        # mode MRMS owns the standalone ``self._sources["CACOMP"]`` slot,
-        # so the blend partner is a separately-managed MSC instance.
+        # MSC blending for CACOMP: only in ``ca_source=mrms_with_msc_blend``
+        # mode.  In that mode MRMS owns the standalone
+        # ``self._sources["CACOMP"]`` slot (via the MRMS provider's
+        # ``regions`` list including CACOMP), so the blend partner is a
+        # separately-managed MSC instance.  In ``ca_source=mrms`` mode no
+        # MSC is fetched; in ``ca_source=msc`` mode MSC is the primary in
+        # ``self._sources["CACOMP"]`` and no blend partner is needed.
         self._cacomp_msc_source: MSCCanadaSource | None = None
-        if self._na_source == "mrms_fallback" and any(
+        if self._ca_source == "mrms_with_msc_blend" and any(
             r.name == "CACOMP" for r in self._enabled_regions
         ):
             self._cacomp_msc_source = MSCCanadaSource(
@@ -146,6 +151,8 @@ class RadarFetcher:
             )
 
         # IEM fallback for all US-group MRMS regions: only in mrms_fallback.
+        # Gated on ``na_source`` (US-side concern) — independent of
+        # ``ca_source``.
         self._iem_fallback: IEMSource | None = None
         if self._na_source == "mrms_fallback" and any(
             r.name in self._MRMS_REGIONS and r.group == "US"
@@ -507,17 +514,18 @@ class RadarFetcher:
                 )
                 continue
             if result is None:
-                # MRMS fallback: if MRMS returned None, try IEM for USCOMP
-                # or MSC standalone for CACOMP.
+                # MRMS fallback: if MRMS returned None, try IEM for US
+                # regions (when na_source=mrms_fallback) or MSC standalone
+                # for CACOMP (when ca_source=mrms_with_msc_blend).
                 fallback_result = await self._try_fallback(region, ts, source_type, source_arg)  # noqa: E501
                 if fallback_result is not None:
                     result = fallback_result
                 else:
                     continue
             else:
-                # CACOMP blending: only in mrms_fallback mode.
+                # CACOMP blending: MRMS+MSC blend mode only.
                 if (
-                    self._na_source == "mrms_fallback"
+                    self._ca_source == "mrms_with_msc_blend"
                     and region.name == "CACOMP"
                     and self._cacomp_msc_source is not None
                 ):
@@ -573,13 +581,21 @@ class RadarFetcher:
         source_type: str,
         source_arg: int | datetime,
     ) -> np.ndarray | None:
-        """Fall back to IEM if MRMS fails for any US-group region, or MSC for CACOMP."""
-        if self._na_source != "mrms_fallback":
-            return None
+        """Cross-source fallback when the primary returned None.
 
-        # US-group MRMS regions fall back to IEM
+        US-side: in ``na_source=mrms_fallback`` mode, fall back from
+        MRMS to IEM for any US-group region.
+
+        Canada-side: in ``ca_source=mrms_with_msc_blend`` mode, fall back
+        from MRMS to MSC Canada standalone for CACOMP.  In ``ca_source=msc``
+        mode MSC is already the primary so no fallback is needed; in
+        ``ca_source=mrms`` mode MSC isn't fetched at all and the failure
+        is just propagated (IFS fills the gap).
+        """
+        # US-group MRMS regions fall back to IEM (gated by na_source).
         if (
-            region.name in self._MRMS_REGIONS
+            self._na_source == "mrms_fallback"
+            and region.name in self._MRMS_REGIONS
             and region.group == "US"
             and self._iem_fallback is not None
         ):
@@ -593,8 +609,12 @@ class RadarFetcher:
                 logger.exception("IEM fallback also failed for %s", region.name)
                 return None
 
-        # CACOMP fallback: use MSC Canada standalone (no MRMS blending)
-        if region.name == "CACOMP" and self._cacomp_msc_source is not None:
+        # CACOMP MRMS-failure fallback to MSC standalone (gated by ca_source).
+        if (
+            self._ca_source == "mrms_with_msc_blend"
+            and region.name == "CACOMP"
+            and self._cacomp_msc_source is not None
+        ):
             logger.info("MRMS failed for CACOMP, falling back to MSC standalone")
             try:
                 if source_type == "live":

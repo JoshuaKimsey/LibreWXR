@@ -177,6 +177,7 @@ def _build_fetcher(store, tile_cache, radar_cache, region):
     fetcher._warm_task = None
     fetcher._enabled_regions = [region]
     fetcher._na_source = "iem"
+    fetcher._ca_source = "msc"
     source = _FakeSource()
     fetcher._sources = {region.name: source}
     fetcher._cacomp_msc_source = None

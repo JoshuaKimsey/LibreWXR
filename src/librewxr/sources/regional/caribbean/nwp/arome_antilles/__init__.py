@@ -18,7 +18,7 @@ __all__ = ["AROMEAntillesGrid", "nwp_provider"]
 
 def nwp_provider(settings, cache_dir) -> NWPContribution | None:
     """Return an AROME-Antilles contribution when enabled."""
-    if not getattr(settings, "arome_antilles_enabled", False):
+    if not getattr(settings, "arome_antilles_enabled", True):
         return None
     return NWPContribution(
         instance=AROMEAntillesGrid(cache_dir=cache_dir),

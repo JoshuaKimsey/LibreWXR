@@ -100,3 +100,73 @@ def test_fetcher_sees_registry_providers():
 
     assert len(RADAR_PROVIDERS) >= 1
     assert all(callable(p) for p in RADAR_PROVIDERS)
+
+
+class TestNACASourceSplit:
+    """The US-side ``na_source`` and Canada-side ``ca_source`` knobs are
+    independent.  These tests pin the dispatch wiring across every
+    relevant combination so a future regression can't silently put MSC
+    in MRMS's CACOMP slot (the bug Phase 1 introduced and Phase 5 fixes).
+    """
+
+    @staticmethod
+    def _fetcher_with(monkeypatch, na, ca):
+        from librewxr.config import settings as S
+        from librewxr.data.fetcher import RadarFetcher
+        from librewxr.data.store import FrameStore
+        from librewxr.tiles.cache import TileCache
+
+        monkeypatch.setattr(S, "na_source", na)
+        monkeypatch.setattr(S, "ca_source", ca)
+        store = FrameStore(max_frames=2)
+        cache = TileCache(max_mb=10)
+        return RadarFetcher(store, cache)
+
+    def test_mrms_with_msc_blend_uses_mrms_as_cacomp_primary(self, monkeypatch):
+        from librewxr.sources.regional.north_america.canada.radar.msc_canada import (
+            MSCCanadaSource,
+        )
+        from librewxr.sources.regional.north_america.usa.radar.mrms import (
+            MRMSCompositeSource,
+        )
+        f = self._fetcher_with(monkeypatch, "mrms_fallback", "mrms_with_msc_blend")
+        # MRMS owns the CACOMP dispatch slot.
+        assert isinstance(f._sources["CACOMP"], MRMSCompositeSource)
+        # MSC is set up separately as the blend partner.
+        assert isinstance(f._cacomp_msc_source, MSCCanadaSource)
+
+    def test_ca_msc_uses_msc_standalone(self, monkeypatch):
+        from librewxr.sources.regional.north_america.canada.radar.msc_canada import (
+            MSCCanadaSource,
+        )
+        f = self._fetcher_with(monkeypatch, "mrms_fallback", "msc")
+        assert isinstance(f._sources["CACOMP"], MSCCanadaSource)
+        assert f._cacomp_msc_source is None  # no blend partner needed
+
+    def test_ca_mrms_uses_mrms_only_no_msc(self, monkeypatch):
+        from librewxr.sources.regional.north_america.usa.radar.mrms import (
+            MRMSCompositeSource,
+        )
+        f = self._fetcher_with(monkeypatch, "mrms_fallback", "mrms")
+        assert isinstance(f._sources["CACOMP"], MRMSCompositeSource)
+        assert f._cacomp_msc_source is None  # no MSC fetched at all
+
+    def test_na_iem_ca_mrms_activates_mrms_just_for_cacomp(self, monkeypatch):
+        """The decoupling lets ``na_source=iem`` coexist with MRMS for CA."""
+        from librewxr.sources.regional.north_america.usa.radar.iem import IEMSource
+        from librewxr.sources.regional.north_america.usa.radar.mrms import (
+            MRMSCompositeSource,
+        )
+        f = self._fetcher_with(monkeypatch, "iem", "mrms")
+        assert isinstance(f._sources["USCOMP"], IEMSource)
+        assert isinstance(f._sources["CACOMP"], MRMSCompositeSource)
+        assert f._iem_fallback is None  # no US-side fallback in iem mode
+
+    def test_na_iem_ca_msc_classic_legacy_combination(self, monkeypatch):
+        from librewxr.sources.regional.north_america.canada.radar.msc_canada import (
+            MSCCanadaSource,
+        )
+        from librewxr.sources.regional.north_america.usa.radar.iem import IEMSource
+        f = self._fetcher_with(monkeypatch, "iem", "msc")
+        assert isinstance(f._sources["USCOMP"], IEMSource)
+        assert isinstance(f._sources["CACOMP"], MSCCanadaSource)

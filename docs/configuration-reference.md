@@ -113,11 +113,11 @@ More frames = longer animation history = more RAM usage.
 
 ### `LIBREWXR_NA_SOURCE`
 
-Data source for North American radar composites (USCOMP, AKCOMP, HICOMP, PRCOMP, GUCOMP, and CACOMP). Three modes:
+US-side radar data source — applies to USCOMP, AKCOMP, HICOMP, PRCOMP, and GUCOMP only. **Canada (CACOMP) is controlled independently** by `LIBREWXR_CA_SOURCE`. Three modes:
 
-- **`mrms_fallback`** (default) — NCEP MRMS quality-controlled mosaics as the primary source, with IEM NEXRAD fallback for US regions and MSC blending for Canadian gaps. Best coverage: MRMS includes Canadian radar ingest and quality control. IEM is only fetched when MRMS fails for a specific frame.
-- **`mrms`** — NCEP MRMS only, no fallback or blending. Pure MRMS where available; gaps show as empty (the global ECMWF IFS layer still fills in outside radar coverage). Least bandwidth.
-- **`iem`** — Legacy mode. IEM NEXRAD N0Q for US regions, MSC GeoMet standalone for Canada. NEXRAD-only without Canadian radar ingest. Simplest and most battle-tested, but fewer radars and no QC.
+- **`mrms_fallback`** (default) — NCEP MRMS quality-controlled mosaics as the primary source, with IEM NEXRAD fallback when MRMS fails for a specific frame. Best coverage.
+- **`mrms`** — NCEP MRMS only, no fallback. Pure MRMS where available; gaps show as empty (the global ECMWF IFS layer still fills in outside radar coverage). Least bandwidth.
+- **`iem`** — Legacy mode. IEM NEXRAD N0Q only. NEXRAD-only without quality control. Simplest and most battle-tested, but fewer radars and no QC.
 
 | | |
 |---|---|
@@ -126,6 +126,22 @@ Data source for North American radar composites (USCOMP, AKCOMP, HICOMP, PRCOMP,
 | **Values** | `mrms_fallback`, `mrms`, `iem` |
 
 **Note:** This setting does not affect the OPERA (Europe) source, which always uses EUMETNET OPERA via MeteoGate S3.
+
+### `LIBREWXR_CA_SOURCE`
+
+Canada-side radar data source — applies to CACOMP only. Fully independent of `LIBREWXR_NA_SOURCE`: any US choice can be combined with any Canada choice. Three modes:
+
+- **`mrms_with_msc_blend`** (default) — NCEP MRMS as the primary source covering southern Canada via its CONUS product, with MSC Canada blended in to fill gaps north of MRMS's bbox (latitudes north of ~55°N) and as a fallback if MRMS fails. Best coverage.
+- **`mrms`** — NCEP MRMS only via the CONUS product. Southern Canada is covered; northern Canada (outside the MRMS bbox) falls through to the global ECMWF IFS layer. No MSC fetched.
+- **`msc`** — MSC Canada standalone — Environment and Climate Change Canada's native composite covering all of Canada (RADAR_1KM_RRAI via WMS, MRMS makes no contribution to CACOMP).
+
+| | |
+|---|---|
+| **Default** | `mrms_with_msc_blend` |
+| **Type** | string |
+| **Values** | `mrms_with_msc_blend`, `mrms`, `msc` |
+
+**Combinations:** With independent US/Canada knobs you can, for example, run `NA_SOURCE=mrms_fallback` + `CA_SOURCE=msc` to use MRMS for the US but stay on ECCC's native composite for Canada, or `NA_SOURCE=iem` + `CA_SOURCE=mrms` to use legacy IEM for the US while still getting MRMS-quality data for southern Canada.
 
 ### `LIBREWXR_MRMS_BASE_URL`
 
@@ -140,7 +156,7 @@ Only change this if you're mirroring MRMS data to a custom endpoint.
 
 ### `LIBREWXR_IEM_BASE_URL`
 
-Base URL for the Iowa Environmental Mesonet NEXRAD composites (US regions). Only used when `LIBREWXR_NA_SOURCE` is `iem` or `mrms_fallback`.
+Base URL for the Iowa Environmental Mesonet NEXRAD composites (US regions). Only used when `LIBREWXR_NA_SOURCE` is `iem` (primary) or `mrms_fallback` (US-side fallback).
 
 | | |
 |---|---|
@@ -149,7 +165,7 @@ Base URL for the Iowa Environmental Mesonet NEXRAD composites (US regions). Only
 
 ### `LIBREWXR_MSC_CANADA_BASE_URL`
 
-Base URL for the Environment and Climate Change Canada MSC GeoMet WMS service (Canadian radar). Only used when `LIBREWXR_NA_SOURCE` is `iem` or `mrms_fallback`.
+Base URL for the Environment and Climate Change Canada MSC GeoMet WMS service (Canadian radar). Only used when `LIBREWXR_CA_SOURCE` is `msc` (primary) or `mrms_with_msc_blend` (blend partner + fallback).
 
 | | |
 |---|---|
