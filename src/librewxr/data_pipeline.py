@@ -31,24 +31,19 @@ from rich.logging import RichHandler
 from librewxr.config import settings
 from librewxr.data.alerts_fetcher import WMOAlertsFetcher
 from librewxr.data.alerts_store import AlertsStore
-from librewxr.data.arome_antilles_grid import AROMEAntillesGrid
 from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.coverage import build_coverage_masks, build_feather_masks
-from librewxr.data.dmi_dini_grid import DMIDiniGrid
-from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.fetcher import RadarFetcher
-from librewxr.data.hrdps_grid import HRDPSGrid
-from librewxr.data.hrrr_alaska_grid import HRRRAlaskaGrid
-from librewxr.data.hrrr_grid import HRRRGrid
-from librewxr.data.icon_eu_grid import ICONEUGrid
 from librewxr.data.master_state import dump_state
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.radar_cache import RadarFrameCache
 from librewxr.data.regions import REGIONS
 from librewxr.data.store import FrameStore
-from librewxr.data.wrf_smn_grid import WRFSMNGrid
-from librewxr.sources import collect_radar_coverage_metadata
+from librewxr.sources import (
+    collect_nwp_contributions,
+    collect_radar_coverage_metadata,
+)
 from librewxr.tiles.cache import TileCache
 
 # The pipeline writes no tiles itself, but RadarFetcher invalidates a
@@ -65,15 +60,15 @@ _LOG_TAGS = {
     "librewxr.data.store": "store",
     "librewxr.data.regions": "regions",
     "librewxr.data.coverage": "coverage",
-    "librewxr.data.ecmwf_grid": "ifs",
-    "librewxr.data.ecmwf_interpolation": "ifs",
-    "librewxr.data.hrrr_grid": "hrrr",
-    "librewxr.data.hrrr_alaska_grid": "hrrr-ak",
-    "librewxr.data.icon_eu_grid": "icon-eu",
-    "librewxr.data.dmi_dini_grid": "dmi-dini",
-    "librewxr.data.hrdps_grid": "hrdps",
-    "librewxr.data.arome_antilles_grid": "arome-ant",
-    "librewxr.data.wrf_smn_grid": "wrf-smn",
+    "librewxr.sources.world.ifs.grid": "ifs",
+    "librewxr.sources.world.ifs.interpolation": "ifs",
+    "librewxr.sources.regional.north_america.usa.nwp.hrrr.grid": "hrrr",
+    "librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska.grid": "hrrr-ak",
+    "librewxr.sources.regional.europe.nwp.icon_eu.grid": "icon-eu",
+    "librewxr.sources.regional.europe.nwp.dmi_dini.grid": "dmi-dini",
+    "librewxr.sources.regional.north_america.canada.nwp.hrdps.grid": "hrdps",
+    "librewxr.sources.regional.caribbean.nwp.arome_antilles.grid": "arome-ant",
+    "librewxr.sources.regional.south_america.nwp.wrf_smn.grid": "wrf-smn",
     "librewxr.data.cloud_grid": "cloud",
     "librewxr.data.cloud_cache": "cloud",
     "librewxr.data.nowcast": "nowcast",
@@ -121,46 +116,21 @@ async def run_pipeline() -> None:
     store = FrameStore(max_frames=settings.max_frames, cache_dir=cache_dir)
     tile_cache = TileCache(max_mb=1)  # noop-effect (see module docstring)
 
-    ecmwf_grid = ECMWFGrid(cache_dir=cache_dir) if settings.ecmwf_enabled else None
-    if settings.na_nwp_source == "hrrr":
-        hrrr_grid = HRRRGrid(cache_dir=cache_dir)
-        hrrr_alaska_grid = HRRRAlaskaGrid(cache_dir=cache_dir)
-    else:
-        hrrr_grid = None
-        hrrr_alaska_grid = None
-    if settings.eu_nwp_profile in ("icon_eu_only", "dini_with_icon_eu"):
-        icon_eu_grid = ICONEUGrid(cache_dir=cache_dir)
-    else:
-        icon_eu_grid = None
-    if settings.eu_nwp_profile == "dini_with_icon_eu":
-        dmi_dini_grid = DMIDiniGrid(cache_dir=cache_dir)
-    else:
-        dmi_dini_grid = None
-    hrdps_grid = HRDPSGrid(cache_dir=cache_dir) if settings.hrdps_enabled else None
-    arome_antilles_grid = (
-        AROMEAntillesGrid(cache_dir=cache_dir)
-        if settings.arome_antilles_enabled else None
-    )
-    wrf_smn_grid = WRFSMNGrid(cache_dir=cache_dir) if settings.wrf_smn_enabled else None
-
-    chain_sources = []
-    if hrrr_grid:
-        chain_sources.append(hrrr_grid)
-    if hrrr_alaska_grid:
-        chain_sources.append(hrrr_alaska_grid)
-    if hrdps_grid:
-        chain_sources.append(hrdps_grid)
-    if arome_antilles_grid:
-        chain_sources.append(arome_antilles_grid)
-    if dmi_dini_grid:
-        chain_sources.append(dmi_dini_grid)
-    if icon_eu_grid:
-        chain_sources.append(icon_eu_grid)
-    if wrf_smn_grid:
-        chain_sources.append(wrf_smn_grid)
-    if ecmwf_grid is not None:
-        chain_sources.append(ecmwf_grid)
-    nwp_chain = NWPChain(chain_sources)
+    # Walk the auto-discovered NWP providers under ``librewxr.sources``;
+    # each returns a contribution (or ``None`` when its config flag is
+    # off).  Same chain order as ``main.py`` — see that module for the
+    # priority assignments.
+    nwp_contribs = collect_nwp_contributions(settings, cache_dir)
+    nwp_by_name = {c.name: c.instance for c in nwp_contribs}
+    hrrr_grid = nwp_by_name.get("HRRR")
+    hrrr_alaska_grid = nwp_by_name.get("HRRR-Alaska")
+    hrdps_grid = nwp_by_name.get("HRDPS")
+    arome_antilles_grid = nwp_by_name.get("AROME Antilles")
+    wrf_smn_grid = nwp_by_name.get("WRF-SMN")
+    icon_eu_grid = nwp_by_name.get("ICON-EU")
+    dmi_dini_grid = nwp_by_name.get("DMI DINI")
+    ecmwf_grid = nwp_by_name.get("ECMWF IFS")
+    nwp_chain = NWPChain([c.instance for c in nwp_contribs])
     logger.info("NWP chain: [%s]", ", ".join(s.name for s in nwp_chain.sources))
 
     cloud_grid = CloudGrid(cache_dir=cache_dir) if settings.satellite_enabled else None

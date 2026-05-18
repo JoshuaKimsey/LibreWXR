@@ -11,7 +11,7 @@ import pytest
 
 pytestmark = pytest.mark.dmi_dini
 
-from librewxr.data.dmi_dini_grid import (
+from librewxr.sources.regional.europe.nwp.dmi_dini.grid import (
     BRACKET_INTERVAL_SECONDS,
     CYCLE_INTERVAL_SECONDS,
     DMI_DINI_GRID_HEIGHT,
@@ -236,7 +236,7 @@ class TestZR:
 class TestDecodeOrientation:
     def test_decode_flips_south_up_grib(self, monkeypatch):
         from contextlib import contextmanager
-        from librewxr.data import dmi_dini_grid as dmi
+        from librewxr.sources.regional.europe.nwp.dmi_dini import grid as dmi
 
         # Synthetic cfgrib output: row 0 at the SOUTHERN edge.
         tp = np.zeros((DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH), dtype=np.float32)
@@ -473,8 +473,8 @@ class TestChainOrdering:
         # Build a minimal DINI in front of a global IFS fallback.  Inside
         # DINI the chain should return DINI's value; outside DINI it
         # should return the IFS value.
-        from librewxr.data.ecmwf_grid import ECMWFGrid
-        from librewxr.data.ecmwf_grid import (
+        from librewxr.sources.world.ifs.grid import ECMWFGrid
+        from librewxr.sources.world.ifs.grid import (
             GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W,
         )
 
@@ -676,7 +676,7 @@ class TestDecode2TOrientation:
 
     def test_decode_flips_south_up_and_converts_kelvin(self, monkeypatch):
         from contextlib import contextmanager
-        from librewxr.data import dmi_dini_grid as dmi
+        from librewxr.sources.regional.europe.nwp.dmi_dini import grid as dmi
 
         # Synthetic cfgrib output in Kelvin: row 0 at southern edge.
         # 263.15 K = -10 °C (cold north), 283.15 K = +10 °C (warm south)
@@ -922,8 +922,8 @@ class TestSnowMaskPersistence:
 
 class TestChainSnowMaskWithDMIDini:
     def test_chain_prefers_dini_snow_inside_domain(self, hourly_brackets):
-        from librewxr.data.ecmwf_grid import ECMWFGrid
-        from librewxr.data.ecmwf_grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
+        from librewxr.sources.world.ifs.grid import ECMWFGrid
+        from librewxr.sources.world.ifs.grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
 
         # IFS says snow everywhere; DINI says rain inside its domain.
         # Inside DINI, DINI wins → rain.  Outside (NYC), IFS wins → snow.

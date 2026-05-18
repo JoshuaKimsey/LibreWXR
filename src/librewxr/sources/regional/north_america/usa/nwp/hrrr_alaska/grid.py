@@ -51,7 +51,7 @@ import httpx
 import numpy as np
 
 from librewxr.config import settings
-from librewxr.data.hrrr_grid import (
+from librewxr.sources.regional.north_america.usa.nwp.hrrr.grid import (
     IdxRecord,
     compute_snow_mask,
     fetch_byte_range,

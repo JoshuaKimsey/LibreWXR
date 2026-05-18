@@ -328,7 +328,7 @@ class ECMWFGrid:
 
         # Optionally interpolate between hourly frames to produce 10-min steps
         if settings.ecmwf_interpolation and len(new_timesteps) >= 2:
-            from librewxr.data.ecmwf_interpolation import interpolate_timesteps
+            from librewxr.sources.world.ifs.interpolation import interpolate_timesteps
 
             new_timesteps, ecmwf_flow = interpolate_timesteps(new_timesteps)
         else:

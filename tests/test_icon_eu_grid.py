@@ -10,7 +10,7 @@ import pytest
 
 pytestmark = pytest.mark.icon_eu
 
-from librewxr.data.icon_eu_grid import (
+from librewxr.sources.regional.europe.nwp.icon_eu.grid import (
     BRACKET_INTERVAL_SECONDS,
     CYCLE_INTERVAL_SECONDS,
     ICON_EU_GRID_HEIGHT,
@@ -202,7 +202,7 @@ class TestZR:
 class TestDecodeOrientation:
     def test_decode_flips_south_up_grib(self, monkeypatch):
         from contextlib import contextmanager
-        from librewxr.data import icon_eu_grid as iem
+        from librewxr.sources.regional.europe.nwp.icon_eu import grid as iem
 
         # Synthetic cfgrib output: row 0 at the SOUTHERN edge.
         tp = np.zeros((ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH), dtype=np.float32)
@@ -306,8 +306,8 @@ class TestProtocol:
 
 class TestChainOrdering:
     def test_chain_prefers_icon_eu_inside_europe(self, hourly_brackets):
-        from librewxr.data.ecmwf_grid import ECMWFGrid
-        from librewxr.data.ecmwf_grid import (
+        from librewxr.sources.world.ifs.grid import ECMWFGrid
+        from librewxr.sources.world.ifs.grid import (
             GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W,
         )
 
@@ -463,7 +463,7 @@ class TestDecodeT2MOrientation:
 
     def test_decode_flips_south_up_and_converts_kelvin(self, monkeypatch):
         from contextlib import contextmanager
-        from librewxr.data import icon_eu_grid as icon_eu
+        from librewxr.sources.regional.europe.nwp.icon_eu import grid as icon_eu
 
         # Synthetic cfgrib output in Kelvin: row 0 at southern edge.
         # 283.15 K = +10 °C (warm south), 263.15 K = -10 °C (cold north)
@@ -717,8 +717,8 @@ class TestSnowMaskPersistence:
 
 class TestChainSnowMaskWithIconEU:
     def test_chain_prefers_icon_eu_snow_inside_domain(self, hourly_brackets):
-        from librewxr.data.ecmwf_grid import ECMWFGrid
-        from librewxr.data.ecmwf_grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
+        from librewxr.sources.world.ifs.grid import ECMWFGrid
+        from librewxr.sources.world.ifs.grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
 
         # IFS says snow everywhere; ICON-EU says rain inside its domain.
         # Inside ICON-EU, ICON-EU wins → rain.  Outside (NYC), IFS wins → snow.

@@ -10,7 +10,7 @@ import pytest
 
 pytestmark = pytest.mark.arome_antilles
 
-from librewxr.data.arome_antilles_grid import (
+from librewxr.sources.regional.caribbean.nwp.arome_antilles.grid import (
     AROME_ANT_GRID_HEIGHT,
     AROME_ANT_GRID_WIDTH,
     AROME_ANT_LAT_NORTH,
@@ -233,7 +233,7 @@ class TestZR:
 class TestDecodeOrientation:
     def test_decode_no_flip_when_north_up(self, monkeypatch):
         from contextlib import contextmanager
-        from librewxr.data import arome_antilles_grid as ant
+        from librewxr.sources.regional.caribbean.nwp.arome_antilles import grid as ant
 
         # Synthetic cfgrib output: row 0 at the NORTHERN edge (correct).
         tp = np.zeros((AROME_ANT_GRID_HEIGHT, AROME_ANT_GRID_WIDTH), dtype=np.float32)
@@ -272,7 +272,7 @@ class TestDecodeOrientation:
         """Defensive: if cfgrib ever returns the file south-up, the flip
         should self-correct on the latitude coord."""
         from contextlib import contextmanager
-        from librewxr.data import arome_antilles_grid as ant
+        from librewxr.sources.regional.caribbean.nwp.arome_antilles import grid as ant
 
         tp = np.zeros((AROME_ANT_GRID_HEIGHT, AROME_ANT_GRID_WIDTH), dtype=np.float32)
         tp[0, 100] = 5.0    # marker at "row 0" (now south)

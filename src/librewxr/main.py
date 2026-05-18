@@ -15,22 +15,25 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from librewxr.api import routes
 from librewxr.config import settings
-from librewxr.data.arome_antilles_grid import AROMEAntillesGrid
-from librewxr.data.wrf_smn_grid import WRFSMNGrid
 from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.coverage import build_coverage_masks, build_feather_masks
-from librewxr.data.dmi_dini_grid import DMIDiniGrid
-from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.fetcher import RadarFetcher
-from librewxr.data.hrdps_grid import HRDPSGrid
-from librewxr.data.hrrr_alaska_grid import HRRRAlaskaGrid
-from librewxr.data.hrrr_grid import HRRRGrid
-from librewxr.data.icon_eu_grid import ICONEUGrid
 from librewxr.data.master_state import apply_state, load_state, state_mtime
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.store import FrameStore
-from librewxr.sources import collect_radar_coverage_metadata
+from librewxr.sources import (
+    collect_nwp_contributions,
+    collect_radar_coverage_metadata,
+)
+from librewxr.sources.regional.caribbean.nwp.arome_antilles import AROMEAntillesGrid
+from librewxr.sources.regional.europe.nwp.dmi_dini import DMIDiniGrid
+from librewxr.sources.regional.europe.nwp.icon_eu import ICONEUGrid
+from librewxr.sources.regional.north_america.canada.nwp.hrdps import HRDPSGrid
+from librewxr.sources.regional.north_america.usa.nwp.hrrr import HRRRGrid
+from librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska import HRRRAlaskaGrid
+from librewxr.sources.regional.south_america.nwp.wrf_smn import WRFSMNGrid
+from librewxr.sources.world.ifs import ECMWFGrid
 from librewxr.data.alerts_store import AlertsStore
 from librewxr.data.alerts_fetcher import WMOAlertsFetcher
 from librewxr.memory import MemoryMonitor, detect_memory_limit_mb
@@ -56,15 +59,15 @@ _LOG_TAGS = {
     "librewxr.data.store": "store",
     "librewxr.data.regions": "regions",
     "librewxr.data.coverage": "coverage",
-    "librewxr.data.ecmwf_grid": "ifs",
-    "librewxr.data.ecmwf_interpolation": "ifs",
-    "librewxr.data.hrrr_grid": "hrrr",
-    "librewxr.data.hrrr_alaska_grid": "hrrr-ak",
-    "librewxr.data.icon_eu_grid": "icon-eu",
-    "librewxr.data.dmi_dini_grid": "dmi-dini",
-    "librewxr.data.hrdps_grid": "hrdps",
-    "librewxr.data.arome_antilles_grid": "arome-ant",
-    "librewxr.data.wrf_smn_grid": "wrf-smn",
+    "librewxr.sources.world.ifs.grid": "ifs",
+    "librewxr.sources.world.ifs.interpolation": "ifs",
+    "librewxr.sources.regional.north_america.usa.nwp.hrrr.grid": "hrrr",
+    "librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska.grid": "hrrr-ak",
+    "librewxr.sources.regional.europe.nwp.icon_eu.grid": "icon-eu",
+    "librewxr.sources.regional.europe.nwp.dmi_dini.grid": "dmi-dini",
+    "librewxr.sources.regional.north_america.canada.nwp.hrdps.grid": "hrdps",
+    "librewxr.sources.regional.caribbean.nwp.arome_antilles.grid": "arome-ant",
+    "librewxr.sources.regional.south_america.nwp.wrf_smn.grid": "wrf-smn",
     "librewxr.data.cloud_grid": "cloud",
     "librewxr.data.cloud_cache": "cloud",
     "librewxr.data.nowcast": "nowcast",
@@ -359,78 +362,24 @@ async def lifespan(app: FastAPI):
 
     store = FrameStore(max_frames=settings.max_frames)
     cache = TileCache(max_mb=settings.tile_cache_mb)
-    ecmwf_grid = ECMWFGrid() if settings.ecmwf_enabled else None
     from pathlib import Path
     nwp_cache_dir = Path(settings.cache_dir) if settings.cache_dir else None
-    # ``na_nwp_source=hrrr`` enables BOTH HRRR-CONUS and HRRR-Alaska.
-    # They are the same NCEP model running on disjoint domains and sit
-    # on the same anonymous S3 bucket, so a single toggle covers both.
-    # The chain order is CONUS → Alaska → … (order between them is
-    # irrelevant since their domains don't overlap).
-    if settings.na_nwp_source == "hrrr":
-        hrrr_grid = HRRRGrid(cache_dir=nwp_cache_dir)
-        hrrr_alaska_grid = HRRRAlaskaGrid(cache_dir=nwp_cache_dir)
-    else:
-        hrrr_grid = None
-        hrrr_alaska_grid = None
-    # Both DINI and ICON-EU may be active simultaneously: DINI takes
-    # precedence over its (smaller, higher-res) domain and ICON-EU fills
-    # the broader European coverage outside DINI's footprint.  The
-    # profile name controls which subset is instantiated.
-    if settings.eu_nwp_profile in ("icon_eu_only", "dini_with_icon_eu"):
-        icon_eu_grid = ICONEUGrid(cache_dir=nwp_cache_dir)
-    else:
-        icon_eu_grid = None
-    if settings.eu_nwp_profile == "dini_with_icon_eu":
-        dmi_dini_grid = DMIDiniGrid(cache_dir=nwp_cache_dir)
-    else:
-        dmi_dini_grid = None
-    # HRDPS is independent of na_nwp_source: HRRR's CONUS focus and
-    # HRDPS's Canadian focus are disjoint enough that running both
-    # together is the common case — HRRR wins where it's denser inside
-    # CONUS, HRDPS fills Canada / northern fringe / the Atlantic.
-    if settings.hrdps_enabled:
-        hrdps_grid = HRDPSGrid(cache_dir=nwp_cache_dir)
-    else:
-        hrdps_grid = None
-    # AROME Antilles fills the eastern Caribbean — disjoint from every
-    # other regional source in the chain, so position relative to the
-    # other regionals doesn't matter.  Sits ahead of IFS to win inside
-    # its domain.
-    if settings.arome_antilles_enabled:
-        arome_antilles_grid = AROMEAntillesGrid(cache_dir=nwp_cache_dir)
-    else:
-        arome_antilles_grid = None
-    # WRF-SMN covers the South American Southern Cone (Argentina + Chile
-    # + Uruguay + Paraguay + Bolivia + S. Brazil) — disjoint from every
-    # other regional source so position only matters relative to IFS.
-    if settings.wrf_smn_enabled:
-        wrf_smn_grid = WRFSMNGrid(cache_dir=nwp_cache_dir)
-    else:
-        wrf_smn_grid = None
-    # Chain order = specificity (narrowest domain first), so HRRR fills
-    # CONUS, HRDPS fills Canada, AROME Antilles fills the Caribbean,
-    # DMI DINI fills NW + central Europe at 2 km, ICON-EU fills the
-    # rest of Europe at 7 km, WRF-SMN fills S. America's Southern Cone,
-    # IFS catches everything else globally.
-    chain_sources = []
-    if hrrr_grid:
-        chain_sources.append(hrrr_grid)
-    if hrrr_alaska_grid:
-        chain_sources.append(hrrr_alaska_grid)
-    if hrdps_grid:
-        chain_sources.append(hrdps_grid)
-    if arome_antilles_grid:
-        chain_sources.append(arome_antilles_grid)
-    if dmi_dini_grid:
-        chain_sources.append(dmi_dini_grid)
-    if icon_eu_grid:
-        chain_sources.append(icon_eu_grid)
-    if wrf_smn_grid:
-        chain_sources.append(wrf_smn_grid)
-    if ecmwf_grid is not None:
-        chain_sources.append(ecmwf_grid)
-    nwp_chain = NWPChain(chain_sources)
+    # Walk the auto-discovered NWP providers under ``librewxr.sources``;
+    # each returns a contribution (or ``None`` when its config flag is
+    # off).  Chain order is set by ``NWPContribution.priority``: HRRR
+    # (10) → HRRR-Alaska (11) → HRDPS (20) → AROME Antilles (25) → DMI
+    # DINI (30) → ICON-EU (35) → WRF-SMN (40) → IFS (1000 — catch-all).
+    nwp_contribs = collect_nwp_contributions(settings, nwp_cache_dir)
+    nwp_by_name = {c.name: c.instance for c in nwp_contribs}
+    hrrr_grid = nwp_by_name.get("HRRR")
+    hrrr_alaska_grid = nwp_by_name.get("HRRR-Alaska")
+    hrdps_grid = nwp_by_name.get("HRDPS")
+    arome_antilles_grid = nwp_by_name.get("AROME Antilles")
+    wrf_smn_grid = nwp_by_name.get("WRF-SMN")
+    icon_eu_grid = nwp_by_name.get("ICON-EU")
+    dmi_dini_grid = nwp_by_name.get("DMI DINI")
+    ecmwf_grid = nwp_by_name.get("ECMWF IFS")
+    nwp_chain = NWPChain([c.instance for c in nwp_contribs])
     logger.info("NWP chain: [%s]", ", ".join(s.name for s in nwp_chain.sources))
     cloud = CloudGrid() if settings.satellite_enabled else None
     enabled = settings.get_enabled_regions()

@@ -10,7 +10,7 @@ import pytest
 
 pytestmark = pytest.mark.hrdps
 
-from librewxr.data.hrdps_grid import (
+from librewxr.sources.regional.north_america.canada.nwp.hrdps.grid import (
     BRACKET_INTERVAL_SECONDS,
     CYCLE_INTERVAL_SECONDS,
     HRDPS_GRID_HEIGHT,
@@ -256,7 +256,7 @@ class TestZR:
 class TestDecodeOrientation:
     def test_decode_flips_south_up_grib(self, monkeypatch):
         from contextlib import contextmanager
-        from librewxr.data import hrdps_grid as h
+        from librewxr.sources.regional.north_america.canada.nwp.hrdps import grid as h
 
         # Synthetic cfgrib output: row 0 at the SOUTHERN edge (matches
         # ECCC's GRIB scan mode jScansPositively=1, iScansNegatively=0).
@@ -374,7 +374,7 @@ class TestChainOrdering:
         # Build a minimal HRDPS in front of a global IFS fallback.
         # Inside HRDPS the chain returns HRDPS's value; outside the
         # rotated rectangle it falls through to IFS.
-        from librewxr.data.ecmwf_grid import (
+        from librewxr.sources.world.ifs.grid import (
             ECMWFGrid,
             GRID_HEIGHT as IFS_H,
             GRID_WIDTH as IFS_W,

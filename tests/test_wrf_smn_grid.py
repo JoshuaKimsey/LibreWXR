@@ -11,7 +11,7 @@ import pytest
 
 pytestmark = pytest.mark.wrf_smn
 
-from librewxr.data.wrf_smn_grid import (
+from librewxr.sources.regional.south_america.nwp.wrf_smn.grid import (
     BRACKET_INTERVAL_SECONDS,
     CYCLE_INTERVAL_SECONDS,
     SOURCE_STEP_SECONDS,
@@ -627,8 +627,8 @@ class TestSnowMaskPersistence:
 
 class TestChainSnowMaskWithWRFSMN:
     def test_chain_prefers_wrf_smn_snow_inside_domain(self, hourly_brackets):
-        from librewxr.data.ecmwf_grid import ECMWFGrid
-        from librewxr.data.ecmwf_grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
+        from librewxr.sources.world.ifs.grid import ECMWFGrid
+        from librewxr.sources.world.ifs.grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
 
         # IFS says snow everywhere; WRF-SMN says rain inside its
         # domain.  Inside the SMN domain, SMN wins → rain.  Outside,

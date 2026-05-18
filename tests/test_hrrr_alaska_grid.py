@@ -15,7 +15,7 @@ import pytest
 
 pytestmark = pytest.mark.hrrr_alaska
 
-from librewxr.data.hrrr_alaska_grid import (
+from librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska.grid import (
     BRACKET_INTERVAL_SECONDS,
     CYCLE_INTERVAL_SECONDS,
     HRRR_AK_FEATHER_DISTANCE_M,
@@ -36,7 +36,7 @@ from librewxr.data.hrrr_alaska_grid import (
     ps_forward,
     wrfsfcf_url,
 )
-from librewxr.data.hrrr_grid import compute_snow_mask, find_tmp_2m_records, parse_idx
+from librewxr.sources.regional.north_america.usa.nwp.hrrr.grid import compute_snow_mask, find_tmp_2m_records, parse_idx
 from librewxr.data.nwp_source import NWPChain, NWPSource
 
 
@@ -71,7 +71,7 @@ class TestPolarStereoProjection:
         )
         # x at col=0 == GRID_X_ORIGIN; y at the south edge sits
         # (NY-1)*DY metres below GRID_Y_ORIGIN.
-        from librewxr.data.hrrr_alaska_grid import (
+        from librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska.grid import (
             HRRR_AK_GRID_X_ORIGIN, HRRR_AK_GRID_Y_ORIGIN, HRRR_AK_GRID_DY,
         )
         assert abs(x[0] - HRRR_AK_GRID_X_ORIGIN) < 1.0
@@ -325,7 +325,7 @@ class TestDecodeOrientation:
 
     def test_decode_flips_south_up_grib(self, monkeypatch):
         from contextlib import contextmanager
-        from librewxr.data import hrrr_alaska_grid as hagm
+        from librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska import grid as hagm
 
         refc_data = np.zeros(
             (HRRR_AK_GRID_HEIGHT, HRRR_AK_GRID_WIDTH), dtype=np.float32
@@ -372,7 +372,7 @@ class TestDecodeOrientation:
     def test_decode_does_not_double_flip_north_up_grib(self, monkeypatch):
         """If cfgrib ever returns north-up natively, don't re-flip."""
         from contextlib import contextmanager
-        from librewxr.data import hrrr_alaska_grid as hagm
+        from librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska import grid as hagm
 
         refc_data = np.zeros(
             (HRRR_AK_GRID_HEIGHT, HRRR_AK_GRID_WIDTH), dtype=np.float32
@@ -517,7 +517,7 @@ class TestChainIntegration:
     """Verify HRRR-Alaska soft-blends with IFS at its domain boundary."""
 
     def test_chain_uses_hrrr_alaska_inside_domain(self):
-        from librewxr.data.ecmwf_grid import (
+        from librewxr.sources.world.ifs.grid import (
             ECMWFGrid,
             GRID_HEIGHT as IFS_H,
             GRID_WIDTH as IFS_W,
@@ -808,8 +808,8 @@ class TestSnowMaskPersistence:
 
 class TestChainSnowMaskWithHRRRAlaska:
     def test_chain_prefers_hrrr_alaska_snow_inside_domain(self):
-        from librewxr.data.ecmwf_grid import ECMWFGrid
-        from librewxr.data.ecmwf_grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
+        from librewxr.sources.world.ifs.grid import ECMWFGrid
+        from librewxr.sources.world.ifs.grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
 
         # IFS says snow everywhere; HRRR-Alaska says rain everywhere.
         # Inside HRRR-AK's domain, HRRR-AK wins → rain.  Outside, IFS

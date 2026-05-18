@@ -533,7 +533,7 @@ def _draw_motion_arrows(
     ecmwf_precip = None
     radar_coverage = None
     if has_ecmwf:
-        from librewxr.data.ecmwf_grid import GRID_HEIGHT, GRID_WIDTH, NORTH, PIXEL_SIZE, WEST
+        from librewxr.sources.world.ifs.grid import GRID_HEIGHT, GRID_WIDTH, NORTH, PIXEL_SIZE, WEST
         ecmwf_latlons = tile_pixel_latlons(z, x, y, tile_size)
         ecmwf_precip = ecmwf_grid.sample(
             ecmwf_latlons[0], ecmwf_latlons[1], frame_timestamp,

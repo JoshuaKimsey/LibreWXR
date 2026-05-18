@@ -11,16 +11,16 @@ import numpy as np
 
 from librewxr.config import settings
 from librewxr.memory import release_memory
-from librewxr.data.arome_antilles_grid import AROMEAntillesGrid
-from librewxr.data.wrf_smn_grid import WRFSMNGrid
 from librewxr.data.cloud_grid import CloudGrid
-from librewxr.data.dmi_dini_grid import DMIDiniGrid
-from librewxr.data.ecmwf_grid import ECMWFGrid
-from librewxr.data.hrdps_grid import HRDPSGrid
-from librewxr.data.hrrr_alaska_grid import HRRRAlaskaGrid
-from librewxr.data.hrrr_grid import HRRRGrid
-from librewxr.data.icon_eu_grid import ICONEUGrid
 from librewxr.data.regions import REGIONS, RegionDef
+from librewxr.sources.world.ifs import ECMWFGrid
+from librewxr.sources.regional.caribbean.nwp.arome_antilles import AROMEAntillesGrid
+from librewxr.sources.regional.europe.nwp.dmi_dini import DMIDiniGrid
+from librewxr.sources.regional.europe.nwp.icon_eu import ICONEUGrid
+from librewxr.sources.regional.north_america.canada.nwp.hrdps import HRDPSGrid
+from librewxr.sources.regional.north_america.usa.nwp.hrrr import HRRRGrid
+from librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska import HRRRAlaskaGrid
+from librewxr.sources.regional.south_america.nwp.wrf_smn import WRFSMNGrid
 # Cross-source policy stays in this file (the discovery walker
 # populates ``self._sources`` but blending and fallback still belong
 # here).  MRMS contributes ``MRMS_EXTENTS["USCOMP"]`` for the CACOMP

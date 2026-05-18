@@ -14,7 +14,7 @@ import pytest
 
 pytestmark = pytest.mark.hrrr
 
-from librewxr.data.hrrr_grid import (
+from librewxr.sources.regional.north_america.usa.nwp.hrrr.grid import (
     HRRR_FEATHER_DISTANCE_M,
     HRRR_GRID_DX,
     HRRR_GRID_HEIGHT,
@@ -148,8 +148,8 @@ class TestSoftBlendChain:
 
     def test_chain_with_binary_feathers_matches_hard_fill(self):
         """A chain of binary-feather sources behaves like the old hard fill."""
-        from librewxr.data.ecmwf_grid import ECMWFGrid
-        from librewxr.data.ecmwf_grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
+        from librewxr.sources.world.ifs.grid import ECMWFGrid
+        from librewxr.sources.world.ifs.grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
 
         ifs = ECMWFGrid()
         ifs_dbz = np.full((IFS_H, IFS_W), int((10 + 32) * 2), dtype=np.uint8)
@@ -167,8 +167,8 @@ class TestSoftBlendChain:
 
     def test_chain_blends_in_hrrr_feather_zone(self):
         """In HRRR's feather zone, the chain blends HRRR and IFS proportionally."""
-        from librewxr.data.ecmwf_grid import ECMWFGrid
-        from librewxr.data.ecmwf_grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
+        from librewxr.sources.world.ifs.grid import ECMWFGrid
+        from librewxr.sources.world.ifs.grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
 
         # IFS = 0 dBZ everywhere (encoded 64); HRRR = 50 dBZ everywhere (encoded 164)
         ifs = ECMWFGrid()
@@ -361,7 +361,7 @@ class TestDecodeOrientation:
 
     def test_decode_flips_south_up_grib(self, monkeypatch):
         from contextlib import contextmanager
-        from librewxr.data import hrrr_grid as hgm
+        from librewxr.sources.regional.north_america.usa.nwp.hrrr import grid as hgm
 
         # Synthetic cfgrib-style output: row 0 at lat=21°N, row last at lat=53°N
         refc_data = np.zeros((HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH), dtype=np.float32)
@@ -404,7 +404,7 @@ class TestDecodeOrientation:
     def test_decode_does_not_double_flip_north_up_grib(self, monkeypatch):
         """If cfgrib ever changes to return north-up natively, don't re-flip."""
         from contextlib import contextmanager
-        from librewxr.data import hrrr_grid as hgm
+        from librewxr.sources.regional.north_america.usa.nwp.hrrr import grid as hgm
 
         refc_data = np.zeros((HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH), dtype=np.float32)
         refc_data[0, 100] = 65.0  # at NORTH edge in already-correct frame
@@ -594,8 +594,8 @@ class TestHRRRGridProtocol:
 
 class TestChainWithHRRR:
     def test_chain_prefers_hrrr_inside_conus(self):
-        from librewxr.data.ecmwf_grid import ECMWFGrid
-        from librewxr.data.ecmwf_grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
+        from librewxr.sources.world.ifs.grid import ECMWFGrid
+        from librewxr.sources.world.ifs.grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
 
         # IFS says 10 dBZ everywhere; HRRR says 50 dBZ in CONUS.
         ifs = ECMWFGrid()
@@ -1011,8 +1011,8 @@ class TestSnowMaskPersistence:
 
 class TestChainSnowMaskWithHRRR:
     def test_chain_prefers_hrrr_snow_inside_conus(self):
-        from librewxr.data.ecmwf_grid import ECMWFGrid
-        from librewxr.data.ecmwf_grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
+        from librewxr.sources.world.ifs.grid import ECMWFGrid
+        from librewxr.sources.world.ifs.grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
 
         # IFS says snow everywhere; HRRR says rain everywhere.  Inside HRRR's
         # domain, HRRR wins → rain.  Outside, IFS wins → snow.

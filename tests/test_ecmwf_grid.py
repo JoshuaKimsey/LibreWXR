@@ -8,7 +8,7 @@ from PIL import Image
 
 pytestmark = pytest.mark.ecmwf
 
-from librewxr.data.ecmwf_grid import (
+from librewxr.sources.world.ifs.grid import (
     GRID_HEIGHT,
     GRID_WIDTH,
     PIXEL_SIZE,
@@ -200,8 +200,8 @@ class TestECMWFGrid:
 
         # now=06:30Z, max_ts=3 → first vt >= now is 07Z → window [05, 06, 07]
         mock_now = datetime(2026, 4, 5, 6, 30, tzinfo=timezone.utc)
-        with patch("librewxr.data.ecmwf_grid.datetime") as mock_dt, \
-             patch("librewxr.data.ecmwf_grid.settings") as mock_settings:
+        with patch("librewxr.sources.world.ifs.grid.datetime") as mock_dt, \
+             patch("librewxr.sources.world.ifs.grid.settings") as mock_settings:
             mock_dt.now.return_value = mock_now
             mock_dt.fromisoformat = datetime.fromisoformat
             mock_settings.nowcast_enabled = False
@@ -223,8 +223,8 @@ class TestECMWFGrid:
         # now=06:30Z, nowcast=6×600s=3600s → anchor at 07:30Z
         # first vt >= 07:30 is 08Z → window [06, 07, 08]
         mock_now = datetime(2026, 4, 5, 6, 30, tzinfo=timezone.utc)
-        with patch("librewxr.data.ecmwf_grid.datetime") as mock_dt, \
-             patch("librewxr.data.ecmwf_grid.settings") as mock_settings:
+        with patch("librewxr.sources.world.ifs.grid.datetime") as mock_dt, \
+             patch("librewxr.sources.world.ifs.grid.settings") as mock_settings:
             mock_dt.now.return_value = mock_now
             mock_dt.fromisoformat = datetime.fromisoformat
             mock_settings.nowcast_enabled = True
@@ -246,8 +246,8 @@ class TestECMWFGrid:
         # IFS run just released — all valid_times are after now
         vt_list = [f"2026-04-05T{h:02d}:00Z" for h in range(7, 19)]
         mock_now = datetime(2026, 4, 5, 6, 30, tzinfo=timezone.utc)
-        with patch("librewxr.data.ecmwf_grid.datetime") as mock_dt, \
-             patch("librewxr.data.ecmwf_grid.settings") as mock_settings:
+        with patch("librewxr.sources.world.ifs.grid.datetime") as mock_dt, \
+             patch("librewxr.sources.world.ifs.grid.settings") as mock_settings:
             mock_dt.now.return_value = mock_now
             mock_dt.fromisoformat = datetime.fromisoformat
             mock_settings.nowcast_enabled = False
@@ -267,8 +267,8 @@ class TestECMWFGrid:
 
         vt_list = [f"2026-04-05T{h:02d}:00Z" for h in range(1, 5)]
         mock_now = datetime(2026, 4, 5, 12, 0, tzinfo=timezone.utc)
-        with patch("librewxr.data.ecmwf_grid.datetime") as mock_dt, \
-             patch("librewxr.data.ecmwf_grid.settings") as mock_settings:
+        with patch("librewxr.sources.world.ifs.grid.datetime") as mock_dt, \
+             patch("librewxr.sources.world.ifs.grid.settings") as mock_settings:
             mock_dt.now.return_value = mock_now
             mock_dt.fromisoformat = datetime.fromisoformat
             mock_settings.nowcast_enabled = False

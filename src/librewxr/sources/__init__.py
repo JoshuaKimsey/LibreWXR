@@ -68,6 +68,29 @@ def _collect_providers() -> tuple[list, list]:
 RADAR_PROVIDERS, NWP_PROVIDERS = _collect_providers()
 
 
+def collect_nwp_contributions(settings, cache_dir) -> list:
+    """Walk active NWP providers; return contributions sorted by priority.
+
+    Returns a list of ``NWPContribution`` objects (each carrying the
+    instantiated grid, its name, and its priority) — already sorted so
+    callers can feed it straight into ``NWPChain``.  Providers that
+    return ``None`` (e.g. ``hrdps_enabled=False`` or
+    ``eu_nwp_profile != "dini_with_icon_eu"``) are filtered out.
+    """
+    contributions = []
+    for provider in NWP_PROVIDERS:
+        try:
+            contribution = provider(settings, cache_dir)
+        except Exception:
+            logger.exception("NWP source provider %r raised", provider)
+            continue
+        if contribution is None:
+            continue
+        contributions.append(contribution)
+    contributions.sort(key=lambda c: c.priority)
+    return contributions
+
+
 def collect_radar_coverage_metadata(
     settings,
 ) -> tuple[

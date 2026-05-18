@@ -6,7 +6,7 @@ import pytest
 
 pytestmark = pytest.mark.ecmwf
 
-from librewxr.data.ecmwf_interpolation import interpolate_timesteps
+from librewxr.sources.world.ifs.interpolation import interpolate_timesteps
 from librewxr.data.nwp_interpolation import (
     _compute_flow,
     _interpolate_precip as _interpolate_frame,

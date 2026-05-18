@@ -50,7 +50,7 @@ import httpx
 import numpy as np
 
 from librewxr.config import settings
-from librewxr.data.hrrr_grid import compute_snow_mask
+from librewxr.sources.regional.north_america.usa.nwp.hrrr.grid import compute_snow_mask
 
 logger = logging.getLogger(__name__)
 

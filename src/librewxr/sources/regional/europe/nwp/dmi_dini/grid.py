@@ -1,105 +1,170 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
-"""DWD ICON-EU regional precipitation source.
+"""DMI HARMONIE-AROME DINI regional precipitation source.
 
-Implements the NWPSource Protocol for Deutscher Wetterdienst's ICON-EU
-model — 6.5 km native, regridded to 0.0625° regular lat/lon, covering
-Europe (29.5–70.5°N, 23.5°W–62.5°E).  Eight daily cycles
-(00/03/06/09/12/15/18/21 UTC) give a ~3-hour effective freshness;
-forecast steps are hourly out to +30 h (intermediate runs) or +120 h
-(main runs).
+Implements the NWPSource Protocol for the Danish Meteorological Institute's
+HARMONIE-AROME DINI run — a 2 km native UWC-West HARMONIE configuration on
+a Lambert Conformal Conic grid covering most of populated Europe (UK,
+Ireland, France, Benelux, Germany, Switzerland, Austria, northern Italy,
+Czechia, Poland, southern Scandinavia, Iceland and surrounding seas).
 
-ICON-EU does not publish a native composite reflectivity field — only
-accumulated precipitation (``tot_prec``).  We difference consecutive
-forecast steps to recover the hourly rate and apply the same
-Marshall-Palmer Z-R conversion ECMWFGrid uses for IFS.
+Eight daily cycles (00/03/06/09/12/15/18/21 UTC), 60 h forecast horizon,
+hourly forecast steps.  HARMONIE-AROME's standard surface output has no
+native composite reflectivity field, so we derive dBZ from accumulated
+``tp`` (Total Precipitation, kg/m²) by differencing consecutive forecast
+steps and applying the same Marshall-Palmer Z-R conversion ECMWFGrid /
+ICONEUGrid use.
 
-Distribution: free public access on DWD's open-data file server, no
-auth, plain HTTPS.  Files are bzip2-compressed GRIB2, one variable per
-file, one forecast step per file.
+Distribution: anonymous AWS Open Data S3 (``s3://dmi-opendata/`` in
+``eu-north-1``), no auth, plain HTTPS.  Each (run, lead) is a single
+multi-message GRIB2 file ~600 MB in size containing all surface fields
+for that timestep.  DMI publishes no ``.idx`` sidecars, so we do an
+on-demand byte-range header walk to locate the ``tp`` message offset
+once per run, then use it for every subsequent leadtime download from
+that run (offsets are stable across leadtimes within a run).
 
-Data attribution: Deutscher Wetterdienst (DWD), CC-BY-4.0.
+Data attribution: Danish Meteorological Institute (DMI), distributed via
+AWS Open Data.
 """
 
 from __future__ import annotations
 
 import asyncio
-import bz2
 import logging
+import math
 import os
 import re
 import shutil
+import struct
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
 import numpy as np
 
 from librewxr.config import settings
-from librewxr.data.hrrr_grid import compute_snow_mask
+from librewxr.sources.regional.north_america.usa.nwp.hrrr.grid import compute_snow_mask
 
 logger = logging.getLogger(__name__)
 
 
-# ── ICON-EU regridded lat/lon grid parameters ─────────────────────────
+# ── DMI HARMONIE-AROME DINI LCC grid parameters ────────────────────────
 #
-# Source: cfgrib-decoded coordinates of a real DWD ICON-EU GRIB file.
-# The output is on a regular lat/lon grid with 0.0625° spacing.  Lat
-# increases with row index (row 0 is the SOUTHERN edge), opposite the
-# image convention our grid_indices() uses, so decode flips the array
-# vertically (same gotcha as HRRR via cfgrib).
+# Source: GRIB Section 3 of a representative HARMONIE_DINI_SF file
+# decoded on 2026-05-03.  Earth radius 6371229 m matches the standard
+# spherical sphere used by all HIRLAM / UWC-West models (and HRRR).
+#
+# Both standard parallels coincide at 55.5°N, so the projection is the
+# degenerate single-tangent-parallel case (n = sin φ_0).  Same family
+# as HRRR's LCC; we crib the math here with DMI-specific constants.
 
-ICON_EU_LAT_MIN = 29.5    # southern grid edge (deg N)
-ICON_EU_LAT_MAX = 70.5    # northern grid edge (deg N)
-ICON_EU_LON_MIN = -23.5   # western grid edge (deg E)
-ICON_EU_LON_MAX = 62.5    # eastern grid edge (deg E)
-ICON_EU_PIXEL_SIZE = 0.0625
-ICON_EU_GRID_HEIGHT = int(round((ICON_EU_LAT_MAX - ICON_EU_LAT_MIN) / ICON_EU_PIXEL_SIZE)) + 1   # 657
-ICON_EU_GRID_WIDTH  = int(round((ICON_EU_LON_MAX - ICON_EU_LON_MIN) / ICON_EU_PIXEL_SIZE)) + 1   # 1377
+DMI_DINI_SPHERE_RADIUS = 6371229.0           # metres (sphere, not WGS84)
+DMI_DINI_LAT_0 = 55.5                        # latitude of projection origin
+DMI_DINI_LON_0 = -8.0                        # central meridian (LoV = 352°E)
+DMI_DINI_STD_PARALLEL = 55.5                 # single tangent standard parallel
+DMI_DINI_GRID_DX = 2000.0                    # x spacing (m, ~2 km native)
+DMI_DINI_GRID_DY = 2000.0                    # y spacing (m)
+DMI_DINI_GRID_WIDTH = 1906                   # Ni — points along parallel
+DMI_DINI_GRID_HEIGHT = 1606                  # Nj — points along meridian
+
+# Corner [0,0] of the grid, given by GRIB as (La1, Lo1) in geographic
+# coordinates: 39.671°N, -25.422°E (= 334.578°E).  We project that into
+# LCC space at import time so grid_indices can subtract directly.
+DMI_DINI_LA1 = 39.671
+DMI_DINI_LO1 = 334.578 - 360.0               # -25.422°E
+
+# Precomputed LCC constants — compiled once at import time.
+_PHI_0 = math.radians(DMI_DINI_STD_PARALLEL)
+_N = math.sin(_PHI_0)
+_F = math.cos(_PHI_0) * math.tan(math.pi / 4 + _PHI_0 / 2) ** _N / _N
+_RHO_0 = DMI_DINI_SPHERE_RADIUS * _F / math.tan(math.pi / 4 + _PHI_0 / 2) ** _N
+_LON_0_RAD = math.radians(DMI_DINI_LON_0)
+
+
+def lcc_forward(
+    lat: np.ndarray, lon: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Project geographic (lat, lon) → DMI DINI LCC (x, y) in metres.
+
+    Spherical Lambert Conformal Conic per Snyder (1987) §15, single
+    tangent standard parallel case (n = sin φ_0).
+    """
+    phi = np.radians(lat)
+    lam = np.radians(lon)
+
+    rho = DMI_DINI_SPHERE_RADIUS * _F / np.tan(np.pi / 4 + phi / 2) ** _N
+    theta = _N * (lam - _LON_0_RAD)
+
+    x = rho * np.sin(theta)
+    y = _RHO_0 - rho * np.cos(theta)
+    return x, y
+
+
+# Project the corner (La1, Lo1) — the grid's southern corner since the
+# native scan is south-to-north — to fix the grid's x/y origin in LCC
+# space.  After we flip on decode, row 0 lands at the NORTHERN edge,
+# whose y-coordinate is the southern origin plus (HEIGHT - 1) cells.
+_X0_ARR, _Y0_ARR = lcc_forward(np.array([DMI_DINI_LA1]), np.array([DMI_DINI_LO1]))
+DMI_DINI_GRID_X_ORIGIN = float(_X0_ARR[0])
+DMI_DINI_GRID_Y_ORIGIN_SOUTH = float(_Y0_ARR[0])
+DMI_DINI_GRID_Y_ORIGIN_NORTH = (
+    DMI_DINI_GRID_Y_ORIGIN_SOUTH + (DMI_DINI_GRID_HEIGHT - 1) * DMI_DINI_GRID_DY
+)
+del _X0_ARR, _Y0_ARR
 
 
 def grid_indices(
     lat: np.ndarray, lon: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return fractional ``(row, col)`` on the ICON-EU grid (north-up).
+    """Convert (lat, lon) to fractional (row, col) on the DINI grid.
 
-    After decode flips the array, row 0 is the NORTHERN edge.  Out-of-
-    domain points still return values; callers should test
-    ``domain_mask`` first.
+    After decode flips the array, row 0 is the NORTHERN edge (the GRIB
+    file scans south-to-north — same gotcha as HRRR / ICON-EU).  Column
+    0 is the western edge.  Out-of-domain points still return values;
+    callers should test ``domain_mask`` first.
     """
-    row = (ICON_EU_LAT_MAX - lat) / ICON_EU_PIXEL_SIZE
-    col = (lon - ICON_EU_LON_MIN) / ICON_EU_PIXEL_SIZE
+    x, y = lcc_forward(lat, lon)
+    col = (x - DMI_DINI_GRID_X_ORIGIN) / DMI_DINI_GRID_DX
+    row = (DMI_DINI_GRID_Y_ORIGIN_NORTH - y) / DMI_DINI_GRID_DY
     return row, col
 
 
 def domain_mask(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
-    """``True`` where (lat, lon) falls inside the ICON-EU output grid."""
+    """``True`` where (lat, lon) falls inside the DMI DINI LCC grid."""
     row, col = grid_indices(lat, lon)
     return (
         (row >= 0)
-        & (row < ICON_EU_GRID_HEIGHT - 1)
+        & (row < DMI_DINI_GRID_HEIGHT - 1)
         & (col >= 0)
-        & (col < ICON_EU_GRID_WIDTH - 1)
+        & (col < DMI_DINI_GRID_WIDTH - 1)
     )
 
 
 # ── Boundary feathering ───────────────────────────────────────────────
+#
+# Width of the soft transition zone at the DINI LCC domain edge in
+# metres.  Inside the inner region (≥ FEATHER_DISTANCE_M from any edge)
+# DINI is trusted at full weight; over the feather zone the weight
+# tapers linearly to 0 at the edge so chain blending hands control to
+# the next source (ICON-EU, then IFS) smoothly.
 
-ICON_EU_FEATHER_DISTANCE_DEG = 1.0  # ~70-110 km depending on latitude
+DMI_DINI_FEATHER_DISTANCE_M = 75_000.0  # 75 km ≈ 37 grid cells at 2 km
 
 
 def feather_mask(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
-    """Soft taper to 0 at the ICON-EU domain edge (~1° in lat/lon space)."""
-    # Distance to nearest edge in degrees
-    lat_dist = np.minimum(lat - ICON_EU_LAT_MIN, ICON_EU_LAT_MAX - lat)
-    lon_dist = np.minimum(lon - ICON_EU_LON_MIN, ICON_EU_LON_MAX - lon)
-    dist_deg = np.minimum(lat_dist, lon_dist)
-    weight = np.clip(dist_deg / ICON_EU_FEATHER_DISTANCE_DEG, 0.0, 1.0)
+    """Float32 weights in [0, 1]: 1 deep inside DINI, 0 outside."""
+    row, col = grid_indices(lat, lon)
+    dist_cells = np.minimum(
+        np.minimum(row, (DMI_DINI_GRID_HEIGHT - 1) - row),
+        np.minimum(col, (DMI_DINI_GRID_WIDTH - 1) - col),
+    )
+    dist_m = dist_cells * DMI_DINI_GRID_DX
+    weight = np.clip(dist_m / DMI_DINI_FEATHER_DISTANCE_M, 0.0, 1.0)
     return weight.astype(np.float32, copy=False)
 
 
-# ── Z-R conversion (matches ECMWFGrid IFS path) ───────────────────────
+# ── Z-R conversion (matches ECMWFGrid / ICONEUGrid) ───────────────────
 
 ZR_A_RAIN = 200.0
 ZR_B_RAIN = 1.6
@@ -111,46 +176,39 @@ def precip_rate_to_dbz_encoded(
 ) -> np.ndarray:
     """Convert mm/h precip rate → uint8 dBZ encoded (pixel = (dBZ+32)*2).
 
-    Negative or non-finite values map to 0 (no precipitation).  Uses
-    Marshall-Palmer rain Z-R: Z = 200 * R^1.6, dBZ = 10 * log10(Z).
-    ``dbz_offset`` shifts the resulting dBZ uniformly to compensate for
-    the model-vs-radar intensity bias (radar reads the brightest part
-    of the storm column; the model gives surface rate).
+    Same Marshall-Palmer rain Z-R as ICON-EU: Z = 200 * R^1.6.  The
+    optional ``dbz_offset`` shifts the result uniformly to compensate
+    for the model-vs-radar intensity bias (radar samples the brightest
+    part of the storm column while the model gives surface rate).
     """
     rate = np.where(np.isfinite(precip_mm_per_hour), precip_mm_per_hour, 0.0)
     rate = np.maximum(rate, 0.0)
-    # Z = a * R^b — guard log10 against zero rate
     eps = 1e-6
     z = ZR_A_RAIN * np.power(rate + eps, ZR_B_RAIN)
     dbz = 10.0 * np.log10(np.maximum(z, eps)) + dbz_offset
     encoded = np.clip((dbz + 32.0) * 2.0 + 0.5, 0, 255)
-    # Zero-rate sentinel: clamp to 0 so the downstream noise floor and
-    # both-zero blend logic both see "no precipitation" rather than the
-    # ZR_A * eps^b artifact.
     encoded[rate <= 0.0] = 0
     return encoded.astype(np.uint8)
 
 
 # ── Run / step timing ─────────────────────────────────────────────────
 
-CYCLE_INTERVAL_SECONDS = 3 * 3600       # ICON-EU runs every 3 hours
+CYCLE_INTERVAL_SECONDS = 3 * 3600        # DMI DINI deterministic runs every 3 h
 SOURCE_STEP_SECONDS = 3600               # forecast steps are 1 hour apart in the source files
 # Backwards-compatible alias — existing call sites and tests reference
-# this name directly.  Prefer ``SOURCE_STEP_SECONDS`` in new code.
+# the name directly.  Prefer ``SOURCE_STEP_SECONDS`` in new code.
 BRACKET_INTERVAL_SECONDS = SOURCE_STEP_SECONDS
 # Post-interpolation stored cadence.  When ``LIBREWXR_REGIONAL_INTERPOLATION``
 # is enabled, the fetch loop runs Farneback warping at the end to fill
 # 10-minute synthetic frames between hourly originals; the bracket
 # lookup then walks at this finer interval.
 STORED_INTERVAL_SECONDS = 600
-MAX_FORECAST_HOURS = 30                  # intermediate-run horizon (main runs go further)
+MAX_FORECAST_HOURS = 60                  # all runs reach +60 h
 
-# How far back to walk through run cycles when looking for a run that
-# can serve a given valid time.  Two cycles (6 hours) is plenty: each
-# run reaches +30 h forward, so the latest two cycles cover any active
-# window comfortably.  Going further back means falling off the end of
-# intermediate runs' published forecast horizons, which produces 404s
-# at the request layer.
+# Two cycles of lookback (6 h) is plenty: each run covers +60 h, far
+# more than any reasonable active window.  We don't have ICON-EU's
+# intermediate-run truncation to worry about — every DMI cycle reaches
+# full horizon.
 RUN_LOOKBACK_CYCLES = 2
 
 
@@ -176,11 +234,8 @@ def bracket_lead_seconds(
     Defaults to ``SOURCE_STEP_SECONDS`` (3600 s — the raw hourly source
     cadence).  Pass ``STORED_INTERVAL_SECONDS`` (600 s) to bracket
     against the post-interpolation cadence — that's what the
-    ``ICONEUGrid`` class does internally when
+    ``DMIDiniGrid`` class does internally when
     ``LIBREWXR_REGIONAL_INTERPOLATION`` is enabled.
-
-    For ``lead_seconds < 0`` the bracket falls back; the caller selects
-    an earlier run instead.
     """
     if lead_seconds < 0:
         return 0, 0, 0.0
@@ -190,27 +245,211 @@ def bracket_lead_seconds(
     return l0, l1, alpha
 
 
-# ── DWD opendata file URLs ────────────────────────────────────────────
+# ── DMI Open Data S3 file URLs ────────────────────────────────────────
+#
+# Filename scheme:
+#   forecastdata/HARMONIE_DINI_SF/HARMONIE_DINI_SF_{run}_{valid}.grib
+# where {run} and {valid} are ISO timestamps shaped like
+# ``2026-05-03T000000Z`` (no separators inside HHMMSS).  One file per
+# (run, leadtime).
 
-def file_url(run: datetime, step_hour: int, param: str) -> str:
-    """Build the opendata.dwd.de URL for a single (run, step, variable) file.
+_DMI_TS_FMT = "%Y-%m-%dT%H%M%SZ"
 
-    ``param`` is the lowercase variable name (matches directory name);
-    the filename uses upper case.
-    """
-    base = settings.icon_eu_base_url.rstrip("/")
-    hh = run.strftime("%H")
-    yyyymmddhh = run.strftime("%Y%m%d%H")
-    step = f"{step_hour:03d}"
-    upper = param.upper()
+
+def _format_dmi_ts(dt: datetime) -> str:
+    """Format a datetime as DMI's ISO-without-HHMMSS-separators stamp."""
+    return dt.strftime(_DMI_TS_FMT)
+
+
+def file_url(run: datetime, step_hour: int) -> str:
+    """Construct the S3 URL for a HARMONIE_DINI_SF (run, leadtime) file."""
+    bucket = settings.dmi_dini_s3_bucket
+    region = settings.dmi_dini_s3_region
+    valid = run + timedelta(hours=step_hour)
+    run_str = _format_dmi_ts(run)
+    valid_str = _format_dmi_ts(valid)
     return (
-        f"{base}/{hh}/{param}/"
-        f"icon-eu_europe_regular-lat-lon_single-level_"
-        f"{yyyymmddhh}_{step}_{upper}.grib2.bz2"
+        f"https://{bucket}.s3.{region}.amazonaws.com/"
+        f"forecastdata/HARMONIE_DINI_SF/"
+        f"HARMONIE_DINI_SF_{run_str}_{valid_str}.grib"
     )
 
 
-# ── GRIB2 decode + bzip2 unpack ───────────────────────────────────────
+# ── GRIB2 byte-range header walker ────────────────────────────────────
+#
+# DMI ships no .idx sidecars and each file is ~600 MB containing ~93
+# surface-field messages.  To avoid downloading the whole file just to
+# extract precipitation, we walk GRIB Section 0 + Section 4 of each
+# message via small Range requests (~512 bytes each).  Section 0 gives
+# the message length (so we can hop to the next message); Section 4
+# (Product Definition) gives the parameter category & number.
+#
+# Total Precipitation (accumulated, kg/m²) is discipline=0, category=1
+# (Moisture), parameter=52 in HARMONIE's GRIB tables — same paramId
+# 228228 cfgrib reports as ``tp``.
+#
+# Empirically the offset of the tp message is identical across every
+# leadtime of a given run (DMI's GRIB packing is deterministic per run),
+# so we cache it once per run and reuse for all 60 leadtime downloads.
+
+_TP_DISCIPLINE = 0
+_TP_CATEGORY = 1
+_TP_PARAMETER = 52
+
+# 2-metre temperature lives at discipline=0 category=0 (Temperature)
+# parameter=0 (TMP) — the same triplet as soil / surface / pressure-level
+# temperatures.  To pick the 2-m field specifically we also check the
+# Product Definition Template 4.0 fixed-surface fields: type=103
+# (specified height above ground), scaled value=2 (metres).
+_T2_DISCIPLINE = 0
+_T2_CATEGORY = 0
+_T2_PARAMETER = 0
+_T2_FIXED_SURFACE_TYPE = 103
+_T2_FIXED_SURFACE_VALUE = 2
+
+
+async def find_tp_message_offset(
+    url: str,
+    client: httpx.AsyncClient,
+    *,
+    max_messages: int = 200,
+) -> tuple[int, int] | None:
+    """Walk GRIB headers via byte-range to locate the TP message.
+
+    Returns ``(byte_offset, byte_length)`` of the discipline=0 cat=1
+    num=52 message, or ``None`` if not found.  Issues one ~512-byte
+    Range request per GRIB message scanned.  An ``httpx`` client with
+    keepalive cuts the per-request overhead substantially compared to
+    fresh connections.
+    """
+    from librewxr.data.retry import retry_get
+
+    offset = 0
+    for _ in range(max_messages):
+        resp = await retry_get(
+            client, url, headers={"Range": f"bytes={offset}-{offset + 511}"},
+            log_name="DMI DINI header",
+        )
+        if resp is None:
+            return None
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError:
+            logger.warning("DMI DINI header walk HTTP error at offset %d", offset)
+            return None
+        chunk = resp.content
+        if len(chunk) < 16 or chunk[:4] != b"GRIB":
+            return None
+        if chunk[7] != 2:
+            logger.warning("DMI DINI: unexpected GRIB edition %d at offset %d", chunk[7], offset)
+            return None
+        msg_len = struct.unpack(">Q", chunk[8:16])[0]
+        discipline = chunk[6]
+        # Walk sections within the chunk to find the Product Definition Section.
+        cur = 16
+        while cur < len(chunk) - 5:
+            if cur + 4 > len(chunk):
+                break
+            sec_len = struct.unpack(">I", chunk[cur:cur + 4])[0]
+            if sec_len == 0 or sec_len > msg_len:
+                break
+            sec_num = chunk[cur + 4]
+            if sec_num == 4:
+                if cur + 11 <= len(chunk):
+                    cat = chunk[cur + 9]
+                    num = chunk[cur + 10]
+                    if discipline == _TP_DISCIPLINE and cat == _TP_CATEGORY and num == _TP_PARAMETER:
+                        return offset, msg_len
+                break
+            if sec_num >= 5:
+                break  # past PDS without finding it — uninteresting message
+            cur += sec_len
+        offset += msg_len
+    logger.warning(
+        "DMI DINI: scanned %d messages without finding tp (discipline=%d cat=%d num=%d)",
+        max_messages, _TP_DISCIPLINE, _TP_CATEGORY, _TP_PARAMETER,
+    )
+    return None
+
+
+async def find_2t_message_offset(
+    url: str,
+    client: httpx.AsyncClient,
+    *,
+    max_messages: int = 200,
+) -> tuple[int, int] | None:
+    """Walk GRIB headers via byte-range to locate the 2-m temperature message.
+
+    Same shape as ``find_tp_message_offset`` but matches on the
+    Temperature parameter (discipline=0 cat=0 num=0) AND on the fixed-
+    surface descriptor (type=103 = "specified height above ground",
+    scaled value=2 metres) to disambiguate 2-m TMP from surface / soil /
+    pressure-level TMP messages, all of which share the same parameter
+    triplet.  Returns ``(byte_offset, byte_length)`` or ``None``.
+    """
+    from librewxr.data.retry import retry_get
+
+    offset = 0
+    for _ in range(max_messages):
+        resp = await retry_get(
+            client, url, headers={"Range": f"bytes={offset}-{offset + 511}"},
+            log_name="DMI DINI 2t header",
+        )
+        if resp is None:
+            return None
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError:
+            logger.warning("DMI DINI 2t header walk HTTP error at offset %d", offset)
+            return None
+        chunk = resp.content
+        if len(chunk) < 16 or chunk[:4] != b"GRIB":
+            return None
+        if chunk[7] != 2:
+            logger.warning("DMI DINI: unexpected GRIB edition %d at offset %d", chunk[7], offset)
+            return None
+        msg_len = struct.unpack(">Q", chunk[8:16])[0]
+        discipline = chunk[6]
+        cur = 16
+        while cur < len(chunk) - 5:
+            if cur + 4 > len(chunk):
+                break
+            sec_len = struct.unpack(">I", chunk[cur:cur + 4])[0]
+            if sec_len == 0 or sec_len > msg_len:
+                break
+            sec_num = chunk[cur + 4]
+            if sec_num == 4:
+                # Need cat (cur+9), num (cur+10), fixed-surface type
+                # (cur+22) and scaled value (cur+24..27) to fully
+                # qualify the 2-m TMP field.
+                if cur + 28 <= len(chunk):
+                    cat = chunk[cur + 9]
+                    num = chunk[cur + 10]
+                    fs_type = chunk[cur + 22]
+                    fs_value = struct.unpack(">i", chunk[cur + 24:cur + 28])[0]
+                    if (
+                        discipline == _T2_DISCIPLINE
+                        and cat == _T2_CATEGORY
+                        and num == _T2_PARAMETER
+                        and fs_type == _T2_FIXED_SURFACE_TYPE
+                        and fs_value == _T2_FIXED_SURFACE_VALUE
+                    ):
+                        return offset, msg_len
+                break
+            if sec_num >= 5:
+                break
+            cur += sec_len
+        offset += msg_len
+    logger.warning(
+        "DMI DINI: scanned %d messages without finding 2t (discipline=%d cat=%d num=%d type=%d value=%d)",
+        max_messages, _T2_DISCIPLINE, _T2_CATEGORY, _T2_PARAMETER,
+        _T2_FIXED_SURFACE_TYPE, _T2_FIXED_SURFACE_VALUE,
+    )
+    return None
+
+
+# ── GRIB2 message decode ──────────────────────────────────────────────
+
 
 def _suppress_eccodes_stderr():
     from librewxr.data.sources import _suppress_eccodes_stderr as _s
@@ -218,12 +457,12 @@ def _suppress_eccodes_stderr():
 
 
 def decode_tp_message(grib_bytes: bytes) -> np.ndarray | None:
-    """Decode an ICON-EU ``tot_prec`` GRIB2 message into a 2D float32 array.
+    """Decode a single GRIB2 ``tp`` message into a 2D float32 array.
 
     Returns ``None`` on parse failure.  Output shape is
-    ``(ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH)`` with row 0 at the
+    ``(DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH)`` with row 0 at the
     NORTHERN edge (the array is flipped vertically because cfgrib
-    returns ICON-EU with row 0 = south).
+    returns the file with row 0 = south, matching the GRIB scan mode).
     """
     import xarray as xr
 
@@ -240,7 +479,7 @@ def decode_tp_message(grib_bytes: bytes) -> np.ndarray | None:
             )
         ds = ds.compute()
     except Exception:
-        logger.exception("Failed to decode ICON-EU tot_prec GRIB2 message")
+        logger.exception("Failed to decode DMI DINI tp GRIB2 message")
         return None
     finally:
         if tmp_path is not None:
@@ -249,31 +488,30 @@ def decode_tp_message(grib_bytes: bytes) -> np.ndarray | None:
             except OSError:
                 pass
 
-    # cfgrib names the variable ``tp`` (mm of accumulated precipitation).
     if "tp" in ds.data_vars:
         arr = ds["tp"].values
     else:
         for name, da in ds.data_vars.items():
-            if da.ndim == 2 and da.shape == (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH):
+            if da.ndim == 2 and da.shape == (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH):
                 logger.warning(
-                    "ICON-EU tp variable not named 'tp' (got %r); using fallback",
+                    "DMI DINI tp variable not named 'tp' (got %r); using fallback",
                     name,
                 )
                 arr = da.values
                 break
         else:
-            logger.warning("ICON-EU GRIB had no recognised tot_prec field")
+            logger.warning("DMI DINI GRIB had no recognised tp field")
             return None
 
-    if arr.shape != (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH):
+    if arr.shape != (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH):
         logger.warning(
-            "ICON-EU tp has unexpected shape %s (expected %s); skipping",
-            arr.shape, (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH),
+            "DMI DINI tp has unexpected shape %s (expected %s); skipping",
+            arr.shape, (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH),
         )
         return None
 
-    # cfgrib returns row 0 at the southern edge.  Verify and flip when
-    # needed so row 0 = north matches grid_indices().
+    # cfgrib returns the file in its native scan order (row 0 = south).
+    # Flip when needed so row 0 = north matches grid_indices().
     if "latitude" in ds.coords:
         lat_first = float(np.asarray(ds["latitude"].values).flat[0])
         lat_last = float(np.asarray(ds["latitude"].values).flat[-1])
@@ -286,15 +524,15 @@ def decode_tp_message(grib_bytes: bytes) -> np.ndarray | None:
     return np.ascontiguousarray(arr, dtype=np.float32)
 
 
-def decode_t_2m_message(grib_bytes: bytes) -> np.ndarray | None:
-    """Decode an ICON-EU ``T_2M`` GRIB2 message into Celsius float32.
+def decode_2t_message(grib_bytes: bytes) -> np.ndarray | None:
+    """Decode a single GRIB2 2-m temperature message into Celsius float32.
 
     Returns ``None`` on parse failure.  Output shape is
-    ``(ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH)`` with row 0 at the
-    NORTHERN edge.  DWD reports T_2M in Kelvin per GRIB convention;
-    we subtract 273.15 before returning so the threshold comparison
-    in ``compute_snow_mask`` runs in °C, matching every other regional
-    NWP source in the chain.
+    ``(DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH)`` with row 0 at the
+    NORTHERN edge.  HARMONIE GRIB encodes 2-m TMP in Kelvin per the
+    GRIB convention; we subtract 273.15 before returning so the
+    threshold comparison in ``compute_snow_mask`` runs in °C, matching
+    every other regional NWP source in the chain.
     """
     import xarray as xr
 
@@ -311,7 +549,7 @@ def decode_t_2m_message(grib_bytes: bytes) -> np.ndarray | None:
             )
         ds = ds.compute()
     except Exception:
-        logger.exception("Failed to decode ICON-EU T_2M GRIB2 message")
+        logger.exception("Failed to decode DMI DINI 2t GRIB2 message")
         return None
     finally:
         if tmp_path is not None:
@@ -326,21 +564,21 @@ def decode_t_2m_message(grib_bytes: bytes) -> np.ndarray | None:
         arr = ds["2t"].values
     else:
         for name, da in ds.data_vars.items():
-            if da.ndim == 2 and da.shape == (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH):
+            if da.ndim == 2 and da.shape == (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH):
                 logger.warning(
-                    "ICON-EU T_2M variable not named 't2m' (got %r); using fallback",
+                    "DMI DINI 2t variable not named 't2m' (got %r); using fallback",
                     name,
                 )
                 arr = da.values
                 break
         else:
-            logger.warning("ICON-EU GRIB had no recognised T_2M field")
+            logger.warning("DMI DINI GRIB had no recognised 2t field")
             return None
 
-    if arr.shape != (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH):
+    if arr.shape != (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH):
         logger.warning(
-            "ICON-EU T_2M has unexpected shape %s (expected %s); skipping",
-            arr.shape, (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH),
+            "DMI DINI 2t has unexpected shape %s (expected %s); skipping",
+            arr.shape, (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH),
         )
         return None
 
@@ -353,49 +591,49 @@ def decode_t_2m_message(grib_bytes: bytes) -> np.ndarray | None:
     if needs_flip:
         arr = np.flipud(arr)
 
-    # cfgrib returns T_2M in Kelvin; convert to Celsius for the threshold.
+    # cfgrib returns 2t in Kelvin; convert to Celsius for the threshold.
     celsius = np.ascontiguousarray(arr, dtype=np.float32) - 273.15
     return celsius
 
 
-def decompress_bz2(data: bytes) -> bytes:
-    """Decompress a bzip2-encoded GRIB2 payload."""
-    return bz2.decompress(data)
+# ── DMIDiniGrid: the public NWPSource implementation ─────────────────
 
 
-# ── ICONEUGrid: the public NWPSource implementation ──────────────────
+class DMIDiniGrid:
+    """DMI HARMONIE-AROME DINI as an NWPSource for the European chain slot."""
 
-
-class ICONEUGrid:
-    """DWD ICON-EU as an NWPSource for the European chain slot."""
-
-    name = "icon_eu"
+    name = "dmi_dini"
 
     def __init__(self, cache_dir: Path | None = None):
-        # (run_ts, lead_seconds) -> uint8 dBZ-encoded array on the lat/lon grid
+        # (run_ts, lead_seconds) → uint8 dBZ-encoded array on the LCC grid.
         self._frames: dict[tuple[int, int], np.ndarray] = {}
-        # Raw accumulated tp values keyed by (run_ts, step_hour).  Kept
-        # only long enough to compute the rate at the next forecast step;
-        # purged on eviction.
+        # Raw accumulated tp values keyed by (run_ts, step_hour); kept
+        # only long enough to compute the rate at the next step.
         self._accum: dict[tuple[int, int], np.ndarray] = {}
         # Per-frame snow mask (1 = snow, 0 = rain) keyed by the same
-        # (run_ts, lead_seconds) as ``_frames``.  Derived from a
-        # separate T_2M bz2 file at the DWD opendata URL pattern; one
-        # extra HTTPS GET per leadtime, bandwidth-cheap.
+        # (run_ts, lead_seconds) as ``_frames``.  Derived from the 2-m
+        # temperature message inside the same per-run HARMONIE GRIB
+        # file; the 2t byte offset is cached per run in ``_t2_offsets``.
         self._snow_masks: dict[tuple[int, int], np.ndarray] = {}
+        # Per-run cache of (tp_byte_offset, tp_byte_length).  Stable
+        # across all leadtimes within a run, so the header walk runs
+        # exactly once per new run we encounter.
+        self._tp_offsets: dict[int, tuple[int, int]] = {}
+        # Parallel per-run cache of (2t_byte_offset, 2t_byte_length).
+        self._t2_offsets: dict[int, tuple[int, int]] = {}
         self._client: httpx.AsyncClient | None = None
         self._latest_run_ts: int | None = None
         self._fetch_lock = asyncio.Lock()
 
         if cache_dir is not None:
-            self._memmap_dir = Path(cache_dir) / "icon_eu"
+            self._memmap_dir = Path(cache_dir) / "dmi_dini"
             self._persistent = True
         else:
-            self._memmap_dir = Path(tempfile.mkdtemp(prefix="librewxr_icon_eu_"))
+            self._memmap_dir = Path(tempfile.mkdtemp(prefix="librewxr_dmi_dini_"))
             self._persistent = False
         self._memmap_dir.mkdir(parents=True, exist_ok=True)
         logger.info(
-            "ICON-EU memmap directory: %s (persistent=%s)",
+            "DMI DINI memmap directory: %s (persistent=%s)",
             self._memmap_dir, self._persistent,
         )
         if self._persistent:
@@ -435,7 +673,7 @@ class ICONEUGrid:
             try:
                 mm = np.memmap(
                     path, dtype=np.uint8, mode="r",
-                    shape=(ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH),
+                    shape=(DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH),
                 )
             except Exception:
                 logger.warning("Failed to memmap cached %s, removing", path)
@@ -446,7 +684,7 @@ class ICONEUGrid:
                 self._latest_run_ts = run_ts
             loaded += 1
         if loaded:
-            logger.info("ICON-EU: loaded %d cached frame(s) from disk", loaded)
+            logger.info("DMI DINI: loaded %d cached frame(s) from disk", loaded)
 
         # Second pass: snow masks.  Orphans (no matching precip frame)
         # are removed so they don't accumulate across restarts.
@@ -464,7 +702,7 @@ class ICONEUGrid:
             try:
                 mm = np.memmap(
                     path, dtype=np.uint8, mode="r",
-                    shape=(ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH),
+                    shape=(DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH),
                 )
             except Exception:
                 logger.warning(
@@ -476,7 +714,7 @@ class ICONEUGrid:
             snow_loaded += 1
         if snow_loaded:
             logger.info(
-                "ICON-EU: loaded %d cached snow mask(s) from disk",
+                "DMI DINI: loaded %d cached snow mask(s) from disk",
                 snow_loaded,
             )
 
@@ -502,6 +740,8 @@ class ICONEUGrid:
         self._frames = {}
         self._accum = {}
         self._snow_masks = {}
+        self._tp_offsets = {}
+        self._t2_offsets = {}
         self._latest_run_ts = None
         self._load_cached_frames()
 
@@ -565,11 +805,12 @@ class ICONEUGrid:
     ) -> np.ndarray:
         """Sample the snow / rain classification at each (lat, lon, ts).
 
-        Mirrors ``sample`` for the parallel T_2M-derived snow mask:
-        same run picker, same bracket-lerp, then re-binarise at 0.5.
-        Returns ``False`` everywhere if no snow mask is loaded for the
-        bracket — the chain dispatcher then falls through to the next
-        snow-capable source (IFS, globally) for those pixels.
+        Mirrors ``sample`` for the parallel 2t-derived snow mask: same
+        run picker, same bracket-lerp, then re-binarise at 0.5.  Returns
+        ``False`` everywhere if no snow mask is loaded for the bracket —
+        the chain dispatcher then falls through to the next snow-capable
+        source (typically ICON-EU for the southern fringe of DINI, then
+        IFS globally).
         """
         if timestamp is None or not self._snow_masks:
             return np.zeros(lat.shape, dtype=bool)
@@ -647,6 +888,9 @@ class ICONEUGrid:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(60.0, connect=10.0),
                 follow_redirects=True,
+                # Keepalive across the dozens of header-walk requests
+                # cuts per-run scan time roughly 10× vs fresh connections.
+                limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),
             )
         return self._client
 
@@ -656,12 +900,12 @@ class ICONEUGrid:
         history_seconds: int = 0,
         horizon_seconds: int = 60 * 60,
     ) -> None:
-        """Refresh the in-memory window — same shape as HRRRGrid.fetch."""
+        """Refresh the in-memory window — same shape as ICONEUGrid.fetch."""
         async with self._fetch_lock:
             if now_ts is None:
                 now_ts = int(datetime.now(tz=timezone.utc).timestamp())
 
-            publish_delay = settings.icon_eu_publish_delay_minutes * 60
+            publish_delay = settings.dmi_dini_publish_delay_minutes * 60
             latest_run_ts = latest_published_run(now_ts, publish_delay)
             if self._latest_run_ts is None or latest_run_ts > self._latest_run_ts:
                 self._latest_run_ts = latest_run_ts
@@ -669,11 +913,6 @@ class ICONEUGrid:
             window_start = now_ts - history_seconds
             window_end = now_ts + horizon_seconds
 
-            # Enumerate at most a handful of recent cycle boundaries
-            # (latest, latest-3h, latest-6h).  Each run reaches +30 h
-            # forward so two cycles is enough for any reasonable active
-            # window; going further back falls off intermediate runs'
-            # forecast horizons and yields 404s.
             earliest_run = max(
                 floor_cycle(window_start - CYCLE_INTERVAL_SECONDS),
                 latest_run_ts - RUN_LOOKBACK_CYCLES * CYCLE_INTERVAL_SECONDS,
@@ -682,7 +921,7 @@ class ICONEUGrid:
                 earliest_run, latest_run_ts + 1, CYCLE_INTERVAL_SECONDS,
             ))
             if not runs_to_consider:
-                logger.debug("ICON-EU fetch: no runs available for window")
+                logger.debug("DMI DINI fetch: no runs available for window")
                 return
 
             client = await self._get_client()
@@ -691,9 +930,6 @@ class ICONEUGrid:
             total_failed = 0
             for run_ts in runs_to_consider:
                 run_dt = datetime.fromtimestamp(run_ts, tz=timezone.utc)
-                # Bracket-interval slack on each side so the L1 frame at
-                # the future edge and the L0 frame at the past edge are
-                # both included.
                 min_lead = max(0, window_start - run_ts - BRACKET_INTERVAL_SECONDS)
                 max_lead = min(
                     MAX_FORECAST_HOURS * 3600,
@@ -702,7 +938,7 @@ class ICONEUGrid:
                 if max_lead < min_lead:
                     continue
                 # Need step F-1 to compute the rate at step F via diff,
-                # so always start one step earlier than we strictly need.
+                # so always start one step earlier than strictly needed.
                 min_step = max(0, (min_lead // BRACKET_INTERVAL_SECONDS) - 1)
                 max_step = min(
                     MAX_FORECAST_HOURS,
@@ -716,11 +952,10 @@ class ICONEUGrid:
                         total_failed += 1
 
             # Phase 2: optical-flow interpolation per run.  Fills 10-min
-            # synthetic frames between hourly originals so frontal
-            # systems over Iberia, southern Italy, Greece, the Balkans,
-            # and eastern Europe (the slice ICON-EU covers that DMI DINI
-            # doesn't reach) translate smoothly between bracket frames
-            # instead of cross-fading.  Idempotent.
+            # synthetic frames between hourly originals so a cell moving
+            # 40-80 km/hr across northern Europe doesn't cross-fade
+            # between bracket frames.  Idempotent: re-running on an
+            # already-interpolated run is a no-op.
             total_interpolated = 0
             if settings.regional_interpolation:
                 for run_ts in runs_to_consider:
@@ -730,14 +965,14 @@ class ICONEUGrid:
 
             if total_fetched:
                 logger.info(
-                    "ICON-EU: %d hourly frame(s) ingested + %d interpolated "
+                    "DMI DINI: %d hourly frame(s) ingested + %d interpolated "
                     "across %d run(s); store now holds %d frame(s)",
                     total_fetched, total_interpolated,
                     len(runs_to_consider), len(self._frames),
                 )
             elif total_failed:
                 logger.warning(
-                    "ICON-EU: no frames ingested (%d file(s) failed)",
+                    "DMI DINI: no frames ingested (%d file(s) failed)",
                     total_failed,
                 )
 
@@ -746,9 +981,9 @@ class ICONEUGrid:
 
         Pulls this run's hourly precip + snow frames out of
         ``self._frames`` / ``self._snow_masks``, delegates to the shared
-        Farneback warper, and memmap-writes synthetic frames (precip
-        and snow side-by-side) back into the in-memory dicts at the
-        new ``lead_seconds`` keys.
+        Farneback warper, and memmap-writes the synthetic frames (precip
+        and snow side-by-side) back into the in-memory dicts at the new
+        ``lead_seconds`` keys.
 
         Returns the number of synthetic precip frames added.  Idempotent:
         if the run already has stored-interval spacing, no work is done.
@@ -774,7 +1009,7 @@ class ICONEUGrid:
             frames_by_lead,
             snow_masks_by_ts=snow_by_lead,
             target_interval_seconds=STORED_INTERVAL_SECONDS,
-            log_label=f"ICON-EU interpolation (run {run_ts})",
+            log_label=f"DMI DINI interpolation (run {run_ts})",
         )
 
         added = 0
@@ -804,77 +1039,95 @@ class ICONEUGrid:
     async def _fetch_one_step(
         self, run: datetime, step_hour: int, client: httpx.AsyncClient,
     ) -> int:
-        """Fetch one step's tot_prec, difference against the previous step,
+        """Fetch one step's tp, difference against the previous step,
         encode, and store.  Returns 1 on success, 0 if already loaded,
         -1 on fetch error.
         """
         run_ts = int(run.timestamp())
         lead_seconds = step_hour * BRACKET_INTERVAL_SECONDS
 
-        # Step 0: accumulated precip is zero everywhere (nothing has
-        # rained yet at model init).  We still cache it so step 1's diff
-        # is straightforward.
+        # Step 0: nothing has rained yet at model init — accumulated
+        # precip is zero everywhere.  Cache the zero baseline so step 1
+        # can diff against it cleanly.
         if step_hour == 0:
             if (run_ts, 0) not in self._accum:
                 self._accum[(run_ts, 0)] = np.zeros(
-                    (ICON_EU_GRID_HEIGHT, ICON_EU_GRID_WIDTH),
+                    (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH),
                     dtype=np.float32,
                 )
             return 0
 
-        # Already have the encoded frame — nothing to do.
         if (run_ts, lead_seconds) in self._frames:
             return 0
 
-        url = file_url(run, step_hour, "tot_prec")
+        url = file_url(run, step_hour)
+
+        # Resolve (or compute) the byte offset of the tp message in this
+        # run's files.  The header walk only happens for the first
+        # leadtime we touch from a given run; subsequent leadtimes reuse
+        # the cached offset.
+        tp_loc = self._tp_offsets.get(run_ts)
+        if tp_loc is None:
+            tp_loc = await find_tp_message_offset(url, client)
+            if tp_loc is None:
+                logger.warning(
+                    "DMI DINI: unable to locate tp message for run %s step %d",
+                    run.isoformat(), step_hour,
+                )
+                return -1
+            self._tp_offsets[run_ts] = tp_loc
+            logger.info(
+                "DMI DINI: tp message located for run %s at byte offset %d (size %.2f MB)",
+                run.isoformat(), tp_loc[0], tp_loc[1] / 1e6,
+            )
+
+        offset, size = tp_loc
         from librewxr.data.retry import retry_get
-        resp = await retry_get(client, url, log_name="ICON-EU")
+        resp = await retry_get(
+            client, url,
+            headers={"Range": f"bytes={offset}-{offset + size - 1}"},
+            log_name="DMI DINI data",
+        )
         if resp is None:
             return -1
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            logger.warning("ICON-EU fetch failed for %s: %s", url, e)
+            logger.warning("DMI DINI fetch failed for %s: %s", url, e)
             return -1
-
-        try:
-            grib_bytes = decompress_bz2(resp.content)
-        except Exception:
-            logger.exception("ICON-EU bz2 decompress failed for %s", url)
-            return -1
+        grib_bytes = resp.content
 
         accum = decode_tp_message(grib_bytes)
         if accum is None:
             return -1
 
-        # Ensure we have step F-1 cached for the diff.  If not, fetch it.
+        # Ensure we have step F-1 cached for the diff.
         prev_key = (run_ts, step_hour - 1)
         prev = self._accum.get(prev_key)
         if prev is None and step_hour - 1 >= 0:
-            # Recursive fetch of the previous step.  Step 0 is the
-            # zero-baseline; everything else is a real download.
             await self._fetch_one_step(run, step_hour - 1, client)
             prev = self._accum.get(prev_key)
         if prev is None:
-            # Couldn't establish a baseline — bail.
             return -1
 
         rate_mm_per_hour = accum - prev
         encoded = precip_rate_to_dbz_encoded(
             rate_mm_per_hour,
-            dbz_offset=settings.icon_eu_dbz_offset,
+            dbz_offset=settings.dmi_dini_dbz_offset,
         )
         mm = self._to_memmap(f"r{run_ts}_l{lead_seconds}", encoded)
         self._frames[(run_ts, lead_seconds)] = mm
         self._accum[(run_ts, step_hour)] = accum
 
-        # Snow side: a separate t_2m.bz2 file at the same DWD URL
-        # pattern.  One extra HTTPS GET per leadtime, bandwidth-cheap
-        # (T_2M bz2's compress well).  Decode failures are non-fatal:
-        # the precip frame still lands and ``get_snow_mask`` falls
-        # through to the next chain source for the affected bracket.
+        # Snow side: a second byte-range fetch for the 2t message from
+        # the same per-(run, step) GRIB file.  Each step's 2t message is
+        # at a different byte offset than tp, but the per-run offset is
+        # stable across leadtimes — cached in ``_t2_offsets``.  Decode
+        # failures here are non-fatal: the precip frame still lands and
+        # ``get_snow_mask`` falls through to the next chain source for
+        # this bracket.
         if (run_ts, lead_seconds) not in self._snow_masks:
-            await self._fetch_and_store_snow(run, step_hour, client)
+            await self._fetch_and_store_snow(run, step_hour, url, client)
 
         return 1
 
@@ -882,30 +1135,57 @@ class ICONEUGrid:
         self,
         run: datetime,
         step_hour: int,
+        url: str,
         client: httpx.AsyncClient,
     ) -> None:
-        """Fetch the t_2m.bz2 file for one step and write its snow mask."""
+        """Byte-range fetch + decode the 2t message and store its snow mask.
+
+        Locates the 2t byte offset (cached per run) and pulls just that
+        message via Range request, decodes Kelvin → Celsius, classifies
+        via the shared ``compute_snow_mask`` helper, and memmap-writes
+        the result alongside the precip frame.  All failures log a
+        warning and return without storing — the chain dispatcher will
+        fall through to the next snow-capable source for the affected
+        bracket.
+        """
         from librewxr.data.retry import retry_get
 
         run_ts = int(run.timestamp())
         lead_seconds = step_hour * BRACKET_INTERVAL_SECONDS
-        url = file_url(run, step_hour, "t_2m")
-        resp = await retry_get(client, url, log_name="ICON-EU T_2M")
+
+        t2_loc = self._t2_offsets.get(run_ts)
+        if t2_loc is None:
+            t2_loc = await find_2t_message_offset(url, client)
+            if t2_loc is None:
+                logger.warning(
+                    "DMI DINI: unable to locate 2t message for run %s step %d",
+                    run.isoformat(), step_hour,
+                )
+                return
+            self._t2_offsets[run_ts] = t2_loc
+            logger.info(
+                "DMI DINI: 2t message located for run %s at byte offset %d (size %.2f MB)",
+                run.isoformat(), t2_loc[0], t2_loc[1] / 1e6,
+            )
+
+        offset, size = t2_loc
+        resp = await retry_get(
+            client, url,
+            headers={"Range": f"bytes={offset}-{offset + size - 1}"},
+            log_name="DMI DINI 2t data",
+        )
         if resp is None:
             return
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            logger.warning("ICON-EU T_2M fetch failed for %s: %s", url, e)
+            logger.warning("DMI DINI 2t fetch failed for %s: %s", url, e)
             return
-        try:
-            grib_bytes = decompress_bz2(resp.content)
-        except Exception:
-            logger.exception("ICON-EU T_2M bz2 decompress failed for %s", url)
-            return
-        t2_celsius = decode_t_2m_message(grib_bytes)
+
+        t2_celsius = decode_2t_message(resp.content)
         if t2_celsius is None:
             return
+
         threshold = settings.regional_snow_temp_threshold
         snow = compute_snow_mask(t2_celsius, threshold)
         mm = self._to_memmap(f"r{run_ts}_l{lead_seconds}_snow", snow)
@@ -934,9 +1214,8 @@ class ICONEUGrid:
                 self._snow_frame_path(*key).unlink(missing_ok=True)
             except OSError:
                 pass
-        # Also evict orphan snow masks whose precip frame is gone — can
-        # happen if T_2M decoded successfully but tp for the prior step
-        # was never fetched (no precip frame at this lead got produced).
+        # Also evict orphan snow masks whose precip frame is gone (could
+        # happen if 2t decoded but tp's prior-step accum was missing).
         stale_orphan_snow = []
         for key in self._snow_masks:
             run_ts, lead = key
@@ -949,7 +1228,6 @@ class ICONEUGrid:
                 self._snow_frame_path(*key).unlink(missing_ok=True)
             except OSError:
                 pass
-        # Drop accumulated cache for runs whose entire window is outside.
         stale_accums = []
         for (run_ts, step_h) in self._accum:
             valid_time = run_ts + step_h * BRACKET_INTERVAL_SECONDS
@@ -957,9 +1235,18 @@ class ICONEUGrid:
                 stale_accums.append((run_ts, step_h))
         for k in stale_accums:
             self._accum.pop(k, None)
+        # Drop tp / 2t offset cache entries for runs whose every frame
+        # has been evicted (i.e. that run is no longer in the window).
+        live_runs = {r for (r, _) in self._frames}
+        stale_runs = [r for r in self._tp_offsets if r not in live_runs]
+        for r in stale_runs:
+            self._tp_offsets.pop(r, None)
+        stale_t2_runs = [r for r in self._t2_offsets if r not in live_runs]
+        for r in stale_t2_runs:
+            self._t2_offsets.pop(r, None)
         if stale_frames:
             logger.info(
-                "ICON-EU: evicted %d out-of-window frame(s)", len(stale_frames),
+                "DMI DINI: evicted %d out-of-window frame(s)", len(stale_frames),
             )
 
     # ── Lifecycle ─────────────────────────────────────────────────────
@@ -968,15 +1255,17 @@ class ICONEUGrid:
         self._frames.clear()
         self._accum.clear()
         self._snow_masks.clear()
+        self._tp_offsets.clear()
+        self._t2_offsets.clear()
         if self._client is not None and not self._client.is_closed:
             await self._client.aclose()
         self._client = None
         if not self._persistent:
             shutil.rmtree(self._memmap_dir, ignore_errors=True)
-            logger.info("ICON-EU memmap directory cleaned up")
+            logger.info("DMI DINI memmap directory cleaned up")
         else:
             logger.info(
-                "ICON-EU cache retained at %s for warm restart", self._memmap_dir,
+                "DMI DINI cache retained at %s for warm restart", self._memmap_dir,
             )
 
 
@@ -990,7 +1279,7 @@ def _sample_grid(
     *,
     bilinear: bool = False,
 ) -> np.ndarray:
-    """Sample a uint8 lat/lon grid at (lat, lon) points."""
+    """Sample a uint8 LCC grid at (lat, lon) points."""
     row_f, col_f = grid_indices(lat, lon)
 
     if not bilinear:
@@ -998,9 +1287,9 @@ def _sample_grid(
         col = np.rint(col_f).astype(np.int32)
         in_domain = (
             (row >= 0)
-            & (row < ICON_EU_GRID_HEIGHT)
+            & (row < DMI_DINI_GRID_HEIGHT)
             & (col >= 0)
-            & (col < ICON_EU_GRID_WIDTH)
+            & (col < DMI_DINI_GRID_WIDTH)
         )
         out = np.zeros(lat.shape, dtype=np.uint8)
         if in_domain.any():
@@ -1013,14 +1302,14 @@ def _sample_grid(
     c1 = c0 + 1
     in_domain = (
         (r0 >= 0)
-        & (r1 < ICON_EU_GRID_HEIGHT)
+        & (r1 < DMI_DINI_GRID_HEIGHT)
         & (c0 >= 0)
-        & (c1 < ICON_EU_GRID_WIDTH)
+        & (c1 < DMI_DINI_GRID_WIDTH)
     )
-    r0c = np.clip(r0, 0, ICON_EU_GRID_HEIGHT - 1)
-    r1c = np.clip(r1, 0, ICON_EU_GRID_HEIGHT - 1)
-    c0c = np.clip(c0, 0, ICON_EU_GRID_WIDTH - 1)
-    c1c = np.clip(c1, 0, ICON_EU_GRID_WIDTH - 1)
+    r0c = np.clip(r0, 0, DMI_DINI_GRID_HEIGHT - 1)
+    r1c = np.clip(r1, 0, DMI_DINI_GRID_HEIGHT - 1)
+    c0c = np.clip(c0, 0, DMI_DINI_GRID_WIDTH - 1)
+    c1c = np.clip(c1, 0, DMI_DINI_GRID_WIDTH - 1)
     dr = np.clip(row_f - r0, 0.0, 1.0).astype(np.float32)
     dc = np.clip(col_f - c0, 0.0, 1.0).astype(np.float32)
     v00 = grid[r0c, c0c].astype(np.float32)

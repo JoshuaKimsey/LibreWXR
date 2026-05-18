@@ -15,17 +15,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from librewxr.data.arome_antilles_grid import AROMEAntillesGrid
+from librewxr.sources.regional.caribbean.nwp.arome_antilles.grid import AROMEAntillesGrid
 from librewxr.data.cloud_grid import CloudGrid
-from librewxr.data.dmi_dini_grid import DMIDiniGrid
-from librewxr.data.ecmwf_grid import ECMWFGrid
-from librewxr.data.hrdps_grid import HRDPSGrid
-from librewxr.data.hrrr_alaska_grid import HRRRAlaskaGrid
-from librewxr.data.hrrr_grid import HRRRGrid
-from librewxr.data.icon_eu_grid import ICONEUGrid
+from librewxr.sources.regional.europe.nwp.dmi_dini.grid import DMIDiniGrid
+from librewxr.sources.world.ifs.grid import ECMWFGrid
+from librewxr.sources.regional.north_america.canada.nwp.hrdps.grid import HRDPSGrid
+from librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska.grid import HRRRAlaskaGrid
+from librewxr.sources.regional.north_america.usa.nwp.hrrr.grid import HRRRGrid
+from librewxr.sources.regional.europe.nwp.icon_eu.grid import ICONEUGrid
 from librewxr.data.nowcast import NowcastFrame, NowcastStore
 from librewxr.data.store import FrameStore, RadarFrame
-from librewxr.data.wrf_smn_grid import WRFSMNGrid
+from librewxr.sources.regional.south_america.nwp.wrf_smn.grid import WRFSMNGrid
 
 pytestmark = pytest.mark.store
 
