@@ -86,10 +86,13 @@ services:
         limits:
           memory: ${LIBREWXR_RENDER_MEMORY:-18G}
 
-  # Wipe the shared cache volume.  Run with:
+  # Wipe the shared cache volume.  Gated behind the "manual" profile so
+  # it doesn't run on every `docker compose up` — explicit targeting via
+  # `run` still works regardless of the profile.  Invoke with:
   #   docker compose -f docker-compose.multiworker.yml run --rm clear-cache
   clear-cache:
     image: alpine:latest
+    profiles: ["manual"]
     volumes:
       - librewxr-cache:/data/cache
     command: sh -c "rm -rf /data/cache/* && echo 'All caches cleared'"
