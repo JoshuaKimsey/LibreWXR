@@ -4,8 +4,15 @@ This guide walks through adding a radar composite or regional NWP grid to LibreW
 
 If you're looking for the short procedural checklist instead of the full walkthrough, see the **"Adding a New Source"** section in [`CLAUDE.md`](../CLAUDE.md) at the project root.
 
+Self-hosters running their own LibreWXR instance are free to integrate any source the architecture supports — that's between the operator and the upstream data provider. **Contributing a source to the core project is narrower:** the data has to be open, either by explicit license or by a clear governmental policy that places it in the open. Read [Upstream contribution criteria](#upstream-contribution-criteria) before doing the implementation work, especially if the licensing situation isn't already obvious.
+
 ## Table of Contents
 
+- [Upstream contribution criteria](#upstream-contribution-criteria)
+  - [Hard requirements](#hard-requirements)
+  - [Soft constraints (Tier 2)](#soft-constraints-tier-2)
+  - [Blockers](#blockers)
+  - [When the license is unclear](#when-the-license-is-unclear)
 - [How discovery works](#how-discovery-works)
 - [Directory layout](#directory-layout)
   - [Country-dir convention](#country-dir-convention)
@@ -22,6 +29,41 @@ If you're looking for the short procedural checklist instead of the full walkthr
 - [Coverage map](#coverage-map)
 - [Tests](#tests)
 - [Final checklist](#final-checklist)
+
+## Upstream contribution criteria
+
+LibreWXR is permissive about what you run on your own instance. Submitting a source for inclusion in the upstream project is narrower — it has to be redistributable by an AGPL-3.0 open-source project that anyone can host.
+
+### Hard requirements
+
+A source can be merged upstream when **all three** of the following hold:
+
+- **Open license, or a site-wide open-data policy that plausibly covers it.** An explicit license is the easiest case — e.g., CC-BY-4.0 (MMD Malaysia), Etalab Open Licence v2.0 (Météo-France), OGDL v1.0 (CWA Taiwan), Canada OGL, US public domain. "Heavily implied" also counts when the operator publishes a clear blanket policy: e.g., a national meteorology site stating that unless marked otherwise, all data and information on the site is in the public domain. PAGASA (Philippines) is one example of that shape — site-wide public-domain notice covering products that lack their own per-product license text.
+- **Anonymous access.** No API keys, no per-user tokens, no registration. API-key-gated sources are an automatic decline for the core project regardless of how generous the license is, because they don't scale to a self-hosted project where every operator would need to register their own credentials.
+- **Redistribution permitted.** No "non-commercial only" clauses, no "no third-party hosting" clauses, no audience restrictions. LibreWXR does not put a ceiling on who can run it, and bundling sources whose terms exclude commercial or large-scale operators would create asymmetric licensing across the source set.
+
+### Soft constraints (Tier 2)
+
+These are accepted but worth flagging in the package `README.md`:
+
+- WAFs / Cloudflare / Imperva in front of the source — tolerated when anonymous access works reliably in practice.
+- Undocumented bounds or projection — workable when reverse-engineering is unambiguous and verifiable against the operator's own viewer at the same wall-clock moment.
+- Attribution requirements — fine as long as they can be honored in the package `README.md` (and, if required by the license, in the served UI).
+- Short archive depth (under 24 hours) — acceptable; note it in the README.
+
+### Blockers
+
+These rule a source out for upstream regardless of how technically attractive it is:
+
+- API keys or per-user authentication.
+- "Non-commercial use only" / "no redistribution" / "personal use only" terms.
+- App-only access policies (operator's stated position is that the data is for their own apps, not third-party use).
+- Paywalls, even nominal ones.
+- Commercial state-owned-enterprise licensing (national met service that operates as a commercial entity and licenses data per customer).
+
+### When the license is unclear
+
+Reach out to the operator before doing the implementation work. Ask plainly whether the data is available for redistribution by a self-hostable, AGPL-3.0 open-source project. If the answer is no or ambiguous, record the determination in [`source-survey.md`](source-survey.md) — that file is the running ledger of accept / defer / reject decisions across radar and NWP sources, and is the right place to save the next contributor from re-discovering a blocker.
 
 ## How discovery works
 
@@ -314,6 +356,7 @@ If the registry-discovery tests in `tests/test_sources_discovery.py` need an ass
 
 Before opening a PR:
 
+- [ ] License + redistribution terms verified compatible with [Upstream contribution criteria](#upstream-contribution-criteria).
 - [ ] Package directory exists under the right `sources/.../` path (follow the country-dir convention).
 - [ ] `__init__.py` exports a `radar_provider` or `nwp_provider`.
 - [ ] `regions.py` (radar) defines `REGIONS` and `REGION_GROUP`.
