@@ -11,6 +11,9 @@ build/
 # Environment (contains local config)
 .env
 
+# Per-host compose overrides (memory caps, bind mounts, tunnel credentials, etc.)
+docker-compose.override.yml
+
 # IDE
 .vscode/
 .idea/
