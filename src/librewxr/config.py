@@ -181,7 +181,11 @@ class Settings(BaseSettings):
     # since the Antilles domain is disjoint from every other regional
     # source in the chain (Caribbean, abuts the existing PRCOMP radar).
     arome_antilles_enabled: bool = True
-    arome_antilles_base_url: str = "https://object.data.gouv.fr/meteofrance-pnt"
+    # Météo-France migrated PNT distribution off object.data.gouv.fr to
+    # direct OVH Swift hosting around 2026-01.  Old host returns 404 for
+    # all runs; the data.gouv.fr API now redirects every download to the
+    # OVH bucket below.  Same path layout (/pnt/{run}/arome-om/...).
+    arome_antilles_base_url: str = "https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net"
     arome_antilles_publish_delay_minutes: int = 420   # ~7 h after init for full 0..48h
     arome_antilles_dbz_offset: float = 6.0            # same Marshall-Palmer caveat as DINI/ICON-EU
     # SMN Argentina WRF-DET: 4 km LCC over Argentina + Chile + Uruguay

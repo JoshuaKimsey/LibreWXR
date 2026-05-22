@@ -187,7 +187,6 @@ class TestFileUrl:
     def test_uses_settings_base_url(self):
         run = datetime(2026, 5, 8, 0, tzinfo=timezone.utc)
         url = file_url(run, 1)
-        assert "object.data.gouv.fr" in url
         assert "meteofrance-pnt" in url
 
 

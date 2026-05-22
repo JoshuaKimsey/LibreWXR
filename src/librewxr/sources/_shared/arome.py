@@ -5,8 +5,11 @@
 All AROME overseas models (Antilles, Réunion-Mayotte, French Guiana,
 New Caledonia, French Polynesia) share:
 
-- Same upstream: ``object.data.gouv.fr/meteofrance-pnt`` open-data
-  object storage, anonymous HTTPS, Etalab Open Licence v2.0.
+- Same upstream: ``meteofrance-pnt.s3.rbx.io.cloud.ovh.net`` (OVH
+  OpenStack Swift / S3-compatible), anonymous HTTPS, Etalab Open
+  Licence v2.0.  Météo-France migrated PNT distribution off the older
+  ``object.data.gouv.fr/meteofrance-pnt/`` host around 2026-01; the
+  data.gouv.fr API still works but its file links now 302 to OVH.
 - Same file layout: single-message GRIB2 per (run, lead hour) with
   ``shortName=tp`` containing accumulated total precipitation
   (kg/m² ≡ mm), regular lat/lon grid (gridType=regular_ll), scan

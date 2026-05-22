@@ -782,7 +782,7 @@ Météo-France AROME Antilles at 1.3 km native resolution, public-dist as 0.025�
 
 | | |
 |---|---|
-| **Default** | `https://object.data.gouv.fr/meteofrance-pnt` |
+| **Default** | `https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net` |
 | **Type** | string |
 
 #### `LIBREWXR_AROME_ANTILLES_PUBLISH_DELAY_MINUTES`

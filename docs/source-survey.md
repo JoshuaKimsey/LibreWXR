@@ -339,7 +339,7 @@ ECCC continental at 2.5 km native rotated lat/lon, 6-hourly cycles, 1-hour APCP 
 
 ### AROME Antilles (priority 25)
 
-Météo-France 1.3 km native / 2.5 km public distribution (0.025° regular lat/lon, with NaN mask outside the trapezoidal native grid). Anonymous via the data.gouv.fr open-data portal at `object.data.gouv.fr/meteofrance-pnt/`. 4 cycles/day (00/06/12/18Z), 0–48 h horizon. License: Etalab Open Licence v2.0. Scan mode 0 (row 0 = north, no flip needed) — the first source where this is the case. `tp` shortName recognised directly (no paramId fallback). Cumulative-since-init precip → diff against prior step → Marshall-Palmer Z-R.
+Météo-France 1.3 km native / 2.5 km public distribution (0.025° regular lat/lon, with NaN mask outside the trapezoidal native grid). Anonymous HTTPS via the OVH Swift bucket at `meteofrance-pnt.s3.rbx.io.cloud.ovh.net` (Météo-France migrated PNT distribution off `object.data.gouv.fr/meteofrance-pnt/` around 2026-01; the data.gouv.fr API still works but its file links now 302 to OVH). 4 cycles/day (00/06/12/18Z), 0–48 h horizon. License: Etalab Open Licence v2.0. Scan mode 0 (row 0 = north, no flip needed) — the first source where this is the case. `tp` shortName recognised directly (no paramId fallback). Cumulative-since-init precip → diff against prior step → Marshall-Palmer Z-R.
 
 Snow mask not enabled — the domain is tropical.
 
