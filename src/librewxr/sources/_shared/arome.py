@@ -529,6 +529,30 @@ class AROMEOverseasGrid:
         ))
         return latest_run_ts, runs_to_consider
 
+    @classmethod
+    def _step_range(cls, min_lead: int, max_lead: int) -> tuple[int, int]:
+        """Return ``(min_step, max_step)`` for a single run's fetch loop.
+
+        ``min_step`` is the smallest step n such that ``n * BRACKET >=
+        min_lead`` (ceiling) — its valid_time lands on or above the
+        eviction lower bound.  ``max_step`` is the largest step n such
+        that ``n * BRACKET <= max_lead`` (floor) — its valid_time lands
+        on or below the eviction upper bound.  Both ends are clamped
+        to ``[0, MAX_FORECAST_HOURS]``.
+
+        Pre-2026-05-22 the formula used ``floor - 1`` on the low end
+        and ``ceil`` on the high end, which fetched one extra step on
+        each side that ``_evict_outside_window`` immediately wiped.
+        Combined with disk-cached frames from prior runs, that
+        occasionally left the store at 0 frames when the wall clock
+        landed near a bracket boundary.
+        """
+        bracket = cls.BRACKET_INTERVAL_SECONDS
+        # Ceiling division: -(-a // b) == ceil(a / b) for positive ints.
+        min_step = max(0, -(-min_lead // bracket))
+        max_step = min(cls.MAX_FORECAST_HOURS, max_lead // bracket)
+        return min_step, max_step
+
     async def fetch(
         self,
         now_ts: int | None = None,
@@ -571,11 +595,7 @@ class AROMEOverseasGrid:
                 )
                 if max_lead < min_lead:
                     continue
-                min_step = max(0, (min_lead // self.BRACKET_INTERVAL_SECONDS) - 1)
-                max_step = min(
-                    self.MAX_FORECAST_HOURS,
-                    -(-max_lead // self.BRACKET_INTERVAL_SECONDS),
-                )
+                min_step, max_step = self._step_range(min_lead, max_lead)
                 for step in range(int(min_step), int(max_step) + 1):
                     added = await self._fetch_one_step(run_dt, step, client)
                     if added > 0:

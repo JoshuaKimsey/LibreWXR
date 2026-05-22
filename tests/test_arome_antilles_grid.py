@@ -219,6 +219,106 @@ class TestWindowRuns:
         assert len(runs) >= 2
 
 
+# ── Step range (regression for the evict-everything edge case) ────────
+
+
+class TestStepRange:
+    """Regression tests for ``_step_range``.
+
+    Pre-2026-05-22 ``min_step`` used ``(min_lead // BRACKET) - 1`` and
+    ``max_step`` used ``ceil(max_lead / BRACKET)``.  Both shapes fetched
+    one bracket of slack beyond what ``_evict_outside_window`` retains,
+    so every cycle ingested 2-3 frames that were immediately wiped.
+    When those wasted fetches lined up just right with stale disk
+    frames from prior runs, the store could end up at 0 frames for
+    a full 10-min cycle — chain dispatch fell through to IFS and the
+    AROME variant briefly disappeared from the map.
+
+    The fix uses ceil for min_step and floor for max_step so every
+    fetched step's valid_time falls inside the eviction window.
+    """
+
+    BRACKET = 3600
+
+    def test_min_step_valid_time_inside_eviction_lower_bound(self):
+        # min_lead = window_start - run_ts - BRACKET, by construction.
+        # The eviction lower bound is window_start - BRACKET, so any
+        # step whose valid_time >= window_start - BRACKET survives.
+        # Step's valid_time = run_ts + step * BRACKET, so we need
+        # step * BRACKET >= min_lead.
+        for min_lead in [0, 1, 3599, 3600, 3601, 33019, 36000, 36001]:
+            min_step, _ = AROMEAntillesGrid._step_range(min_lead, min_lead + 3600)
+            assert min_step * self.BRACKET >= min_lead, (
+                f"min_step={min_step} (lead={min_step * self.BRACKET}) "
+                f"is below min_lead={min_lead}"
+            )
+
+    def test_max_step_valid_time_inside_eviction_upper_bound(self):
+        # max_lead = window_end - run_ts + BRACKET.  Eviction upper
+        # bound is window_end + BRACKET = run_ts + max_lead, so any
+        # step whose valid_time <= max_lead-from-run survives.
+        for max_lead in [3600, 7200, 51019, 54000, 54001, 60000]:
+            _, max_step = AROMEAntillesGrid._step_range(0, max_lead)
+            assert max_step * self.BRACKET <= max_lead, (
+                f"max_step={max_step} (lead={max_step * self.BRACKET}) "
+                f"is above max_lead={max_lead}"
+            )
+
+    def test_step_clamped_to_max_forecast_hours(self):
+        # A max_lead that would exceed the model horizon is clamped.
+        _, max_step = AROMEAntillesGrid._step_range(0, 200 * 3600)
+        assert max_step == AROMEAntillesGrid.MAX_FORECAST_HOURS
+
+    def test_min_step_never_negative(self):
+        # Step 0 is the analysis frame; the fetcher must never request
+        # a negative step.
+        min_step, _ = AROMEAntillesGrid._step_range(0, 3600)
+        assert min_step >= 0
+
+    @pytest.mark.parametrize("now_h_utc", [4.17, 6.17, 8.17, 10.17, 12.17])
+    def test_every_fetched_step_survives_eviction(self, now_h_utc):
+        # End-to-end: pick a wall clock, walk through window_start,
+        # window_end, eviction window, and assert every step the fetcher
+        # would request lands inside [ws_evict, we_evict].  This is the
+        # property the pre-fix code violated — extra steps got fetched
+        # and then immediately wiped.
+        hour = int(now_h_utc)
+        minute = int(round((now_h_utc - hour) * 60))
+        now = int(datetime(2026, 5, 22, hour, minute, tzinfo=timezone.utc).timestamp())
+        history = 2 * 3600   # nwp_history default
+        horizon = 1 * 3600   # nwp_horizon default
+        publish_delay = 7 * 3600
+        bracket = 3600
+
+        _, runs = AROMEAntillesGrid._window_runs(
+            now_ts=now, history_seconds=history, horizon_seconds=horizon,
+            publish_delay_seconds=publish_delay,
+        )
+        assert runs, "no runs to consider — test setup wrong"
+
+        window_start = now - history
+        window_end = now + horizon
+        ws_evict = window_start - bracket
+        we_evict = window_end + bracket
+
+        for run_ts in runs:
+            min_lead = max(0, window_start - run_ts - bracket)
+            max_lead = min(
+                AROMEAntillesGrid.MAX_FORECAST_HOURS * 3600,
+                window_end - run_ts + bracket,
+            )
+            if max_lead < min_lead:
+                continue
+            min_step, max_step = AROMEAntillesGrid._step_range(min_lead, max_lead)
+            for step in range(min_step, max_step + 1):
+                valid_time = run_ts + step * bracket
+                assert ws_evict <= valid_time <= we_evict, (
+                    f"run={run_ts} step={step} valid_time={valid_time} "
+                    f"falls outside eviction window [{ws_evict}, {we_evict}] "
+                    f"— would be fetched then immediately evicted"
+                )
+
+
 # ── URL construction ──────────────────────────────────────────────────
 
 
