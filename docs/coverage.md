@@ -62,7 +62,11 @@ show. Anywhere none of these models reach, ECMWF IFS fills in.
 | ECCC HRDPS-Continental | Canada + northern US | 2.5 km | rotated lat/lon | 6-hourly |
 | DMI HARMONIE-AROME DINI | Most of populated Europe + Iceland | 2 km | LCC | 3-hourly |
 | DWD ICON-EU | Europe (wider than DINI) | ~7 km | regular lat/lon | 3-hourly |
-| Météo-France AROME Antilles | Eastern Caribbean | 1.3 km | regular lat/lon | 6-hourly |
+| Météo-France AROME Antilles | Eastern Caribbean (Guadeloupe + Martinique) | 2.5 km | regular lat/lon | 6-hourly |
+| Météo-France AROME Guyane | French Guiana | 2.5 km | regular lat/lon | 6-hourly |
+| Météo-France AROME Indien | Réunion + Mayotte + Comoros + Madagascar + SW Indian Ocean | 2.5 km | regular lat/lon | 6-hourly |
+| Météo-France AROME Nouvelle-Calédonie | New Caledonia + Vanuatu (SW Pacific) | 2.5 km | regular lat/lon | 6-hourly |
+| Météo-France AROME Polynésie | French Polynesia (Society + Tuamotu + Marquesas archipelagoes) | 2.5 km | regular lat/lon | 6-hourly |
 | SMN Argentina WRF-DET | South American Cone (AR/CL/UY/PY + S. Brazil + Bolivia) | 4 km | LCC | 6-hourly |
 
 The HRRR-Alaska polygon wraps across the antimeridian onto the Russian
