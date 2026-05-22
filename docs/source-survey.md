@@ -343,6 +343,22 @@ Météo-France 1.3 km native / 2.5 km public distribution (0.025° regular lat/l
 
 Snow mask not enabled — the domain is tropical.
 
+### AROME Guyane (priority 26)
+
+Same upstream + family base as AROME Antilles. URL token `GUYANE`. Domain ~1156 × 877 km covering French Guiana plus the eastern strip of Suriname and a sliver of Amapá, Brazil. Pairs with Antilles to give continuous Caribbean → Guianas coverage. Domain back-decoded from GRIB Section 3 on 2026-05-21.
+
+### AROME Indien (priority 27)
+
+URL token `INDIEN`. The largest AROME-OM grid at ~3742 × 2492 km — covers Réunion, Mayotte, the Comoros, almost all of Madagascar, and the Tanzanian coast. ~70 MB RAM is the highest memory cost of any AROME-OM variant, so disable it if low on memory and not serving Indian Ocean clients.
+
+### AROME Nouvelle-Calédonie (priority 28)
+
+URL token `NCALED`. Domain ~1357 × 1360 km covering New Caledonia + Loyalty Islands + the southern half of Vanuatu.
+
+### AROME Polynésie (priority 29)
+
+URL token `POLYN`. Domain ~1365 × 1404 km covering the Society Islands (Tahiti, Bora Bora) and the Tuamotu archipelago. The Marquesas are outside the public 0.025° grid even though they're part of the operational model's footprint. An earlier survey claimed Polynésie ran 12-hourly, but a bucket probe on 2026-05-21 confirmed 6-hourly cycles like every other AROME-OM variant.
+
 ### DMI HARMONIE-AROME DINI (priority 30)
 
 2 km native LCC, 3-hourly cycles. Anonymous AWS S3 bucket `dmi-opendata` in `eu-north-1` (`--no-sign-request`). No `.idx` files — uses byte-range header walk to find the precip message offset. Domain covers UK + Ireland, France, Benelux, Germany, Switzerland, Austria, northern Italy, Czechia, Poland, **all of Scandinavia including most of Finland**, Denmark, and Iceland (DMI's published computational grid extends past the marketing maps).

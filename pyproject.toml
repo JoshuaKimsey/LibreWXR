@@ -59,6 +59,10 @@ markers = [
     "dmi_dini: DMI HARMONIE-AROME DINI grid, LCC, and fetch tests",
     "hrdps: HRDPS rotated lat/lon grid and fetch tests",
     "arome_antilles: Météo-France AROME Antilles regular lat/lon grid and fetch tests",
+    "arome_guyane: Météo-France AROME Guyane regular lat/lon grid tests",
+    "arome_indien: Météo-France AROME Indien (Réunion/Mayotte/Madagascar) regular lat/lon grid tests",
+    "arome_ncaled: Météo-France AROME Nouvelle-Calédonie regular lat/lon grid tests",
+    "arome_polyn: Météo-France AROME Polynésie française regular lat/lon grid tests",
     "wrf_smn: SMN Argentina WRF-DET LCC grid and NetCDF4 decode tests",
     "alerts: WMO CAP weather alerts tests",
 ]

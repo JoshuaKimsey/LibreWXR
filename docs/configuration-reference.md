@@ -803,6 +803,31 @@ Full 0..48h files publish ~6-7 h after init; 7 h is conservative.
 | **Type** | float |
 | **Unit** | dBZ |
 
+### Météo-France AROME Outre-Mer (other variants)
+
+The remaining four AROME-OM variants share the same upstream, file
+format, cadence, and decoder as Antilles (via the
+`AROMEOverseasGrid` family base in `sources/_shared/arome.py`).
+Each is independently toggleable. All four are tropical /
+sub-tropical and skip snow-mask classification + optical-flow
+interpolation (their natively-hourly cadence is fine for animation
+at small domain sizes).
+
+| Variant | Token | Domain (~km E-W × N-S) | Coverage | Chain priority |
+|---|---|---|---|---|
+| AROME Guyane | `GUYANE` | 1156 × 877 | French Guiana + Suriname + Amapá borders | 26 |
+| AROME Indien | `INDIEN` | 3742 × 2492 (largest AROME-OM) | Réunion + Mayotte + Comoros + most of Madagascar + Tanzania coast | 27 |
+| AROME Nouvelle-Calédonie | `NCALED` | 1357 × 1360 | New Caledonia + Loyalty Islands + Vanuatu side | 28 |
+| AROME Polynésie | `POLYN` | 1365 × 1404 | Society + Tuamotu archipelagoes | 29 |
+
+Each variant exposes four settings analogous to Antilles:
+`LIBREWXR_AROME_{VARIANT}_ENABLED`,
+`LIBREWXR_AROME_{VARIANT}_BASE_URL`,
+`LIBREWXR_AROME_{VARIANT}_PUBLISH_DELAY_MINUTES`, and
+`LIBREWXR_AROME_{VARIANT}_DBZ_OFFSET`. Defaults match Antilles
+(`true`, `https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net`, `420`,
+`6.0`).
+
 ### South American: WRF-SMN
 
 Servicio Meteorológico Nacional Argentina WRF-DET at 4 km LCC. First regional NWP for the South American Cone — covers Argentina, Chile, Uruguay, Paraguay, Bolivia, southern Brazil + adjacent oceans. Anonymous AWS Open Data (smn-ar-wrf in us-west-2). 4 cycles/day, 72 h horizon. Files are NetCDF4 (~34 MB each — the only non-GRIB source in the chain).

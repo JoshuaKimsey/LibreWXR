@@ -413,6 +413,30 @@ def build_model_sources() -> list[Source]:
         latlon_box(-75.3, -51.7, 9.7, 22.9),
     ))
 
+    # AROME Guyane — French Guiana + neighbours
+    models.append(Source(
+        "AROME Guyane", "#9467bd",
+        latlon_box(-56.75, -46.30, 1.05, 8.95),
+    ))
+
+    # AROME Indien — Réunion/Mayotte/Madagascar/Comoros (largest AROME-OM grid)
+    models.append(Source(
+        "AROME Indien", "#17becf",
+        latlon_box(32.75, 67.60, -25.90, -3.45),
+    ))
+
+    # AROME Nouvelle-Calédonie
+    models.append(Source(
+        "AROME Nouvelle-Calédonie", "#1f77b4",
+        latlon_box(158.50, 171.50, -26.00, -13.75),
+    ))
+
+    # AROME Polynésie (Society + Tuamotu archipelagoes)
+    models.append(Source(
+        "AROME Polynésie", "#c5b0d5",
+        latlon_box(-157.50, -144.50, -25.25, -12.60),
+    ))
+
     # WRF-SMN Argentina (LCC, southern hemisphere, 6,370 km sphere)
     smn_crs = CRS.from_proj4(
         "+proj=lcc +lat_0=-35 +lon_0=-65 +lat_1=-35 +lat_2=-35 "

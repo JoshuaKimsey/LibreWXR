@@ -38,10 +38,13 @@ src/librewxr/
   sources/                                # Per-source packages (auto-discovered)
     _base.py                              # Protocols + contribution dataclasses
     _helpers.py                           # Shared dBZ encoder + GRIB stderr muzzle
+    _shared/                              # Base classes for source families
+      arome.py                            # AROMEOverseasGrid (all 5 AROME-OM variants)
     __init__.py                           # Discovery walker, registry, helpers
     world/ifs/                            # ECMWF IFS (global, NWP)
     regional/
-      caribbean/nwp/arome_antilles/       # AROME Antilles (FR-GP+MQ+GF)
+      africa/nwp/arome_indien/            # AROME Indien (RE+YT+KM+MG+SW Indian Ocean)
+      caribbean/nwp/arome_antilles/       # AROME Antilles (FR-GP+MQ)
       central_america/el_salvador/radar/marn/
       east_asia/taiwan/radar/cwa/
       europe/radar/opera/
@@ -51,7 +54,8 @@ src/librewxr/
         canada/nwp/hrdps/
         usa/radar/{iem,mrms}/
         usa/nwp/{hrrr,hrrr_alaska}/
-      south_america/nwp/wrf_smn/          # WRF-SMN (AR+CL+UY+PY+BO+S.BR)
+      oceania/nwp/{arome_ncaled,arome_polyn}/  # AROME New Caledonia + French Polynesia
+      south_america/nwp/{wrf_smn,arome_guyane}/  # WRF-SMN (cone) + AROME Guyane (FR-GF)
       southeast_asia/malaysia/radar/mmd/
   data/                                   # Cross-cutting infra only
     regions.py       # RegionDef base + REGIONS dict (built from discovery)

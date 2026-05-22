@@ -188,6 +188,34 @@ class Settings(BaseSettings):
     arome_antilles_base_url: str = "https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net"
     arome_antilles_publish_delay_minutes: int = 420   # ~7 h after init for full 0..48h
     arome_antilles_dbz_offset: float = 6.0            # same Marshall-Palmer caveat as DINI/ICON-EU
+    # Météo-France AROME Outre-Mer variants — same upstream + format +
+    # decoder as Antilles via the shared AROMEOverseasGrid base.  Each
+    # covers a separate French overseas territory (and surrounding
+    # waters / nearby islands).  4 cycles/day, 48 h horizon, 0.025°
+    # regular lat/lon, anonymous, Etalab v2.0.  Defaults enabled.
+    #
+    # GUYANE — French Guiana (+ Suriname, Amapá Brazil borders).
+    arome_guyane_enabled: bool = True
+    arome_guyane_base_url: str = "https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net"
+    arome_guyane_publish_delay_minutes: int = 420
+    arome_guyane_dbz_offset: float = 6.0
+    # INDIEN — Réunion, Mayotte, Comoros, much of Madagascar + adjacent
+    # SW Indian Ocean (~3700×2500 km, the largest of the AROME-OM grids).
+    arome_indien_enabled: bool = True
+    arome_indien_base_url: str = "https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net"
+    arome_indien_publish_delay_minutes: int = 420
+    arome_indien_dbz_offset: float = 6.0
+    # NCALED — Nouvelle-Calédonie + adjacent SW Pacific (Vanuatu side).
+    arome_ncaled_enabled: bool = True
+    arome_ncaled_base_url: str = "https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net"
+    arome_ncaled_publish_delay_minutes: int = 420
+    arome_ncaled_dbz_offset: float = 6.0
+    # POLYN — French Polynesia (Society, Tuamotu, Marquesas archipelagoes)
+    # spread across the S Pacific.
+    arome_polyn_enabled: bool = True
+    arome_polyn_base_url: str = "https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net"
+    arome_polyn_publish_delay_minutes: int = 420
+    arome_polyn_dbz_offset: float = 6.0
     # SMN Argentina WRF-DET: 4 km LCC over Argentina + Chile + Uruguay
     # + Bolivia + Paraguay + S. Brazil — first regional NWP for the
     # South American Cone.  Anonymous AWS Open Data S3 (smn-ar-wrf in
