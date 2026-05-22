@@ -92,11 +92,11 @@ def test_regions_module_imports_cleanly_with_discovery_wired():
 
 
 def test_fetcher_sees_registry_providers():
-    """RadarFetcher.__init__ iterates ``RADAR_PROVIDERS`` to populate
-    ``self._sources``.  As migrations land, the registry grows; at
-    minimum the MMD provider should be visible from the fetcher's
-    import path."""
-    from librewxr.data.fetcher import RADAR_PROVIDERS
+    """RadarFetcher.__init__ walks the radar provider registry via
+    ``collect_radar_contributions`` to populate ``self._sources``.
+    The registry itself must hold callables; check that here so a
+    regression in the discovery walker can't silently empty it."""
+    from librewxr.sources import RADAR_PROVIDERS
 
     assert len(RADAR_PROVIDERS) >= 1
     assert all(callable(p) for p in RADAR_PROVIDERS)
@@ -116,6 +116,9 @@ class TestNACASourceSplit:
         from librewxr.data.store import FrameStore
         from librewxr.tiles.cache import TileCache
 
+        # These tests exercise radar dispatch wiring; pin the global
+        # radar toggle on regardless of what the loaded .env says.
+        monkeypatch.setattr(S, "radar_enabled", True)
         monkeypatch.setattr(S, "na_source", na)
         monkeypatch.setattr(S, "ca_source", ca)
         store = FrameStore(max_frames=2)
@@ -170,3 +173,46 @@ class TestNACASourceSplit:
         f = self._fetcher_with(monkeypatch, "iem", "msc")
         assert isinstance(f._sources["USCOMP"], IEMSource)
         assert isinstance(f._sources["CACOMP"], MSCCanadaSource)
+
+
+def test_radar_disabled_returns_empty_contributions(monkeypatch):
+    """LIBREWXR_RADAR_ENABLED=false short-circuits every provider call."""
+    from unittest.mock import MagicMock
+
+    from librewxr.sources import RADAR_PROVIDERS, collect_radar_contributions
+
+    settings = MagicMock()
+    settings.radar_enabled = False
+    assert collect_radar_contributions(settings) == []
+
+    # Re-enable and confirm at least one contribution exists (sanity:
+    # we didn't accidentally break the enabled path).
+    settings.radar_enabled = True
+    # Settings used by real providers — wire just enough to get past
+    # the provider gates without exercising network calls.
+    settings.na_source = "iem"
+    settings.ca_source = "msc"
+    settings.iem_enabled = True
+    settings.msc_canada_enabled = True
+    settings.opera_enabled = False
+    settings.mmd_enabled = False
+    settings.cwa_enabled = False
+    settings.marn_enabled = False
+    settings.iem_base_url = "https://example.com"
+    settings.msc_canada_base_url = "https://example.com"
+    contribs = collect_radar_contributions(settings)
+    assert len(contribs) >= 1
+    assert len(contribs) <= len(RADAR_PROVIDERS)
+
+
+def test_radar_disabled_skips_coverage_metadata(monkeypatch):
+    """When radar is off, the coverage helper returns empty maps too."""
+    from unittest.mock import MagicMock
+
+    from librewxr.sources import collect_radar_coverage_metadata
+
+    settings = MagicMock()
+    settings.radar_enabled = False
+    station_map, range_overrides = collect_radar_coverage_metadata(settings)
+    assert station_map == {}
+    assert range_overrides == {}

@@ -29,6 +29,15 @@ class Settings(BaseSettings):
     warm_overview_zoom: int = 4  # Pre-render ALL tiles up to this zoom on each fetch (-1 = disable)
     warm_overview_zoom_regional: int = 6  # Pre-render tiles overlapping enabled regions up to this zoom (-1 = disable)
     enabled_regions: str = "ALL"  # Region spec: CONUS, US, ALL, or comma-separated region names
+    # Global radar-layer toggle.  When False, no radar provider gets
+    # instantiated — every MRMS / IEM / MSC / OPERA / MARN / CWA / MMD
+    # fetcher is skipped, region-coverage masks are empty, and the radar
+    # tile path returns "no data" so the IFS-derived cloud cover or the
+    # real-satellite layer takes over the entire map.  Useful for
+    # satellite-only deployments and for faster startup during
+    # development of non-radar features.  Per-source toggles below
+    # still apply when this is True.
+    radar_enabled: bool = True
     # US-side radar data source (USCOMP / AKCOMP / HICOMP / PRCOMP / GUCOMP).
     # Three modes:
     #   mrms_fallback  - (default) MRMS primary + IEM fallback when MRMS fails.

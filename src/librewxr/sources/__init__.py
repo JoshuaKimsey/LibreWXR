@@ -91,6 +91,29 @@ def _collect_providers() -> tuple[list, list]:
 RADAR_PROVIDERS, NWP_PROVIDERS = _collect_providers()
 
 
+def collect_radar_contributions(settings) -> list:
+    """Walk active radar providers; return their contributions.
+
+    Returns ``[]`` when ``settings.radar_enabled`` is False, short-
+    circuiting every provider call so no S3 / HTTP / cache machinery
+    gets stood up.  Used by the fetcher and the coverage-metadata
+    helper so both honour the global radar toggle from one place.
+    """
+    if not getattr(settings, "radar_enabled", True):
+        return []
+    contributions = []
+    for provider in RADAR_PROVIDERS:
+        try:
+            contribution = provider(settings)
+        except Exception:
+            logger.exception("Radar source provider %r raised", provider)
+            continue
+        if contribution is None:
+            continue
+        contributions.append(contribution)
+    return contributions
+
+
 def collect_nwp_contributions(settings, cache_dir) -> list:
     """Walk active NWP providers; return contributions sorted by priority.
 
@@ -136,14 +159,7 @@ def collect_radar_coverage_metadata(
     """
     station_map: dict[str, list[tuple[float, float]]] = {}
     range_overrides: dict[str, float] = {}
-    for provider in RADAR_PROVIDERS:
-        try:
-            contribution = provider(settings)
-        except Exception:
-            logger.exception("Radar source provider %r raised", provider)
-            continue
-        if contribution is None:
-            continue
+    for contribution in collect_radar_contributions(settings):
         for region_name, stations in contribution.station_map.items():
             station_map[region_name] = list(stations)
         for region_name, range_km in contribution.range_overrides.items():

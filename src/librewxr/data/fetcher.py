@@ -28,7 +28,7 @@ from librewxr.sources.regional.north_america.usa.radar.mrms import (
     MRMSSource,
 )
 from librewxr.data.store import FrameStore, RadarFrame
-from librewxr.sources import RADAR_PROVIDERS
+from librewxr.sources import collect_radar_contributions
 from librewxr.sources._base import NWPContribution
 from librewxr.tiles.cache import TileCache
 
@@ -94,14 +94,7 @@ class RadarFetcher:
             IEMSource | MRMSCompositeSource | MSCCanadaSource,
         ] = {}
         enabled_names = {r.name for r in self._enabled_regions}
-        for provider in RADAR_PROVIDERS:
-            try:
-                contribution = provider(settings)
-            except Exception:
-                logger.exception("Radar source provider %r raised", provider)
-                continue
-            if contribution is None:
-                continue
+        for contribution in collect_radar_contributions(settings):
             for region in contribution.regions:
                 if region.name in enabled_names:
                     self._sources.setdefault(region.name, contribution.instance)
