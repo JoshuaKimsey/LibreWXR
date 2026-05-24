@@ -1,6 +1,8 @@
 # Satellite Implementation Plan — GMGSI
 
-This document is the active plan for shipping real-satellite imagery as a LibreWXR layer. It supersedes an earlier "native per-satellite" plan whose research is preserved on the `satellite-integration` branch (committed `639dfd6`). The pivot reason is at the bottom under [Why not native per-satellite](#why-not-native-per-satellite).
+> **Status: Phases 1, 1.5, and 2 SHIPPED (2026-05-24).** The `/v2/satellite/...` endpoint serves the GMGSI VIS-over-LW composite live; the legacy IFS-derived synthetic cloud path has been deleted. Phase 4 disk-edge feathering also shipped. Phase 3 (optical-flow interpolation) was **declined** — see the in-text note in that section. The forward-looking language below (e.g. "will be deleted", "Phase 1.5 deletes") is preserved as a record of how the plan was sequenced; treat the per-phase scopes as historical-but-still-accurate descriptions of what landed.
+
+This document was the active plan for shipping real-satellite imagery as a LibreWXR layer. It supersedes an earlier "native per-satellite" plan whose research is preserved on the `satellite-integration` branch (committed `639dfd6`). The pivot reason is at the bottom under [Why not native per-satellite](#why-not-native-per-satellite).
 
 ## Table of Contents
 

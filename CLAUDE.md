@@ -42,6 +42,7 @@ src/librewxr/
       arome.py                            # AROMEOverseasGrid (all 5 AROME-OM variants)
     __init__.py                           # Discovery walker, registry, helpers
     world/ifs/                            # ECMWF IFS (global, NWP)
+    satellite/gmgsi/                      # NOAA GMGSI (global, LW + VIS composite)
     regional/
       africa/nwp/arome_indien/            # AROME Indien (RE+YT+KM+MG+SW Indian Ocean)
       caribbean/nwp/arome_antilles/       # AROME Antilles (FR-GP+MQ)
@@ -65,15 +66,13 @@ src/librewxr/
     nowcast.py       # Nowcast generation (radar extrapolation + IFS blend)
     nwp_source.py    # NWPSource Protocol + NWPChain dispatcher
     nwp_interpolation.py  # Shared optical-flow helper for regional NWP
-    cloud_grid.py    # IFS-derived cloud cover (satellite layer)
-    cloud_cache.py   # Persistent disk cache for cloud grids
     radar_cache.py   # Persistent disk cache for radar frames
     alerts_fetcher.py / alerts_store.py   # WMO weather alerts
     master_state.py  # Multi-worker state.json snapshot
     retry.py         # Backoff helper
   tiles/
     renderer.py      # On-demand tile rendering
-    satellite_renderer.py  # Cloud cover → IR-like satellite tiles
+    satellite_renderer.py  # GMGSI VIS-over-LW composite tiles
     cache.py         # Byte-capped LRU tile cache
     coordinates.py   # Tile/region coordinate transforms
     warmer.py        # Background tile pre-rendering
@@ -110,7 +109,7 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"`. Markers are defined in 
 - **Tile rendering:** On-demand with byte-capped LRU cache + background tile warmer; Gaussian smoothing radius auto-scales from the local Jacobian (`_compute_blur_radius` in `tiles/renderer.py`) so coarse-grid sources (OPERA LAEA, MRMS, MMD) get more blur at high zoom without over-blurring fine sources at low zoom. Radar sampling under `smooth=1` is bilinear in both padded and unpadded paths
 - **ECMWF IFS:** 9km global precipitation from Open-Meteo S3; optical flow interpolation for 10-min frames; reference_time skip avoids redundant downloads
 - **Nowcasting:** Radar extrapolation + IFS blending with spatial feathering at radar boundaries
-- **Satellite:** IFS cloud cover (high/mid/low) composited into IR-like tiles; persistent disk cache with atomic writes and model-run backfill
+- **Satellite:** NOAA GMGSI hourly global mosaic (LW + VIS), composited at render time as VIS-over-LW with a natural day/night terminator. Latitude grid is Mercator-spaced (`y=atanh(sin(lat))`) — `sample()` inverts Mercator on the queried lat. Disk-edge feathering smooths the ±72.7° cutoff. `LIBREWXR_SATELLITE_ENABLED=false` returns 503 + empty `satellite.infrared` array
 - **Memory management:** Radar frames, ECMWF grids, and nowcast data use numpy memmap (temp files); radar fetcher skips timestamps already in store
 - **MRMS:** Region-aware — separate `MRMSSource` per product path (CONUS, ALASKA, HAWAII, CARIB, GUAM); directory listing with bisect for archive lookups; gzip retry + eccodes stderr suppression
 - **MARN/SNET (El Salvador):** Single S-band radar at San Andrés, 120 km product (`esar82/Images/`) from anonymous GCS bucket `radar-images-sv`; 5-min cadence; filename embeds local time (UTC-6, no DST); decoder maps HSV-style continuous hue gradient (green→cyan→blue→magenta) to dBZ; bucket archive depth ~24 h; MARN license requires citation
