@@ -32,6 +32,10 @@ dependencies = [
     "opencv-python-headless>=4.8",
     "cfgrib>=0.9.14",
     "xarray>=2024.1.0",
+    # NetCDF4 backend for xarray.open_dataset — required by the GMGSI
+    # satellite source (NESDIS publishes hourly mosaics as NetCDF-4).
+    # PyPI wheels bundle HDF5/NetCDF C libs, so no system packages needed.
+    "netCDF4>=1.7",
     "lxml>=5.0",
     "shapely>=2.0",
 ]
