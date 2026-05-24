@@ -28,7 +28,7 @@ from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import coord_cache_bytes, coord_cache_stats
 from librewxr.tiles.renderer import render_coverage_tile, render_tile
 from librewxr.tiles.request_tracker import TileRequestTracker
-from librewxr.tiles.satellite_renderer import render_satellite_tile
+from librewxr.tiles.satellite_renderer import render_gmgsi_tile, render_satellite_tile
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,11 @@ tile_cache: TileCache | None = None
 nwp_grids: dict[str, object] = {}
 ecmwf_grid = None  # ECMWFGrid | None — special-cased by /v2/radar arrows
 nwp_chain = None  # NWPChain | None
-cloud_grid = None  # CloudGrid | None
+cloud_grid = None  # CloudGrid | None — IFS-derived synthetic satellite (Phase 1.5 deletes)
+# GMGSI satellite sources keyed by slug (gmgsi_lw_grid, gmgsi_vis_grid).
+# When non-empty, the satellite tile endpoint serves from these instead
+# of the legacy IFS-derived cloud_grid path.
+satellite_grids: dict[str, object] = {}
 tile_warmer = None  # TileWarmer | None
 nowcast_store = None  # NowcastStore | None
 radar_cache = None  # RadarFrameCache | None
@@ -245,7 +249,18 @@ async def weather_maps() -> WeatherMapsResponse:
         ]
 
     infrared = []
-    if cloud_grid is not None and cloud_grid.loaded:
+    # GMGSI takes precedence: when LW frames are loaded, the catalog
+    # timestamps come from GMGSI and the endpoint serves real satellite
+    # imagery.  Falls back to the IFS-derived synthetic cloud timestamps
+    # only when GMGSI is disabled / unloaded — that fallback path is
+    # slated for deletion in Phase 1.5.
+    gmgsi_lw = satellite_grids.get("gmgsi_lw_grid") if satellite_grids else None
+    if gmgsi_lw is not None and gmgsi_lw.timestamps:
+        infrared = [
+            RadarTimestamp(time=ts, path=f"/v2/satellite/{ts}")
+            for ts in gmgsi_lw.timestamps
+        ]
+    elif cloud_grid is not None and cloud_grid.loaded:
         infrared = [
             RadarTimestamp(time=ts, path=f"/v2/satellite/{ts}")
             for ts in cloud_grid.timestamps
@@ -422,10 +437,14 @@ async def satellite_tile(
     y: int = Path(ge=0),
     ext: str = Path(pattern=r"^(png|webp)$"),
 ) -> Response:
-    """Satellite-like cloud cover tile from IFS cloud data."""
-    if cloud_grid is None or not cloud_grid.loaded:
-        raise HTTPException(status_code=503, detail="Satellite data not available")
+    """Real satellite imagery tile (GMGSI) — IFS-derived fallback if GMGSI off.
 
+    GMGSI is the canonical backing in Phase 1+: the LW (longwave IR)
+    channel covers the populated globe and renders 24/7.  Phase 2 will
+    swap this for the VIS-over-LW composite.  The fallback to the
+    IFS-derived synthetic renderer exists only until Phase 1.5 deletes
+    that path entirely; do not rely on it as a long-term behaviour.
+    """
     if z > settings.max_zoom:
         raise HTTPException(status_code=400, detail=f"Zoom {z} exceeds max {settings.max_zoom}")
 
@@ -435,7 +454,16 @@ async def satellite_tile(
 
     tile_size = 512 if size >= 512 else 256
 
-    cache_key = ("sat", timestamp, z, x, y, tile_size, ext)
+    # Pick backing source: GMGSI when available, else IFS-derived fallback.
+    gmgsi_lw = satellite_grids.get("gmgsi_lw_grid") if satellite_grids else None
+    use_gmgsi = gmgsi_lw is not None and bool(gmgsi_lw.timestamps)
+    if not use_gmgsi and (cloud_grid is None or not cloud_grid.loaded):
+        raise HTTPException(status_code=503, detail="Satellite data not available")
+
+    # Distinct cache keys so the GMGSI and IFS-derived tiles never
+    # collide if the toggle ever flips at runtime.
+    backing = "gmgsi" if use_gmgsi else "ifs"
+    cache_key = ("sat", backing, timestamp, z, x, y, tile_size, ext)
     cached = tile_cache.get(cache_key)
     if cached is not None:
         return Response(
@@ -444,20 +472,31 @@ async def satellite_tile(
             headers={"Cache-Control": "public, max-age=300"},
         )
 
-    tile_bytes = await asyncio.to_thread(
-        render_satellite_tile,
-        cloud_grid=cloud_grid,
-        z=z, x=x, y=y,
-        tile_size=tile_size,
-        timestamp=timestamp,
-        fmt=ext,
-    )
+    if use_gmgsi:
+        tile_bytes = await asyncio.to_thread(
+            render_gmgsi_tile,
+            source=gmgsi_lw,
+            z=z, x=x, y=y,
+            tile_size=tile_size,
+            timestamp=timestamp,
+            fmt=ext,
+        )
+        sat_timestamps = gmgsi_lw.timestamps
+    else:
+        tile_bytes = await asyncio.to_thread(
+            render_satellite_tile,
+            cloud_grid=cloud_grid,
+            z=z, x=x, y=y,
+            tile_size=tile_size,
+            timestamp=timestamp,
+            fmt=ext,
+        )
+        sat_timestamps = cloud_grid.timestamps if cloud_grid else []
 
     tile_cache.put(cache_key, tile_bytes)
 
-    # Satellite frames are all historical once loaded (IFS model-run based)
-    satellite_timestamps = cloud_grid.timestamps if cloud_grid else []
-    latest_sat_ts = max(satellite_timestamps) if satellite_timestamps else None
+    # Older-than-latest frames are immutable; give them a long max-age.
+    latest_sat_ts = max(sat_timestamps) if sat_timestamps else None
     max_age = 7200 if (latest_sat_ts is not None and timestamp < latest_sat_ts) else 300
 
     return Response(

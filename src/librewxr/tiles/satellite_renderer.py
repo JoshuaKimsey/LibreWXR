@@ -76,6 +76,56 @@ def render_satellite_tile(
     return _encode_image(img, fmt)
 
 
+def render_gmgsi_tile(
+    source,
+    z: int,
+    x: int,
+    y: int,
+    tile_size: int = 256,
+    timestamp: int | None = None,
+    fmt: str = "png",
+) -> bytes:
+    """Render a tile from a GMGSI satellite source.
+
+    Phase 1 is LW-only — cold (high cloud tops) → bright + opaque,
+    warm (ground / ocean) → transparent.  The encoding is already
+    cold=high uint8 directly from NESDIS, so the alpha curve is just
+    a normalized version of the encoded value with a mild gamma to
+    pull thin cirrus out of the noise floor.
+
+    Phase 2 will introduce the VIS-over-LW composite (alpha = vis/255)
+    in a separate `render_gmgsi_composite_tile` function that takes
+    both sources; this one stays as the IR-only path.
+    """
+    lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
+    encoded = source.sample(lat_grid, lon_grid, timestamp)
+
+    # Normalize to [0, 1] for both brightness and alpha.  Encoded == 0
+    # is the no-data sentinel (outside the disk or dqf-masked); leave
+    # it fully transparent.
+    norm = encoded.astype(np.float32) / 255.0
+    no_data = encoded == 0
+
+    # Gamma curve gently lifts thin clouds so faint features show
+    # without darkening the bright cloud tops.  0.7 is the standard
+    # GeoColor-style perceptual lift.
+    alpha = np.power(np.clip(norm, 0.0, 1.0), 0.7)
+    alpha = np.where(no_data, 0.0, alpha)
+
+    # Slight cool tint in the blue channel matches the existing
+    # IFS-derived satellite aesthetic; the renderer hasn't visibly
+    # changed for users when GMGSI takes over for IFS-cloud.
+    brightness = np.clip(norm * 255.0, 0, 255)
+    rgba = np.zeros((*encoded.shape, 4), dtype=np.uint8)
+    rgba[..., 0] = brightness.astype(np.uint8)
+    rgba[..., 1] = brightness.astype(np.uint8)
+    rgba[..., 2] = np.clip(brightness + 5.0, 0, 255).astype(np.uint8)
+    rgba[..., 3] = np.clip(alpha * 255.0, 0, 255).astype(np.uint8)
+
+    img = Image.fromarray(rgba, "RGBA")
+    return _encode_image(img, fmt)
+
+
 def _encode_image(img: Image.Image, fmt: str) -> bytes:
     """Encode a PIL image to bytes."""
     buf = io.BytesIO()

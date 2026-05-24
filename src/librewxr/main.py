@@ -25,7 +25,9 @@ from librewxr.data.store import FrameStore
 from librewxr.sources import (
     collect_nwp_contributions,
     collect_radar_coverage_metadata,
+    collect_satellite_contributions,
     nwp_grid_slug,
+    satellite_source_slug,
 )
 from librewxr.data.alerts_store import AlertsStore
 from librewxr.data.alerts_fetcher import WMOAlertsFetcher
@@ -172,6 +174,10 @@ async def _render_only_lifespan(app: FastAPI):
     nwp_grids_by_slug: dict[str, object] = {
         nwp_grid_slug(c): c.instance for c in nwp_contribs
     }
+    satellite_contribs = collect_satellite_contributions(settings, cache_dir)
+    satellite_grids_by_slug: dict[str, object] = {
+        satellite_source_slug(c): c.instance for c in satellite_contribs
+    }
     cloud_grid = CloudGrid(cache_dir=cache_dir) if settings.satellite_enabled else None
     nowcast_store = NowcastStore(cache_dir=cache_dir) if settings.nowcast_enabled else None
     alerts_store = AlertsStore() if settings.alerts_enabled else None
@@ -179,6 +185,7 @@ async def _render_only_lifespan(app: FastAPI):
     stores: dict[str, object | None] = {
         "frame_store": store,
         **nwp_grids_by_slug,
+        **satellite_grids_by_slug,
         "cloud_grid": cloud_grid,
         "nowcast_store": nowcast_store,
         "alerts_store": alerts_store,
@@ -206,6 +213,11 @@ async def _render_only_lifespan(app: FastAPI):
     # routes / chain only see grids that actually loaded from disk.
     nwp_grids_by_slug = {
         slug: stores[slug] for slug in nwp_grids_by_slug if stores[slug] is not None
+    }
+    satellite_grids_by_slug = {
+        slug: stores[slug]
+        for slug in satellite_grids_by_slug
+        if stores[slug] is not None
     }
     ecmwf_grid = nwp_grids_by_slug.get("ecmwf_grid")
     cloud_grid = stores["cloud_grid"]
@@ -258,6 +270,7 @@ async def _render_only_lifespan(app: FastAPI):
     routes.ecmwf_grid = ecmwf_grid
     routes.nwp_chain = nwp_chain
     routes.cloud_grid = cloud_grid
+    routes.satellite_grids = satellite_grids_by_slug
     routes.tile_warmer = None
     routes.nowcast_store = nowcast_store
     routes.tile_request_tracker = tile_request_tracker
@@ -357,6 +370,15 @@ async def lifespan(app: FastAPI):
     nwp_chain = NWPChain([c.instance for c in nwp_contribs])
     logger.info("NWP chain: [%s]", ", ".join(s.name for s in nwp_chain.sources))
     cloud = CloudGrid() if settings.satellite_enabled else None
+    satellite_contribs = collect_satellite_contributions(settings, nwp_cache_dir)
+    satellite_grids_by_slug: dict[str, object] = {
+        satellite_source_slug(c): c.instance for c in satellite_contribs
+    }
+    if satellite_contribs:
+        logger.info(
+            "Satellite chain: [%s]",
+            ", ".join(c.name for c in satellite_contribs),
+        )
     enabled = settings.get_enabled_regions()
 
     # Precompute radar station coverage masks used by the ECMWF fallback
@@ -448,6 +470,7 @@ async def lifespan(app: FastAPI):
     routes.ecmwf_grid = ecmwf_grid
     routes.nwp_chain = nwp_chain
     routes.cloud_grid = cloud
+    routes.satellite_grids = satellite_grids_by_slug
     routes.tile_warmer = warmer
     routes.nowcast_store = nowcast_store
     routes.tile_request_tracker = tile_request_tracker
@@ -478,6 +501,7 @@ async def lifespan(app: FastAPI):
         store, cache,
         nwp_contributions=nwp_contribs,
         cloud_grid=cloud,
+        satellite_contributions=satellite_contribs,
         nowcast_generator=nowcast_generator,
         warmer=warmer,
         radar_cache=radar_cache,

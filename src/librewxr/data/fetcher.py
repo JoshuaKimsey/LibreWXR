@@ -29,7 +29,7 @@ from librewxr.sources.regional.north_america.usa.radar.mrms import (
 )
 from librewxr.data.store import FrameStore, RadarFrame
 from librewxr.sources import collect_radar_contributions
-from librewxr.sources._base import NWPContribution
+from librewxr.sources._base import NWPContribution, SatelliteContribution
 from librewxr.tiles.cache import TileCache
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,7 @@ class RadarFetcher:
         cache: TileCache,
         nwp_contributions: list[NWPContribution] | None = None,
         cloud_grid: CloudGrid | None = None,
+        satellite_contributions: list[SatelliteContribution] | None = None,
         nowcast_generator=None,
         warmer=None,
         radar_cache=None,
@@ -67,12 +68,20 @@ class RadarFetcher:
             nwp_contributions or []
         )
         self._cloud_grid = cloud_grid
+        # Same dispatch pattern as nwp_contributions: every active
+        # satellite source (one per channel, e.g. GMGSI LW) flows
+        # through this list and gets a per-cycle background fetch.
+        # Adding a new satellite source needs zero edits here.
+        self._satellite_contributions: list[SatelliteContribution] = list(
+            satellite_contributions or []
+        )
         self._nowcast_generator = nowcast_generator
         self._warmer = warmer
         self._radar_cache = radar_cache
         self._on_cycle_complete = on_cycle_complete
         self._task: asyncio.Task | None = None
         self._cloud_task: asyncio.Task | None = None
+        self._satellite_tasks: dict[str, asyncio.Task] = {}
         self._enabled_regions = [
             REGIONS[name] for name in settings.get_enabled_regions()
         ]
@@ -180,6 +189,11 @@ class RadarFetcher:
             await self._cacomp_msc_source.close()
             closed.add(id(self._cacomp_msc_source))
         for contrib in self._nwp_contributions:
+            try:
+                await contrib.instance.close()
+            except Exception:
+                logger.exception("Error closing %s", contrib.name)
+        for contrib in self._satellite_contributions:
             try:
                 await contrib.instance.close()
             except Exception:
@@ -353,6 +367,24 @@ class RadarFetcher:
                     self._fetch_cloud_background()
                 )
 
+        # Same background pattern for satellite sources — one task per
+        # contribution.  Per-channel detachment keeps GMGSI LW from
+        # gating on a slow GMGSI VIS fetch (or vice versa) once the
+        # composite renderer lands in Phase 2.  Each fetch is small
+        # (~7.5 MB) but goes through a high-latency S3 endpoint, so
+        # treating them as background tasks matches the cloud pattern.
+        from librewxr.sources import satellite_source_slug
+
+        for contrib in self._satellite_contributions:
+            slug = satellite_source_slug(contrib)
+            existing = self._satellite_tasks.get(slug)
+            if existing is not None and not existing.done():
+                logger.debug("%s fetch still running, skipping", contrib.name)
+                continue
+            self._satellite_tasks[slug] = asyncio.create_task(
+                self._fetch_satellite_background(contrib),
+            )
+
     async def _fetch_cloud_background(self) -> None:
         """Fetch cloud cover data without blocking the main fetch cycle.
 
@@ -370,6 +402,28 @@ class RadarFetcher:
             return
         release_memory()
         await self._fire_cycle_complete()
+
+    async def _fetch_satellite_background(
+        self, contrib: SatelliteContribution,
+    ) -> None:
+        """Fetch one satellite source detached from the main cycle.
+
+        Mirrors ``_fetch_cloud_background``: one task per source, fires
+        the cycle-complete hook on success so render-only workers pick
+        up new frames mid-cycle.  A failed fetch is warned and dropped;
+        the next cycle retries.
+        """
+        try:
+            new_frames = await contrib.instance.fetch()
+        except Exception:
+            logger.warning(
+                "%s fetch failed, satellite layer may be stale", contrib.name,
+            )
+            release_memory()
+            return
+        release_memory()
+        if new_frames:
+            await self._fire_cycle_complete()
 
     async def _fetch_all_frames(self) -> None:
         """Fetch frames for all enabled regions to fill the store.

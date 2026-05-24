@@ -43,7 +43,9 @@ from librewxr.data.store import FrameStore
 from librewxr.sources import (
     collect_nwp_contributions,
     collect_radar_coverage_metadata,
+    collect_satellite_contributions,
     nwp_grid_slug,
+    satellite_source_slug,
 )
 from librewxr.tiles.cache import TileCache
 
@@ -72,6 +74,7 @@ _LOG_TAGS = {
     "librewxr.sources.regional.south_america.nwp.wrf_smn.grid": "wrf-smn",
     "librewxr.data.cloud_grid": "cloud",
     "librewxr.data.cloud_cache": "cloud",
+    "librewxr.sources.satellite.gmgsi.source": "gmgsi",
     "librewxr.data.nowcast": "nowcast",
     "librewxr.data.master_state": "state",
     "librewxr.data.alerts_fetcher": "alerts",
@@ -128,6 +131,19 @@ async def run_pipeline() -> None:
 
     cloud_grid = CloudGrid(cache_dir=cache_dir) if settings.satellite_enabled else None
 
+    # GMGSI satellite sources — one contribution per enabled channel.
+    # collect_satellite_contributions short-circuits to [] when
+    # gmgsi_enabled is False, mirroring the radar / NWP toggle pattern.
+    satellite_contribs = collect_satellite_contributions(settings, cache_dir)
+    satellite_grids_by_slug = {
+        satellite_source_slug(c): c.instance for c in satellite_contribs
+    }
+    if satellite_contribs:
+        logger.info(
+            "Satellite chain: [%s]",
+            ", ".join(c.name for c in satellite_contribs),
+        )
+
     station_map, range_overrides = collect_radar_coverage_metadata(settings)
     build_coverage_masks(station_map, range_overrides=range_overrides)
     build_feather_masks()
@@ -165,6 +181,7 @@ async def run_pipeline() -> None:
     stores = {
         "frame_store": store,
         **nwp_grids_by_slug,
+        **satellite_grids_by_slug,
         "cloud_grid": cloud_grid,
         "nowcast_store": nowcast_store,
         "alerts_store": alerts_store,
@@ -180,6 +197,7 @@ async def run_pipeline() -> None:
         store, tile_cache,
         nwp_contributions=nwp_contribs,
         cloud_grid=cloud_grid,
+        satellite_contributions=satellite_contribs,
         nowcast_generator=nowcast_generator,
         warmer=None,  # tile warming is the render workers' job
         radar_cache=radar_cache,
