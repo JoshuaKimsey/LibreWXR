@@ -70,6 +70,31 @@ def detect_memory_limit_mb(override_mb: int = 0) -> int:
     return psutil.virtual_memory().total // (1024 * 1024)
 
 
+def _read_cgroup_memory_usage() -> int | None:
+    """Return the cgroup's current memory usage in bytes, or None.
+
+    Captures every process in the container — important in multi-worker
+    mode where each render worker's own RSS is only a fraction of the
+    container's total.  Falls back to ``None`` outside containers so
+    callers can use per-process RSS instead.
+    """
+    # cgroup v2
+    try:
+        v2 = Path("/sys/fs/cgroup/memory.current").read_text().strip()
+        return int(v2)
+    except (FileNotFoundError, ValueError, PermissionError):
+        pass
+
+    # cgroup v1
+    try:
+        v1 = Path("/sys/fs/cgroup/memory/memory.usage_in_bytes").read_text().strip()
+        return int(v1)
+    except (FileNotFoundError, ValueError, PermissionError):
+        pass
+
+    return None
+
+
 class MemoryMonitor:
     """Background task that monitors memory and evicts caches under pressure."""
 
@@ -89,10 +114,11 @@ class MemoryMonitor:
         self._process = psutil.Process()
 
     async def start(self) -> None:
+        scope = "container (cgroup)" if _read_cgroup_memory_usage() is not None else "process"
         logger.info(
-            "Memory monitor started (limit=%d MB, check every %ds, "
+            "Memory monitor started (scope=%s, limit=%d MB, check every %ds, "
             "warn=%.0f%%, evict_tiles=%.0f%%, evict_all=%.0f%%)",
-            self._limit_mb, self._check_interval,
+            scope, self._limit_mb, self._check_interval,
             _WARN_THRESHOLD * 100, _EVICT_TILES_THRESHOLD * 100,
             _EVICT_ALL_THRESHOLD * 100,
         )
@@ -115,7 +141,19 @@ class MemoryMonitor:
                 logger.exception("Memory monitor check failed")
 
     def _check(self) -> None:
-        rss = self._process.memory_info().rss
+        # In multi-worker deployments the container holds N render
+        # workers, each with its own ``psutil.Process``.  Comparing one
+        # worker's RSS to the container-wide cgroup limit never trips
+        # the thresholds because no single worker holds more than ~1/N
+        # of the limit.  Read the cgroup's own usage when available so
+        # every worker sees the same shared pressure and they all evict
+        # their local caches in concert.  Falls back to per-process RSS
+        # outside containers (local dev, single-process deployments).
+        cgroup_usage = _read_cgroup_memory_usage()
+        if cgroup_usage is not None:
+            rss = cgroup_usage
+        else:
+            rss = self._process.memory_info().rss
         usage = rss / self._limit_bytes
 
         if usage >= _EVICT_ALL_THRESHOLD:
