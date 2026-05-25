@@ -2,6 +2,7 @@
 # Copyright (C) 2026 Joshua Kimsey
 import io
 import math
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -22,64 +23,96 @@ from librewxr.tiles.coordinates import (
 )
 
 
-def render_tile(
+# ---------------------------------------------------------------------------
+# Cacheable geometry
+# ---------------------------------------------------------------------------
+# A tile request expands across many independent axes — color scheme (9),
+# output format (PNG / WebP), snow flag, smooth flag, arrow style.  The
+# expensive 95% of rendering (region sampling, smoothing, NWP blend) is
+# identical across all of them; only the final colorize + blur + encode +
+# arrow overlay differ.  ``TileGeometry`` is the cacheable intermediate:
+# everything you need to produce any variant of the final image, without
+# committing to a color scheme or format yet.
+
+
+@dataclass
+class TileGeometry:
+    """Pre-presentation tile data, cached between compute and present steps.
+
+    ``values`` holds the post-sample, post-blend, post-noise-floor uint8
+    indices into the color LUT.  ``snow_mask`` is only populated when the
+    geometry was computed with ``snow=True`` and an NWP chain was
+    available — if a later request asks for ``snow=False``, present just
+    ignores the mask.  The cache key includes ``snow`` so we never feed a
+    ``snow=False`` request an entry that lacks the mask but expects it.
+    """
+
+    values: np.ndarray  # uint8 (H, W) where H = W = tile_size + 2*pad
+    snow_mask: np.ndarray | None  # bool, same shape; None if snow wasn't requested
+    tile_size: int  # final size after blur-crop
+    pad: int  # padding on each side; 0 unless blur will be applied
+    blur_radius: float  # 0.0 = no blur
+    is_transparent: bool = False
+
+    @classmethod
+    def transparent(cls, tile_size: int) -> "TileGeometry":
+        """Sentinel for tiles with neither radar nor NWP coverage."""
+        return cls(
+            values=np.empty((0, 0), dtype=np.uint8),
+            snow_mask=None,
+            tile_size=tile_size,
+            pad=0,
+            blur_radius=0.0,
+            is_transparent=True,
+        )
+
+    @property
+    def nbytes(self) -> int:
+        if self.is_transparent:
+            return 64  # account for object overhead
+        n = int(self.values.nbytes)
+        if self.snow_mask is not None:
+            n += int(self.snow_mask.nbytes)
+        return max(n, 64)
+
+
+# ---------------------------------------------------------------------------
+# Compute step (cached)
+# ---------------------------------------------------------------------------
+
+
+def compute_tile_geometry(
     frame_regions: dict[str, np.ndarray],
     z: int,
     x: int,
     y: int,
     tile_size: int = 256,
-    color_scheme: int = 7,
     smooth: bool = False,
     snow: bool = False,
-    fmt: str = "png",
-    ecmwf_grid=None,
     nwp_chain=None,
     enabled_regions: list[str] | None = None,
     frame_timestamp: int | None = None,
     nowcast_blend: float | None = None,
-    flow_regions: dict[str, np.ndarray] | None = None,
-    ecmwf_flow: np.ndarray | None = None,
-    arrow_style: str = "light",
-) -> bytes:
-    """Render a single map tile from composite radar data.
+) -> TileGeometry:
+    """Compute the cacheable geometry for a tile.
 
-    Args:
-        frame_regions: dict mapping region name -> uint8 numpy array
-        z, x, y: tile coordinates
-        tile_size: 256 or 512
-        color_scheme: Rain Viewer color scheme ID
-        smooth: apply Gaussian blur
-        snow: use snow color variant (requires nwp_chain for classification)
-        fmt: "png" or "webp"
-        ecmwf_grid: ECMWFGrid for IFS-specific motion arrow rendering (.flow)
-        nwp_chain: NWPChain for sample / snow_mask / fallback gating
-        enabled_regions: list of enabled region names (for overlap check)
-        frame_timestamp: Unix timestamp of the radar frame being rendered
-        nowcast_blend: If not None, this is a nowcast frame. Value 0.0–1.0
-            indicates how much to trust the extrapolated radar (1.0 = trust
-            radar fully, 0.0 = trust IFS fully). The renderer blends
-            extrapolated radar with IFS forecast, feathered at coverage
-            boundaries.
-
-    Returns:
-        Encoded image bytes.
+    Performs the expensive work — region sampling, multi-region
+    compositing, NWP fill/blend, noise-floor masking, and the snow mask
+    (when requested) — and returns a ``TileGeometry`` that any number of
+    color schemes / output formats / arrow styles can be rendered from
+    via ``present_tile``.
     """
-    # Find which regions overlap this tile and have data
     regions = overlapping_regions(z, x, y, enabled_regions)
     regions_with_data = [r for r in regions if r.name in frame_regions]
 
     has_nwp = nwp_chain is not None and nwp_chain.has_data()
 
     if not regions_with_data:
-        # No radar regions cover this tile — try NWP fallback
         if has_nwp:
-            return _render_ecmwf_only_tile(
-                nwp_chain, ecmwf_grid, z, x, y, tile_size,
-                color_scheme, smooth, snow, fmt, frame_timestamp,
-                ecmwf_flow=ecmwf_flow,
-                arrow_style=arrow_style if flow_regions or ecmwf_flow is not None else "",
+            return _compute_nwp_only_geometry(
+                nwp_chain, z, x, y, tile_size, smooth, snow, frame_timestamp,
             )
-        return _transparent_tile(tile_size, fmt)
+        return TileGeometry.transparent(tile_size)
 
     # Determine blur radius from local geometry: scale Gaussian kernel
     # to the number of tile pixels covered by a single region pixel.
@@ -101,15 +134,14 @@ def render_tile(
             smooth, use_blur, pad,
         )
     else:
-        # Multi-region compositing: layer regions, finest resolution first
         values = _composite_regions(
             frame_regions, regions_with_data, z, x, y, tile_size,
             smooth, use_blur, pad,
         )
 
-    # Fill uncovered pixels from NWP precipitation data.
-    # For nowcast frames, blend extrapolated radar with IFS forecast
-    # using temporal weight + spatial feathering at coverage boundaries.
+    # Fill uncovered pixels from NWP precipitation data.  For nowcast
+    # frames, blend extrapolated radar with NWP using temporal weight +
+    # spatial feathering at coverage boundaries.
     if has_nwp:
         if nowcast_blend is not None:
             values = _blend_nowcast(
@@ -122,49 +154,194 @@ def render_tile(
                 frame_timestamp, smooth,
             )
 
-    # Apply noise floor
     if settings.noise_floor_dbz > -32:
         pixel_threshold = int((settings.noise_floor_dbz + 32) * 2)
         values = values.copy()
         values[values < pixel_threshold] = 0
 
-    # Apply color scheme with per-pixel snow/rain selection
+    snow_mask = None
     if snow and nwp_chain is not None:
         if pad > 0:
             lat_grid, lon_grid = tile_pixel_latlons_padded(z, x, y, tile_size, pad)
         else:
             lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
-        is_snow = nwp_chain.get_snow_mask(lat_grid, lon_grid, frame_timestamp)
-        rgba_rain = colorize(values, color_scheme, snow=False)
-        rgba_snow = colorize(values, color_scheme, snow=True)
-        rgba = np.where(is_snow[..., np.newaxis], rgba_snow, rgba_rain)
-    else:
-        rgba = colorize(values, color_scheme, snow=False)
+        snow_mask = nwp_chain.get_snow_mask(lat_grid, lon_grid, frame_timestamp)
 
-    # Create image
+    return TileGeometry(
+        values=values,
+        snow_mask=snow_mask,
+        tile_size=tile_size,
+        pad=pad,
+        blur_radius=blur_radius,
+    )
+
+
+def _compute_nwp_only_geometry(
+    nwp_chain,
+    z: int, x: int, y: int,
+    tile_size: int,
+    smooth: bool,
+    snow: bool,
+    frame_timestamp: int | None,
+) -> TileGeometry:
+    """Geometry for a tile entirely from NWP (no radar regions overlap)."""
+    lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
+    values = nwp_chain.sample(
+        lat_grid, lon_grid, frame_timestamp, bilinear=smooth,
+    )
+
+    if settings.noise_floor_dbz > -32:
+        pixel_threshold = int((settings.noise_floor_dbz + 32) * 2)
+        values = values.copy()
+        values[values < pixel_threshold] = 0
+
+    snow_mask = None
+    if snow:
+        snow_mask = nwp_chain.get_snow_mask(lat_grid, lon_grid, frame_timestamp)
+
+    return TileGeometry(
+        values=values,
+        snow_mask=snow_mask,
+        tile_size=tile_size,
+        pad=0,
+        blur_radius=0.0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Present step (per-request, cheap)
+# ---------------------------------------------------------------------------
+
+
+def present_tile(
+    geom: TileGeometry,
+    color_scheme: int,
+    fmt: str,
+    *,
+    arrow_style: str = "",
+    flow_regions: dict[str, np.ndarray] | None = None,
+    frame_regions: dict[str, np.ndarray] | None = None,
+    enabled_regions: list[str] | None = None,
+    ecmwf_flow: np.ndarray | None = None,
+    ecmwf_grid=None,
+    frame_timestamp: int | None = None,
+    z: int = 0,
+    x: int = 0,
+    y: int = 0,
+) -> bytes:
+    """Render a cached ``TileGeometry`` to encoded bytes.
+
+    Does the cheap tail: LUT colorize, optional Gaussian blur + crop,
+    optional motion-arrow overlay, image encode.  All of these are
+    per-request because they depend on the request's color/format/arrow
+    parameters, which are deliberately *not* in the cache key.
+
+    Arrow inputs (``flow_regions``, ``ecmwf_flow``, etc.) are passed
+    fresh on each call rather than baked into the geometry so a tile
+    that's cached without arrows can still render an arrow variant when
+    a later request asks for one.
+    """
+    if geom.is_transparent:
+        return _transparent_tile(geom.tile_size, fmt)
+
+    if geom.snow_mask is not None:
+        rgba_rain = colorize(geom.values, color_scheme, snow=False)
+        rgba_snow = colorize(geom.values, color_scheme, snow=True)
+        rgba = np.where(geom.snow_mask[..., np.newaxis], rgba_snow, rgba_rain)
+    else:
+        rgba = colorize(geom.values, color_scheme, snow=False)
+
     img = Image.fromarray(rgba, "RGBA")
 
-    if use_blur:
+    if geom.blur_radius >= 0.5:
         r, g, b, a = img.split()
         rgb = Image.merge("RGB", (r, g, b))
-        rgb = rgb.filter(ImageFilter.GaussianBlur(radius=blur_radius))
-        a = a.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        rgb = rgb.filter(ImageFilter.GaussianBlur(radius=geom.blur_radius))
+        a = a.filter(ImageFilter.GaussianBlur(radius=geom.blur_radius))
         r, g, b = rgb.split()
         img = Image.merge("RGBA", (r, g, b, a))
 
-        if pad > 0:
-            img = img.crop((pad, pad, pad + tile_size, pad + tile_size))
+        if geom.pad > 0:
+            img = img.crop(
+                (geom.pad, geom.pad, geom.pad + geom.tile_size, geom.pad + geom.tile_size)
+            )
 
-    if flow_regions or ecmwf_flow is not None:
+    if arrow_style and (flow_regions or ecmwf_flow is not None):
+        regions = overlapping_regions(z, x, y, enabled_regions)
+        if frame_regions:
+            regions_with_data = [r for r in regions if r.name in frame_regions]
+        else:
+            regions_with_data = []
         img = _draw_motion_arrows(
-            img, flow_regions, frame_regions, regions_with_data,
-            z, x, y, tile_size, arrow_style,
+            img, flow_regions, frame_regions or {}, regions_with_data,
+            z, x, y, geom.tile_size, arrow_style,
             ecmwf_flow=ecmwf_flow,
             ecmwf_grid=ecmwf_grid,
             frame_timestamp=frame_timestamp,
         )
 
     return _encode_image(img, fmt)
+
+
+# ---------------------------------------------------------------------------
+# Convenience: render in one call (used by tests + the warmer's startup path)
+# ---------------------------------------------------------------------------
+
+
+def render_tile(
+    frame_regions: dict[str, np.ndarray],
+    z: int,
+    x: int,
+    y: int,
+    tile_size: int = 256,
+    color_scheme: int = 7,
+    smooth: bool = False,
+    snow: bool = False,
+    fmt: str = "png",
+    ecmwf_grid=None,
+    nwp_chain=None,
+    enabled_regions: list[str] | None = None,
+    frame_timestamp: int | None = None,
+    nowcast_blend: float | None = None,
+    flow_regions: dict[str, np.ndarray] | None = None,
+    ecmwf_flow: np.ndarray | None = None,
+    arrow_style: str = "light",
+) -> bytes:
+    """Compute geometry and present it in a single call.
+
+    Convenience wrapper for callers (mostly tests) that don't care about
+    the cache layer.  Production code paths call ``compute_tile_geometry``
+    and ``present_tile`` separately so the geometry can be cached.
+    """
+    geom = compute_tile_geometry(
+        frame_regions=frame_regions,
+        z=z, x=x, y=y,
+        tile_size=tile_size,
+        smooth=smooth,
+        snow=snow,
+        nwp_chain=nwp_chain,
+        enabled_regions=enabled_regions,
+        frame_timestamp=frame_timestamp,
+        nowcast_blend=nowcast_blend,
+    )
+    return present_tile(
+        geom,
+        color_scheme=color_scheme,
+        fmt=fmt,
+        arrow_style=arrow_style if (flow_regions or ecmwf_flow is not None) else "",
+        flow_regions=flow_regions,
+        frame_regions=frame_regions,
+        enabled_regions=enabled_regions,
+        ecmwf_flow=ecmwf_flow,
+        ecmwf_grid=ecmwf_grid,
+        frame_timestamp=frame_timestamp,
+        z=z, x=x, y=y,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 
 def _compute_blur_radius(
@@ -443,54 +620,6 @@ def _blend_nowcast(
     result[both_zero] = 0
 
     return result
-
-
-def _render_ecmwf_only_tile(
-    nwp_chain,
-    ecmwf_grid,
-    z: int, x: int, y: int,
-    tile_size: int,
-    color_scheme: int,
-    smooth: bool,
-    snow: bool,
-    fmt: str,
-    frame_timestamp: int | None = None,
-    ecmwf_flow: np.ndarray | None = None,
-    arrow_style: str = "",
-) -> bytes:
-    """Render a tile entirely from NWP data (no radar regions overlap)."""
-    lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
-    values = nwp_chain.sample(
-        lat_grid, lon_grid, frame_timestamp, bilinear=smooth,
-    )
-
-    # Apply noise floor
-    if settings.noise_floor_dbz > -32:
-        pixel_threshold = int((settings.noise_floor_dbz + 32) * 2)
-        values = values.copy()
-        values[values < pixel_threshold] = 0
-
-    # Apply color scheme with per-pixel snow/rain selection
-    if snow:
-        is_snow = nwp_chain.get_snow_mask(lat_grid, lon_grid, frame_timestamp)
-        rgba_rain = colorize(values, color_scheme, snow=False)
-        rgba_snow = colorize(values, color_scheme, snow=True)
-        rgba = np.where(is_snow[..., np.newaxis], rgba_snow, rgba_rain)
-    else:
-        rgba = colorize(values, color_scheme, snow=False)
-
-    img = Image.fromarray(rgba, "RGBA")
-
-    if ecmwf_flow is not None and arrow_style:
-        img = _draw_motion_arrows(
-            img, None, {}, [],
-            z, x, y, tile_size, arrow_style,
-            ecmwf_flow=ecmwf_flow,
-            ecmwf_grid=ecmwf_grid,
-            frame_timestamp=frame_timestamp,
-        )
-
-    return _encode_image(img, fmt)
 
 
 def _bilinear_sample(

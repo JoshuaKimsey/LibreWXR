@@ -9,8 +9,16 @@ from PIL import Image
 pytestmark = pytest.mark.tiles
 
 from librewxr.data.regions import REGIONS
+from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
-from librewxr.tiles.renderer import _compute_blur_radius, render_coverage_tile, render_tile
+from librewxr.tiles.renderer import (
+    TileGeometry,
+    _compute_blur_radius,
+    compute_tile_geometry,
+    present_tile,
+    render_coverage_tile,
+    render_tile,
+)
 
 
 class TestRenderTile:
@@ -88,6 +96,89 @@ class TestRenderCoverageTile:
         tile = render_coverage_tile(regions, z=4, x=3, y=5, tile_size=256)
         img = Image.open(io.BytesIO(tile))
         assert img.size == (256, 256)
+
+
+class TestTileGeometryCache:
+    """The compute/present split is what lets one cached tile serve every
+    color scheme + format + arrow style.  These tests pin that contract."""
+
+    def test_compute_returns_geometry(self, sample_frame_data):
+        regions = {"USCOMP": sample_frame_data}
+        geom = compute_tile_geometry(
+            regions, z=4, x=3, y=5, tile_size=256,
+        )
+        assert isinstance(geom, TileGeometry)
+        assert not geom.is_transparent
+        assert geom.values.shape == (256, 256)
+        assert geom.values.dtype == np.uint8
+        assert geom.snow_mask is None  # snow defaults to False
+        assert geom.blur_radius == 0.0
+        assert geom.pad == 0
+
+    def test_transparent_when_no_data(self):
+        """Tiles with no radar AND no NWP return the transparent sentinel."""
+        regions = {}  # no radar data
+        geom = compute_tile_geometry(
+            regions, z=3, x=0, y=3, tile_size=256, nwp_chain=None,
+        )
+        assert geom.is_transparent
+
+    def test_present_handles_transparent(self):
+        """Transparent geometry should encode to a transparent tile of the right size."""
+        geom = TileGeometry.transparent(256)
+        for fmt in ("png", "webp"):
+            tile = present_tile(geom, color_scheme=2, fmt=fmt)
+            img = Image.open(io.BytesIO(tile))
+            assert img.size == (256, 256)
+            assert img.mode == "RGBA"
+
+    def test_one_geometry_serves_all_color_schemes(self, sample_frame_data):
+        """The whole point of the refactor: compute once, present in any color."""
+        regions = {"USCOMP": sample_frame_data}
+        # (5, 7, 12) is the tile that overlaps the sample data block.
+        geom = compute_tile_geometry(
+            regions, z=5, x=7, y=12, tile_size=256,
+        )
+        assert geom.values.max() > 0, "test fixture has no data at this tile"
+        rendered = {}
+        for scheme in (0, 1, 2, 3, 4, 5, 6, 7, 8):
+            tile = present_tile(geom, color_scheme=scheme, fmt="png")
+            assert len(tile) > 0, f"scheme {scheme} produced no bytes"
+            img = Image.open(io.BytesIO(tile))
+            assert img.size == (256, 256)
+            rendered[scheme] = tile
+        # Different schemes should not all produce identical bytes —
+        # otherwise the LUT isn't actually being applied.
+        unique = len(set(rendered.values()))
+        assert unique >= 2, "color schemes produced identical bytes"
+
+    def test_one_geometry_serves_both_formats(self, sample_frame_data):
+        """PNG and WebP from the same geometry should both decode cleanly."""
+        regions = {"USCOMP": sample_frame_data}
+        geom = compute_tile_geometry(
+            regions, z=5, x=7, y=12, tile_size=256,
+        )
+        png_bytes = present_tile(geom, color_scheme=2, fmt="png")
+        webp_bytes = present_tile(geom, color_scheme=2, fmt="webp")
+        assert Image.open(io.BytesIO(png_bytes)).size == (256, 256)
+        assert Image.open(io.BytesIO(webp_bytes)).size == (256, 256)
+        assert png_bytes != webp_bytes
+
+    def test_cache_accepts_geometry(self, sample_frame_data):
+        """TileCache must size and store TileGeometry like it does bytes."""
+        cache = TileCache(max_mb=10)
+        regions = {"USCOMP": sample_frame_data}
+        geom = compute_tile_geometry(
+            regions, z=4, x=3, y=5, tile_size=256,
+        )
+        key = (1700000000, 4, 3, 5, 256, False, False)
+        cache.put(key, geom)
+        assert cache.get(key) is geom
+        assert cache.total_bytes == geom.nbytes
+        # Eviction by timestamp should free the right number of bytes.
+        cache.invalidate_timestamp(1700000000)
+        assert cache.total_bytes == 0
+        assert cache.get(key) is None
 
 
 class TestBlurRadius:

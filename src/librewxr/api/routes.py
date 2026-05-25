@@ -26,7 +26,11 @@ from librewxr.data.store import FrameStore
 from librewxr.memory import detect_memory_limit_mb
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import coord_cache_bytes, coord_cache_stats
-from librewxr.tiles.renderer import render_coverage_tile, render_tile
+from librewxr.tiles.renderer import (
+    compute_tile_geometry,
+    present_tile,
+    render_coverage_tile,
+)
 from librewxr.tiles.request_tracker import TileRequestTracker
 from librewxr.tiles.satellite_renderer import (
     render_gmgsi_composite_tile,
@@ -325,25 +329,46 @@ async def radar_tile(
     elif arrows == "dark":
         arrow_style = "dark"
 
-    cache_key = (timestamp, z, x, y, tile_size, color, smooth, snow, ext, arrow_style)
-    cached = tile_cache.get(cache_key)
-    if cached is not None:
-        return Response(
-            content=cached,
-            media_type=_content_type(ext),
-            headers={"Cache-Control": "public, max-age=300"},
-        )
+    # Geometry cache: keyed only on inputs that affect the sampled values
+    # (radar source + viewport + smoothing + snow-mask presence).  Color
+    # scheme, output format, and arrow style apply per-request in
+    # ``present_tile`` so a single cached entry serves every visual
+    # variant of the same viewport.
+    geom_key = (timestamp, z, x, y, tile_size, smooth, snow)
+    geom = tile_cache.get(geom_key)
 
-    frame = await frame_store.get_frame(timestamp)
+    # We need the radar frame whenever geometry must be computed AND
+    # whenever arrows are requested (arrow rendering needs live frame
+    # data + flow fields).  Skip the fetch on pure cache hits without
+    # arrows — that's the hot path Merry Sky-style clients exercise.
+    frame = None
     nowcast_blend = None
     is_nowcast = False
-    if frame is None and nowcast_store is not None:
-        nc_frame, nowcast_blend = await nowcast_store.get_frame(timestamp)
-        if nc_frame is not None:
-            frame = nc_frame
-            is_nowcast = True
-    if frame is None:
-        raise HTTPException(status_code=404, detail="Frame not found")
+    need_frame = geom is None or bool(arrow_style)
+    if need_frame:
+        frame = await frame_store.get_frame(timestamp)
+        if frame is None and nowcast_store is not None:
+            nc_frame, nowcast_blend = await nowcast_store.get_frame(timestamp)
+            if nc_frame is not None:
+                frame = nc_frame
+                is_nowcast = True
+        if frame is None:
+            raise HTTPException(status_code=404, detail="Frame not found")
+
+    if geom is None:
+        geom = await asyncio.to_thread(
+            compute_tile_geometry,
+            frame_regions=frame.regions,
+            z=z, x=x, y=y,
+            tile_size=tile_size,
+            smooth=smooth,
+            snow=snow,
+            nwp_chain=nwp_chain,
+            enabled_regions=enabled_regions,
+            frame_timestamp=timestamp,
+            nowcast_blend=nowcast_blend,
+        )
+        tile_cache.put(geom_key, geom)
 
     flow_regions = None
     ecmwf_flow = None
@@ -354,36 +379,34 @@ async def radar_tile(
             ecmwf_flow = ecmwf_grid.flow
 
     tile_bytes = await asyncio.to_thread(
-        render_tile,
-        frame_regions=frame.regions,
-        z=z, x=x, y=y,
-        tile_size=tile_size,
+        present_tile,
+        geom,
         color_scheme=color,
-        smooth=smooth,
-        snow=snow,
         fmt=ext,
-        ecmwf_grid=ecmwf_grid,
-        nwp_chain=nwp_chain,
-        enabled_regions=enabled_regions,
-        frame_timestamp=timestamp,
-        nowcast_blend=nowcast_blend,
+        arrow_style=arrow_style if (flow_regions or ecmwf_flow is not None) else "",
         flow_regions=flow_regions,
+        frame_regions=frame.regions if frame is not None else None,
+        enabled_regions=enabled_regions,
         ecmwf_flow=ecmwf_flow,
-        arrow_style=arrow_style,
+        ecmwf_grid=ecmwf_grid,
+        frame_timestamp=timestamp,
+        z=z, x=x, y=y,
     )
 
-    tile_cache.put(cache_key, tile_bytes)
-
     if tile_warmer is not None:
+        # When the cache hit short-circuited the frame fetch, we still
+        # need a frame_type for the warmer.  Cheap lookup against the
+        # in-memory timestamp list.
+        if not need_frame:
+            past_timestamps = await frame_store.get_timestamps()
+            is_nowcast = timestamp not in past_timestamps
         asyncio.ensure_future(
             tile_warmer.warm(
                 triggered_timestamp=timestamp,
                 z=z, x=x, y=y,
                 tile_size=tile_size,
-                color=color,
                 smooth=smooth,
                 snow=snow,
-                ext=ext,
                 frame_type="nowcast" if is_nowcast else "past",
             )
         )

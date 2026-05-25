@@ -9,17 +9,24 @@ from librewxr.config import settings
 from librewxr.data.store import FrameStore
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import overlapping_regions
-from librewxr.tiles.renderer import render_tile
+from librewxr.tiles.renderer import compute_tile_geometry
 
 logger = logging.getLogger(__name__)
 
 
 class TileWarmer:
-    """Pre-renders tiles for other timestamps when a cache miss occurs.
+    """Pre-computes tile geometry for other timestamps when a cache miss occurs.
 
     Overview warming is demand-driven: past and nowcast tiles are only
-    pre-rendered after a user requests a corresponding frame type. The
+    pre-computed after a user requests a corresponding frame type. The
     latest radar frame is pre-warmed at startup for fast initial load.
+
+    What's cached is the pre-presentation ``TileGeometry`` — color
+    scheme, output format, and arrow style are applied per-request in
+    ``present_tile``.  That means the warmer's job is simpler than it
+    used to be: warming one geometry per ``(ts, z, x, y, tile_size,
+    smooth, snow)`` covers every color / format / arrow combination,
+    which collapses what used to be ~18 warm jobs per tile into one.
     """
 
     def __init__(
@@ -90,7 +97,7 @@ class TileWarmer:
         )
 
     async def warm_latest(self) -> None:
-        """Pre-render overview tiles for the latest radar frame only.
+        """Pre-compute overview geometry for the latest radar frame.
 
         Called at startup so the initial map load is fast.  Only warms
         past (radar) tiles — nowcast overview is triggered on demand.
@@ -124,7 +131,7 @@ class TileWarmer:
                 processed += 1
                 if processed % 500 == 0:
                     await asyncio.sleep(0)
-                cache_key = (latest_ts, z, x, y, 256, 7, False, False, "png", "")
+                cache_key = (latest_ts, z, x, y, 256, False, False)
                 if self._cache.get(cache_key) is not None:
                     continue
                 async with self._lock:
@@ -132,10 +139,10 @@ class TileWarmer:
                         if time.monotonic() - self._pending[cache_key] < self._pending_ttl:
                             continue
                     self._pending[cache_key] = time.monotonic()
-                self._submit_render(
+                self._submit_compute(
                     loop, cache_key, frame_regions,
-                    z, x, y, 256, 7, False, False, "png",
-                    self._ecmwf_grid, self._nwp_chain, latest_ts, None,
+                    z, x, y, 256, False, False,
+                    latest_ts, None,
                 )
                 submitted += 1
                 pct = processed * 100 // total_tiles
@@ -160,13 +167,11 @@ class TileWarmer:
         x: int,
         y: int,
         tile_size: int,
-        color: int,
         smooth: bool,
         snow: bool,
-        ext: str,
         frame_type: str = "past",
     ) -> None:
-        """Schedule background renders for all other timestamps.
+        """Schedule background geometry computes for all other timestamps.
 
         Also triggers overview warming for the given frame type so that
         demand-driven pre-warming kicks in after the first cache miss.
@@ -187,7 +192,7 @@ class TileWarmer:
             if ts == triggered_timestamp:
                 continue
 
-            cache_key = (ts, z, x, y, tile_size, color, smooth, snow, ext, "")
+            cache_key = (ts, z, x, y, tile_size, smooth, snow)
 
             if self._cache.get(cache_key) is not None:
                 continue
@@ -210,10 +215,10 @@ class TileWarmer:
                 continue
 
             frame_regions = frame.regions
-            self._submit_render(
+            self._submit_compute(
                 loop, cache_key, frame_regions,
-                z, x, y, tile_size, color, smooth, snow, ext,
-                self._ecmwf_grid, self._nwp_chain, ts, nowcast_blend,
+                z, x, y, tile_size, smooth, snow,
+                ts, nowcast_blend,
             )
 
     @staticmethod
@@ -241,12 +246,10 @@ class TileWarmer:
         max_zoom: int | None = None,
         max_zoom_regional: int | None = None,
         tile_size: int = 256,
-        color: int = 7,
         smooth: bool = False,
         snow: bool = False,
-        ext: str = "png",
     ) -> None:
-        """Pre-render overview tiles for every timestamp.
+        """Pre-compute overview geometry for every timestamp.
 
         ``frame_type`` controls which timestamps are warmed:
         - "past": only radar store timestamps
@@ -311,13 +314,12 @@ class TileWarmer:
                 continue
             frame_regions = frame.regions
 
-            submitted_ts = 0
             for z in range(max_zoom_total + 1):
                 for x, y in tiles_by_zoom[z]:
                     processed += 1
                     if processed % 500 == 0:
                         await asyncio.sleep(0)
-                    cache_key = (ts, z, x, y, tile_size, color, smooth, snow, ext, "")
+                    cache_key = (ts, z, x, y, tile_size, smooth, snow)
                     if self._cache.get(cache_key) is not None:
                         continue
                     async with self._lock:
@@ -325,13 +327,12 @@ class TileWarmer:
                             if time.monotonic() - self._pending[cache_key] < self._pending_ttl:
                                 continue
                         self._pending[cache_key] = time.monotonic()
-                    self._submit_render(
+                    self._submit_compute(
                         loop, cache_key, frame_regions,
-                        z, x, y, tile_size, color, smooth, snow, ext,
-                        self._ecmwf_grid, self._nwp_chain, ts, nowcast_blend,
+                        z, x, y, tile_size, smooth, snow,
+                        ts, nowcast_blend,
                     )
                     submitted += 1
-                    submitted_ts += 1
                     pct = processed * 100 // total_tiles
                     if pct >= next_pct or processed == total_tiles:
                         elapsed = time.monotonic() - start
@@ -357,7 +358,7 @@ class TileWarmer:
         if frame_type in ("nowcast", "both"):
             self._nowcast_warm_complete = True
 
-    def _render_and_cache(
+    def _compute_and_cache(
         self,
         cache_key: tuple,
         frame_regions: dict,
@@ -365,41 +366,33 @@ class TileWarmer:
         x: int,
         y: int,
         tile_size: int,
-        color: int,
         smooth: bool,
         snow: bool,
-        ext: str,
-        ecmwf_grid,
-        nwp_chain,
         frame_timestamp: int | None = None,
         nowcast_blend: float | None = None,
     ) -> None:
-        """Render a tile and store it in the cache (runs in thread pool)."""
+        """Compute tile geometry and store it in the cache (runs in thread pool)."""
         try:
             if self._cache.get(cache_key) is not None:
                 return
-            tile_bytes = render_tile(
+            geom = compute_tile_geometry(
                 frame_regions=frame_regions,
                 z=z, x=x, y=y,
                 tile_size=tile_size,
-                color_scheme=color,
                 smooth=smooth,
                 snow=snow,
-                fmt=ext,
-                ecmwf_grid=ecmwf_grid,
-                nwp_chain=nwp_chain,
+                nwp_chain=self._nwp_chain,
                 enabled_regions=self._enabled_regions,
                 frame_timestamp=frame_timestamp,
                 nowcast_blend=nowcast_blend,
-                arrow_style="",
             )
-            self._cache.put(cache_key, tile_bytes)
+            self._cache.put(cache_key, geom)
         except Exception:
-            logger.debug("Warm render failed for key %s", cache_key[:5])
+            logger.debug("Warm compute failed for key %s", cache_key[:5])
         finally:
             self._pending.pop(cache_key, None)
 
-    def _submit_render(
+    def _submit_compute(
         self,
         loop: asyncio.AbstractEventLoop,
         cache_key: tuple,
@@ -408,41 +401,33 @@ class TileWarmer:
         x: int,
         y: int,
         tile_size: int,
-        color: int,
         smooth: bool,
         snow: bool,
-        ext: str,
-        ecmwf_grid,
-        nwp_chain,
         ts: int,
         nowcast_blend: float | None,
     ) -> None:
-        """Schedule a render on the executor with exception logging."""
+        """Schedule a compute on the executor with exception logging."""
         future = loop.run_in_executor(
             self._executor,
-            self._render_and_cache,
+            self._compute_and_cache,
             cache_key,
             frame_regions,
             z, x, y,
             tile_size,
-            color,
             smooth,
             snow,
-            ext,
-            ecmwf_grid,
-            nwp_chain,
             ts,
             nowcast_blend,
         )
-        future.add_done_callback(self._log_render_exception)
+        future.add_done_callback(self._log_compute_exception)
 
     @staticmethod
-    def _log_render_exception(future) -> None:
+    def _log_compute_exception(future) -> None:
         if future.cancelled():
             return
         exc = future.exception()
         if exc is not None:
-            logger.warning("Warm render task raised: %r", exc)
+            logger.warning("Warm compute task raised: %r", exc)
 
     def shutdown(self) -> None:
         pass  # Executor is shared; lifecycle managed by main.py
