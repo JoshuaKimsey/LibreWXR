@@ -17,6 +17,7 @@ SCHEME_NAMES = {
     6: "NEXRAD Level III",
     7: "Rainbow @ Selex SI",
     8: "Dark Sky",
+    9: "Datameteo Valerio",
 }
 
 # Rain LUTs: scheme_id -> (256, 4) uint8 array mapping pixel value -> RGBA
