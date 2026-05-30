@@ -306,18 +306,21 @@ class NowcastGenerator:
         interval = settings.fetch_interval
 
         # Fetch external nowcast contributions in parallel.  Each call
-        # returns a list of (validtime_unix, frame_data) or None.
+        # returns a list of (validtime_unix, frame_data) or None.  We
+        # iterate every registered contribution, NOT just regions present
+        # in latest_frame — the external source publishes its forecast
+        # independently of our analysis fetch, and may carry the only
+        # signal for the region if the latest analysis slot was missed.
         from librewxr.data.regions import REGIONS as _ALL_REGIONS
         external_by_region: dict[str, dict[int, np.ndarray]] = {}
         fetch_tasks = []
         fetch_region_names = []
-        for region_name in latest_frame.regions:
-            contrib = self._by_region.get(region_name)
-            region_def = _ALL_REGIONS.get(region_name)
-            if contrib is None or region_def is None:
+        for contrib in self._contributions:
+            region_def = _ALL_REGIONS.get(contrib.region_name)
+            if region_def is None:
                 continue
             fetch_tasks.append(contrib.instance.fetch_forecast(region_def))
-            fetch_region_names.append(region_name)
+            fetch_region_names.append(contrib.region_name)
         if fetch_tasks:
             results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
             for region_name, result in zip(fetch_region_names, results):
@@ -390,7 +393,13 @@ class NowcastGenerator:
                 continue
             flows[region_name] = _compute_flow(data0, data1)
 
-        if not flows:
+        # Regions to forecast = anything we can extrapolate internally
+        # OR anything an external source published.  External-only is
+        # the common JPCOMP case when JMA's analysis fetch for the
+        # latest slot is partial — the external N2 forecast still
+        # carries authoritative model output for the region.
+        forecast_regions: set[str] = set(flows.keys()) | set(external_by_region.keys())
+        if not forecast_regions:
             return [], {}
 
         # Generate extrapolated frames for each step
@@ -419,7 +428,7 @@ class NowcastGenerator:
                 blend_weight = 0.20 + 0.80 * (1.0 - t) ** 1.4
 
             regions: dict[str, np.ndarray] = {}
-            for region_name, flow in flows.items():
+            for region_name in forecast_regions:
                 external = external_by_region.get(region_name)
                 external_frame = external.get(nowcast_ts) if external else None
                 # No per-pixel boundary feathering: the internal
@@ -431,9 +440,15 @@ class NowcastGenerator:
                 # pixel would add noise rather than fill a real gap.
                 if external_frame is not None:
                     regions[region_name] = external_frame
-                else:
-                    data = latest_regions[region_name]
+                    continue
+                flow = flows.get(region_name)
+                data = latest_regions.get(region_name)
+                if flow is not None and data is not None:
                     regions[region_name] = _extrapolate_forward(data, flow, step)
+                # else: no external for this step, no internal flow —
+                # skip this region for this step.  Renderer falls back
+                # to NWP fill which is the correct behaviour for an
+                # uncovered region.
 
             frames.append(NowcastFrame(
                 timestamp=nowcast_ts,
@@ -443,8 +458,10 @@ class NowcastGenerator:
 
         elapsed = time.monotonic() - t0
         logger.info(
-            "Nowcast generation: %d frames × %d regions (%.1fs)",
-            len(frames), len(flows), elapsed,
+            "Nowcast generation: %d frames × %d regions "
+            "(%d internal, %d external) (%.1fs)",
+            len(frames), len(forecast_regions),
+            len(flows), len(external_by_region), elapsed,
         )
         return frames, flows
 
