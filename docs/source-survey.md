@@ -152,7 +152,7 @@ Source: `https://www.jma.go.jp/bosai/jmatile/data/nowc/` — anonymous, no auth,
 
 License: **JMA Public Data License v1.0** — CC-BY equivalent, explicit commercial-reuse permission, attribution required ("Source: Japan Meteorological Agency website").  Article 17 of Japan's Meteorological Service Act restricts "provision of meteorological services in Japan" — does not apply to LibreWXR redistributing radar imagery globally, but worth noting for any operator running a Japan-domestic service.
 
-**Removed forecast leg.**  An initial implementation also ingested JMA's N2 manifest (their own 60-min nowcast extrapolation) as a `NowcastContribution` that swapped in for internal optical-flow over JPCOMP.  That path was removed: JMA's 5-min validtime cadence didn't line up cleanly with our 10-min sampling rhythm, the dispatch complexity wasn't worth the win for one region, and the cleaner long-term play is a regional NWP source for Japan rather than an external nowcast.  See the "Japan — JMA LFM / MSM" entry in the NWP — Tier 3 section: those are structurally blocked (paid JMBSC contract only) so we're stuck with internal optical-flow for JPCOMP forecasts until either JMA opens an NWP feed or a third-party Japanese mesoscale model becomes anonymously available.
+**Removed forecast leg.**  An initial implementation also ingested JMA's N2 manifest (their own 60-min nowcast extrapolation) as a `NowcastContribution` that swapped in for internal optical-flow over JPCOMP.  That path was removed: JMA's 5-min validtime cadence didn't line up cleanly with our 10-min sampling rhythm, and the dispatch complexity wasn't worth the win for one region.  The cleaner long-term play — a regional Japanese NWP overlay so optical-flow blends with high-resolution Japan-specific model precip instead of with global IFS — landed 2026-05-30 as **JMA MSM** in the NWP — Implemented section.
 
 ## Radar — Tier 2
 
@@ -446,6 +446,14 @@ Outside the DINI domain: Iberia, southern Italy, Greece, Balkans, Belarus / Ukra
 
 Per-file size (\~34 MB NetCDF4) makes serial download painfully slow, so this source uses a **parallel fetch pipeline** (concurrency 6) — Phase 1 downloads accumulations in parallel, Phase 2 walks them sequentially per run to compute diffs. Other sources don't need this since their files are 1–9 MB.
 
+### JMA MSM (priority 20)
+
+5 km native (0.0625° lon × 0.05° lat) over 22.4–47.6°N × 120–150°E — Japan + Korean Peninsula + Taiwan + Yellow Sea + adjacent waters of the western Pacific. 8 cycles/day (00/03/06/09/12/15/18/21 UTC), hourly forecast steps, 78 h horizon from the 00Z/12Z main runs (39 h others; we only fetch the ~3-hour window around now in either case). Distributed via Open-Meteo's anonymous AWS Open Data mirror at `s3://openmeteo/data_spatial/jma_msm/` in `us-west-2` — the same bucket as IFS. License: redistributed under Open-Meteo's AWS Open Data Sponsorship terms; original JMA data is the Mesoscale Model GPV.
+
+**Workaround for the previously-blocked JMA NWP feed.** JMA's direct distribution channel (JMBSC) is paid-contract-only with terms that don't permit AGPL self-host redistribution. Open-Meteo separately republishes MSM precipitation, temperature, wind, and pressure-level fields to AWS Open Data via the sponsorship arrangement — the same arrangement that makes IFS, NCEP, and DMI usable. LFM (2 km local model) and MEPS ensemble are **not** mirrored — only MSM is. Same `.om` container format we already decode for IFS via `omfiles.OmFileReader`. Single fetch per (run, valid-time) carries every variable; per-step file is \~800 KB.
+
+Pairs with the JMA HRPN radar composite (JPCOMP, analysis-only post-revert) to give Japan a proper mesoscale NWP overlay instead of falling through to global IFS for the model side of the nowcast blend.
+
 ### ECMWF IFS (priority 1000, global base)
 
 9 km native (O1280 reduced Gaussian → regridded to 0.1° lat/lon). Open-Meteo S3 mirror, CC-BY-4.0. Provides pseudo-reflectivity (precipitation rate → dBZ via Marshall-Palmer) plus snow/rain classification globally. Optical flow interpolation of hourly IFS → 10-minute frames. This is the global base layer, not a "fallback" — it provides coverage everywhere a regional model isn't running.
@@ -514,9 +522,13 @@ Israeli IMS requires signing a Terms of Use PDF and emailing it. Open licence in
 
 Svalbard + Barents Sea. Deferred along with MET Nordic.
 
-### Japan — JMA LFM / MSM
+### Japan — JMA LFM (MSM moved to Implemented)
 
-Structurally blocked (verified 2026-05-08). JMBSC is the sole distributor for all of JMA's raw GRIB output (GSM, MSM, MSM upper-level, LFM) — only via paid contract, no anonymous public endpoint. Open-Meteo ingests GSM + MSM via a private credentialed URL their docs explicitly state is "not publicly disclosed." Even with a JMBSC contract, AGPL self-host redistribution would likely violate terms. The only public JMA data is GSM via NOMADS / WMO GTS mirrors at 0.5° / \~55 km — worse than IFS, not worth integrating.
+LFM (Local Forecast Model — 2 km, Japan-area-only) remains blocked. JMBSC is the sole distributor for LFM's raw GRIB output; only via paid contract, no anonymous public endpoint. Open-Meteo does not republish LFM to AWS Open Data (only MSM — see the Implemented section).
+
+GSM (global 13 km) is available via NOMADS / WMO GTS mirrors at 0.5° / \~55 km — worse than IFS, not worth integrating.
+
+The 2026-05-08 survey originally listed both MSM and LFM here as "structurally blocked" because Open-Meteo's *direct query API* docs mention licence restrictions. That note was correct about JMA's *direct* feed but missed that Open-Meteo separately republishes MSM (not LFM) to AWS Open Data Sponsorship under the same arrangement that makes IFS / NCEP / DMI usable. Discovered + shipped 2026-05-30 — see the JMA MSM entry under NWP — Implemented.
 
 ### China — CMA models
 

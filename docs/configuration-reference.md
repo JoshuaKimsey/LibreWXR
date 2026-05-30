@@ -21,6 +21,7 @@ This document is the **full** reference for every setting LibreWXR understands. 
   - [European: DMI DINI + ICON-EU](#european-dmi-dini--icon-eu)
   - [Caribbean: AROME Antilles](#caribbean-arome-antilles)
   - [South American: WRF-SMN](#south-american-wrf-smn)
+  - [East Asia: JMA MSM](#east-asia-jma-msm)
 - [Nowcasting](#nowcasting)
 - [Satellite (GMGSI)](#satellite-gmgsi)
 - [Weather Alerts (WMO CAP)](#weather-alerts-wmo-cap)
@@ -629,7 +630,7 @@ Adds ~130 MB RAM for synthetic frames and ~5-10 seconds of compute per IFS fetch
 
 LibreWXR layers a chain of regional rapid-refresh NWP models on top of the global ECMWF IFS layer. At each pixel, the chain dispatches to the **narrowest** model whose domain covers it, soft-feathering at every domain edge so seams don't show. See [`coverage.md`](coverage.md) for visual maps of every radar + NWP domain.
 
-Most regional sources also classify each pixel as snow vs rain from their own 2-metre temperature field. The threshold is shared across all of them via [`LIBREWXR_REGIONAL_SNOW_TEMP_THRESHOLD`](#librewxr_regional_snow_temp_threshold). HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, and ICON-EU all classify natively; HRDPS and AROME Antilles fall through to IFS for snow detection (HRDPS is expected to be replaced by RRFSv1 mid-2026; AROME Antilles is tropical so the question rarely matters).
+Most regional sources also classify each pixel as snow vs rain from their own 2-metre temperature field. The threshold is shared across all of them via [`LIBREWXR_REGIONAL_SNOW_TEMP_THRESHOLD`](#librewxr_regional_snow_temp_threshold). HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, ICON-EU, and JMA MSM all classify natively; HRDPS and AROME Antilles fall through to IFS for snow detection (HRDPS is expected to be replaced by RRFSv1 mid-2026; AROME Antilles is tropical so the question rarely matters).
 
 Each regional source supports the same set of advanced tuning knobs:
 
@@ -905,9 +906,59 @@ Full 0..72h files publish ~3-4 h after init; 4 h is conservative.
 | **Type** | float |
 | **Unit** | dBZ |
 
+### East Asia: JMA MSM
+
+Japan Meteorological Agency Mesoscale Model at native 5 km (0.0625° lon × 0.05° lat) over 22.4–47.6°N × 120–150°E — Japan + Korean Peninsula + Taiwan + Yellow Sea + adjacent waters of the western Pacific. 8 cycles/day (00/03/06/09/12/15/18/21 UTC), hourly forecast steps, 78 h horizon from the main 00Z/12Z runs (39 h from the others). Distributed via Open-Meteo's anonymous AWS Open Data mirror (`openmeteo` bucket in us-west-2 — same bucket as IFS). Pairs with the JMA HRPN radar composite (JPCOMP) to give Japan a proper mesoscale NWP overlay instead of falling through to global IFS. JMA's direct JMBSC feed is paid-contract-only; the Open-Meteo mirror is the workaround.
+
+#### `LIBREWXR_JMA_MSM_ENABLED`
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+#### `LIBREWXR_JMA_MSM_S3_BUCKET`
+
+| | |
+|---|---|
+| **Default** | `openmeteo` |
+| **Type** | string |
+
+#### `LIBREWXR_JMA_MSM_S3_REGION`
+
+| | |
+|---|---|
+| **Default** | `us-west-2` |
+| **Type** | string |
+
+#### `LIBREWXR_JMA_MSM_S3_PREFIX`
+
+| | |
+|---|---|
+| **Default** | `data_spatial/jma_msm` |
+| **Type** | string |
+
+#### `LIBREWXR_JMA_MSM_PUBLISH_DELAY_MINUTES`
+
+Full run write-out completes ~5 h after init (the published `latest.json`'s `last_modified_time` typically lags `reference_time` by 5h).
+
+| | |
+|---|---|
+| **Default** | `300` |
+| **Type** | integer |
+| **Unit** | minutes |
+
+#### `LIBREWXR_JMA_MSM_DBZ_OFFSET`
+
+| | |
+|---|---|
+| **Default** | `6.0` |
+| **Type** | float |
+| **Unit** | dBZ |
+
 ### `LIBREWXR_REGIONAL_SNOW_TEMP_THRESHOLD`
 
-Temperature threshold for native snow/rain classification across every regional NWP source that derives a snow mask from its own 2-metre temperature field (HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, ICON-EU). Pixels colder than this threshold are tagged as snow and rendered with the snow palette when `snow=1` is set on the tile URL.
+Temperature threshold for native snow/rain classification across every regional NWP source that derives a snow mask from its own 2-metre temperature field (HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, ICON-EU, JMA MSM). Pixels colder than this threshold are tagged as snow and rendered with the snow palette when `snow=1` is set on the tile URL.
 
 | | |
 |---|---|
@@ -919,7 +970,7 @@ Temperature threshold for native snow/rain classification across every regional 
 
 ### `LIBREWXR_REGIONAL_INTERPOLATION`
 
-Enable optical-flow temporal interpolation of hourly regional NWP frames to 10-minute steps. Uses the same OpenCV Farneback dense flow we apply to ECMWF IFS, applied at the end of each fetch cycle to every regional source whose native cadence is hourly (currently WRF-SMN, DMI DINI, ICON-EU).
+Enable optical-flow temporal interpolation of hourly regional NWP frames to 10-minute steps. Uses the same OpenCV Farneback dense flow we apply to ECMWF IFS, applied at the end of each fetch cycle to every regional source whose native cadence is hourly (currently WRF-SMN, DMI DINI, ICON-EU, JMA MSM).
 
 | | |
 |---|---|

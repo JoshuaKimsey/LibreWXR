@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     # still apply when this is True.
     radar_enabled: bool = True
     # Master switch for every regional NWP source — HRRR, HRRR-Alaska,
-    # HRDPS, AROME-OM family, DMI DINI, ICON-EU, WRF-SMN.  When False,
+    # HRDPS, AROME-OM family, DMI DINI, ICON-EU, WRF-SMN, JMA MSM.  When False,
     # the NWP chain collapses to ECMWF IFS alone, keeping the global
     # precipitation layer intact.  Useful for fast startup during
     # satellite-only or nowcast-only development.  Per-source
@@ -328,6 +328,22 @@ class Settings(BaseSettings):
     wrf_smn_s3_region: str = "us-west-2"   # bucket region per x-amz-bucket-region
     wrf_smn_publish_delay_minutes: int = 240          # ~3-4 h after init for full 0..72h
     wrf_smn_dbz_offset: float = 6.0                   # same Marshall-Palmer caveat as DINI/ICON-EU
+    # JMA MSM (Mesoscale Model) for Japan + adjacent East Asia: native 5 km
+    # (0.0625° lon × 0.05° lat), 8 cycles/day (00/03/06/09/12/15/18/21 UTC),
+    # 78 h horizon from the main 00Z/12Z runs (39 h others), hourly steps.
+    # Distributed via Open-Meteo's anonymous AWS Open Data mirror (same
+    # ``openmeteo`` bucket we use for IFS).  Pairs with the JMA HRPN radar
+    # (analysis leg → JPCOMP) to give the East Asia chain slot a high-
+    # resolution Japanese mesoscale NWP overlay instead of falling through
+    # to global IFS.  ~3 MB per fetch (~4 .om files × ~800 KB each in the
+    # 3-hour window), ~50 MB resident.  Independent toggle since this is
+    # the only source covering the East Asia NWP chain slot.
+    jma_msm_enabled: bool = True
+    jma_msm_s3_bucket: str = "openmeteo"
+    jma_msm_s3_region: str = "us-west-2"
+    jma_msm_s3_prefix: str = "data_spatial/jma_msm"
+    jma_msm_publish_delay_minutes: int = 300          # ~5 h after init for full run write-out
+    jma_msm_dbz_offset: float = 6.0                   # same Marshall-Palmer caveat as DINI/ICON-EU
     nowcast_enabled: bool = True  # Generate precipitation nowcast via radar extrapolation + IFS
     nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
     nowcast_blend_mode: str = "blended"  # "radar", "blended", or "model"

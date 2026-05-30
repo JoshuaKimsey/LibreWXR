@@ -47,6 +47,8 @@ src/librewxr/
       africa/nwp/arome_indien/            # AROME Indien (RE+YT+KM+MG+SW Indian Ocean)
       caribbean/nwp/arome_antilles/       # AROME Antilles (FR-GP+MQ)
       central_america/el_salvador/radar/marn/
+      east_asia/japan/nwp/jma_msm/             # JMA MSM (Japan + Korean Peninsula + Taiwan + Yellow Sea)
+      east_asia/japan/radar/jma/               # JMA HRPN composite (analysis leg → JPCOMP)
       east_asia/taiwan/radar/cwa/
       europe/radar/opera/
       europe/italy/radar/dpc/

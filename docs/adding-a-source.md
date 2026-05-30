@@ -247,7 +247,7 @@ For the shared `compute_snow_mask` helper (used by every regional NWP that suppo
 from librewxr.sources.regional.north_america.usa.nwp.hrrr.grid import compute_snow_mask
 ```
 
-HRRR was the original implementation so it owns the helper. DINI, ICON-EU, WRF-SMN, and HRRR-Alaska all import it from this same location.
+HRRR was the original implementation so it owns the helper. DINI, ICON-EU, WRF-SMN, HRRR-Alaska, and JMA MSM all import it from this same location.
 
 Interpolation helpers: if your source publishes at a coarser cadence than LibreWXR's 10-min stored interval, use the shared optical-flow interpolator in `data/nwp_interpolation.py`:
 
@@ -255,7 +255,7 @@ Interpolation helpers: if your source publishes at a coarser cadence than LibreW
 from librewxr.data.nwp_interpolation import interpolate_run
 ```
 
-IFS is the exception — its interpolation lives next door in `sources/world/ifs/interpolation.py` because it was the first one written and the design is IFS-shaped. The shared `nwp_interpolation` module came later when DINI / ICON-EU / WRF-SMN needed it.
+IFS is the exception — its interpolation lives next door in `sources/world/ifs/interpolation.py` because it was the first one written and the design is IFS-shaped. The shared `nwp_interpolation` module came later when DINI / ICON-EU / WRF-SMN / JMA MSM needed it.
 
 ### `__init__.py` (the provider)
 
@@ -312,6 +312,7 @@ Current assignments:
 | HRRR                     | 10       | 3 km CONUS, narrowest domain                       |
 | HRRR-Alaska              | 11       | Same model, disjoint domain                        |
 | HRDPS                    | 20       | 2.5 km Canada                                      |
+| JMA MSM                  | 20       | 5 km Japan + Korean Peninsula + Taiwan (disjoint from HRDPS) |
 | AROME Antilles           | 25       | 2.5 km Caribbean (FR-GP + MQ)                      |
 | AROME Guyane             | 26       | 2.5 km French Guiana                               |
 | AROME Indien             | 27       | 2.5 km SW Indian Ocean (RE + YT + KM + MG + SW)    |

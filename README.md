@@ -23,11 +23,11 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Regional NWP chain** — high-resolution rapid-refresh NWP models layered specificity-first: NOAA HRRR (CONUS + Alaska), ECCC HRDPS (Canada + N. CONUS), DMI HARMONIE-AROME DINI (most of populated Europe), DWD ICON-EU (the European remainder), Météo-France AROME Antilles (eastern Caribbean), and SMN WRF-DET (Argentina + S. American Cone), all on top of ECMWF IFS for global coverage. Soft-feathering at each domain edge prevents visible seams
 - **ECMWF IFS global coverage** — ECMWF IFS 9 km precipitation data provides global precipitation animation and powers the nowcast everywhere the regional NWP chain doesn't reach. Multi-timestep animation auto-scales to match radar history length
 - **Optical flow interpolation** — hourly ECMWF IFS frames are interpolated to 10-minute steps using dense motion vectors, so global IFS coverage animates smoothly like real radar data instead of jumping hour-to-hour (configurable, enabled by default)
-- **Precipitation nowcasting (experimental)** — 60-minute short-range forecast by extrapolating recent radar forward using optical flow, with configurable blend mode: smooth radar-to-model blending (default), pure radar extrapolation (closest to Rain Viewer), or pure NWP forecast. The model side is taken from the active NWP chain — HRRR over CONUS, ICON-EU/DINI over Europe, WRF-SMN over the S. American Cone, IFS elsewhere. Beyond 60 minutes, always uses pure model. Quality varies by weather pattern — works best for steady, organized precipitation; less reliable for fast-developing convection
+- **Precipitation nowcasting (experimental)** — 60-minute short-range forecast by extrapolating recent radar forward using optical flow, with configurable blend mode: smooth radar-to-model blending (default), pure radar extrapolation (closest to Rain Viewer), or pure NWP forecast. The model side is taken from the active NWP chain — HRRR over CONUS, ICON-EU/DINI over Europe, WRF-SMN over the S. American Cone, JMA MSM over Japan + adjacent East Asia, IFS elsewhere. Beyond 60 minutes, always uses pure model. Quality varies by weather pattern — works best for steady, organized precipitation; less reliable for fast-developing convection
 - **Precipitation motion arrows** — optional Dark Sky-style arrows showing storm movement direction and speed, derived from optical flow. Available for both radar and ECMWF data globally. Supports light and dark styles for different map themes via `?arrows=light` or `?arrows=dark` query parameter
 - **Real satellite imagery (GMGSI composite)** — NOAA's hourly global mosaic (GOES-East + GOES-West + Meteosat-9 + Meteosat-10 + Himawari-9, composited by NESDIS) ingested as longwave IR + visible channels and rendered as a VIS-over-LW composite with a natural day/night terminator crossfade. Day side shows continents and clouds as they appear from space; night side shows cold-cloud IR on a transparent basemap. Up to 12 hours of hourly animation with persistent disk caching. Populates the Rain Viewer-compatible `satellite.infrared` endpoint
 - **Weather alerts (WMO CAP)** — global weather alerts polled every 5 minutes from severeweather.wmo.int, with MeteoAlarm geocodes for European polygon resolution. Surfaced through a Rain Viewer-extension alerts API (`/v2/alerts/...`). Configurable via `LIBREWXR_ALERTS_ENABLED`
-- **Snow detection** — per-pixel snow/rain classification. Regional NWP sources classify natively from their own 2-metre temperature field (HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, ICON-EU); ECMWF IFS snowfall ratio fills everywhere else
+- **Snow detection** — per-pixel snow/rain classification. Regional NWP sources classify natively from their own 2-metre temperature field (HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, ICON-EU, JMA MSM); ECMWF IFS snowfall ratio fills everywhere else
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
 - **Tile cache warming** — background pre-rendering for smooth animation playback
 - **Multi-worker tile-server split** — optional production deployment splits the data pipeline from a pool of render workers that share state via memmap files. Lets every core actually do work instead of being GIL-bound at one. Pick the mode with `COMPOSE_PROFILES=multi` in `.env` (vs `single`)
@@ -302,6 +302,7 @@ the inline comments in [`src/librewxr/config.py`](src/librewxr/config.py).
 | `LIBREWXR_HRDPS_ENABLED` | `true` | ECCC HRDPS-Continental (Canada) |
 | `LIBREWXR_AROME_ANTILLES_ENABLED` | `true` | Météo-France AROME Antilles (eastern Caribbean) |
 | `LIBREWXR_WRF_SMN_ENABLED` | `true` | SMN Argentina WRF-DET (South American Cone) |
+| `LIBREWXR_JMA_MSM_ENABLED` | `true` | JMA Mesoscale Model (Japan + Korean Peninsula + Taiwan) |
 | `LIBREWXR_ECMWF_ENABLED` | `true` | ECMWF IFS global precipitation (disable for regional-only debugging) |
 | `LIBREWXR_NWP_FETCH_CONCURRENCY` | `4` | Max parallel NWP grid fetches per cycle |
 | **Nowcast** | | |
@@ -424,7 +425,8 @@ Tiles are served with `Cache-Control: public, max-age=300`, so any caching rever
 [ICON-EU]          ──┼───┤    (per-source feather +   │
 [AROME Antilles]   ──┤   │     specificity-first      │
 [WRF-SMN]          ──┤   │     blending)              ├──> [FastAPI + Tile Renderer]
-[ECMWF IFS]        ──┘   │                            │      (LRU cache + tile warmer)
+[JMA MSM]          ──┤   │                            │      (LRU cache + tile warmer)
+[ECMWF IFS]        ──┘   │                            │
                           │                            │
                           └─> [Optical Flow Interp] ───┤      [Satellite Tile Renderer]
                               (hourly → 10-min)        │       (VIS-over-LW composite)
@@ -457,7 +459,7 @@ everywhere else and isn't shown.
 Polygon shapes follow each grid's actual projected domain (LCC, polar
 stereographic, LAEA, rotated lat/lon, or regular lat/lon) — not a
 misleading lat/lon bounding box — so the curved edges visible on HRRR,
-HRDPS, DMI DINI, OPERA, and WRF-SMN are the real coverage boundaries.
+HRDPS, DMI DINI, OPERA, WRF-SMN, and JMA MSM are the real coverage boundaries.
 See [`docs/coverage.md`](docs/coverage.md) for a labelled breakdown of
 each polygon (resolution, projection, cycle cadence). Regenerate both
 PNGs with
@@ -585,6 +587,7 @@ seams where domains meet.
 | European remainder | DWD ICON-EU | ~7 km | 3-hourly | `LIBREWXR_EU_NWP_PROFILE=icon_eu_only` *(or `dini_with_icon_eu`)* |
 | Eastern Caribbean | Météo-France AROME Antilles | 1.3 km lat/lon | 6-hourly | `LIBREWXR_AROME_ANTILLES_ENABLED=true` |
 | South American Cone | SMN Argentina WRF-DET | 4 km LCC | 6-hourly | `LIBREWXR_WRF_SMN_ENABLED=true` |
+| Japan + Korean Peninsula + Taiwan | JMA MSM (Mesoscale Model) | 5 km lat/lon | 3-hourly | `LIBREWXR_JMA_MSM_ENABLED=true` |
 | Everywhere else | ECMWF IFS | 9 km global | 6-hourly | `LIBREWXR_ECMWF_ENABLED=true` |
 
 Each model gets its own `LIBREWXR_*_PUBLISH_DELAY_MINUTES` and
@@ -600,6 +603,7 @@ LIBREWXR_HRDPS_ENABLED=true               # Canada
 LIBREWXR_EU_NWP_PROFILE=dini_with_icon_eu # Europe (DINI + ICON-EU)
 LIBREWXR_AROME_ANTILLES_ENABLED=true      # eastern Caribbean
 LIBREWXR_WRF_SMN_ENABLED=true             # South American Cone
+LIBREWXR_JMA_MSM_ENABLED=true             # Japan + Korean Peninsula + Taiwan
 LIBREWXR_ECMWF_ENABLED=true               # global IFS layer (everywhere else)
 ```
 
@@ -638,7 +642,8 @@ LibreWXR uses the following freely available data:
 - **[EUMETNET OPERA](https://www.eumetnet.eu/activities/observations-programme/current-activities/opera/)** — Pan-European CIRRUS radar composite via [MeteoGate](https://meteogate.eu/) S3 (~155 radars, 24 countries, ODIM HDF5)
 - **[CWA QPESUMS](https://www.cwa.gov.tw/)** — Central Weather Administration of Taiwan, 7-radar composite reflectivity product `O-A0059-001` via the `cwaopendata` AWS bucket. Licensed under the [Open Government Data License v1.0](https://data.gov.tw/license) (資料來源：中央氣象署 / Source: Central Weather Administration, Taiwan).
 - **[MET Malaysia](https://www.met.gov.my/)** — Jabatan Meteorologi Malaysia, 12-radar national composite (CAPPI 1 km, Rainbow 5 / LEONARDO Germany GmbH processing) via anonymous HTTPS at `api.met.gov.my`. Licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) (Radar data © Jabatan Meteorologi Malaysia / METMalaysia).
-- **[JMA HRPN](https://www.jma.go.jp/bosai/nowc/)** — Japan Meteorological Agency High-Resolution Precipitation Nowcast (気象庁ナウキャスト), 20 C-band Doppler radars + AMeDAS rain-gauge network composited as gauge-corrected QPE.  Both the analysis leg (radar composite) and the forecast leg (JMA's own 60-minute nowcast extrapolation) ingested via the same source package.  Licensed under the [JMA Public Data License v1.0](https://www.jma.go.jp/jma/en/copyright.html) (CC-BY equivalent, commercial reuse permitted with attribution).  Source: Japan Meteorological Agency website ([jma.go.jp](https://www.jma.go.jp/)).
+- **[JMA HRPN](https://www.jma.go.jp/bosai/nowc/)** — Japan Meteorological Agency High-Resolution Precipitation Nowcast (気象庁ナウキャスト), 20 C-band Doppler radars + AMeDAS rain-gauge network composited as gauge-corrected QPE.  Analysis leg only (radar composite); JPCOMP nowcast frames come from LibreWXR's internal optical-flow extrapolation blended with **JMA MSM** as the regional NWP overlay.  Licensed under the [JMA Public Data License v1.0](https://www.jma.go.jp/jma/en/copyright.html) (CC-BY equivalent, commercial reuse permitted with attribution).  Source: Japan Meteorological Agency website ([jma.go.jp](https://www.jma.go.jp/)).
+- **[JMA MSM](https://www.jma.go.jp/jma/en/Activities/nwp.html) via [Open-Meteo](https://open-meteo.com/)** — Japan Meteorological Agency Mesoscale Model (5 km native, Japan + Korean Peninsula + Taiwan + Yellow Sea), republished by Open-Meteo to anonymous AWS Open Data.  The regional NWP overlay paired with the JPCOMP radar composite — fills the model side of the nowcast blend with a Japanese mesoscale forecast instead of falling through to global IFS.
 - **[ECMWF IFS](https://www.ecmwf.int/) via [Open-Meteo](https://open-meteo.com/)** — ECMWF IFS 9km global precipitation and snowfall. The global base layer for precipitation animation and nowcast extrapolation outside the regional NWP chain (CC-BY-4.0, data provided by Open-Meteo.com)
 - **[NOAA GMGSI](https://registry.opendata.aws/noaa-gmgsi/)** — Global Mosaic of Geostationary Satellite Imagery, composited by NESDIS from GOES-East, GOES-West, Meteosat-9, Meteosat-10, and Himawari-9. Anonymous AWS Open Data; hourly cadence; ±72.7° latitude coverage
 
@@ -647,7 +652,7 @@ All sources are provided by government-funded institutions and are freely availa
 ## Current Limitations
 
 - **Limited radar coverage outside US / Canada / Europe / Central America / Taiwan / Japan / SE Asia** — real radar composites cover the US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Canada, El Salvador and its neighbours, Europe (via OPERA), Taiwan (CWA QPESUMS), Japan (JMA HRPN), and Malaysia + Borneo + Brunei + Singapore + N. Sumatra (MET Malaysia). Everywhere else uses the regional NWP chain on top of ECMWF IFS for the precipitation layer — that's a complete picture of global precipitation, but it's modelled output, not direct radar observation
-- **Experimental nowcasting** — precipitation nowcast uses optical flow extrapolation blended with ECMWF IFS, which works well for steady, organized precipitation but is less reliable for fast-developing convection, cell initiation/dissipation, or complex terrain effects.  Japan is the exception: JMA's own HRPN forecast leg (which fuses XRAIN, models convective cell growth, and maintains gauge mass balance through the forecast horizon) is ingested directly via `NowcastContribution` and used in place of the generic extrapolation across JPCOMP
+- **Experimental nowcasting** — precipitation nowcast uses optical flow extrapolation blended with whichever regional model is active in the active NWP chain (or ECMWF IFS where none is), which works well for steady, organized precipitation but is less reliable for fast-developing convection, cell initiation/dissipation, or complex terrain effects
 - **Satellite is hourly, not real-time** — GMGSI publishes one composite per hour with ~35 minutes of latency from observation. Native per-satellite feeds (GOES, Himawari, Meteosat) refresh every 5–15 minutes, but at the cost of seam-blending and reprojection work that GMGSI handles upstream. GMGSI also caps at ±72.7° latitude — the deep polar regions are out of frame
 
 ## License

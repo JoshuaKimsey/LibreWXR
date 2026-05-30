@@ -496,6 +496,13 @@ def build_model_sources() -> list[Source]:
         project_grid_perimeter(smn_crs, smn_x0, smn_x_max, smn_y0, smn_y_max),
     ))
 
+    # JMA MSM (regular lat/lon, 0.0625° lon × 0.05° lat)
+    # Japan + Korean Peninsula + Taiwan + Yellow Sea + adjacent waters.
+    models.append(Source(
+        "JMA MSM", "#e377c2",
+        latlon_box(120.0, 150.0, 22.4, 47.6),
+    ))
+
     return models
 
 

@@ -59,10 +59,9 @@ Japan's `JPCOMP` is a national QPE composite from JMA's HRPN product
 (20 C-band Doppler radars fused with the AMeDAS gauge network).
 Analysis-leg only — JMA also publishes a 60-minute forecast leg but
 we don't currently ingest it; JPCOMP nowcast frames come from
-LibreWXR's internal optical-flow extrapolation like every other
-region.  A future Japanese mesoscale NWP source (e.g. MSM, when /
-if openly accessible) would be the more natural pairing for
-JPCOMP-specific forecast quality.
+LibreWXR's internal optical-flow extrapolation, blended with the
+**JMA MSM** mesoscale NWP source over the same domain (see the
+Regional NWP models section below).
 
 ---
 
@@ -87,6 +86,7 @@ show. Anywhere none of these models reach, ECMWF IFS fills in.
 | Météo-France AROME Nouvelle-Calédonie | New Caledonia + Vanuatu (SW Pacific) | 2.5 km | regular lat/lon | 6-hourly |
 | Météo-France AROME Polynésie | French Polynesia (Society + Tuamotu + Marquesas archipelagoes) | 2.5 km | regular lat/lon | 6-hourly |
 | SMN Argentina WRF-DET | South American Cone (AR/CL/UY/PY + S. Brazil + Bolivia) | 4 km | LCC | 6-hourly |
+| JMA MSM | Japan + Korean Peninsula + Taiwan + Yellow Sea | 5 km | regular lat/lon | 3-hourly |
 
 The HRRR-Alaska polygon wraps across the antimeridian onto the Russian
 Far East — the polar-stereographic grid genuinely covers that area

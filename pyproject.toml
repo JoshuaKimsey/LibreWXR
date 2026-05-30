@@ -82,5 +82,6 @@ markers = [
     "arome_ncaled: Météo-France AROME Nouvelle-Calédonie regular lat/lon grid tests",
     "arome_polyn: Météo-France AROME Polynésie française regular lat/lon grid tests",
     "wrf_smn: SMN Argentina WRF-DET LCC grid and NetCDF4 decode tests",
+    "jma_msm: JMA Mesoscale Model lat/lon grid, .om decode, and fetch tests",
     "alerts: WMO CAP weather alerts tests",
 ]
