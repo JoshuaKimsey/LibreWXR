@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -51,26 +52,28 @@ _FARNEBACK = dict(
 # Coverage-degradation guard: if the latest radar frame for a region has
 # lost more than this fraction of its non-zero pixels vs the previous
 # frame, skip optical-flow extrapolation for that region this cycle.
-#
-# Triggered by contributing-source dropouts that produce partial frames —
-# e.g. MSC Canada drops while MRMS holds, so CACOMP's latest frame
-# covers only ~55°N and south while the previous frame covered all of
-# Canada.  Running Farneback flow across that boundary produces wild
-# motion vectors that ``_extrapolate_forward`` then warps into vertical
-# streaks of fake precipitation.  Skipping the flow lets the renderer
-# fall back to NWP fill, which is the honest behaviour when the
-# upstream observation is incomplete.
-#
-# 0.4 = "latest has under 40% of prev's non-zero pixel count".  A 60%
-# loss is well outside normal precipitation evolution at 10-minute
-# spacing (storms don't dissipate that fast); a source dropout drops
-# the count far more dramatically (CACOMP loses ~70-90%).
-_COVERAGE_DEGRADATION_RATIO = 0.4
+# Belt-and-braces alongside the flow-magnitude clamp below — catches
+# catastrophic partial-frame scenarios the clamp can't see.
+_COVERAGE_DEGRADATION_RATIO = 0.7
 
 # Don't apply the degradation guard when the previous frame had only
 # a small smattering of precipitation — natural variation can swing
 # small counts by large fractions without anything being wrong.
 _MIN_PREV_NONZERO_PX = 1000
+
+# Physical cap on flow magnitude: 200 km/h is the upper extreme of
+# storm motion (severe convective cells embedded in a strong jet).
+# Any per-pixel flow vector implying motion faster than this is an
+# optical-flow artifact at a data/no-data boundary — the Farneback
+# polynomial fit gets unreliable where bright pixels sit next to zero
+# pixels, and the algorithm reports vectors of 50-200+ px/step.  When
+# ``_extrapolate_forward`` inverse-warps with those vectors it samples
+# boundary brightness into the no-data region, producing the vertical
+# streak artifact visible in CACOMP at MRMS/MSC boundaries and
+# anywhere else with irregular coverage.  Clamping in km/h units (vs
+# raw pixels) makes the cap scale correctly across radar grids that
+# range from 0.01° to 0.05° per pixel.
+_MAX_FLOW_KM_PER_HOUR = 200.0
 
 
 def _coverage_degraded(prev: np.ndarray, latest: np.ndarray) -> tuple[bool, int, int]:
@@ -85,6 +88,48 @@ def _coverage_degraded(prev: np.ndarray, latest: np.ndarray) -> tuple[bool, int,
     if prev_nz < _MIN_PREV_NONZERO_PX:
         return False, prev_nz, latest_nz
     return latest_nz < _COVERAGE_DEGRADATION_RATIO * prev_nz, prev_nz, latest_nz
+
+
+def _max_flow_pixels(
+    pixel_size_lat_deg: float, interval_seconds: int,
+    max_km_per_hour: float = _MAX_FLOW_KM_PER_HOUR,
+) -> float:
+    """Convert the km/h flow cap to a pixel magnitude bound.
+
+    Uses latitude pixel size (uniform ~111 km/°, independent of
+    latitude) as the reference axis.  Lon pixels are narrower toward
+    the poles (cos(lat) factor), so the resulting clamp slightly
+    over-restricts east-west motion at high latitudes — acceptable
+    because the artifact vectors we target exceed any physical motion
+    by 5-10x regardless.
+    """
+    max_km_per_step = max_km_per_hour * interval_seconds / 3600.0
+    km_per_px = pixel_size_lat_deg * 111.0
+    return max_km_per_step / km_per_px
+
+
+def _clamp_flow(flow: np.ndarray, max_magnitude_px: float) -> np.ndarray:
+    """Cap per-pixel flow magnitudes at ``max_magnitude_px``.
+
+    Vectors with magnitude below the cap pass through unchanged;
+    over-cap vectors are scaled down to the cap while preserving
+    direction.  Returns the original array when nothing needs clamping
+    (the common path) so we avoid an allocation per cycle on regions
+    with well-behaved flow fields.
+    """
+    dx = flow[..., 0]
+    dy = flow[..., 1]
+    mag = np.sqrt(dx * dx + dy * dy)
+    over = mag > max_magnitude_px
+    if not np.any(over):
+        return flow
+    scale = np.where(
+        over, max_magnitude_px / np.maximum(mag, 1e-9), 1.0,
+    ).astype(np.float32)
+    clamped = flow.copy()
+    clamped[..., 0] = (dx * scale).astype(np.float32)
+    clamped[..., 1] = (dy * scale).astype(np.float32)
+    return clamped
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +468,7 @@ class NowcastGenerator:
         # external contribution still get a flow computed because the
         # extrapolation path may be needed for any step where the
         # external source returned no frame (transient miss).
+        from librewxr.data.regions import REGIONS as _ALL_REGIONS  # local import: avoid circular at module load
         flows: dict[str, np.ndarray] = {}
         for region_name in latest_regions:
             data0 = prev_regions.get(region_name)
@@ -438,7 +484,21 @@ class NowcastGenerator:
                     region_name, prev_nz, latest_nz,
                 )
                 continue
-            flows[region_name] = _compute_flow(data0, data1)
+            flow = _compute_flow(data0, data1)
+            # Cap unphysical motion vectors before extrapolation.  Without
+            # this, Farneback's polynomial fit at data/no-data boundaries
+            # reports 50-200+ px/step magnitudes, which the inverse-warp
+            # then renders as vertical streaks of fake precipitation.
+            region_def = _ALL_REGIONS.get(region_name)
+            if region_def is not None:
+                ps_y = (
+                    region_def.pixel_size_y
+                    if region_def.pixel_size_y > 0
+                    else region_def.pixel_size
+                )
+                max_px = _max_flow_pixels(ps_y, interval)
+                flow = _clamp_flow(flow, max_px)
+            flows[region_name] = flow
 
         # Regions to forecast = anything we can extrapolate internally
         # OR anything an external source published.  External-only is

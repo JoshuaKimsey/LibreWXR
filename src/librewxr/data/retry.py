@@ -77,14 +77,26 @@ def retry_sync(
     """Call a synchronous function with retries on transient errors.
 
     Retries on any ``Exception`` (covers fsspec/S3 transient errors
-    and unexpected I/O failures).  Returns the result on success, or
-    ``None`` if all attempts fail.
+    and unexpected I/O failures).  ``FileNotFoundError`` is treated as
+    a not-yet-published upstream resource rather than a transient
+    error: no retry, one INFO log line, no traceback dump.  This is
+    the common case for Open-Meteo S3 mirrors where the most-recent
+    forecast hours of a run aren't always immediately available.
+    Returns the result on success, or ``None`` if all attempts fail.
     """
     if retries is None:
         retries = settings.download_retries
     for attempt in range(retries + 1):
         try:
             return fn(*args, **kwargs)
+        except FileNotFoundError as e:
+            # Upstream just doesn't have this file yet — retrying
+            # won't make it appear, and the traceback adds nothing.
+            name = log_name or getattr(fn, "__name__", "function")
+            logger.info(
+                "%s: upstream resource not available yet (%s)", name, e,
+            )
+            return None
         except Exception:
             if attempt < retries:
                 name = log_name or getattr(fn, "__name__", "function")

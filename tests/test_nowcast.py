@@ -12,9 +12,11 @@ from librewxr.data.nowcast import (
     NowcastFrame,
     NowcastGenerator,
     NowcastStore,
+    _clamp_flow,
     _compute_flow,
     _coverage_degraded,
     _extrapolate_forward,
+    _max_flow_pixels,
 )
 
 
@@ -396,3 +398,133 @@ class TestNowcastGuardIntegration:
         for f in frames:
             assert "GOOD" in f.regions
             assert "BAD" not in f.regions
+
+
+# ---------------------------------------------------------------------------
+# Flow-magnitude clamp (km/h → px bound, cap unphysical vectors)
+# ---------------------------------------------------------------------------
+
+
+class TestMaxFlowPixels:
+    """Unit tests for the km/h → pixel magnitude conversion."""
+
+    def test_coarse_region_at_10min_cadence(self):
+        # 0.05°/px (e.g. CACOMP, OPERA, JPCOMP); 200 km/h cap; 10-min step.
+        # km_per_step = 200/6 ≈ 33.3 km; km_per_px = 0.05 × 111 = 5.55 km.
+        # max_px = 33.3 / 5.55 ≈ 6.0 px/step.
+        max_px = _max_flow_pixels(0.05, 600)
+        assert 5.5 < max_px < 6.5
+
+    def test_fine_region_at_10min_cadence(self):
+        # 0.01°/px (e.g. USCOMP MRMS); same cap; max_px ≈ 30 px/step.
+        max_px = _max_flow_pixels(0.01, 600)
+        assert 29.5 < max_px < 30.5
+
+    def test_custom_kmh_cap(self):
+        # 100 km/h halves the budget.
+        max_px = _max_flow_pixels(0.05, 600, max_km_per_hour=100.0)
+        assert 2.7 < max_px < 3.3
+
+    def test_5min_cadence_halves_budget(self):
+        max_px_10min = _max_flow_pixels(0.05, 600)
+        max_px_5min = _max_flow_pixels(0.05, 300)
+        assert abs(max_px_5min * 2 - max_px_10min) < 0.01
+
+
+class TestClampFlow:
+    """Unit tests for the flow-magnitude clamp itself."""
+
+    def test_passthrough_when_no_vector_exceeds_cap(self):
+        flow = np.zeros((H, W, 2), dtype=np.float32)
+        flow[..., 0] = 2.0   # all vectors well under cap of 10
+        flow[..., 1] = 3.0
+        clamped = _clamp_flow(flow, max_magnitude_px=10.0)
+        # No allocation when nothing to clamp — same object.
+        assert clamped is flow
+
+    def test_over_cap_vectors_are_scaled_to_cap(self):
+        flow = np.zeros((H, W, 2), dtype=np.float32)
+        # Wild boundary vector: 100 px in x, 0 in y → magnitude 100.
+        flow[10, 10, 0] = 100.0
+        # Modest real vector: magnitude 5.
+        flow[20, 20, 0] = 3.0
+        flow[20, 20, 1] = 4.0
+
+        clamped = _clamp_flow(flow, max_magnitude_px=10.0)
+
+        clamped_mag_wild = np.sqrt(clamped[10, 10, 0] ** 2 + clamped[10, 10, 1] ** 2)
+        clamped_mag_real = np.sqrt(clamped[20, 20, 0] ** 2 + clamped[20, 20, 1] ** 2)
+        # Wild vector clamped exactly to cap.
+        assert abs(clamped_mag_wild - 10.0) < 1e-4
+        # Real vector untouched.
+        assert abs(clamped_mag_real - 5.0) < 1e-4
+
+    def test_direction_preserved_when_scaling(self):
+        flow = np.zeros((H, W, 2), dtype=np.float32)
+        # 100 px wild vector pointing 45° northeast.
+        flow[10, 10, 0] = 70.71
+        flow[10, 10, 1] = 70.71  # magnitude ≈ 100
+        clamped = _clamp_flow(flow, max_magnitude_px=10.0)
+        # Components should be ≈ 10/sqrt(2) each.
+        assert abs(clamped[10, 10, 0] - 7.071) < 0.01
+        assert abs(clamped[10, 10, 1] - 7.071) < 0.01
+
+
+class TestExtrapolationClampingPreventsStreaks:
+    """End-to-end: synthesize a hard data/no-data boundary, verify
+    that flow clamping bounds the magnitude of extrapolated motion.
+
+    Hard data/no-data boundary is the failure mode we're targeting —
+    Farneback's local polynomial fit reports wild vectors at the
+    boundary, and without clamping ``_extrapolate_forward`` warps
+    boundary brightness many pixels into the no-data region.  With
+    clamping, the warp distance is bounded by the physical km/h cap.
+    """
+
+    def test_extrapolation_distance_is_bounded_with_clamp(self):
+        """A wild flow vector at row 30 creates a streak without
+        clamping; the clamp bounds the warp distance so the streak
+        doesn't form.
+
+        ``_extrapolate_forward`` inverse-warps: output[y, x] samples
+        source at ``(y - steps·flow[y, x, 1], x - steps·flow[y, x, 0])``.
+        So a vector with negative y-component at the output position
+        pulls brightness from south of itself (where the cluster is).
+        """
+        frame = np.zeros((H, W), dtype=np.uint8)
+        frame[80, 100] = 200  # bright source pixel south of the streak target
+
+        # Wild flow at row 30, col 100: flow_y = -50 → inverse-warp at
+        # (30, 100) samples (30 - (-50), 100) = (80, 100), the bright
+        # pixel.  Without clamping, output[30, 100] inherits brightness
+        # — the streak.
+        flow_wild = np.zeros((H, W, 2), dtype=np.float32)
+        flow_wild[30, 100, 1] = -50.0
+
+        warped_no_clamp = _extrapolate_forward(frame, flow_wild, steps=1)
+        assert warped_no_clamp[30, 100] > 100  # streak present without clamp
+
+        # With clamp at 10 px: flow_y clamped to -10.  Output at (30, 100)
+        # now samples (40, 100), which is zero.  No streak.
+        flow_clamped = _clamp_flow(flow_wild, max_magnitude_px=10.0)
+        warped = _extrapolate_forward(frame, flow_clamped, steps=1)
+        assert warped[30, 100] == 0  # streak gone
+
+    def test_generate_sync_with_typical_region_applies_clamp(self):
+        """Smoke test: regions in REGIONS get their flow clamped by
+        the per-region pixel size.  We don't construct a wild boundary
+        here — that's covered above; we just verify the wiring works
+        when REGIONS has the named region.
+        """
+        # Use a region name we know is in REGIONS.
+        prev = _make_blob(60, 100, radius=30)
+        latest = _make_blob(60, 105, radius=30)
+        frames, flows = NowcastGenerator._generate_sync(
+            {"USCOMP": prev}, {"USCOMP": latest},
+            latest_ts=1000, n_steps=2, interval=600,
+        )
+        assert "USCOMP" in flows
+        # Verify clamping has bounded the flow magnitudes.  USCOMP at
+        # 0.01° → max ≈ 30 px/step.
+        mag = np.sqrt(flows["USCOMP"][..., 0] ** 2 + flows["USCOMP"][..., 1] ** 2)
+        assert mag.max() <= 30.5  # within rounding of the cap
