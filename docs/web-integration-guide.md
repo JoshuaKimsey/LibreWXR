@@ -366,7 +366,7 @@ loadRadarData(function (data) {
 Key points:
 - **Opacity** is set to `0.8` so the base map shows through. Adjust to taste.
 - The `{z}/{x}/{y}` placeholders are filled by Leaflet automatically as the user pans and zooms.
-- Color scheme `7` (Rainbow @ Selex SI) is a good default — it closely resembles a standard weather radar display. See [Color Schemes](#color-schemes) for all options.
+- Color scheme `10` (Viper HD) is a clean high-resolution default with a smooth ramp from cyan through green / yellow / red into a magenta convective band. Scheme `7` (Rainbow @ Selex SI) is a good alternative if you prefer a look closer to a traditional weather radar display. See [Color Schemes](#color-schemes) for all options.
 
 ### 4. Adding Animation Controls
 
