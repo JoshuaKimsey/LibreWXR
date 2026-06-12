@@ -15,7 +15,7 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 ## Features
 
 - **Rain Viewer v2 API compatible** — drop-in replacement, no client changes needed
-- **All 11 color schemes** — Black & White, Rainviewer Original, Universal Blue, TITAN, TWC, Meteored, NEXRAD III, Rainbow, Dark Sky, Datameteo Valerio, Viper HD, plus raw grayscale
+- **All 12 color schemes** — Black & White, Rainviewer Original, Universal Blue, TITAN, TWC, Meteored, NEXRAD III, Rainbow, Dark Sky, Datameteo Valerio, Viper HD, MRMS CREF, plus raw grayscale
 - **Tile sizes** — 256px and 512px
 - **Image formats** — PNG and WebP (with configurable lossy/lossless quality)
 - **Smoothing** — zoom-adaptive Gaussian blur with seamless tile boundaries
@@ -332,6 +332,7 @@ GET /v2/radar/{timestamp}/{size}/{z}/{x}/{y}/{color}/{smooth}_{snow}.{ext}
 | 8 | Dark Sky |
 | 9 | Datameteo Valerio |
 | 10 | Viper HD |
+| 11 | MRMS CREF |
 | 255 | Raw (grayscale) |
 
 #### Satellite Tiles
@@ -677,7 +678,7 @@ Both examples include:
 - **Source selector** — switch between local (`localhost:8080`) and the public instance (`api.librewxr.net`) with auto-detection
 - **Layer modes** — Radar, Satellite, or Radar + Satellite (satellite as background under radar)
 - **Light/dark theme** — toggles both the base map and UI styling
-- **Color scheme selector** — all 10 color schemes
+- **Color scheme selector** — all 12 color schemes
 - **Motion arrows** — off, light, or dark
 - **Scrubber bar** — draggable timeline with past/nowcast visual distinction and tick labels
 - **Background preloading** — pre-renders all frames with a progress indicator for smooth animation

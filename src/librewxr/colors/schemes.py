@@ -19,6 +19,7 @@ SCHEME_NAMES = {
     8: "Dark Sky",
     9: "Datameteo Valerio",
     10: "Viper HD",
+    11: "MRMS CREF",
 }
 
 # Rain LUTs: scheme_id -> (256, 4) uint8 array mapping pixel value -> RGBA

@@ -151,7 +151,7 @@ This is where the actual tile images come from. Your map library will call this 
 | `z` | Zoom level | `0` to `12` (configurable max) |
 | `x` | Tile column | `0` to `2^z - 1` |
 | `y` | Tile row | `0` to `2^z - 1` |
-| `color` | Color scheme ID | `0` to `10`, or `255` (see [Color Schemes](#color-schemes)) |
+| `color` | Color scheme ID | `0` to `11`, or `255` (see [Color Schemes](#color-schemes)) |
 | `smooth_snow` | Smoothing and snow flags, joined with `_` | `{0 or 1}_{0 or 1}` |
 | `ext` | Image format | `png` or `webp` |
 
@@ -953,7 +953,7 @@ To animate through satellite frames, use the same pattern as radar animation (se
 
 ### Color Schemes
 
-LibreWXR supports the 9 original Rain Viewer color schemes, a contributed scheme from the Datameteo Educational team, the high-resolution Viper HD palette by Ben Mitchell, and a raw grayscale mode:
+LibreWXR supports the 9 original Rain Viewer color schemes, a contributed scheme from the Datameteo Educational team, the high-resolution Viper HD palette by Ben Mitchell, the MRMS CREF operational palette used by NOAA/NSSL's MRMS Product Viewer, and a raw grayscale mode:
 
 | ID | Name | Description |
 |----|------|-------------|
@@ -968,6 +968,7 @@ LibreWXR supports the 9 original Rain Viewer color schemes, a contributed scheme
 | 8 | Dark Sky | Muted, minimal style |
 | 9 | Datameteo Valerio | Discrete 5-dBZ stepped scale contributed by Valerio at Datameteo Educational; reads as distinct bins from drizzle through large hail / tornado |
 | 10 | Viper HD | High-resolution palette by Ben Mitchell (WxTools.org); cyan-blue through smooth greens into yellow / orange / red, with a magenta band at 55–60 dBZ and a grayscale tail for extreme reflectivity. Also used by RadarScope, Supercell Wx, and others |
+| 11 | MRMS CREF | Stepped 5-dBZ operational palette used by NOAA/NSSL's MRMS Product Viewer for composite reflectivity. Cyan through blue / green / yellow / orange / red into a magenta band at 70 dBZ, with light-tan and purple swatches for sub-zero / clear-air returns |
 | 255 | Raw | Grayscale proportional to dBZ — useful for custom client-side coloring |
 
 Use the scheme ID as the `{color}` path parameter. If an invalid ID is provided, the server falls back to Rainbow @ Selex SI (7).
