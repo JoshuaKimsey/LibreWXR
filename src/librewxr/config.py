@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8080
     public_url: str = "http://localhost:8080"
+    # Optional direct TLS termination.  Leave both unset (the default) to
+    # serve plain HTTP and let a reverse proxy / tunnel handle TLS.  Set
+    # both to absolute paths to have uvicorn serve HTTPS itself.
+    ssl_certfile: str | None = None
+    ssl_keyfile: str | None = None
     fetch_interval: int = 600  # seconds between fetches (10 min = radar frame cadence)
     max_frames: int = 12
     max_zoom: int = 12

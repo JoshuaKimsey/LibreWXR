@@ -589,6 +589,14 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 def main():
     import uvicorn
+    # Optional direct TLS: only enabled when both cert and key are set.
+    # Otherwise serve plain HTTP (TLS handled by a reverse proxy / tunnel).
+    ssl_kwargs = {}
+    if settings.ssl_certfile and settings.ssl_keyfile:
+        ssl_kwargs = {
+            "ssl_certfile": settings.ssl_certfile,
+            "ssl_keyfile": settings.ssl_keyfile,
+        }
     uvicorn.run(
         "librewxr.main:app",
         host=settings.host,
@@ -596,6 +604,7 @@ def main():
         workers=settings.workers,
         log_level="info",
         access_log=False,
+        **ssl_kwargs,
     )
 
 
