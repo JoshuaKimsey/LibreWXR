@@ -953,7 +953,7 @@ To animate through satellite frames, use the same pattern as radar animation (se
 
 ### Color Schemes
 
-LibreWXR supports the 9 original Rain Viewer color schemes, a contributed scheme from the Datameteo Educational team, the high-resolution Viper HD palette by Ben Mitchell, the MRMS CREF operational palette used by NOAA/NSSL's MRMS Product Viewer, the ABC3340 Max Storm stepped palette from ABC 33/40's Chief Meteorologist James Aydelott via Ben Mitchell's WxTools, and a raw grayscale mode:
+LibreWXR supports the 9 original Rain Viewer color schemes, a contributed scheme from the Datameteo Educational team, the high-resolution Viper HD palette by Ben Mitchell, the MRMS CREF operational palette used by NOAA/NSSL's MRMS Product Viewer, the 33/40 Max Storm stepped palette from ABC 33/40's Chief Meteorologist James Aydelott via Ben Mitchell's WxTools, and a raw grayscale mode:
 
 | ID | Name | Description |
 |----|------|-------------|
@@ -969,7 +969,7 @@ LibreWXR supports the 9 original Rain Viewer color schemes, a contributed scheme
 | 9 | Datameteo Valerio | Discrete 5-dBZ stepped scale contributed by Valerio at Datameteo Educational; reads as distinct bins from drizzle through large hail / tornado |
 | 10 | Viper HD | High-resolution palette by Ben Mitchell (WxTools.org); cyan-blue through smooth greens into yellow / orange / red, with a magenta band at 55–60 dBZ and a grayscale tail for extreme reflectivity. Also used by RadarScope, Supercell Wx, and others |
 | 11 | MRMS CREF | Stepped 5-dBZ operational palette used by NOAA/NSSL's MRMS Product Viewer for composite reflectivity. Cyan through blue / green / yellow / orange / red into a magenta band at 70 dBZ, with light-tan and purple swatches for sub-zero / clear-air returns |
-| 12 | ABC3340 Max Storm | Stepped 5-dBZ palette designed by ABC 33/40 Chief Meteorologist James Aydelott, published via Ben Mitchell's WxTools (WxTools.org). Green ramp for light precip (10–30 dBZ) stepping through yellow / orange / red for moderate-to-heavy, into a pink / magenta convective band at 55+ dBZ. Snow variant reuses the Universal Blue gradient. Also used by RadarScope, Supercell Wx, and others |
+| 12 | 33/40 Max Storm | Stepped 5-dBZ palette designed by ABC 33/40 Chief Meteorologist James Aydelott, published via Ben Mitchell's WxTools (WxTools.org). Green ramp for light precip (10–30 dBZ) stepping through yellow / orange / red for moderate-to-heavy, into a pink / magenta convective band at 55+ dBZ. Snow variant reuses the Universal Blue gradient. Also used by RadarScope, Supercell Wx, and others |
 | 255 | Raw | Grayscale proportional to dBZ — useful for custom client-side coloring |
 
 Use the scheme ID as the `{color}` path parameter. If an invalid ID is provided, the server falls back to Rainbow @ Selex SI (7).
