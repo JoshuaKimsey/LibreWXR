@@ -29,7 +29,7 @@ pytest tests/test_renderer.py     # single file
 pytest -k "test_tile_render"      # by name pattern
 ```
 
-Test markers (defined in `pyproject.toml`): `api`, `ecmwf`, `nowcast`, `sources`, `tiles`, `store`, `hrrr`, `hrrr_alaska`, `icon_eu`, `dmi_dini`, `hrdps`, `arome_antilles`, `arome_guyane`, `arome_indien`, `arome_ncaled`, `arome_polyn`, `wrf_smn`, `alerts`.
+Test markers (defined in `pyproject.toml`): `api`, `ecmwf`, `nowcast`, `sources`, `tiles`, `store`, `hrrr`, `hrrr_alaska`, `icon_eu`, `dmi_dini`, `hrdps`, `arome_antilles`, `arome_guyane`, `arome_indien`, `arome_ncaled`, `arome_polyn`, `wrf_smn`, `jma_msm`, `alerts`.
 
 All tests are auto-async (`asyncio_mode = "auto"` in pyproject.toml). No explicit `@pytest.mark.asyncio` needed on individual async tests (though some older tests still have it).
 
@@ -58,8 +58,11 @@ src/librewxr/
       africa/nwp/arome_indien/            # AROME Indien (RE+YT+KM+MG+SW Indian Ocean)
       caribbean/nwp/arome_antilles/       # AROME Antilles (FR-GP+MQ)
       central_america/el_salvador/radar/marn/
+      east_asia/japan/nwp/jma_msm/          # JMA MSM (Japan + Korean Peninsula + Taiwan + Yellow Sea)
+      east_asia/japan/radar/jma/            # JMA HRPN composite (analysis leg → JPCOMP)
       east_asia/taiwan/radar/cwa/
       europe/radar/opera/
+      europe/italy/radar/dpc/               # DPC Italy national VMI (ITCOMP)
       europe/nwp/{icon_eu,dmi_dini}/
       north_america/
         canada/radar/msc_canada/
@@ -107,8 +110,8 @@ Docker Compose uses profiles: `COMPOSE_PROFILES=single` or `COMPOSE_PROFILES=mul
 - **Entry points:** `python -m librewxr.main` (renderer/server); `python -m librewxr.data_pipeline` (multi-mode fetcher)
 - **Auto-discovery:** `sources/__init__.py` walks the `sources/` tree and registers radar/NWP/satellite providers automatically. Adding a source requires no changes to `fetcher.py`, `routes.py`, or `main.py`.
 - **Shared state wiring:** Lifespan in `main.py` creates all singletons and assigns them to `routes` module-level vars — dependencies are NOT injected via FastAPI's DI. Key vars: `frame_store`, `tile_cache`, `nwp_grids` (dict by slug), `ecmwf_grid`, `nwp_chain`, `satellite_grids`, `nowcast_store`, `alerts_store`, `alerts_fetcher`, `tile_request_tracker`.
-- **NWP chain:** Priority-ordered sources: HRRR (10) → HRRR-Alaska (11) → HRDPS (20) → AROME Antilles (25) → DMI DINI (30) → ICON-EU (35) → WRF-SMN (40) → IFS (1000, global catch-all). `NWPChain` dispatches narrowest-domain-first.
-- **Radar regions:** US (USCOMP, AKCOMP, HICOMP, PRCOMP, GUCOMP), Canada (CACOMP), Central America (SVCOMP), Europe (OPERA + ITCOMP — Italy via DPC, finer `pixel_size` so it precedes OPERA in the multi-region compositor), Taiwan (TWCOMP), SE Asia (MYPENINSULAR, MYEAST). Region groups: CONUS, US, CANADA, CENTRAL_AMERICA, EUROPE, SOUTHEAST_ASIA, TAIWAN, ALL.
+- **NWP chain:** Priority-ordered sources: HRRR (10) → HRRR-Alaska (11) → HRDPS (20) → JMA MSM (20) → AROME Antilles (25) → AROME Guyane (26) → AROME Indien (27) → AROME Ncaled (28) → AROME Polyn (29) → DMI DINI (30) → ICON-EU (35) → WRF-SMN (40) → IFS (1000, global catch-all). `NWPChain` dispatches narrowest-domain-first.
+- **Radar regions:** US (USCOMP, AKCOMP, HICOMP, PRCOMP, GUCOMP), Canada (CACOMP), Central America (SVCOMP), Europe (OPERA + ITCOMP — Italy via DPC, finer `pixel_size` so it precedes OPERA in the multi-region compositor), Japan (JPCOMP — JMA HRPN analysis leg), Taiwan (TWCOMP), SE Asia (MYPENINSULAR, MYEAST). Region groups: CONUS, US, CANADA, CENTRAL_AMERICA, EUROPE, JAPAN, SOUTHEAST_ASIA, TAIWAN, ALL.
 - **Data encoding:** Radar frames are `dict[str, np.ndarray]` keyed by region name, stored as uint8 dBZ values.
 - **Tile rendering:** Compute / present split — `compute_tile_geometry` does the expensive work (region sampling, multi-region compositing, NWP fill/blend, noise-floor masking, optional snow mask) and returns a `TileGeometry` dataclass. `present_tile` does the cheap per-request tail (LUT colorize, Gaussian blur, optional motion-arrow overlay, encode). The `TileCache` stores `TileGeometry` records (not encoded bytes) so one cached entry serves every visual variant.
 - **Satellite:** NOAA GMGSI hourly global mosaic (LW + VIS), composited at render time as VIS-over-LW with a natural day/night terminator. Latitude grid is Mercator-spaced.
@@ -127,6 +130,7 @@ All config via `LIBREWXR_*` env vars or `.env` file. Settings defined in `src/li
 - `LIBREWXR_TILE_CACHE_MB`: tile cache size (0 = mode default: 200 single, 128 multi)
 - `LIBREWXR_WARMER_THREADS`: render thread pool size (0 = mode default: auto single, 4 multi)
 - `LIBREWXR_RENDER_ONLY`: `true` — skip fetcher init, memmap pipeline snapshot (multi mode)
+- `LIBREWXR_SSL_CERTFILE` / `LIBREWXR_SSL_KEYFILE`: optional direct TLS termination (paths to cert + key; leave both unset to serve plain HTTP behind a reverse proxy)
 
 **Radar:**
 - `LIBREWXR_ENABLED_REGIONS`: `ALL`, `CONUS`, `US`, `CANADA`, `EUROPE`, or comma-separated region names
@@ -175,4 +179,4 @@ The discovery walker picks up the new package automatically — no per-source pl
 - **File headers:** `# SPDX-License-Identifier: AGPL-3.0-or-later` + `# Copyright (C) 2026 Joshua Kimsey` on every source file
 - **Commit style:** imperative mood, concise (e.g., "Add precipitation motion arrows")
 - **Docker:** `docker compose up --build` with `COMPOSE_PROFILES=single` (default) or `COMPOSE_PROFILES=multi`. Exposes port 8080 (configurable via `LIBREWXR_PORT`). Use `docker compose run --rm clear-cache` to wipe caches.
-- **Docs:** `docs/adding-a-source.md`, `docs/configuration-reference.md`, `docs/satellite-implementation-plan.md`, `docs/coverage.md`, `docs/rainviewer-migration-guide.md`, `docs/web-integration-guide.md`
+- **Docs:** `docs/adding-a-source.md`, `docs/configuration-reference.md`, `docs/satellite-implementation-plan.md`, `docs/coverage.md`, `docs/rainviewer-migration-guide.md`, `docs/web-integration-guide.md`, `docs/source-survey.md`
