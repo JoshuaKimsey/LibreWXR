@@ -690,4 +690,10 @@ Open either file in a browser — it auto-detects whether to use your local serv
 
 ## License
 
-LibreWXR is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
+LibreWXR is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-or-later). It is free to use, self-host, modify, and redistribute under those terms, and it always will be. Note that the AGPL's network-use clause (section 13) means that if you run a *modified* version of LibreWXR as a network service, you must make your modified source available to that service's users.
+
+### Commercial licensing
+
+The AGPL is the right fit for the open project and the self-hosting community. But its copyleft and network-use obligations are incompatible with some commercial uses — for example, building LibreWXR into a closed-source product, or running a hosted service on top of it whose modifications you can't release.
+
+If that describes your use case, a separate commercial license is available that lifts the AGPL obligations. This changes nothing about the open project: LibreWXR stays AGPL-licensed and free for everyone else. Reach out to <jkimsey@proton.me> to discuss terms.
