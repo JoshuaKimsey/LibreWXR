@@ -87,10 +87,18 @@ class FrameStore:
             for name, data in list(frame.regions.items()):
                 frame.regions[name] = self._to_memmap(frame.timestamp, name, data)
 
-            # Merge into existing frame if same timestamp
+            # Merge into existing frame if same timestamp.
+            # Copy-on-write: build a NEW regions dict and swap the reference instead of
+            # mutating in place. The tile warmer/renderer captures `frame.regions` (a live
+            # dict ref) and renders many tiles over several seconds; an in-place `.update()`
+            # mid-warm makes tiles rendered before the swap read the old arrays and tiles
+            # after read the new ones -> a visible seam ("tearing") on any frame whose data
+            # updates mid-warm. Swapping the reference leaves in-flight renders on a
+            # consistent snapshot (region arrays are never mutated in place, so sharing the
+            # old arrays with an in-flight reader is safe).
             for existing in self._frames:
                 if existing.timestamp == frame.timestamp:
-                    existing.regions.update(frame.regions)
+                    existing.regions = {**existing.regions, **frame.regions}
                     return None, True
 
             evicted_ts = None
