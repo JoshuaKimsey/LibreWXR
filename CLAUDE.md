@@ -42,7 +42,10 @@ src/librewxr/
       arome.py                            # AROMEOverseasGrid (all 5 AROME-OM variants)
     __init__.py                           # Discovery walker, registry, helpers
     world/ifs/                            # ECMWF IFS (global, NWP)
+    satellite/_geo_base.py                 # Shared base for geostationary sources
     satellite/gmgsi/                      # NOAA GMGSI (global, LW + VIS composite)
+    satellite/goes/                       # GOES-18/19 ABI (Americas, 2km, 5-min)
+    satellite/himawari/                   # Himawari-9 AHI (Asia-Pacific, 2km, 10-min)
     regional/
       africa/nwp/arome_indien/            # AROME Indien (RE+YT+KM+MG+SW Indian Ocean)
       caribbean/nwp/arome_antilles/       # AROME Antilles (FR-GP+MQ)
@@ -75,7 +78,8 @@ src/librewxr/
     retry.py         # Backoff helper
   tiles/
     renderer.py      # On-demand tile rendering
-    satellite_renderer.py  # GMGSI VIS-over-LW composite tiles
+    satellite_renderer.py  # VIS-over-IR composite tiles (works with any satellite source)
+    geostationary.py # Geostationary fixed-grid ↔ lat/lon projection (GOES/Himawari)
     cache.py         # Byte-capped LRU tile cache
     coordinates.py   # Tile/region coordinate transforms
     warmer.py        # Background tile pre-rendering
@@ -112,7 +116,7 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"`. Markers are defined in 
 - **Tile rendering:** Compute / present split — `compute_tile_geometry` runs the expensive part (region sampling, multi-region compositing, NWP fill / blend, noise-floor masking, optional snow mask) and returns a `TileGeometry` dataclass (uint8 values + optional snow_mask + blur metadata). `present_tile` runs the cheap per-request tail (LUT colorize, post-colorize Gaussian blur + crop, optional motion-arrow overlay, encode). The byte-capped LRU `TileCache` stores `TileGeometry` records keyed on `(ts, z, x, y, tile_size, smooth, snow)` — color scheme, output format, and arrow style are deliberately *not* in the key, so one cached entry serves every visual variant of a given viewport. The background tile warmer pre-computes geometry only. Gaussian smoothing radius auto-scales from the local Jacobian (`_compute_blur_radius` in `tiles/renderer.py`) so coarse-grid sources (OPERA LAEA, MRMS, MMD) get more blur at high zoom without over-blurring fine sources at low zoom. Radar sampling under `smooth=1` is bilinear in both padded and unpadded paths
 - **ECMWF IFS:** 9km global precipitation from Open-Meteo S3; optical flow interpolation for 10-min frames; reference_time skip avoids redundant downloads
 - **Nowcasting:** Radar extrapolation + IFS blending with spatial feathering at radar boundaries
-- **Satellite:** NOAA GMGSI hourly global mosaic (LW + VIS), composited at render time as VIS-over-LW with a natural day/night terminator. Latitude grid is Mercator-spaced (`y=atanh(sin(lat))`) — `sample()` inverts Mercator on the queried lat. Disk-edge feathering smooths the ±72.7° cutoff. `LIBREWXR_SATELLITE_ENABLED=false` returns 503 + empty `satellite.infrared` array
+- **Satellite:** Three source families, auto-selected by station longitude: GOES-18/19 ABI (Americas, 2 km, 5-min via `noaa-goes18`/`noaa-goes19` S3), Himawari-9 AHI (Asia-Pacific, 2 km, 10-min via `noaa-himawari9` S3), GMGSI (global fallback, 8 km, hourly via `noaa-gmgsi-pds` S3). All use the same VIS-over-IR composite renderer at `/v2/satellite/...`. GOES/Himawari use geostationary fixed-grid projection (`tiles/geostationary.py`); GMGSI is pre-composited equirectangular (Mercator-spaced rows). Auto-selection in each provider's `satellite_provider()` checks `LIBREWXR_BBOX` center or `LIBREWXR_STATION_LON`; GMGSI stays as global fallback. `LIBREWXR_SATELLITE_ENABLED=false` returns 503 + empty `satellite.infrared` array
 - **Memory management:** Radar frames, ECMWF grids, and nowcast data use numpy memmap (temp files); radar fetcher skips timestamps already in store
 - **MRMS:** Region-aware — separate `MRMSSource` per product path (CONUS, ALASKA, HAWAII, CARIB, GUAM); directory listing with bisect for archive lookups; gzip retry + eccodes stderr suppression
 - **MARN/SNET (El Salvador):** Single S-band radar at San Andrés, 120 km product (`esar82/Images/`) from anonymous GCS bucket `radar-images-sv`; 5-min cadence; filename embeds local time (UTC-6, no DST); decoder maps HSV-style continuous hue gradient (green→cyan→blue→magenta) to dBZ; bucket archive depth ~24 h; MARN license requires citation

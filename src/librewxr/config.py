@@ -99,10 +99,29 @@ class Settings(BaseSettings):
     # degrades the composite to LW-only without breaking the endpoint.
     gmgsi_lw_enabled: bool = True
     gmgsi_vis_enabled: bool = True
-    # Number of hourly satellite frames retained per channel.  GMGSI
-    # publishes one frame per hour, so 12 ≈ 12 hours of animation.
-    # At ~15 MB per channel per frame, 12 × 2 channels ≈ 360 MB resident.
-    satellite_max_frames: int = 12
+    # Number of satellite frames retained per channel.  GMGSI publishes
+    # one frame per hour (12 = 12 hours); GOES publishes every 5 min
+    # (36 = 3 hours); Himawari every 10 min (36 = 6 hours).  GOES/Himawari
+    # frames are much smaller than GMGSI when a BBOX crop is active.
+    satellite_max_frames: int = 36
+    # GOES-18/19 ABI — high-resolution (2 km) satellite imagery for the
+    # Americas at 5-min cadence.  Auto-selects GOES-18 (West) or GOES-19
+    # (East) based on the BBOX center or station_lon.  When the station
+    # is outside the Americas, GOES contributes nothing and GMGSI or
+    # Himawari takes over.
+    goes_enabled: bool = True
+    goes_ir_enabled: bool = True
+    goes_vis_enabled: bool = True
+    # Himawari-9 AHI — high-resolution (2 km) satellite imagery for
+    # Asia-Pacific at 10-min cadence.  Auto-selected when the station
+    # is between 60°E and 180°E.
+    himawari_enabled: bool = True
+    himawari_ir_enabled: bool = True
+    himawari_vis_enabled: bool = True
+    # Station longitude hint for satellite source auto-selection when no
+    # BBOX is configured.  When None, auto-selection falls through to
+    # GMGSI for all regions.
+    station_lon: float | None = None
     # US-side radar data source (USCOMP / AKCOMP / HICOMP / PRCOMP / GUCOMP).
     # Three modes:
     #   mrms_fallback  - (default) MRMS primary + IEM fallback when MRMS fails.

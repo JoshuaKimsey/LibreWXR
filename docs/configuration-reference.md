@@ -1036,9 +1036,18 @@ The model side is taken from the active NWP chain — **HRRR over CONUS, HRDPS o
 
 ---
 
-## Satellite (GMGSI)
+## Satellite Imagery
 
-Real satellite imagery backed by NOAA's GMGSI hourly global mosaic — GOES-East + GOES-West + Meteosat-9 + Meteosat-10 + Himawari-9, composited and re-projected by NESDIS into a single equirectangular file per hour per channel. LibreWXR ingests two channels (longwave IR + visible) and renders the `/v2/satellite/...` tile endpoint as a VIS-over-LW composite with a natural day/night terminator crossfade. Coverage extends to ±72.7° latitude.
+LibreWXR supports three satellite source families, auto-selected based on the operator's location:
+
+| Source | Coverage | Resolution | Cadence | S3 Bucket |
+|--------|----------|------------|---------|-----------|
+| **GOES-18** (West) | Americas west of 100°W | 2 km | 5 min | `noaa-goes18` |
+| **GOES-19** (East) | Americas east of 100°W | 2 km | 5 min | `noaa-goes19` |
+| **Himawari-9** | Asia-Pacific (60°E–180°E) | 2 km | 10 min | `noaa-himawari9` |
+| **GMGSI** (fallback) | Global ±72.7° latitude | 8 km | 60 min | `noaa-gmgsi-pds` |
+
+Auto-selection uses `LIBREWXR_BBOX` center longitude (if set) or `LIBREWXR_STATION_LON`. When neither is configured, GMGSI serves as the global default. All sources feed the same `/v2/satellite/...` tile endpoint via a VIS-over-IR composite with a natural day/night terminator crossfade.
 
 When the satellite layer is disabled, the endpoint returns 503 and the catalog's `satellite.infrared` array is empty (mirrors the `LIBREWXR_RADAR_ENABLED=false` behaviour).
 
@@ -1051,32 +1060,107 @@ Master switch for the satellite layer.
 | **Default** | `true` |
 | **Type** | boolean |
 
-### `LIBREWXR_GMGSI_LW_ENABLED`
-
-Per-channel toggle for GMGSI longwave IR (~12 µm). LW is the 24/7 base of the composite and works on the night side too. Disabling it alongside VIS effectively disables the layer.
-
-| | |
-|---|---|
-| **Default** | `true` |
-| **Type** | boolean |
-
-### `LIBREWXR_GMGSI_VIS_ENABLED`
-
-Per-channel toggle for GMGSI visible (~0.6 µm). VIS adds the daytime reflected-sunlight overlay; on the night side it contributes nothing. Disabling VIS while LW stays on degrades the composite to LW-only without breaking the endpoint.
-
-| | |
-|---|---|
-| **Default** | `true` |
-| **Type** | boolean |
-
 ### `LIBREWXR_SATELLITE_MAX_FRAMES`
 
-Number of hourly satellite frames retained per channel. GMGSI publishes one frame per hour, so 12 ≈ 12 hours of animation. Each frame is ~15 MB, so 12 frames × 2 channels ≈ 360 MB resident.
+Number of satellite frames retained per channel. Frame cadence depends on the active source: GOES every 5 min (36 frames = 3 hours), Himawari every 10 min (36 = 6 hours), GMGSI every 60 min (36 = 36 hours). GOES/Himawari frames are much smaller than GMGSI when a BBOX crop is active.
 
 | | |
 |---|---|
-| **Default** | `12` |
+| **Default** | `36` |
 | **Type** | integer |
+
+### `LIBREWXR_STATION_LON`
+
+Station longitude hint for satellite source auto-selection when no `LIBREWXR_BBOX` is configured. Set to the longitude of your weather station to enable GOES or Himawari auto-selection without a full BBOX. Leave unset to fall through to GMGSI for all regions.
+
+| | |
+|---|---|
+| **Default** | *(unset)* |
+| **Type** | float (optional) |
+
+### GOES-18/19 (Americas)
+
+GOES ABI (Advanced Baseline Imager) serves CONUS-sector imagery at 2 km IR / 2 km VIS, 5-minute cadence. Auto-selects GOES-18 (137°W) for stations west of 100°W, GOES-19 (75.2°W) for stations east of 100°W. Coverage: longitude -170° to -30° (Americas + Caribbean + Hawaii).
+
+#### `LIBREWXR_GOES_ENABLED`
+
+Master toggle for GOES satellite. When `false`, GOES contributes nothing regardless of station location; GMGSI or Himawari takes over.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+#### `LIBREWXR_GOES_IR_ENABLED`
+
+Per-channel toggle for GOES Band 13 (10.3 µm longwave IR). The 24/7 base of the composite.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+#### `LIBREWXR_GOES_VIS_ENABLED`
+
+Per-channel toggle for GOES Band 2 (0.64 µm visible). Adds the daytime reflected-sunlight overlay. Disabling VIS while IR stays on degrades the composite to IR-only.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+### Himawari-9 (Asia-Pacific)
+
+Himawari-9 AHI serves full-disk imagery at 2 km resolution, 10-minute cadence. Auto-selected for stations between 60°E and 180°E (Japan, Korea, SE Asia, Oceania, eastern Africa coast).
+
+#### `LIBREWXR_HIMAWARI_ENABLED`
+
+Master toggle for Himawari-9. When `false`, Himawari contributes nothing; GMGSI takes over for Asia-Pacific stations.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+#### `LIBREWXR_HIMAWARI_IR_ENABLED`
+
+Per-channel toggle for Himawari Band 13 (10.4 µm longwave IR).
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+#### `LIBREWXR_HIMAWARI_VIS_ENABLED`
+
+Per-channel toggle for Himawari Band 3 (0.64 µm visible).
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+### GMGSI (Global Fallback)
+
+NOAA's GMGSI hourly global mosaic — composited from GOES-East + GOES-West + Meteosat-9 + Meteosat-10 + Himawari-9. Coverage ±72.7° latitude, 8 km resolution. Serves as the fallback when no regional source (GOES/Himawari) covers the station.
+
+#### `LIBREWXR_GMGSI_LW_ENABLED`
+
+Per-channel toggle for GMGSI longwave IR (~12 µm).
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+#### `LIBREWXR_GMGSI_VIS_ENABLED`
+
+Per-channel toggle for GMGSI visible (~0.6 µm).
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
 
 ---
 
