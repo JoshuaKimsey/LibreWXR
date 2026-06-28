@@ -26,7 +26,14 @@ from PIL import Image
 from librewxr.data.regions import RegionDef
 from librewxr.data.retry import retry_get
 
+from ..regions import REGIONS as _SOURCE_REGIONS
+
 logger = logging.getLogger(__name__)
+
+# Original (uncropped) region definitions — used to compute crop
+# offsets when LIBREWXR_BBOX shrinks the active region bounds but
+# the IEM PNG still covers the full original grid.
+_ORIGINAL_REGIONS: dict[str, RegionDef] = {r.name: r for r in _SOURCE_REGIONS}
 
 
 class IEMSource:
@@ -101,6 +108,10 @@ def _parse_n0q_png(data: bytes, region: RegionDef) -> np.ndarray | None:
 
     The PNGs are palette-indexed. We extract the raw index values,
     not the RGB colors.
+
+    When LIBREWXR_BBOX is active the region's bounds are smaller than
+    the IEM PNG grid.  The PNG still covers the original full extent,
+    so we slice the matching sub-rectangle.
     """
     try:
         img = Image.open(io.BytesIO(data))
@@ -111,10 +122,23 @@ def _parse_n0q_png(data: bytes, region: RegionDef) -> np.ndarray | None:
 
         expected = (region.height, region.width)
         if arr.shape != expected:
-            logger.warning(
-                "Unexpected %s dimensions: %s (expected %s)",
-                region.name, arr.shape, expected,
-            )
+            original = _ORIGINAL_REGIONS.get(region.name)
+            if original and arr.shape == (original.height, original.width):
+                row_start = int(round(
+                    (original.north - region.north) / original._ps_y
+                ))
+                col_start = int(round(
+                    (region.west - original.west) / original.pixel_size
+                ))
+                arr = arr[
+                    row_start : row_start + region.height,
+                    col_start : col_start + region.width,
+                ]
+            else:
+                logger.warning(
+                    "Unexpected %s dimensions: %s (expected %s)",
+                    region.name, arr.shape, expected,
+                )
         return arr
     except Exception:
         logger.exception("Failed to parse N0Q PNG for %s", region.name)
