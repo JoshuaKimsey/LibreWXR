@@ -539,15 +539,40 @@ class WMOAlertsFetcher:
         nws_alerts = await nws_task
         all_alerts.extend(nws_alerts)
 
-        # 5. Replace store
+        # 5. BBOX geographic filter — when LIBREWXR_BBOX is configured,
+        # discard alerts whose polygon does not intersect the bounding
+        # box.  Alerts without polygon geometry are also dropped since
+        # they cannot be placed on the map and their relevance to the
+        # configured region cannot be determined.
+        bbox = settings.get_bbox()
+        pre_filter = len(all_alerts)
+        if bbox is not None:
+            from shapely.geometry import box
+            south, west, north, east = bbox
+            bbox_poly = box(west, south, east, north)
+            all_alerts = [
+                a for a in all_alerts
+                if a.polygon is not None and a.polygon.intersects(bbox_poly)
+            ]
+
+        # 6. Replace store
         self._store.replace_all(all_alerts)
-        logger.info(
-            "Alerts updated: %d total (%d WMO + %d NWS) from %d sources",
-            len(all_alerts),
-            len(all_alerts) - len(nws_alerts),
-            len(nws_alerts),
-            len(source_ids),
-        )
+        if bbox is not None:
+            logger.info(
+                "Alerts updated: %d stored (%d before BBOX filter, "
+                "%d WMO + %d NWS) from %d sources",
+                len(all_alerts), pre_filter,
+                pre_filter - len(nws_alerts), len(nws_alerts),
+                len(source_ids),
+            )
+        else:
+            logger.info(
+                "Alerts updated: %d total (%d WMO + %d NWS) from %d sources",
+                len(all_alerts),
+                len(all_alerts) - len(nws_alerts),
+                len(nws_alerts),
+                len(source_ids),
+            )
 
     async def _fetch_loop(self) -> None:
         """Background task: wait for meteoalarm, then fetch→sleep→repeat."""

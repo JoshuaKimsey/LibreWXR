@@ -268,15 +268,14 @@ async def weather_maps() -> WeatherMapsResponse:
         ]
 
     infrared = []
-    # Catalog timestamps come from GMGSI LW since LW is the always-on
-    # 24/7 baseline (VIS only carries the daytime half of the day).
-    # When the satellite layer is disabled or unloaded the array is
-    # empty and the tile endpoint returns 503.
-    gmgsi_lw = satellite_grids.get("gmgsi_lw_grid") if satellite_grids else None
-    if gmgsi_lw is not None and gmgsi_lw.timestamps:
+    # Catalog timestamps come from the active IR source (GOES, Himawari,
+    # or GMGSI LW) — whichever the auto-selection loaded.  The IR channel
+    # is the 24/7 baseline; VIS only carries the daytime half.
+    ir_source, _ = _find_satellite_sources()
+    if ir_source is not None and ir_source.timestamps:
         infrared = [
             RadarTimestamp(time=ts, path=f"/v2/satellite/{ts}")
-            for ts in gmgsi_lw.timestamps
+            for ts in ir_source.timestamps
         ]
 
     color_schemes = [
@@ -460,6 +459,30 @@ async def coverage_tile(
     )
 
 
+def _find_satellite_sources() -> tuple[object | None, object | None]:
+    """Find the best-loaded IR and VIS satellite sources.
+
+    Iterates ``satellite_grids`` by slug, picks the highest-priority
+    (lowest priority number) loaded IR and VIS sources.  Slugs ending
+    in ``_ir_grid`` or ``_lw_grid`` are IR; ``_vis_grid`` are VIS.
+    This dispatches to GOES, Himawari, or GMGSI transparently.
+    """
+    if not satellite_grids:
+        return None, None
+    ir_source = None
+    vis_source = None
+    for slug, grid in satellite_grids.items():
+        if grid is None or not bool(grid.timestamps):
+            continue
+        if slug.endswith("_ir_grid") or slug.endswith("_lw_grid"):
+            if ir_source is None:
+                ir_source = grid
+        elif slug.endswith("_vis_grid"):
+            if vis_source is None:
+                vis_source = grid
+    return ir_source, vis_source
+
+
 @router.get("/v2/satellite/{timestamp}/{size}/{z}/{x}/{y}/0/0_0.{ext}")
 async def satellite_tile(
     timestamp: int,
@@ -469,13 +492,14 @@ async def satellite_tile(
     y: int = Path(ge=0),
     ext: str = Path(pattern=r"^(png|webp)$"),
 ) -> Response:
-    """Real satellite imagery tile, backed by NOAA GMGSI.
+    """Satellite imagery tile backed by GOES, Himawari, or GMGSI.
 
-    Backing renderer is picked per request: the VIS-over-LW composite
-    when both channels have ingested frames (the production path during
-    Phase 2+), or the stand-alone LW renderer when only longwave IR is
-    loaded.  When the satellite layer is disabled or neither channel has
-    any frames yet, returns 503.
+    The backing renderer is picked per request: the VIS-over-IR composite
+    when both channels have ingested frames, or the stand-alone IR
+    renderer when only the IR channel is loaded.  Source selection
+    (GOES vs Himawari vs GMGSI) is handled at startup by the satellite
+    provider auto-selection — by the time we get here, ``satellite_grids``
+    already has the right sources registered by slug.
     """
     if z > settings.max_zoom:
         raise HTTPException(status_code=400, detail=f"Zoom {z} exceeds max {settings.max_zoom}")
@@ -486,22 +510,17 @@ async def satellite_tile(
 
     tile_size = 512 if size >= 512 else 256
 
-    # Backing selection: composite when both channels loaded, LW-only
-    # otherwise, 503 if nothing's ready.
-    gmgsi_lw = satellite_grids.get("gmgsi_lw_grid") if satellite_grids else None
-    gmgsi_vis = satellite_grids.get("gmgsi_vis_grid") if satellite_grids else None
-    has_lw = gmgsi_lw is not None and bool(gmgsi_lw.timestamps)
-    has_vis = gmgsi_vis is not None and bool(gmgsi_vis.timestamps)
+    ir_source, vis_source = _find_satellite_sources()
+    has_ir = ir_source is not None
+    has_vis = vis_source is not None
 
-    if has_lw and has_vis:
-        backing = "gmgsi_composite"
-    elif has_lw:
-        backing = "gmgsi_lw"
+    if has_ir and has_vis:
+        backing = "composite"
+    elif has_ir:
+        backing = "ir_only"
     else:
         raise HTTPException(status_code=503, detail="Satellite data not available")
 
-    # Distinct cache keys per backing so a runtime swap (e.g. VIS ingest
-    # catching up after restart) doesn't serve stale composites.
     cache_key = ("sat", backing, timestamp, z, x, y, tile_size, ext)
     cached = tile_cache.get(cache_key)
     if cached is not None:
@@ -511,11 +530,11 @@ async def satellite_tile(
             headers={"Cache-Control": "public, max-age=300"},
         )
 
-    if backing == "gmgsi_composite":
+    if backing == "composite":
         tile_bytes = await asyncio.to_thread(
             render_gmgsi_composite_tile,
-            lw_source=gmgsi_lw,
-            vis_source=gmgsi_vis,
+            lw_source=ir_source,
+            vis_source=vis_source,
             z=z, x=x, y=y,
             tile_size=tile_size,
             timestamp=timestamp,
@@ -524,17 +543,16 @@ async def satellite_tile(
     else:
         tile_bytes = await asyncio.to_thread(
             render_gmgsi_tile,
-            source=gmgsi_lw,
+            source=ir_source,
             z=z, x=x, y=y,
             tile_size=tile_size,
             timestamp=timestamp,
             fmt=ext,
         )
-    sat_timestamps = gmgsi_lw.timestamps
+    sat_timestamps = ir_source.timestamps
 
     tile_cache.put(cache_key, tile_bytes)
 
-    # Older-than-latest frames are immutable; give them a long max-age.
     latest_sat_ts = max(sat_timestamps) if sat_timestamps else None
     max_age = 7200 if (latest_sat_ts is not None and timestamp < latest_sat_ts) else 300
 
