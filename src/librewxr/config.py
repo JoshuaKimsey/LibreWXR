@@ -353,6 +353,15 @@ class Settings(BaseSettings):
     nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
     nowcast_blend_mode: str = "blended"  # "radar", "blended", or "model"
     cache_dir: str = ""  # Persistent cache directory for fetched grids; empty = in-memory only
+    # Geographic bounding box crop: "south,west,north,east" in degrees.
+    # When set, all latlon radar regions are clipped to this box at
+    # startup — regions outside the box are dropped entirely, regions
+    # overlapping are trimmed to the intersection.  Reduces per-frame
+    # memory from ~63 MB (full CONUS) to <1 MB for a metro-area box.
+    # The full GRIB2 is still downloaded (NOAA serves full CONUS only),
+    # but the decoded array is cropped immediately after resampling.
+    # Example: "32.0,-120.5,35.5,-114.5" (SoCal).
+    bbox: str = ""
 
     # Multi-worker tile-server split.  When render_only is True, this
     # process skips fetcher / NWP grid / satellite / nowcast initialisation
@@ -389,6 +398,27 @@ class Settings(BaseSettings):
     # bring fetch-cycle wall time closer to the slowest single source.
     nwp_fetch_concurrency: int = 4
     cors_origins: list[str] = ["*"]
+
+    @field_validator("bbox", mode="before")
+    @classmethod
+    def _validate_bbox(cls, v):
+        """Validate LIBREWXR_BBOX format: 'south,west,north,east'."""
+        if not v:
+            return ""
+        parts = [x.strip() for x in str(v).split(",")]
+        if len(parts) != 4:
+            raise ValueError(
+                f"LIBREWXR_BBOX must be 'south,west,north,east' (got {len(parts)} parts)"
+            )
+        try:
+            south, west, north, east = (float(p) for p in parts)
+        except ValueError:
+            raise ValueError("LIBREWXR_BBOX values must be numeric")
+        if south >= north:
+            raise ValueError(f"LIBREWXR_BBOX south ({south}) must be < north ({north})")
+        if west >= east:
+            raise ValueError(f"LIBREWXR_BBOX west ({west}) must be < east ({east})")
+        return v
 
     @field_validator("mode", mode="before")
     @classmethod
@@ -436,6 +466,13 @@ class Settings(BaseSettings):
             if self.nowcast_enabled else 0
         )
         return past_hours + future_hours + 2
+
+    def get_bbox(self) -> tuple[float, float, float, float] | None:
+        """Return parsed (south, west, north, east) or None if unset."""
+        if not self.bbox:
+            return None
+        parts = [float(x.strip()) for x in self.bbox.split(",")]
+        return (parts[0], parts[1], parts[2], parts[3])
 
     def get_enabled_regions(self) -> list[str]:
         """Resolve the region spec into individual region names."""

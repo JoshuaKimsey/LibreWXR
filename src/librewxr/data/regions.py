@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +136,88 @@ def _merge_discovered_regions() -> None:
 
 
 _merge_discovered_regions()
+
+
+def _apply_bbox_crop() -> None:
+    """Crop all latlon regions to LIBREWXR_BBOX if configured.
+
+    Regions entirely outside the box are removed from REGIONS and
+    REGION_GROUPS.  Regions that overlap are replaced with a new
+    RegionDef whose bounds are the intersection.  Non-latlon (projected)
+    regions are left untouched.
+
+    Called once at import time after _merge_discovered_regions().
+    """
+    try:
+        from librewxr.config import settings
+    except ImportError:
+        return
+
+    bbox = settings.get_bbox()
+    if bbox is None:
+        return
+
+    south, west, north, east = bbox
+    logger.info(
+        "BBOX crop enabled: south=%.2f west=%.2f north=%.2f east=%.2f",
+        south, west, north, east,
+    )
+
+    to_remove: list[str] = []
+    to_replace: dict[str, RegionDef] = {}
+
+    for name, region in REGIONS.items():
+        if region.proj != "latlon":
+            continue
+
+        # No overlap → drop this region entirely
+        if (region.east <= west or region.west >= east
+                or region.north <= south or region.south >= north):
+            to_remove.append(name)
+            continue
+
+        # Compute intersection
+        new_west = max(region.west, west)
+        new_east = min(region.east, east)
+        new_south = max(region.south, south)
+        new_north = min(region.north, north)
+
+        if (new_west == region.west and new_east == region.east
+                and new_south == region.south and new_north == region.north):
+            continue  # fully contained — no crop needed
+
+        cropped = replace(
+            region,
+            west=new_west, east=new_east,
+            south=new_south, north=new_north,
+        )
+        to_replace[name] = cropped
+
+    for name in to_remove:
+        del REGIONS[name]
+        logger.info("BBOX crop: removed %s (no overlap)", name)
+
+    for name, cropped in to_replace.items():
+        old = REGIONS[name]
+        REGIONS[name] = cropped
+        logger.info(
+            "BBOX crop: %s [%.1f,%.1f,%.1f,%.1f] → [%.1f,%.1f,%.1f,%.1f] (%d×%d px)",
+            name,
+            old.south, old.west, old.north, old.east,
+            cropped.south, cropped.west, cropped.north, cropped.east,
+            cropped.width, cropped.height,
+        )
+
+    # Clean up REGION_GROUPS: remove references to dropped regions
+    for group_name in list(REGION_GROUPS):
+        REGION_GROUPS[group_name] = [
+            m for m in REGION_GROUPS[group_name] if m in REGIONS
+        ]
+        if not REGION_GROUPS[group_name]:
+            del REGION_GROUPS[group_name]
+
+
+_apply_bbox_crop()
 
 
 def resolve_regions(spec: str) -> list[str]:
