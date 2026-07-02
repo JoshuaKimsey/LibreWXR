@@ -103,6 +103,15 @@ class Settings(BaseSettings):
     # publishes one frame per hour, so 12 ≈ 12 hours of animation.
     # At ~15 MB per channel per frame, 12 × 2 channels ≈ 360 MB resident.
     satellite_max_frames: int = 12
+    # Deadline for one satellite fetch pass (list + download + decode of
+    # any missing hours in the retention window).  The per-channel fetch
+    # runs as a detached background task that is *skipped* — not retried —
+    # while the previous one is still running, so without a deadline a
+    # single hung S3 connection freezes the channel until restart while
+    # radar keeps updating.  A full 12-frame cold fill takes well under a
+    # minute on a slow link; 10 minutes is generous for steady state
+    # (one ~7.5 MB file per hour).
+    satellite_fetch_timeout: float = 600.0
     # US-side radar data source (USCOMP / AKCOMP / HICOMP / PRCOMP / GUCOMP).
     # Three modes:
     #   mrms_fallback  - (default) MRMS primary + IEM fallback when MRMS fails.
