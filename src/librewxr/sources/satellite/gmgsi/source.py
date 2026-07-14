@@ -32,6 +32,8 @@ import fsspec
 import numpy as np
 import xarray as xr
 
+from librewxr.sources._helpers import HDF5_LOCK
+
 logger = logging.getLogger(__name__)
 
 # Grid constants.  Verified against a live LW file 2026-05-23 and
@@ -290,33 +292,34 @@ class GMGSISource:
         We mask pixels where ``dqf != 0`` (per CF convention 0=good)
         to 0, clip to [0, 255], and cast to uint8.
         """
-        ds = xr.open_dataset(path, engine="netcdf4", decode_times=False)
-        try:
-            data = ds["data"].values
-            # Strip time axis if present.
-            if data.ndim == 3 and data.shape[0] == 1:
-                data = data[0]
-            if data.shape != GRID_SHAPE:
-                logger.warning(
-                    "%s: unexpected grid shape %s, want %s — rejecting",
-                    self.friendly_name, data.shape, GRID_SHAPE,
-                )
-                return None
+        with HDF5_LOCK:
+            ds = xr.open_dataset(path, engine="netcdf4", decode_times=False)
+            try:
+                data = ds["data"].values
+                # Strip time axis if present.
+                if data.ndim == 3 and data.shape[0] == 1:
+                    data = data[0]
+                if data.shape != GRID_SHAPE:
+                    logger.warning(
+                        "%s: unexpected grid shape %s, want %s — rejecting",
+                        self.friendly_name, data.shape, GRID_SHAPE,
+                    )
+                    return None
 
-            # Apply quality mask when present.
-            if "dqf" in ds.variables:
-                dqf = ds["dqf"].values
-                if dqf.ndim == 3 and dqf.shape[0] == 1:
-                    dqf = dqf[0]
-                if dqf.shape == data.shape:
-                    data = np.where(dqf == 0, data, 0.0)
+                # Apply quality mask when present.
+                if "dqf" in ds.variables:
+                    dqf = ds["dqf"].values
+                    if dqf.ndim == 3 and dqf.shape[0] == 1:
+                        dqf = dqf[0]
+                    if dqf.shape == data.shape:
+                        data = np.where(dqf == 0, data, 0.0)
 
-            # Treat NaN / out-of-range as no-data sentinel (0).
-            data = np.where(np.isfinite(data), data, 0.0)
-            data = np.clip(data, 0, 255).astype(GRID_DTYPE)
-            return data
-        finally:
-            ds.close()
+                # Treat NaN / out-of-range as no-data sentinel (0).
+                data = np.where(np.isfinite(data), data, 0.0)
+                data = np.clip(data, 0, 255).astype(GRID_DTYPE)
+                return data
+            finally:
+                ds.close()
 
     # ── Cache (disk persistence + cross-worker snapshot) ──
 

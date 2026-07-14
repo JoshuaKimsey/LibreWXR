@@ -12,6 +12,14 @@ Two helpers contributors reach for when implementing a new source:
   eccodes C library's non-actionable ``dataTime`` truncation noise.
   Used by every NWP source that opens GRIB2 (HRRR, HRRR-Alaska, HRDPS,
   ICON-EU, DMI DINI, AROME Antilles) and by the MRMS radar source.
+- ``HDF5_LOCK`` — a process-wide lock guarding every call into the
+  HDF5 C library (h5py, and xarray's ``engine="netcdf4"``).  HDF5 is
+  not thread-safe, and each of h5py/netCDF4's wheels bundles its own
+  private ``libhdf5`` build, so concurrent access from more than one
+  Python thread (e.g. one source parsing on the event loop while
+  another parses inside ``asyncio.to_thread``) corrupts the library's
+  internal state and segfaults the process. Used by OPERA (radar) and
+  WRF-SMN + GMGSI (NWP/satellite) — the only sources that touch HDF5.
 
 Both intentionally live outside any one source package so a new source
 can pick them up without importing from a sibling source's internals.
@@ -19,9 +27,12 @@ can pick them up without importing from a sibling source's internals.
 from __future__ import annotations
 
 import os
+import threading
 from contextlib import contextmanager
 
 import numpy as np
+
+HDF5_LOCK = threading.Lock()
 
 
 def _dbz_float_to_uint8(arr: np.ndarray) -> np.ndarray:
