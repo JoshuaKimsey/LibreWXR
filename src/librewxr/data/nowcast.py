@@ -13,6 +13,16 @@ Generates short-range forecast frames (default 60 minutes) by:
 
 The renderer handles the actual blending — this module only produces
 the extrapolated radar data and the temporal blend weight for each step.
+
+Phase 1 (optical-flow computation) is also reused by the
+``/v2/radar`` motion-arrow overlay when ``nowcast_enabled=false`` but
+``arrow_flow_enabled=true``.  In that state ``generate()`` runs Phase 1
+only — at a lower target resolution (tuned for the arrow draw grid) —
+skipping extrapolation entirely.  The Farneback vectors land in
+``NowcastStore._flows`` exactly as in the nowcast-on path, so the arrow
+renderer at ``routes.radar_tile`` reads them transparently.  See
+``LIBREWXR_ARROW_FLOW_ENABLED`` / ``LIBREWXR_ARROW_FLOW_TARGET_DIM``
+in ``config.py`` for the tunables.
 """
 from __future__ import annotations
 
@@ -368,8 +378,26 @@ class NowcastGenerator:
         contributions are fetched first (async) and passed into the sync
         path; regions without a contribution fall through to optical-flow
         extrapolation.
+
+        Two configurably-independent paths share this entry point:
+
+        * ``nowcast_enabled=true``  — full path: Farneback optical flow
+          + per-step extrapolation + IFS blend, swapped into
+          ``NowcastStore._frames`` for the nowcast tile endpoint.
+        * ``nowcast_enabled=false, arrow_flow_enabled=true`` — flow
+          only: Farneback (at a reduced target resolution — see
+          ``LIBREWXR_ARROW_FLOW_TARGET_DIM``) computed for every
+          region with ≥2 frames, swapped into ``NowcastStore._flows``,
+          extrapolation skipped entirely.  The ``/v2/radar`` motion-
+          arrow overlay reads the flows the same way it does in the
+          nowcast-on state, so arrow direction is correct regardless
+          of the nowcast toggle.
+
+        Disabling both flags makes this method a no-op (no optical-
+        flow CPU, no arrow vectors — the arrow renderer then suppresses
+        the overlay via its own ``arrow_style`` gate).
         """
-        if not settings.nowcast_enabled:
+        if not settings.nowcast_enabled and not settings.arrow_flow_enabled:
             return
 
         timestamps = await self._store.get_timestamps()
@@ -387,59 +415,80 @@ class NowcastGenerator:
 
         n_steps = settings.nowcast_frames
         interval = settings.fetch_interval
+        extrapolate = settings.nowcast_enabled
 
-        # Fetch external nowcast contributions in parallel.  Each call
-        # returns a list of (validtime_unix, frame_data) or None.  We
-        # iterate every registered contribution, NOT just regions present
-        # in latest_frame — the external source publishes its forecast
-        # independently of our analysis fetch, and may carry the only
-        # signal for the region if the latest analysis slot was missed.
-        from librewxr.data.regions import REGIONS as _ALL_REGIONS
+        # External nowcast contributions are part of the extrapolation
+        # phase only — the arrow-flow path doesn't need them (it never
+        # produces forecast frames), so skip the async fetch entirely
+        # and let ``external_by_region`` stay empty.
         external_by_region: dict[str, dict[int, np.ndarray]] = {}
-        fetch_tasks = []
-        fetch_region_names = []
-        for contrib in self._contributions:
-            region_def = _ALL_REGIONS.get(contrib.region_name)
-            if region_def is None:
-                continue
-            fetch_tasks.append(contrib.instance.fetch_forecast(region_def))
-            fetch_region_names.append(contrib.region_name)
-        if fetch_tasks:
-            results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-            for region_name, result in zip(fetch_region_names, results):
-                if isinstance(result, Exception):
-                    logger.warning(
-                        "External nowcast for %s raised: %s", region_name, result,
-                    )
+        if extrapolate:
+            # Fetch external nowcast contributions in parallel.  Each call
+            # returns a list of (validtime_unix, frame_data) or None.  We
+            # iterate every registered contribution, NOT just regions present
+            # in latest_frame — the external source publishes its forecast
+            # independently of our analysis fetch, and may carry the only
+            # signal for the region if the latest analysis slot was missed.
+            from librewxr.data.regions import REGIONS as _ALL_REGIONS
+            fetch_tasks = []
+            fetch_region_names = []
+            for contrib in self._contributions:
+                region_def = _ALL_REGIONS.get(contrib.region_name)
+                if region_def is None:
                     continue
-                if result is None:
-                    continue
-                external_by_region[region_name] = {
-                    ts: frame for (ts, frame) in result
-                }
+                fetch_tasks.append(contrib.instance.fetch_forecast(region_def))
+                fetch_region_names.append(contrib.region_name)
+            if fetch_tasks:
+                results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+                for region_name, result in zip(fetch_region_names, results):
+                    if isinstance(result, Exception):
+                        logger.warning(
+                            "External nowcast for %s raised: %s", region_name, result,
+                        )
+                        continue
+                    if result is None:
+                        continue
+                    external_by_region[region_name] = {
+                        ts: frame for (ts, frame) in result
+                    }
 
-        # Run CPU-heavy extrapolation in a thread
+        # Run CPU-heavy work in a thread.  ``extrapolate`` controls both
+        # the target flow resolution (full for the nowcast feed to
+        # cv2.remap; reduced for arrows which downsample flow ~10-30x
+        # while drawing) and whether Phase B (per-step extrapolation)
+        # runs at all.
         nowcast_frames, flows = await asyncio.to_thread(
             self._generate_sync,
             prev_frame.regions, latest_frame.regions,
             latest_ts, n_steps, interval,
             settings.nowcast_blend_mode,
             external_by_region,
+            extrapolate,
         )
 
-        # Swap into the store and invalidate old tile cache entries
-        old_timestamps = await self._nowcast_store.replace_all(nowcast_frames)
+        # The flows swap is unconditional — the arrow overlay depends on
+        # it in both the nowcast-on and arrow-flow-only paths.
         await self._nowcast_store.replace_flows(flows)
-        if self._cache is not None:
-            for ts in old_timestamps:
-                self._cache.invalidate_timestamp(ts)
 
-        if nowcast_frames:
+        # The frames swap only matters in the nowcast-on path; skipping
+        # it on the arrow-flow-only path leaves NowcastStore._frames
+        # empty, which is exactly what ``routes.radar_tile`` expects for
+        # a nowcast-disabled deployment (no nowcast tiles to serve).
+        if extrapolate and nowcast_frames:
+            old_timestamps = await self._nowcast_store.replace_all(nowcast_frames)
+            if self._cache is not None:
+                for ts in old_timestamps:
+                    self._cache.invalidate_timestamp(ts)
             logger.info(
                 "Nowcast updated: %d frames (T+%d to T+%d min)",
                 len(nowcast_frames),
                 interval // 60,
                 n_steps * interval // 60,
+            )
+        elif flows:
+            logger.info(
+                "Arrow flow updated: %d region%s (nowcast disabled)",
+                len(flows), "s" if len(flows) != 1 else "",
             )
 
     @staticmethod
@@ -451,8 +500,26 @@ class NowcastGenerator:
         interval: int,
         blend_mode: str = "blended",
         external_by_region: dict[str, dict[int, np.ndarray]] | None = None,
-    ) -> list[NowcastFrame]:
+        extrapolate: bool = True,
+    ) -> tuple[list[NowcastFrame], dict[str, np.ndarray]]:
         """Synchronous nowcast generation (runs in a thread).
+
+        Phase A — optical flow: for every region present in both
+        ``prev_regions`` and ``latest_regions``, compute Farneback flow
+        between the two frames, apply the coverage-degradation guard
+        and the magnitude clamp, and accumulate into ``flows``.  The
+        target flow resolution is ``_TARGET_FLOW_DIM`` when
+        ``extrapolate`` is true (the nowcast path needs full-res flow
+        to feed ``cv2.remap``) or ``settings.arrow_flow_target_dim``
+        when false (the arrow overlay downsamples flow ~10-30x while
+        drawing, so a high-resolution field is wasted work).
+
+        Phase B — extrapolation: for each forecast step, prefer an
+        external ``NowcastContribution`` frame for the validtime when
+        one was returned; otherwise inverse-warp the latest radar
+        forward along the precomputed flow.  Skipped entirely when
+        ``extrapolate`` is false (the arrow-flow-only path), in which
+        case this method returns ``( [], flows )`` after Phase A.
 
         For regions present in ``external_by_region``, the external
         validtime → frame mapping is consulted first for each forecast
@@ -463,6 +530,12 @@ class NowcastGenerator:
         """
         t0 = time.monotonic()
         external_by_region = external_by_region or {}
+        # Flow target resolution: full for the nowcast extrapolation
+        # feed to cv2.remap; reduced for the arrow-only path (arrows
+        # draw on a 32/48px grid and downsample the flow anyway).
+        flow_target_dim = (
+            _TARGET_FLOW_DIM if extrapolate else settings.arrow_flow_target_dim
+        )
 
         # Pre-compute flow per region.  Regions fully served by an
         # external contribution still get a flow computed because the
@@ -484,7 +557,7 @@ class NowcastGenerator:
                     region_name, prev_nz, latest_nz,
                 )
                 continue
-            flow = _compute_flow(data0, data1)
+            flow = _compute_flow(data0, data1, target_dim=flow_target_dim)
             # Cap unphysical motion vectors before extrapolation.  Without
             # this, Farneback's polynomial fit at data/no-data boundaries
             # reports 50-200+ px/step magnitudes, which the inverse-warp
@@ -499,6 +572,20 @@ class NowcastGenerator:
                 max_px = _max_flow_pixels(ps_y, interval)
                 flow = _clamp_flow(flow, max_px)
             flows[region_name] = flow
+
+        # Arrow-flow-only path: Phase A is the whole job.  Return an
+        # empty frame list so the caller skips the nowcast store swap
+        # (``replace_all``) but still publishes ``flows`` via
+        # ``replace_flows``.  Mirrors the existing empty-set precedent
+        # below (no forecast regions → return [], {}).
+        if not extrapolate:
+            elapsed = time.monotonic() - t0
+            logger.info(
+                "Arrow flow generation: %d region%s (%.1fs, target_dim=%d)",
+                len(flows), "s" if len(flows) != 1 else "",
+                elapsed, flow_target_dim,
+            )
+            return [], flows
 
         # Regions to forecast = anything we can extrapolate internally
         # OR anything an external source published.  External-only is
@@ -577,15 +664,22 @@ class NowcastGenerator:
 # Optical flow helpers
 # ---------------------------------------------------------------------------
 
-def _compute_flow(frame0: np.ndarray, frame1: np.ndarray) -> np.ndarray:
+def _compute_flow(
+    frame0: np.ndarray, frame1: np.ndarray,
+    target_dim: int = _TARGET_FLOW_DIM,
+) -> np.ndarray:
     """Compute dense optical flow with adaptive downscaling.
 
-    Downscales so the longest dimension is ~``_TARGET_FLOW_DIM`` pixels,
+    Downscales so the longest dimension is ~``target_dim`` pixels,
     computes Farneback flow, then upscales the flow vectors to the
-    original resolution.
+    original resolution.  ``target_dim`` defaults to the module constant
+    ``_TARGET_FLOW_DIM`` (full-res, used by the nowcast extrapolation
+    feed to ``cv2.remap``); the arrow-only path passes
+    ``settings.arrow_flow_target_dim`` (lower — arrows downsample flow
+    ~10-30x while drawing, so a high-resolution field is wasted work).
     """
     h, w = frame0.shape
-    scale = min(_TARGET_FLOW_DIM / max(h, w), 1.0)
+    scale = min(target_dim / max(h, w), 1.0)
 
     if scale < 1.0:
         small_h = max(1, int(h * scale))

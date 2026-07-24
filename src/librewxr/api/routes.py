@@ -193,6 +193,9 @@ async def health():
         },
         "nowcast": {
             "enabled": settings.nowcast_enabled,
+            "arrow_flow_enabled": settings.arrow_flow_enabled,
+            "arrow_flow_target_dim": settings.arrow_flow_target_dim,
+            "flows": len(await nowcast_store.get_flows() or {}) if nowcast_store else 0,
             "frames": await nowcast_store.get_timestamps() if nowcast_store else [],
             "count": len(await nowcast_store.get_timestamps()) if nowcast_store else 0,
         },

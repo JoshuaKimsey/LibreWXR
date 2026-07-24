@@ -150,21 +150,38 @@ async def run_pipeline() -> None:
 
     nowcast_store = None
     nowcast_generator = None
-    if settings.nowcast_enabled:
+    # Constructed whenever nowcast is on OR arrow_flow is on — the
+    # latter reuses NowcastGenerator's Phase A (optical flow) to
+    # populate the arrow overlay's flow vectors without running the
+    # extrapolation phase, so arrows show real storm motion even
+    # with nowcast disabled (see LIBREWXR_ARROW_FLOW_ENABLED).
+    if settings.nowcast_enabled or settings.arrow_flow_enabled:
         nowcast_store = NowcastStore(cache_dir=cache_dir)
-        nowcast_contribs = collect_nowcast_contributions(settings)
+        # External nowcast contributions are only relevant to the
+        # extrapolation path; skip the fetch when nowcast is off.
+        nowcast_contribs = (
+            collect_nowcast_contributions(settings)
+            if settings.nowcast_enabled
+            else []
+        )
         nowcast_generator = NowcastGenerator(
             store, nowcast_store, cache=tile_cache,
             nowcast_contributions=nowcast_contribs,
         )
         external_names = [c.region_name for c in nowcast_contribs]
-        if external_names:
-            logger.info(
-                "Nowcast enabled: %d frames (external sources: %s)",
-                settings.nowcast_frames, ", ".join(external_names),
-            )
+        if settings.nowcast_enabled:
+            if external_names:
+                logger.info(
+                    "Nowcast enabled: %d frames (external sources: %s)",
+                    settings.nowcast_frames, ", ".join(external_names),
+                )
+            else:
+                logger.info("Nowcast enabled: %d frames", settings.nowcast_frames)
         else:
-            logger.info("Nowcast enabled: %d frames", settings.nowcast_frames)
+            logger.info(
+                "Arrow flow enabled (nowcast off): target_dim=%d",
+                settings.arrow_flow_target_dim,
+            )
 
     # RadarFrameCache lets the pipeline restart and re-populate its
     # FrameStore from the prior session's frames before the first fetch

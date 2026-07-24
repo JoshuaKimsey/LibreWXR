@@ -129,9 +129,13 @@ async def test_render_only_lifespan_picks_up_snapshot(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "cache_dir", str(cache_dir))
     # Disable optional stores that don't appear in the snapshot — keeps
     # the render-only path from spinning up Cloud / Nowcast plumbing
-    # this smoke test doesn't care about.
+    # this smoke test doesn't care about.  Both ``nowcast_enabled`` and
+    # ``arrow_flow_enabled`` must be off: the latter would otherwise
+    # construct NowcastStore via the widened build condition added when
+    # decoupling optical flow from nowcast.
     monkeypatch.setattr(settings, "satellite_enabled", False)
     monkeypatch.setattr(settings, "nowcast_enabled", False)
+    monkeypatch.setattr(settings, "arrow_flow_enabled", False)
     monkeypatch.setattr(settings, "alerts_enabled", False)
     monkeypatch.setattr(settings, "state_wait_timeout", 5.0)
     monkeypatch.setattr(settings, "state_poll_interval", 0.1)

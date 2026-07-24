@@ -176,7 +176,11 @@ async def _render_only_lifespan(app: FastAPI):
     satellite_grids_by_slug: dict[str, object] = {
         satellite_source_slug(c): c.instance for c in satellite_contribs
     }
-    nowcast_store = NowcastStore(cache_dir=cache_dir) if settings.nowcast_enabled else None
+    nowcast_store = (
+        NowcastStore(cache_dir=cache_dir)
+        if (settings.nowcast_enabled or settings.arrow_flow_enabled)
+        else None
+    )
     alerts_store = AlertsStore() if settings.alerts_enabled else None
 
     stores: dict[str, object | None] = {
@@ -390,24 +394,40 @@ async def lifespan(app: FastAPI):
     )
     build_feather_masks()
 
-    # Nowcast store and generator
+    # Nowcast store and generator.  Constructed whenever nowcast is on
+    # OR arrow_flow is on — the latter reuses NowcastGenerator's
+    # Phase A (optical flow) to populate the arrow overlay's flow
+    # vectors without running the extrapolation phase, so arrows
+    # show real storm motion even with nowcast disabled.
     nowcast_store = None
     nowcast_generator = None
-    if settings.nowcast_enabled:
+    if settings.nowcast_enabled or settings.arrow_flow_enabled:
         nowcast_store = NowcastStore()
-        nowcast_contribs = collect_nowcast_contributions(settings)
+        # External nowcast contributions are only relevant to the
+        # extrapolation path; skip the fetch when nowcast is off.
+        nowcast_contribs = (
+            collect_nowcast_contributions(settings)
+            if settings.nowcast_enabled
+            else []
+        )
         nowcast_generator = NowcastGenerator(
             store, nowcast_store, cache=cache,
             nowcast_contributions=nowcast_contribs,
         )
         external_names = [c.region_name for c in nowcast_contribs]
-        if external_names:
-            logger.info(
-                "Nowcast enabled: %d frames (external sources: %s)",
-                settings.nowcast_frames, ", ".join(external_names),
-            )
+        if settings.nowcast_enabled:
+            if external_names:
+                logger.info(
+                    "Nowcast enabled: %d frames (external sources: %s)",
+                    settings.nowcast_frames, ", ".join(external_names),
+                )
+            else:
+                logger.info("Nowcast enabled: %d frames", settings.nowcast_frames)
         else:
-            logger.info("Nowcast enabled: %d frames", settings.nowcast_frames)
+            logger.info(
+                "Arrow flow enabled (nowcast off): target_dim=%d",
+                settings.arrow_flow_target_dim,
+            )
 
     # Separate thread pools for direct requests and background warming.
     # Direct requests get their own pool so they are never queued behind
@@ -519,13 +539,18 @@ async def lifespan(app: FastAPI):
     logger.info(
         "Starting LibreWXR (public_url=%s, max_zoom=%d, regions=%s, "
         "tile_cache=%d MB, memory_limit=%d MB, nowcast=%s, "
-        "alerts=%s, cache_dir=%s)",
+        "arrow_flow=%s, alerts=%s, cache_dir=%s)",
         settings.public_url,
         settings.max_zoom,
         ", ".join(enabled),
         settings.tile_cache_mb,
         mem_limit,
         f"{settings.nowcast_frames} frames" if settings.nowcast_enabled else "off",
+        (
+            f"on (target_dim={settings.arrow_flow_target_dim})"
+            if settings.arrow_flow_enabled and not settings.nowcast_enabled
+            else "on" if settings.arrow_flow_enabled else "off"
+        ),
         "enabled" if settings.alerts_enabled else "off",
         settings.cache_dir or "(none)",
     )

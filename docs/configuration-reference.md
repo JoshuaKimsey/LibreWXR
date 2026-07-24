@@ -1034,6 +1034,40 @@ The model side is taken from the active NWP chain — **HRRR over CONUS, HRDPS o
 
 (Value renamed from `ifs` to `model` after the regional NWP chain shipped — the model side is no longer IFS-only.)
 
+### `LIBREWXR_ARROW_FLOW_ENABLED`
+
+The `/v2/radar/...` tile endpoint accepts an `?arrows=` query param that overlays semi-transparent precipitation-direction arrows on areas with active precipitation. Arrows key off per-region optical flow computed between the two most recent radar frames; ECMWF IFS wind is a fallback only outside radar coverage.
+
+Before this toggle existed, optical flow was computed only as a byproduct of nowcast generation — so disabling `LIBREWXR_NOWCAST_ENABLED` silently broke arrow direction (every tile fell through to the coarse ECMWF IFS wind field, producing the "incorrect, randomly placed" arrows reported in [issue #7](https://github.com/JoshuaKimsey/LibreWXR/issues/7)).
+
+With this toggle on (the default), arrows get real radar storm motion regardless of the nowcast state:
+
+| `nowcast_enabled` | `arrow_flow_enabled` | Flow CPU | Arrows | Nowcast frames |
+|---|---|---|---|---|
+| `true`  | (any)   | full | correct (radar flow) | generated |
+| `false` | `true`  | ~25-35% of full nowcast | **correct** (radar flow at reduced resolution) | none |
+| `false` | `false` | zero | suppressed entirely | none |
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+Note: Farneback optical flow is the expensive part of the nowcast pipeline (~90% of the per-cycle ~44s in the default 13-region config); extrapolation/IFS-blend is comparatively cheap. Disabling nowcast but keeping arrow flow on therefore saves only **~10-20% CPU** vs full nowcast — not ~90%. **The real escape hatch for CPU-conscious operators is disabling both `nowcast_enabled` and `arrow_flow_enabled`** — that fully suppresses the overlay (the `?arrows=` query becomes a no-op) and pays zero flow CPU.
+
+### `LIBREWXR_ARROW_FLOW_TARGET_DIM`
+
+Longest dimension (in pixels) passed to the Farneback optical-flow algorithm when computing flow for the arrow-only path (`nowcast_enabled=false, arrow_flow_enabled=true`). Larger grids are downscaled to this before the flow computation, then the flow vectors are upscaled back to the original resolution.
+
+| | |
+|---|---|
+| **Default** | `500` |
+| **Type** | integer |
+
+Arrows draw on a 32-pixel (256-tile) or 48-pixel (512-tile) grid and downsample flow ~10-30x while drawing, so a high-resolution flow field is wasted work for arrow purposes — 500 reaches the arrow-visible quality ceiling at roughly 4× the speed of the 1000-pixel field used for nowcast extrapolation (which feeds `cv2.remap` and needs the pixel sharpness).
+
+**No effect when nowcast is on** — that path uses the module constant `_TARGET_FLOW_DIM = 1000` in `nowcast.py`, so the two paths no longer share tuning. If you turn nowcast back on, you don't need to revisit this setting.
+
 ---
 
 ## Satellite (GMGSI)

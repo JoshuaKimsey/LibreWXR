@@ -361,6 +361,26 @@ class Settings(BaseSettings):
     nowcast_enabled: bool = True  # Generate precipitation nowcast via radar extrapolation + IFS
     nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
     nowcast_blend_mode: str = "blended"  # "radar", "blended", or "model"
+    # Separate optical-flow computation used by the /v2/radar motion-arrow
+    # overlay.  Arrows key off per-region Farneback flow between the two
+    # most recent radar frames; that flow is otherwise computed only as a
+    # byproduct of ``nowcast_enabled``, so before this toggle existed,
+    # disabling nowcast silently broke the arrow direction (every tile fell
+    # through to the coarse ECMWF IFS wind field).  Default ON so arrows
+    # "just work" regardless of the nowcast state; an operator who wants
+    # zero flow CPU sets both ``nowcast_enabled=false`` AND
+    # ``arrow_flow_enabled=false`` (the arrow overlay is then suppressed
+    # entirely — see ``routes.radar_tile``).
+    arrow_flow_enabled: bool = True
+    # Cap on the longest dimension passed to Farneback when computing flow
+    # for arrows-only (``nowcast_enabled=false, arrow_flow_enabled=true``).
+    # Arrows draw on a 32/48px grid and downsample flow 10-30x while
+    # drawing, so a high-resolution flow field is wasted work — 500 hits
+    # the arrow-visible quality ceiling at ~4x the speed of the 1000-pixel
+    # field used for nowcast extrapolation (which feeds ``cv2.remap`` and
+    # needs the pixel sharpness).  No effect when nowcast is on, since that
+    # path uses the module constant ``_TARGET_FLOW_DIM`` in nowcast.py.
+    arrow_flow_target_dim: int = 500
     cache_dir: str = ""  # Persistent cache directory for fetched grids; empty = in-memory only
 
     # Multi-worker tile-server split.  When render_only is True, this
@@ -440,6 +460,10 @@ class Settings(BaseSettings):
         if self.ecmwf_max_timesteps > 0:
             return self.ecmwf_max_timesteps
         past_hours = math.ceil(self.max_frames * self.fetch_interval / 3600)
+        # IFS timesteps are only consumed by the nowcast blend path (the
+        # arrow-flow-only path uses past radar frames, not IFS forecasts),
+        # so the future-timestep budget stays empty whenever nowcast is
+        # off, regardless of ``arrow_flow_enabled``.
         future_hours = (
             math.ceil(self.nowcast_frames * self.fetch_interval / 3600)
             if self.nowcast_enabled else 0

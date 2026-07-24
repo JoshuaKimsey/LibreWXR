@@ -528,3 +528,253 @@ class TestExtrapolationClampingPreventsStreaks:
         # 0.01° → max ≈ 30 px/step.
         mag = np.sqrt(flows["USCOMP"][..., 0] ** 2 + flows["USCOMP"][..., 1] ** 2)
         assert mag.max() <= 30.5  # within rounding of the cap
+
+
+# ---------------------------------------------------------------------------
+# Decoupled arrow-flow path (nowcast_enabled=false, arrow_flow_enabled=true)
+# ---------------------------------------------------------------------------
+#
+# These tests pin the contract documented in nowcast.generate(): when the
+# caller passes ``extrapolate=False``, the sync path computes optical flow
+# for every region with both prev and latest frames, returns an empty
+# frame list (Phase B skipped), and runs Farneback at the reduced
+# ``arrow_flow_target_dim`` (the arrow renderer downsamples flow ~10-30x
+# while drawing, so a high-resolution field is wasted work).  Coverage
+# for the ``generate()`` async top-level gate — both flags off → no-op —
+# is in ``TestArrowFlowGating`` below.
+
+
+class TestArrowFlowSyncPath:
+    """``_generate_sync(extrapolate=False)`` returns flows only, no frames."""
+
+    def test_extrapolate_false_returns_empty_frames_populated_flows(self):
+        """The arrow-flow-only path computes flow but skips extrapolation."""
+        blob0 = _make_blob(60, 100, radius=20, value=150)
+        blob1 = _make_blob(60, 110, radius=20, value=150)
+
+        frames, flows = NowcastGenerator._generate_sync(
+            {"USCOMP": blob0}, {"USCOMP": blob1},
+            latest_ts=1000, n_steps=6, interval=600,
+            extrapolate=False,
+        )
+
+        # No extrapolation phase ran — every forecast step is skipped.
+        assert frames == []
+        # Flow for USCOMP was computed (Phase A runs regardless of extrapolate).
+        assert "USCOMP" in flows
+        assert flows["USCOMP"].shape == (H, W, 2)
+
+    def test_extrapolate_false_still_applies_clamp(self):
+        """The coverage + magnitude guards apply on the arrow-only path too."""
+        # Same clamp smoke test as test_generate_sync_with_typical_region_applies_clamp,
+        # but with extrapolate=False — the guards must still fire.
+        prev = _make_blob(60, 100, radius=30)
+        latest = _make_blob(60, 105, radius=30)
+        frames, flows = NowcastGenerator._generate_sync(
+            {"USCOMP": prev}, {"USCOMP": latest},
+            latest_ts=1000, n_steps=6, interval=600,
+            extrapolate=False,
+        )
+        assert frames == []
+        assert "USCOMP" in flows
+        mag = np.sqrt(flows["USCOMP"][..., 0] ** 2 + flows["USCOMP"][..., 1] ** 2)
+        assert mag.max() <= 30.5  # USCOMP at 0.01° → max ≈ 30 px/step
+
+    def test_extrapolate_false_missing_prev_yields_empty_flows(self):
+        """No prior frame → no flow, no frames — arrow tile falls through to
+        the forced-off branch in the route handler (no arrow_style)."""
+        blob = _make_blob(60, 100)
+        frames, flows = NowcastGenerator._generate_sync(
+            {}, {"USCOMP": blob},
+            latest_ts=1000, n_steps=6, interval=600,
+            extrapolate=False,
+        )
+        assert frames == []
+        assert flows == {}
+
+    def test_extrapolate_false_uses_reduced_target_dim(self):
+        """``arrow_flow_target_dim`` only matters on the arrow-only path.
+
+        We assert the resolution branch indirectly: with a grid larger
+        than ``target_dim``, ``_compute_flow`` downscales before calling
+        Farneback.  Mock ``cv2.calcOpticalFlowFarneback`` and verify the
+        small-array passed in has its longest dimension capped by the
+        requested ``target_dim`` (not the module default 1000).
+        """
+        import cv2
+        from unittest.mock import patch
+
+        # Build a grid larger than the arrow target_dim default (500)
+        # so the downscale branch is actually exercised.
+        big_h, big_w = 800, 1600
+        f0 = np.zeros((big_h, big_w), dtype=np.uint8)
+        f0[400, 800] = 200
+        f1 = np.zeros((big_h, big_w), dtype=np.uint8)
+        f1[400, 810] = 200
+
+        captured = {}
+
+        def fake_farneback(a, b, flow=None, **kwargs):
+            captured["shape"] = a.shape
+            return np.zeros((*a.shape, 2), dtype=np.float32)
+
+        with patch("cv2.calcOpticalFlowFarneback", side_effect=fake_farneback):
+            flow = _compute_flow(f0, f1, target_dim=500)
+
+        # Flow is upscaled back to the input resolution.
+        assert flow.shape == (big_h, big_w, 2)
+        # Farneback saw a downscaled array whose max dimension ≤ target_dim.
+        assert max(captured["shape"]) <= 500
+        # Sanity: with the default target_dim=1000, the same grid would
+        # be downscaled to longest_dim=1000.  Assert that's *not* what
+        # happened — proves the target_dim kwarg threads through.
+        assert max(captured["shape"]) <= 500  # explicit, intentionally obvious
+
+    def test_extrapolate_true_uses_module_default_target_dim(self):
+        """The nowcast-on path uses the module constant ``_TARGET_FLOW_DIM``
+        (1000), so a 1600-wide grid downscales to 1000, not to 500."""
+        import cv2
+        from unittest.mock import patch
+        from librewxr.data.nowcast import _TARGET_FLOW_DIM
+
+        big_h, big_w = 800, 1600
+        f0 = np.zeros((big_h, big_w), dtype=np.uint8)
+        f1 = np.zeros((big_h, big_w), dtype=np.uint8)
+
+        captured = {}
+
+        def fake_farneback(a, b, flow=None, **kwargs):
+            captured["shape"] = a.shape
+            return np.zeros((*a.shape, 2), dtype=np.float32)
+
+        with patch("cv2.calcOpticalFlowFarneback", side_effect=fake_farneback):
+            _compute_flow(f0, f1)  # default target_dim=_TARGET_FLOW_DIM
+
+        # Farneback input was scaled so max dim == _TARGET_FLOW_DIM (1000).
+        assert max(captured["shape"]) <= _TARGET_FLOW_DIM
+        assert max(captured["shape"]) > 500  # proves it's not the 500 path
+
+
+class _StubFrameStore:
+    """Minimal FrameStore stub for the async generate() gating tests.
+
+    Only the methods ``generate()`` reaches into: ``get_timestamps`` and
+    ``get_frame``.  Returns a 2-frame window so the ``len(timestamps) < 2``
+    guard never trips.
+    """
+
+    def __init__(self, regions0: dict, regions1: dict, ts=(1000, 1600)):
+        self._ts = list(ts)
+        self._frames = {ts[0]: regions0, ts[1]: regions1}
+
+    async def get_timestamps(self):
+        return list(self._ts)
+
+    async def get_frame(self, ts):
+        from librewxr.data.store import RadarFrame
+        if ts not in self._frames:
+            return None
+        return RadarFrame(timestamp=ts, regions=dict(self._frames[ts]))
+
+
+class TestArrowFlowGating:
+    """``generate()`` async gating: both flags off → no-op."""
+
+    async def test_generate_both_flags_off_is_noop(self, monkeypatch):
+        """With ``nowcast_enabled=False`` AND ``arrow_flow_enabled=False``,
+        the generator must short-circuit before touching the store."""
+        from librewxr.config import settings
+
+        # A store we can detect any state change on.  replace_flows /
+        # replace_all are async and would raise if either were called
+        # with an empty dict (we use sentinel values below).
+        store = NowcastStore()
+        # Sentinel: any successful replace_flows call would replace _flows.
+        await store.replace_flows({"SENTINEL": np.zeros((2, 2, 2), dtype=np.float32)})
+        baseline_flows = await store.get_flows()
+        assert "SENTINEL" in baseline_flows
+
+        stub = _StubFrameStore(
+            {"USCOMP": _make_blob(60, 100, radius=15, value=150)},
+            {"USCOMP": _make_blob(60, 110, radius=15, value=150)},
+        )
+        gen = NowcastGenerator(stub, store, cache=None, nowcast_contributions=[])
+
+        monkeypatch.setattr(settings, "nowcast_enabled", False)
+        monkeypatch.setattr(settings, "arrow_flow_enabled", False)
+
+        await gen.generate()
+
+        # Nothing was replaced: the sentinel flow is still there, no new
+        # flows, no frames in the store.  This is the "both off" row of
+        # the plan's behavior matrix.
+        after_flows = await store.get_flows()
+        assert "SENTINEL" in after_flows  # unchanged
+        assert set(after_flows.keys()) == {"SENTINEL"}
+        assert await store.get_timestamps() == []  # no frames written
+
+    async def test_generate_nowcast_off_arrow_flow_on_writes_flows_only(self, monkeypatch):
+        """``nowcast_enabled=False`` + ``arrow_flow_enabled=True``:
+        ``generate()`` runs Phase A (flows) and skips Phase B (frames).
+
+        This is the core fix for issue #7: arrows read real storm motion
+        even when nowcast is disabled.
+        """
+        from librewxr.config import settings
+
+        store = NowcastStore()
+        stub = _StubFrameStore(
+            {"USCOMP": _make_blob(60, 100, radius=15, value=150)},
+            {"USCOMP": _make_blob(60, 110, radius=15, value=150)},
+        )
+        gen = NowcastGenerator(stub, store, cache=None, nowcast_contributions=[])
+
+        monkeypatch.setattr(settings, "nowcast_enabled", False)
+        monkeypatch.setattr(settings, "arrow_flow_enabled", True)
+        # Use a small target_dim so the test is fast (full-res not needed
+        # to verify the gating contract).
+        monkeypatch.setattr(settings, "arrow_flow_target_dim", 200)
+
+        await gen.generate()
+
+        flows = await store.get_flows()
+        assert "USCOMP" in flows
+        assert flows["USCOMP"].shape == (H, W, 2)
+        # Phase B skipped — no nowcast frames were written to the store,
+        # which is what radar_tile expects on a nowcast-disabled deploy.
+        assert await store.get_timestamps() == []
+
+    async def test_generate_nowcast_on_writes_both_flows_and_frames(self, monkeypatch):
+        """``nowcast_enabled=True`` (regardless of arrow_flow): the original
+        full nowcast-on contract — both flows and nowcast frames populated.
+
+        Pins that the decoupling refactor doesn't accidentally regress
+        the path the existing user base (nowcast on) relies on.
+        """
+        from librewxr.config import settings
+
+        store = NowcastStore()
+        stub = _StubFrameStore(
+            {"USCOMP": _make_blob(60, 100, radius=15, value=150)},
+            {"USCOMP": _make_blob(60, 110, radius=15, value=150)},
+        )
+        gen = NowcastGenerator(stub, store, cache=None, nowcast_contributions=[])
+
+        monkeypatch.setattr(settings, "nowcast_enabled", True)
+        monkeypatch.setattr(settings, "nowcast_frames", 3)
+        monkeypatch.setattr(settings, "fetch_interval", 600)
+        monkeypatch.setattr(settings, "arrow_flow_enabled", True)  # ignored when nowcast on
+
+        await gen.generate()
+
+        flows = await store.get_flows()
+        assert "USCOMP" in flows
+        # Both flows AND frames populated — the unchanged nowcast contract.
+        timestamps = await store.get_timestamps()
+        assert len(timestamps) == 3
+        # Stub's latest_ts is the second timestamp (1600); each frame
+        # is latest_ts + step * interval (= 600s), so the first lands at 2200.
+        assert timestamps[0] == 1600 + 600
+        # The first timestamp equals latest_ts+interval for step=1.
+        # Generate interruptions interleaving or out-of-order would fail this.
+        assert timestamps[2] == 1600 + 3 * 600
