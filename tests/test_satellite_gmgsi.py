@@ -18,10 +18,12 @@ import numpy as np
 import pytest
 
 from librewxr.sources.satellite.gmgsi.source import (
+    CACHE_LAYOUT_VERSION,
     GMGSILWSource,
     GMGSISource,
     GMGSIVISSource,
     GRID_HEIGHT,
+    GRID_SHAPE,
     GRID_WIDTH,
     LAT_MAX,
     LAT_MIN,
@@ -226,6 +228,83 @@ def test_sample_returns_zero_when_no_frames(tmp_path: Path):
     assert (out == 0).all()
 
 
+# ── Width coercion (NESDIS 2026-07 column drop) ──
+
+
+def test_coerce_accepts_canonical_width():
+    """A frame already at GRID_SHAPE passes through untouched."""
+    arr = np.zeros(GRID_SHAPE, dtype=np.float32)
+    out = GMGSISource._coerce_to_canonical(arr)
+    assert out is arr
+    assert out.shape == GRID_SHAPE
+
+
+def test_coerce_pads_narrow_by_one():
+    """A frame one column short is padded by repeating the last column.
+
+    Width tolerance kicks in for NESDIS upstream twiddles like the
+    2026-07 5000->4999 drop (and a hypothetical 4999->4998 shave).
+    Edge mode keeps the right-hand disk edge intact rather than
+    zero-filling it with the no-data sentinel.
+    """
+    arr = np.arange(GRID_HEIGHT * (GRID_WIDTH - 1), dtype=np.float32).reshape(
+        GRID_HEIGHT, GRID_WIDTH - 1,
+    )
+    out = GMGSISource._coerce_to_canonical(arr)
+    assert out is not None
+    assert out.shape == GRID_SHAPE
+    # Last column is a copy of the previous last column.
+    np.testing.assert_array_equal(out[:, -1], arr[:, -1])
+    np.testing.assert_array_equal(out[:, :-1], arr)
+
+
+def test_coerce_crops_wide_by_one():
+    """A frame one column too wide is cropped to the canonical width.
+
+    Preserves the 2026-05 layout (5000 cols) ingest path so a rolled-
+    back upstream never takes the satellite layer down either.
+    """
+    arr = np.arange(
+        GRID_HEIGHT * (GRID_WIDTH + 1), dtype=np.float32,
+    ).reshape(GRID_HEIGHT, GRID_WIDTH + 1)
+    out = GMGSISource._coerce_to_canonical(arr)
+    assert out is not None
+    assert out.shape == GRID_SHAPE
+    np.testing.assert_array_equal(out, arr[:, :GRID_WIDTH])
+
+
+def test_coerce_rejects_height_mismatch():
+    """Latitude re-grids are never benign — reject them loudly."""
+    arr = np.zeros((GRID_HEIGHT - 1, GRID_WIDTH), dtype=np.float32)
+    assert GMGSISource._coerce_to_canonical(arr) is None
+
+
+def test_coerce_rejects_height_gain():
+    """Symmetric: too-tall frames are rejected too, not silently cropped."""
+    arr = np.zeros((GRID_HEIGHT + 1, GRID_WIDTH), dtype=np.float32)
+    assert GMGSISource._coerce_to_canonical(arr) is None
+
+
+def test_coerce_rejects_width_out_of_tolerance():
+    """Width off by more than +-1 col returns None (loud-fail preserved).
+
+    A 10-column re-grid (4999 -> 4990) is not a benign twiddle — the
+    global lon step shifts and LAT_VEC/LON_VEC would mis-sample.  The
+    strict guard fires so the next NESDIS re-grid is obvious on first
+    ingest rather than producing subtle pixel drift.
+    """
+    arr = np.zeros((GRID_HEIGHT, GRID_WIDTH - 10), dtype=np.float32)
+    assert GMGSISource._coerce_to_canonical(arr) is None
+    wide = np.zeros((GRID_HEIGHT, GRID_WIDTH + 10), dtype=np.float32)
+    assert GMGSISource._coerce_to_canonical(wide) is None
+
+
+def test_coerce_rejects_wrong_ndim():
+    """A 3-D array (time axis not stripped) is rejected, not coerced."""
+    arr = np.zeros((1, GRID_HEIGHT, GRID_WIDTH), dtype=np.float32)
+    assert GMGSISource._coerce_to_canonical(arr) is None
+
+
 # ── Cross-process pickle round-trip ──
 
 
@@ -267,6 +346,50 @@ def test_pickle_round_trip_handles_missing_cache_files(tmp_path: Path):
     render_src = GMGSILWSource.__new__(GMGSILWSource)
     render_src.__setstate__(state)
     assert render_src.timestamps == []
+
+
+# ── Cache layout ──
+
+
+def test_cache_dir_uses_versioned_v2_layout(tmp_path: Path):
+    """Cache lives under ``gmgsi/v2/<channel>/`` so a width change never
+    re-memmaps stale frames at the new shape (silent row-shear trap).
+
+    The bump from 5000->4999 columns on 2026-07-24 left stale
+    15,000,000-byte files on disk that numpy would happily memmap at
+    the new 14,997,000-byte shape, shearing every row by one column.
+    Versioning the layout dir sidesteps the whole class of bug for
+    future re-grids too: ``CACHE_LAYOUT_VERSION`` just bumps again.
+    """
+    lw = GMGSILWSource(cache_dir=tmp_path, max_frames=12)
+    assert lw._channel_cache_dir == tmp_path / "gmgsi" / CACHE_LAYOUT_VERSION / "LW"
+    assert lw._channel_cache_dir.exists()
+
+    vis = GMGSIVISSource(cache_dir=tmp_path, max_frames=12)
+    assert vis._channel_cache_dir == (
+        tmp_path / "gmgsi" / CACHE_LAYOUT_VERSION / "VIS"
+    )
+    assert vis._channel_cache_dir.exists()
+
+    # Sanity: the constant is what the layout actually uses.
+    assert CACHE_LAYOUT_VERSION == "v2"
+
+
+def test_pickle_round_trip_routes_render_worker_to_v2_cache(tmp_path: Path):
+    """A render worker restoring __setstate__ resolves the same v2 path.
+
+    Guards against a drift where __init__ versions the dir but
+    __setstate__ picks the unversioned path and silently misses the
+    pipeline's freshly-written frames.
+    """
+    pipeline_src = GMGSILWSource(cache_dir=tmp_path, max_frames=12)
+    state = pipeline_src.__getstate__()
+
+    render_src = GMGSILWSource.__new__(GMGSILWSource)
+    render_src.__setstate__(state)
+    assert render_src._channel_cache_dir == (
+        tmp_path / "gmgsi" / CACHE_LAYOUT_VERSION / "LW"
+    )
 
 
 # ── _list_recent_keys with mocked fsspec ──

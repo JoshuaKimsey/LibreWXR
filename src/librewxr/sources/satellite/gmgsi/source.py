@@ -4,7 +4,7 @@
 
 GMGSI is a hourly pre-composited global mosaic that NESDIS builds from
 GOES-East + GOES-West + Meteosat-9 + Meteosat-10 + Himawari-9.  It ships
-on a regular equirectangular lat/lon grid (3000 yc x 5000 xc at 0.0722°
+on a regular equirectangular lat/lon grid (3000 yc x 4999 xc at 0.0722°
 between ±72.74° lat), so we get all the seam blending and reprojection
 for free — there is nothing geostationary about the data once it lands.
 
@@ -35,14 +35,31 @@ import xarray as xr
 logger = logging.getLogger(__name__)
 
 # Grid constants.  Verified against a live LW file 2026-05-23 and
-# documented in docs/satellite-implementation-plan.md.  An incoming
-# frame whose shape doesn't match these is rejected rather than
-# silently mis-rendered — if NESDIS ever re-grids GMGSI, we want
-# loud failure on first ingest, not subtle pixel drift.
+# documented in docs/satellite-implementation-plan.md.  Re-verified
+# 2026-07-24 — NESDIS shaved one column (xc 5000 -> 4999) with no
+# change to the lat/lon bounding box, so coverage is unchanged and
+# LAT_VEC / LON_VEC still sample the same geographic points.
+#
+# An incoming frame whose height doesn't match GRID_HEIGHT, or whose
+# width is off by more than +-1 from GRID_WIDTH, is rejected rather
+# than silently mis-rendered — if NESDIS ever re-grids GMGSI, we want
+# loud failure on first ingest, not subtle pixel drift.  A +-1 column
+# wobble is tolerated by padding/cropping to the canonical width so a
+# future single-column twiddle doesn't take the satellite layer down
+# again; height stays strict (lat re-grids are never benign).
 GRID_HEIGHT = 3000
-GRID_WIDTH = 5000
+GRID_WIDTH = 4999
 GRID_SHAPE = (GRID_HEIGHT, GRID_WIDTH)
 GRID_DTYPE = np.uint8
+
+# On-disk cache layout version.  Bumped to "v2" when the grid width
+# dropped (5000 -> 4999) so stale 5000-wide memmaps from prior runs
+# are never re-opened at the new shape — numpy would silently
+# truncate the oversized file and shear each row by one column,
+# producing a subtly broken render rather than an error.  Old
+# gmgsi/{channel}/ dirs are ignored on upgrade; space is reclaimed
+# via `docker compose run --rm clear-cache`.
+CACHE_LAYOUT_VERSION = "v2"
 
 # Coordinate vectors — also stored verbatim from the upstream file's
 # geospatial_lat_max / lat_min / lon_min / lon_max attrs.  These are
@@ -115,7 +132,7 @@ class GMGSISource:
             Path(resolved_cache_root) if resolved_cache_root else None
         )
         self._channel_cache_dir: Path | None = (
-            self._cache_root / "gmgsi" / self.channel
+            self._cache_root / "gmgsi" / CACHE_LAYOUT_VERSION / self.channel
             if self._cache_root else None
         )
         if self._channel_cache_dir is not None:
@@ -289,6 +306,12 @@ class GMGSISource:
         ``0-255 Brightness Temperature`` per the upstream long_name.
         We mask pixels where ``dqf != 0`` (per CF convention 0=good)
         to 0, clip to [0, 255], and cast to uint8.
+
+        Width is coerced to ``GRID_WIDTH`` when within +-1 column
+        (NESDIS shaved the grid by one column on 2026-07-24; the guard
+        tolerates a future single-column twiddle without taking the
+        satellite layer down).  Anything further off, or any height
+        mismatch, is rejected outright — see ``_coerce_to_canonical``.
         """
         ds = xr.open_dataset(path, engine="netcdf4", decode_times=False)
         try:
@@ -296,19 +319,19 @@ class GMGSISource:
             # Strip time axis if present.
             if data.ndim == 3 and data.shape[0] == 1:
                 data = data[0]
-            if data.shape != GRID_SHAPE:
-                logger.warning(
-                    "%s: unexpected grid shape %s, want %s — rejecting",
-                    self.friendly_name, data.shape, GRID_SHAPE,
-                )
-                return None
 
-            # Apply quality mask when present.
+            dqf = None
             if "dqf" in ds.variables:
                 dqf = ds["dqf"].values
                 if dqf.ndim == 3 and dqf.shape[0] == 1:
                     dqf = dqf[0]
-                if dqf.shape == data.shape:
+
+            data = self._coerce_to_canonical(data)
+            if data is None:
+                return None
+            if dqf is not None:
+                dqf = self._coerce_to_canonical(dqf)
+                if dqf is not None and dqf.shape == data.shape:
                     data = np.where(dqf == 0, data, 0.0)
 
             # Treat NaN / out-of-range as no-data sentinel (0).
@@ -317,6 +340,38 @@ class GMGSISource:
             return data
         finally:
             ds.close()
+
+    @staticmethod
+    def _coerce_to_canonical(arr: np.ndarray) -> np.ndarray | None:
+        """Coerce a decoded GMGSI plane to the canonical ``GRID_SHAPE``.
+
+        Height must always equal ``GRID_HEIGHT`` — a latitude re-grid is
+        never benign (the Mercator-spaced ``LAT_VEC`` assumes exact row
+        count) so it stays loud-fail.  Width is allowed to wobble by one
+        column in either direction: pads narrow frames by repeating the
+        last column (edge mode — keeps the right-hand disk edge intact
+        rather than zero-filling) and crops wide frames by dropping the
+        extra trailing column(s).  Anything further off returns ``None``
+        so the caller rejects the frame rather than mis-rendering it.
+        """
+        if arr.ndim != 2 or arr.shape[0] != GRID_HEIGHT:
+            logger.warning(
+                "GMGSI: height mismatch %s, want %s — rejecting",
+                arr.shape, GRID_HEIGHT,
+            )
+            return None
+        width = arr.shape[1]
+        if width == GRID_WIDTH:
+            return arr
+        if width == GRID_WIDTH - 1:
+            return np.pad(arr, ((0, 0), (0, 1)), mode="edge")
+        if width == GRID_WIDTH + 1:
+            return arr[:, :GRID_WIDTH]
+        logger.warning(
+            "GMGSI: width %s out of tolerance (want %s +-1) — rejecting",
+            width, GRID_WIDTH,
+        )
+        return None
 
     # ── Cache (disk persistence + cross-worker snapshot) ──
 
@@ -463,7 +518,9 @@ class GMGSISource:
         if self._cache_root is None:
             self._channel_cache_dir = None
             return
-        self._channel_cache_dir = self._cache_root / "gmgsi" / self.channel
+        self._channel_cache_dir = (
+            self._cache_root / "gmgsi" / CACHE_LAYOUT_VERSION / self.channel
+        )
         # The directory may not exist yet on render-worker cold start
         # if pipeline hasn't created it — handle gracefully.
         if not self._channel_cache_dir.exists():

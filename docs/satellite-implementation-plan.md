@@ -114,11 +114,11 @@ noaa-gmgsi-pds/
 
 One file per hour per channel, ~7.5 MB compressed. Archive depth: 2021 onwards (5 years).
 
-**File structure** (verified against a live LW file 2026-05-23 23:00Z):
+**File structure** (verified against a live LW file 2026-05-23 23:00Z; re-verified 2026-07-24 after the upstream column drop):
 
 | Property | Value |
 |---|---|
-| Grid | 3000 yc × 5000 xc, regular equirectangular |
+| Grid | 3000 yc × 4999 xc, regular equirectangular (was 3000 × 5000 until 2026-07; coverage unchanged) |
 | Resolution | 0.0722° (~8 km at equator) |
 | Lat coverage | -72.74° to +72.72° |
 | Lon coverage | -179.93° to +180° |
