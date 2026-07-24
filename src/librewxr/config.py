@@ -31,7 +31,7 @@ _MODE_DEFAULTS: dict[str, dict[str, int]] = {
 class Settings(BaseSettings):
     model_config = {"env_prefix": "LIBREWXR_", "env_file": ".env", "extra": "ignore"}
 
-    host: str = "0.0.0.0"
+    host: str | None = None
     port: int = 8080
     public_url: str = "http://localhost:8080"
     # Optional direct TLS termination.  Leave both unset (the default) to
