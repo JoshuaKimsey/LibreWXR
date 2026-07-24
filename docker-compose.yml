@@ -49,6 +49,18 @@ services:
           #   ALL regions + full NWP chain:           ~9-10 GB
           # Override in .env: LIBREWXR_MEMORY=10G
           memory: ${LIBREWXR_MEMORY:-7G}
+    # LibreWXR is memmap-heavy: every radar/NWP/satellite/nowcast frame
+    # is a separate np.memmap file, and on cold start the renderer reopens
+    # all of them via __setstate__.  A fully-populated multi-region cache
+    # (12 frames × ~13 regions + 13 NWP grids × ~30 timesteps × 2 +
+    # nowcast + satellite) is 800+ open files before any tile render —
+    # the Docker default soft nofile (often 1024 on the host) blows up
+    # with EMFILE on the very first state.json reload.  65536 is ~80x
+    # the actual steady-state usage and well below any host hard limit.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
 
   # ─── MULTI MODE ─────────────────────────────────────────────────────
   # pipeline   — single asyncio process fetching all radar / NWP /
@@ -83,6 +95,14 @@ services:
       resources:
         limits:
           memory: ${LIBREWXR_PIPELINE_MEMORY:-12G}
+    # See the single-mode service above for the rationale.  The pipeline
+    # writes the memmap files but never reopens them via __setstate__,
+    # so it has lower FD pressure than the renderer; included for
+    # symmetry and headroom during fetch bursts.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
 
   renderer:
     profiles: ["multi"]
@@ -115,6 +135,15 @@ services:
       resources:
         limits:
           memory: ${LIBREWXR_RENDER_MEMORY:-18G}
+    # The renderer reopens every cached memmap via __setstate__ on each
+    # state.json refresh (see the single-mode comment above).  This is
+    # the service that was hitting EMFILE in production — the nofile
+    # limit must cover ~800+ radar/NWP/satellite/nowcast frames plus
+    # tile cache, HTTP, and warmer thread pools.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
 
   # ─── MANUAL UTILITIES ───────────────────────────────────────────────
   # Wipe the shared cache volume.  Gated behind the "manual" profile so
