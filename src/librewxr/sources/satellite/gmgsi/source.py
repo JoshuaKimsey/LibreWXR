@@ -32,6 +32,8 @@ import fsspec
 import numpy as np
 import xarray as xr
 
+from librewxr.sources._helpers import HDF5_LOCK
+
 logger = logging.getLogger(__name__)
 
 # Grid constants.  Verified against a live LW file 2026-05-23 and
@@ -327,33 +329,34 @@ class GMGSISource:
         satellite layer down).  Anything further off, or any height
         mismatch, is rejected outright — see ``_coerce_to_canonical``.
         """
-        ds = xr.open_dataset(path, engine="netcdf4", decode_times=False)
-        try:
-            data = ds["data"].values
-            # Strip time axis if present.
-            if data.ndim == 3 and data.shape[0] == 1:
-                data = data[0]
+        with HDF5_LOCK:
+            ds = xr.open_dataset(path, engine="netcdf4", decode_times=False)
+            try:
+                data = ds["data"].values
+                # Strip time axis if present.
+                if data.ndim == 3 and data.shape[0] == 1:
+                    data = data[0]
 
-            dqf = None
-            if "dqf" in ds.variables:
-                dqf = ds["dqf"].values
-                if dqf.ndim == 3 and dqf.shape[0] == 1:
-                    dqf = dqf[0]
+                dqf = None
+                if "dqf" in ds.variables:
+                    dqf = ds["dqf"].values
+                    if dqf.ndim == 3 and dqf.shape[0] == 1:
+                        dqf = dqf[0]
 
-            data = self._coerce_to_canonical(data)
-            if data is None:
-                return None
-            if dqf is not None:
-                dqf = self._coerce_to_canonical(dqf)
-                if dqf is not None and dqf.shape == data.shape:
-                    data = np.where(dqf == 0, data, 0.0)
+                data = self._coerce_to_canonical(data)
+                if data is None:
+                    return None
+                if dqf is not None:
+                    dqf = self._coerce_to_canonical(dqf)
+                    if dqf is not None and dqf.shape == data.shape:
+                        data = np.where(dqf == 0, data, 0.0)
 
-            # Treat NaN / out-of-range as no-data sentinel (0).
-            data = np.where(np.isfinite(data), data, 0.0)
-            data = np.clip(data, 0, 255).astype(GRID_DTYPE)
-            return data
-        finally:
-            ds.close()
+                # Treat NaN / out-of-range as no-data sentinel (0).
+                data = np.where(np.isfinite(data), data, 0.0)
+                data = np.clip(data, 0, 255).astype(GRID_DTYPE)
+                return data
+            finally:
+                ds.close()
 
     @staticmethod
     def _coerce_to_canonical(arr: np.ndarray) -> np.ndarray | None:

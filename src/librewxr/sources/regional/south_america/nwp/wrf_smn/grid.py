@@ -50,6 +50,7 @@ import httpx
 import numpy as np
 
 from librewxr.config import settings
+from librewxr.sources._helpers import HDF5_LOCK
 from librewxr.sources.regional.north_america.usa.nwp.hrrr.grid import compute_snow_mask
 
 logger = logging.getLogger(__name__)
@@ -324,7 +325,7 @@ def decode_pp_message(nc_bytes: bytes) -> np.ndarray | None:
         with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as tmp:
             tmp.write(nc_bytes)
             tmp_path = tmp.name
-        with h5py.File(tmp_path, "r") as f:
+        with HDF5_LOCK, h5py.File(tmp_path, "r") as f:
             if "PP" not in f:
                 logger.warning(
                     "WRF-SMN file has no 'PP' dataset (vars=%s)",
@@ -385,7 +386,7 @@ def decode_t2_message(nc_bytes: bytes) -> np.ndarray | None:
         with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as tmp:
             tmp.write(nc_bytes)
             tmp_path = tmp.name
-        with h5py.File(tmp_path, "r") as f:
+        with HDF5_LOCK, h5py.File(tmp_path, "r") as f:
             if "T2" not in f:
                 logger.warning(
                     "WRF-SMN file has no 'T2' dataset (vars=%s)",

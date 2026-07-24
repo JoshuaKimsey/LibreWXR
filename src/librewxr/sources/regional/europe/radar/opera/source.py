@@ -25,7 +25,7 @@ import numpy as np
 
 from librewxr.data.regions import RegionDef
 from librewxr.data.retry import retry_get
-from librewxr.sources._helpers import _dbz_float_to_uint8
+from librewxr.sources._helpers import HDF5_LOCK, _dbz_float_to_uint8
 
 logger = logging.getLogger(__name__)
 
@@ -120,13 +120,13 @@ def _parse_opera_hdf5(data: bytes) -> np.ndarray | None:
     OPERA marks inconsistent swaths of ocean as "undetect."
     """
     try:
-        f = h5py.File(io.BytesIO(data), "r")
-        raw = f["dataset1/data1/data"][:]
-        what = f["dataset1/data1/what"]
-        nodata_val = float(what.attrs["nodata"])
-        undetect_val = float(what.attrs["undetect"])
-        gain = float(what.attrs["gain"])
-        offset = float(what.attrs["offset"])
+        with HDF5_LOCK, h5py.File(io.BytesIO(data), "r") as f:
+            raw = f["dataset1/data1/data"][:]
+            what = f["dataset1/data1/what"]
+            nodata_val = float(what.attrs["nodata"])
+            undetect_val = float(what.attrs["undetect"])
+            gain = float(what.attrs["gain"])
+            offset = float(what.attrs["offset"])
 
         # Apply gain/offset (usually 1.0/0.0 for OPERA CIRRUS)
         dbz = raw.astype(np.float32) * gain + offset
