@@ -158,7 +158,21 @@ class GMGSISource:
 
     def _get_fs(self) -> fsspec.AbstractFileSystem:
         if self._fs is None:
-            self._fs = fsspec.filesystem("s3", anon=True)
+            # Explicit botocore timeouts: the defaults can leave a stuck
+            # connection blocking the (thread-bridged) sync call for a very
+            # long time, and the pipeline skips a channel while its fetch
+            # task is pending — a hang here froze the satellite layer in
+            # production while radar kept updating.  Keep every network
+            # wait bounded so the fetch pass always finishes or fails.
+            self._fs = fsspec.filesystem(
+                "s3",
+                anon=True,
+                config_kwargs={
+                    "connect_timeout": 30,
+                    "read_timeout": 60,
+                    "retries": {"max_attempts": 3},
+                },
+            )
         return self._fs
 
     async def fetch(self) -> bool:

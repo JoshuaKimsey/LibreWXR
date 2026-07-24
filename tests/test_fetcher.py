@@ -484,3 +484,80 @@ class TestCarryForward:
 
         carried = (await store.get_frame(1000 + interval)).regions["TESTREG"]
         assert carried[0, 0] == 77  # still readable, original value
+
+
+class _StubSatelliteInstance:
+    """Satellite source stand-in exposing only what the background task uses."""
+
+    def __init__(self, behavior):
+        self._behavior = behavior
+
+    async def fetch(self) -> bool:
+        return await self._behavior()
+
+
+class _StubSatelliteContribution:
+    def __init__(self, behavior, name="GMGSI LW"):
+        self.name = name
+        self.instance = _StubSatelliteInstance(behavior)
+
+
+def _build_satellite_fetcher():
+    """Bare fetcher with just the state _fetch_satellite_background touches."""
+    fetcher = RadarFetcher.__new__(RadarFetcher)
+    fetcher._on_cycle_complete = None
+    fetcher._satellite_tasks = {}
+    return fetcher
+
+
+class TestSatelliteBackgroundFetch:
+    async def test_hung_fetch_times_out_and_frees_the_skip_gate(
+        self, monkeypatch, caplog
+    ):
+        """A fetch that hangs must finish (via deadline) so later cycles retry.
+
+        The scheduler skips a channel while its previous task is pending;
+        before the deadline existed, one hung S3 call froze the channel
+        until restart with nothing logged above DEBUG.
+        """
+        from librewxr.config import settings
+
+        monkeypatch.setattr(settings, "satellite_fetch_timeout", 0.05)
+        fetcher = _build_satellite_fetcher()
+
+        async def hang() -> bool:
+            await asyncio.sleep(30)
+            return True
+
+        contrib = _StubSatelliteContribution(hang)
+        task = asyncio.create_task(fetcher._fetch_satellite_background(contrib))
+        with caplog.at_level("WARNING"):
+            await asyncio.wait_for(task, timeout=5)  # must not take ~30s
+
+        assert task.done()
+        assert any("timed out" in r.message for r in caplog.records)
+
+    async def test_successful_fetch_fires_cycle_complete(self):
+        fetcher = _build_satellite_fetcher()
+        fired = asyncio.Event()
+
+        async def on_complete() -> None:
+            fired.set()
+
+        fetcher._on_cycle_complete = on_complete
+
+        async def ok() -> bool:
+            return True
+
+        await fetcher._fetch_satellite_background(_StubSatelliteContribution(ok))
+        assert fired.is_set()
+
+    async def test_failed_fetch_is_dropped_with_a_warning(self, caplog):
+        fetcher = _build_satellite_fetcher()
+
+        async def boom() -> bool:
+            raise RuntimeError("s3 exploded")
+
+        with caplog.at_level("WARNING"):
+            await fetcher._fetch_satellite_background(_StubSatelliteContribution(boom))
+        assert any("fetch failed" in r.message for r in caplog.records)

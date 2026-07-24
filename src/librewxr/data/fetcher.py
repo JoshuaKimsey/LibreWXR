@@ -386,9 +386,27 @@ class RadarFetcher:
         cycle-complete hook on success so render-only workers pick up
         new frames mid-cycle.  A failed fetch is warned and dropped;
         the next cycle retries.
+
+        The fetch runs under ``satellite_fetch_timeout``.  The scheduler
+        skips a channel while its previous task is still pending, so a
+        fetch that hangs (instead of failing) would otherwise freeze the
+        channel forever with no log above DEBUG.  On expiry the task
+        completes, the skip-gate opens, and the next cycle retries.  Note
+        the cancellation only abandons the coroutine — a worker thread
+        blocked inside a syscall lingers until its socket dies, which the
+        source's client-side timeouts keep bounded.
         """
         try:
-            new_frames = await contrib.instance.fetch()
+            new_frames = await asyncio.wait_for(
+                contrib.instance.fetch(), timeout=settings.satellite_fetch_timeout,
+            )
+        except TimeoutError:
+            logger.warning(
+                "%s fetch timed out after %.0fs, satellite layer may be stale",
+                contrib.name, settings.satellite_fetch_timeout,
+            )
+            release_memory()
+            return
         except Exception:
             logger.warning(
                 "%s fetch failed, satellite layer may be stale", contrib.name,
