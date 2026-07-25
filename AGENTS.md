@@ -109,7 +109,7 @@ Docker Compose uses profiles: `COMPOSE_PROFILES=single` or `COMPOSE_PROFILES=mul
 - **Source layout:** `src/librewxr/` (hatchling build backend, editable install via `pip install -e ".[dev]"`)
 - **Entry points:** `python -m librewxr.main` (renderer/server); `python -m librewxr.data_pipeline` (multi-mode fetcher)
 - **Auto-discovery:** `sources/__init__.py` walks the `sources/` tree and registers radar/NWP/satellite providers automatically. Adding a source requires no changes to `fetcher.py`, `routes.py`, or `main.py`.
-- **Shared state wiring:** Lifespan in `main.py` creates all singletons and assigns them to `routes` module-level vars — dependencies are NOT injected via FastAPI's DI. Key vars: `frame_store`, `tile_cache`, `nwp_grids` (dict by slug), `ecmwf_grid`, `nwp_chain`, `satellite_grids`, `nowcast_store`, `alerts_store`, `alerts_fetcher`, `tile_request_tracker`.
+- **Shared state wiring:** Lifespan functions in `main.py` create all singletons and assign them to `routes` module-level vars — dependencies are NOT injected via FastAPI's DI. Two variants exist: `lifespan` (single mode + multi fetcher parent) and `_render_only_lifespan` (multi renderer workers; leaves fetch-side singletons as `None`). Key vars: `frame_store`, `tile_cache`, `nwp_grids` (dict by slug), `ecmwf_grid`, `nwp_chain`, `satellite_grids`, `nowcast_store`, `alerts_store`, `alerts_fetcher`, `tile_request_tracker`, `tile_warmer`, `radar_cache`, `radar_fetcher`, `enabled_regions`, `alerts_enabled`.
 - **NWP chain:** Priority-ordered sources: HRRR (10) → HRRR-Alaska (11) → HRDPS (20) → JMA MSM (20) → AROME Antilles (25) → AROME Guyane (26) → AROME Indien (27) → AROME Ncaled (28) → AROME Polyn (29) → DMI DINI (30) → ICON-EU (35) → WRF-SMN (40) → IFS (1000, global catch-all). `NWPChain` dispatches narrowest-domain-first.
 - **Radar regions:** US (USCOMP, AKCOMP, HICOMP, PRCOMP, GUCOMP), Canada (CACOMP), Central America (SVCOMP), Europe (OPERA + ITCOMP — Italy via DPC, finer `pixel_size` so it precedes OPERA in the multi-region compositor), Japan (JPCOMP — JMA HRPN analysis leg), Taiwan (TWCOMP), SE Asia (MYPENINSULAR, MYEAST). Region groups: CONUS, US, CANADA, CENTRAL_AMERICA, EUROPE, JAPAN, SOUTHEAST_ASIA, TAIWAN, ALL.
 - **Data encoding:** Radar frames are `dict[str, np.ndarray]` keyed by region name, stored as uint8 dBZ values.
@@ -131,6 +131,12 @@ All config via `LIBREWXR_*` env vars or `.env` file. Settings defined in `src/li
 - `LIBREWXR_WARMER_THREADS`: render thread pool size (0 = mode default: auto single, 4 multi)
 - `LIBREWXR_RENDER_ONLY`: `true` — skip fetcher init, memmap pipeline snapshot (multi mode)
 - `LIBREWXR_SSL_CERTFILE` / `LIBREWXR_SSL_KEYFILE`: optional direct TLS termination (paths to cert + key; leave both unset to serve plain HTTP behind a reverse proxy)
+- `LIBREWXR_HOST`: bind host (default unset → uvicorn dual-stack default; set `0.0.0.0` to restore the pre-`f1eea96` IPv4-only behaviour — useful for IPv4-only reverse proxies)
+- `LIBREWXR_PORT`: bind port (default 8080)
+- `LIBREWXR_PUBLIC_URL`: public base URL advertised by the JSON API (default `http://localhost:8080`)
+- `LIBREWXR_CORS_ORIGINS`: comma-separated allowed origins (default `["*"]`)
+- `LIBREWXR_FETCH_INTERVAL`: radar/satellite fetch cadence, seconds (default 600)
+- `LIBREWXR_STATE_POLL_INTERVAL` / `LIBREWXR_STATE_WAIT_TIMEOUT`: multi-mode `state.json` mtime poll interval / startup wait before fresh snapshot (defaults 1.0s / 300.0s; `0` wait = forever)
 
 **Radar:**
 - `LIBREWXR_ENABLED_REGIONS`: `ALL`, `CONUS`, `US`, `CANADA`, `EUROPE`, or comma-separated region names
@@ -153,14 +159,19 @@ All config via `LIBREWXR_*` env vars or `.env` file. Settings defined in `src/li
 **Nowcast:**
 - `LIBREWXR_NOWCAST_ENABLED`: default true
 - `LIBREWXR_NOWCAST_FRAMES`: default 6 (10-min forecast frames)
+- `LIBREWXR_NOWCAST_BLEND_MODE`: `radar`, `blended` (default), or `model` — radar extrapolation only, radar+IFS blend, or IFS-only nowcast composition
+- `LIBREWXR_ARROW_FLOW_ENABLED`: render motion-arrow overlay on nowcast tiles (default true)
 
 **Alerts:**
 - `LIBREWXR_ALERTS_ENABLED`: WMO CAP weather alerts toggle
 - `LIBREWXR_ALERTS_FETCH_INTERVAL`: default 300s
+- `LIBREWXR_ALERTS_CACHE_DIR`: local WMO CAP cache dir (default empty = system temp)
+- `LIBREWXR_ALERTS_CONCURRENCY`: parallel alert fetches (default 5)
 
 **Other:**
 - `LIBREWXR_CACHE_DIR`: persistent disk cache; empty = in-memory only
 - `LIBREWXR_NWP_FETCH_CONCURRENCY`: max parallel NWP grid decodes (default 4)
+- `LIBREWXR_TILE_TRACKING_ENABLED`: hot-tile counters surfaced in `/health` diagnostics (default true; adaptive warming policy not currently shipping)
 
 ## Adding a New Source
 
