@@ -37,12 +37,21 @@ This document is the **full** reference for every setting LibreWXR understands. 
 
 ### `LIBREWXR_HOST`
 
-The address the server binds to.
+The network interface the server binds to. When unset (`None`), the value is passed straight to uvicorn, which selects a dual-stack listen — both IPv4 and IPv6 on capable systems. This replaced the previous IPv4-only `0.0.0.0` default in commit `f1eea96` ("Default host to None (dual-stack) instead of 0.0.0.0 (IPv4-only)").
+
+Most self-hosters want the new behaviour, but if your reverse proxy or network only speaks IPv4, set this explicitly:
+
+| Value | Behaviour |
+|---|---|
+| `0.0.0.0` | IPv4 wildcard (all interfaces). Backwards-compatible with pre-`f1eea96` behaviour — what most IPv4-only deployments behind nginx / cloudflared will want. |
+| `127.0.0.1` | IPv4 loopback only — useful when a sidecar proxy on the same host is the only client that should reach LibreWXR. |
+| `::` | IPv6 wildcard (implies dual-stack on most kernels). |
+| `<other IP>` | Bind to one specific interface. |
 
 | | |
 |---|---|
-| **Default** | `0.0.0.0` |
-| **Type** | string |
+| **Default** | `None` (uvicorn dual-stack default) |
+| **Type** | string \| None |
 
 ### `LIBREWXR_PORT`
 
