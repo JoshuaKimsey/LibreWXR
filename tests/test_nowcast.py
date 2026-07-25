@@ -9,6 +9,9 @@ import pytest
 pytestmark = pytest.mark.nowcast
 
 from librewxr.data.nowcast import (
+    NWP_FLOW_NORTH,
+    NWP_FLOW_SOUTH,
+    NWP_FLOW_WEST,
     NowcastFrame,
     NowcastGenerator,
     NowcastStore,
@@ -777,4 +780,211 @@ class TestArrowFlowGating:
         assert timestamps[0] == 1600 + 600
         # The first timestamp equals latest_ts+interval for step=1.
         # Generate interruptions interleaving or out-of-order would fail this.
-        assert timestamps[2] == 1600 + 3 * 600
+
+
+# ---------------------------------------------------------------------------
+# Composite NWP flow (hybrid arrow path)
+# ---------------------------------------------------------------------------
+
+
+class _StubNWPChain:
+    """Minimal NWPChain stub for the composite flow tests.
+
+    ``sample`` returns a global precip raster at the given timestamp —
+    a blob that moves between prev_ts and latest_ts so Farneback picks
+    up real motion.  ``has_data`` just returns ``True``.
+    """
+
+    def __init__(self, prev_blob_lon: int, latest_blob_lon: int):
+        self._prev_blob_lon = prev_blob_lon
+        self._latest_blob_lon = latest_blob_lon
+
+    def has_data(self) -> bool:
+        return True
+
+    def sample(self, lat, lon, timestamp, bilinear=False):
+        # Build a precip blob at a fixed latitude that we offset in
+        # longitude per timestamp.  Return uint8 dBZ-encoded values.
+        res = 5.0  # coarse degrees so the stub is fast
+        row = ((NWP_FLOW_NORTH - lat) / res).astype(np.int32)
+        col = ((lon - NWP_FLOW_WEST) / res).astype(np.int32)
+        h = int(round((NWP_FLOW_NORTH - NWP_FLOW_SOUTH) / res)) + 1
+        w = int(round(360.0 / res))
+        grid = np.zeros((h, w), dtype=np.uint8)
+        # Blob center chosen to be within the grid.
+        cy = h // 2
+        cx = (w // 4) if timestamp == 1000 else (w // 2)
+        ys_grid, xs_grid = np.ogrid[0:h, 0:w]
+        mask = (ys_grid - cy) ** 2 + (xs_grid - cx) ** 2 <= 5 ** 2
+        grid[mask] = 150
+        row = np.clip(row, 0, h - 1)
+        col = np.clip(col, 0, w - 1)
+        return grid[row, col]
+
+
+class TestCompositeNWPFlow:
+    """Phase A-NWP: the hybrid arrow path's composite global flow raster."""
+
+    def test_compute_nwp_flow_returns_flow(self, monkeypatch):
+        """``_compute_nwp_flow_sync`` returns a flow array of the right shape."""
+        from librewxr.config import settings
+
+        # Use a coarse resolution so the stub raster is small + fast.
+        monkeypatch.setattr(settings, "arrow_nwp_flow_resolution_deg", 5.0)
+        monkeypatch.setattr(settings, "arrow_flow_target_dim", 500)
+
+        chain = _StubNWPChain(prev_blob_lon=0, latest_blob_lon=45)
+        store = NowcastStore()
+        gen = NowcastGenerator(
+            store, store, cache=None, nowcast_contributions=[],
+            nwp_chain=chain,
+        )
+
+        flow = gen._compute_nwp_flow_sync(prev_ts=1000, latest_ts=1600, interval=600)
+        assert flow is not None
+        assert flow.ndim == 3
+        assert flow.shape[2] == 2
+        # 5° resolution → lat_count = 37, lon_count = 72
+        assert flow.shape[0] == int(round(180.0 / 5.0)) + 1
+        assert flow.shape[1] == int(round(360.0 / 5.0))
+
+    def test_compute_nwp_flow_no_chain_returns_none(self):
+        """Without an ``nwp_chain``, the composite flow is ``None``."""
+        store = NowcastStore()
+        gen = NowcastGenerator(
+            store, store, cache=None, nowcast_contributions=[],
+            nwp_chain=None,
+        )
+        flow = gen._compute_nwp_flow_sync(prev_ts=1000, latest_ts=1600, interval=600)
+        assert flow is None
+
+    def test_compute_nwp_flow_all_zero_returns_none(self, monkeypatch):
+        """If both snapshots are all-zero (NWP fetch gap), bail with ``None``."""
+        from librewxr.config import settings
+
+        monkeypatch.setattr(settings, "arrow_nwp_flow_resolution_deg", 5.0)
+
+        class _EmptyChain:
+            def has_data(self):
+                return True
+
+            def sample(self, lat, lon, ts, bilinear=False):
+                return np.zeros(lat.shape, dtype=np.uint8)
+
+        store = NowcastStore()
+        gen = NowcastGenerator(
+            store, store, cache=None, nowcast_contributions=[],
+            nwp_chain=_EmptyChain(),
+        )
+        flow = gen._compute_nwp_flow_sync(prev_ts=1000, latest_ts=1600, interval=600)
+        assert flow is None
+
+    async def test_generate_writes_nwp_flow_when_arrow_on(self, monkeypatch):
+        """``arrow_flow_enabled=True`` → ``replace_nwp_flow`` is called."""
+        from librewxr.config import settings
+
+        store = NowcastStore()
+        stub = _StubFrameStore(
+            {"USCOMP": _make_blob(60, 100, radius=15, value=150)},
+            {"USCOMP": _make_blob(60, 110, radius=15, value=150)},
+        )
+        chain = _StubNWPChain(prev_blob_lon=0, latest_blob_lon=45)
+        gen = NowcastGenerator(
+            stub, store, cache=None, nowcast_contributions=[],
+            nwp_chain=chain,
+        )
+
+        monkeypatch.setattr(settings, "nowcast_enabled", False)
+        monkeypatch.setattr(settings, "arrow_flow_enabled", True)
+        monkeypatch.setattr(settings, "arrow_flow_target_dim", 200)
+        monkeypatch.setattr(settings, "arrow_nwp_flow_resolution_deg", 5.0)
+
+        await gen.generate()
+
+        nwp_flow = await store.get_nwp_flow()
+        assert nwp_flow is not None
+        assert nwp_flow.ndim == 3
+
+    async def test_generate_clears_nwp_flow_when_arrow_off(self, monkeypatch):
+        """``arrow_flow_enabled=False`` + ``nowcast_enabled=True`` → NWP
+        flow is cleared (not computed), so stale flow can't leak arrows."""
+        from librewxr.config import settings
+
+        store = NowcastStore()
+        # Pre-seed a stale NWP flow so we can verify it's cleared.
+        await store.replace_nwp_flow(
+            np.zeros((4, 4, 2), dtype=np.float32)
+        )
+        assert await store.get_nwp_flow() is not None
+
+        stub = _StubFrameStore(
+            {"USCOMP": _make_blob(60, 100, radius=15, value=150)},
+            {"USCOMP": _make_blob(60, 110, radius=15, value=150)},
+        )
+        chain = _StubNWPChain(prev_blob_lon=0, latest_blob_lon=45)
+        gen = NowcastGenerator(
+            stub, store, cache=None, nowcast_contributions=[],
+            nwp_chain=chain,
+        )
+
+        monkeypatch.setattr(settings, "nowcast_enabled", True)
+        monkeypatch.setattr(settings, "nowcast_frames", 3)
+        monkeypatch.setattr(settings, "fetch_interval", 600)
+        monkeypatch.setattr(settings, "arrow_flow_enabled", False)
+
+        await gen.generate()
+
+        # Nowcast frames still written (nowcast on).
+        assert len(await store.get_timestamps()) == 3
+        # NWP flow cleared because arrow_flow is off.
+        assert await store.get_nwp_flow() is None
+
+
+class TestNowcastStoreNWPFlow:
+    """``replace_nwp_flow`` / ``get_nwp_flow`` plumbing on ``NowcastStore``."""
+
+    @pytest.mark.asyncio
+    async def test_replace_and_get_nwp_flow(self, tmp_path):
+        store = NowcastStore(cache_dir=tmp_path)
+        flow = np.full((5, 10, 2), 1.5, dtype=np.float32)
+        await store.replace_nwp_flow(flow)
+        result = await store.get_nwp_flow()
+        assert result is not None
+        np.testing.assert_array_equal(result, flow)
+
+    @pytest.mark.asyncio
+    async def test_replace_nwp_flow_none_clears(self, tmp_path):
+        store = NowcastStore(cache_dir=tmp_path)
+        await store.replace_nwp_flow(np.full((5, 10, 2), 1.5, dtype=np.float32))
+        await store.replace_nwp_flow(None)
+        assert await store.get_nwp_flow() is None
+
+    @pytest.mark.asyncio
+    async def test_nwp_flow_roundtrip_persistence(self, tmp_path):
+        """``__getstate__``/``__setstate__`` round-trips the NWP flow field."""
+        producer = NowcastStore(cache_dir=tmp_path)
+        flow = np.full((4, 8, 2), 2.0, dtype=np.float32)
+        await producer.replace_nwp_flow(flow)
+
+        state = producer.__getstate__()
+        import json
+        snapshot = json.loads(json.dumps(state))
+
+        consumer = NowcastStore()
+        consumer.__setstate__(snapshot)
+        result = await consumer.get_nwp_flow()
+        assert result is not None
+        np.testing.assert_array_equal(result, flow)
+
+    @pytest.mark.asyncio
+    async def test_nwp_flow_absent_in_old_snapshot(self, tmp_path):
+        """Old snapshots written before the hybrid arrow path omit
+        ``nwp_flow``; ``__setstate__`` must treat absence as ``None``."""
+        producer = NowcastStore(cache_dir=tmp_path)
+        state = producer.__getstate__()
+        # Simulate an old snapshot by removing the key entirely.
+        del state["nwp_flow"]
+
+        consumer = NowcastStore()
+        consumer.__setstate__(state)
+        assert await consumer.get_nwp_flow() is None

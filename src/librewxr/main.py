@@ -413,6 +413,7 @@ async def lifespan(app: FastAPI):
         nowcast_generator = NowcastGenerator(
             store, nowcast_store, cache=cache,
             nowcast_contributions=nowcast_contribs,
+            nwp_chain=nwp_chain,
         )
         external_names = [c.region_name for c in nowcast_contribs]
         if settings.nowcast_enabled:

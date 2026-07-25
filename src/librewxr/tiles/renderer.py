@@ -222,8 +222,8 @@ def present_tile(
     flow_regions: dict[str, np.ndarray] | None = None,
     frame_regions: dict[str, np.ndarray] | None = None,
     enabled_regions: list[str] | None = None,
-    ecmwf_flow: np.ndarray | None = None,
-    ecmwf_grid=None,
+    nwp_flow: np.ndarray | None = None,
+    nwp_chain=None,
     frame_timestamp: int | None = None,
     z: int = 0,
     x: int = 0,
@@ -236,10 +236,14 @@ def present_tile(
     per-request because they depend on the request's color/format/arrow
     parameters, which are deliberately *not* in the cache key.
 
-    Arrow inputs (``flow_regions``, ``ecmwf_flow``, etc.) are passed
-    fresh on each call rather than baked into the geometry so a tile
-    that's cached without arrows can still render an arrow variant when
-    a later request asks for one.
+    Arrow inputs (``flow_regions``, ``nwp_flow``, ``nwp_chain``) are
+    passed fresh on each call rather than baked into the geometry so a
+    tile that's cached without arrows can still render an arrow variant
+    when a later request asks for one.  ``nwp_flow`` is the single
+    composite NWP optical-flow raster (one global field, see
+    ``NowcastGenerator._compute_nwp_flow_sync``); ``nwp_chain`` is the
+    dispatch chain used to gate arrow presence on the chain's own
+    precip at the point.
     """
     if geom.is_transparent:
         return _transparent_tile(geom.tile_size, fmt)
@@ -266,7 +270,7 @@ def present_tile(
                 (geom.pad, geom.pad, geom.pad + geom.tile_size, geom.pad + geom.tile_size)
             )
 
-    if arrow_style and (flow_regions or ecmwf_flow is not None):
+    if arrow_style and (flow_regions or nwp_flow is not None):
         regions = overlapping_regions(z, x, y, enabled_regions)
         if frame_regions:
             regions_with_data = [r for r in regions if r.name in frame_regions]
@@ -275,8 +279,8 @@ def present_tile(
         img = _draw_motion_arrows(
             img, flow_regions, frame_regions or {}, regions_with_data,
             z, x, y, geom.tile_size, arrow_style,
-            ecmwf_flow=ecmwf_flow,
-            ecmwf_grid=ecmwf_grid,
+            nwp_flow=nwp_flow,
+            nwp_chain=nwp_chain,
             frame_timestamp=frame_timestamp,
         )
 
@@ -298,13 +302,12 @@ def render_tile(
     smooth: bool = False,
     snow: bool = False,
     fmt: str = "png",
-    ecmwf_grid=None,
     nwp_chain=None,
     enabled_regions: list[str] | None = None,
     frame_timestamp: int | None = None,
     nowcast_blend: float | None = None,
     flow_regions: dict[str, np.ndarray] | None = None,
-    ecmwf_flow: np.ndarray | None = None,
+    nwp_flow: np.ndarray | None = None,
     arrow_style: str = "light",
 ) -> bytes:
     """Compute geometry and present it in a single call.
@@ -328,12 +331,12 @@ def render_tile(
         geom,
         color_scheme=color_scheme,
         fmt=fmt,
-        arrow_style=arrow_style if (flow_regions or ecmwf_flow is not None) else "",
+        arrow_style=arrow_style if (flow_regions or nwp_flow is not None) else "",
         flow_regions=flow_regions,
         frame_regions=frame_regions,
         enabled_regions=enabled_regions,
-        ecmwf_flow=ecmwf_flow,
-        ecmwf_grid=ecmwf_grid,
+        nwp_flow=nwp_flow,
+        nwp_chain=nwp_chain,
         frame_timestamp=frame_timestamp,
         z=z, x=x, y=y,
     )
@@ -671,8 +674,8 @@ def _draw_motion_arrows(
     z: int, x: int, y: int,
     tile_size: int,
     style: str = "light",
-    ecmwf_flow: np.ndarray | None = None,
-    ecmwf_grid=None,
+    nwp_flow: np.ndarray | None = None,
+    nwp_chain=None,
     frame_timestamp: int | None = None,
 ) -> Image.Image:
     """Draw precipitation motion vector arrows on the tile.
@@ -680,8 +683,11 @@ def _draw_motion_arrows(
     Overlays semi-transparent arrows on areas with active precipitation,
     showing storm movement direction and relative speed. Arrows are
     derived from the optical flow field computed between the two most
-    recent radar frames, with ECMWF IFS flow as a global fallback
-    outside radar coverage.
+    recent radar frames, with a single composite NWP optical-flow raster
+    as the global fallback outside radar coverage — reflecting whichever
+    regional NWP source is active at each point (HRRR over CONUS,
+    ICON-EU over Europe, JMA MSM over Japan, IFS elsewhere) rather than
+    IFS alone.
 
     ``style`` selects the arrow colour: ``"light"`` for white arrows
     (best on dark maps) or ``"dark"`` for dark arrows (best on light maps).
@@ -695,13 +701,12 @@ def _draw_motion_arrows(
     else:
         valid_regions = []
 
-    has_ecmwf = (
-        ecmwf_flow is not None
-        and ecmwf_grid is not None
-        and ecmwf_grid.data is not None
+    has_nwp = (
+        nwp_flow is not None
+        and nwp_chain is not None
     )
 
-    if not valid_regions and not has_ecmwf:
+    if not valid_regions and not has_nwp:
         return img
 
     # Precompute pixel-index arrays for each valid radar region
@@ -711,21 +716,31 @@ def _draw_motion_arrows(
         row_i, col_i = region_pixel_indices(r, z, x, y, tile_size)
         region_info.append((r, row_f, col_f, row_i, col_i))
 
-    # Precompute lat/lon grid for ECMWF fallback (only if needed)
-    ecmwf_latlons = None
-    ecmwf_precip = None
+    # Precompute lat/lon grid for composite NWP flow fallback (only if needed)
+    nwp_latlons = None
+    nwp_precip = None
     radar_coverage = None
-    if has_ecmwf:
-        from librewxr.sources.world.ifs.grid import GRID_HEIGHT, GRID_WIDTH, NORTH, PIXEL_SIZE, WEST
-        ecmwf_latlons = tile_pixel_latlons(z, x, y, tile_size)
-        ecmwf_precip = ecmwf_grid.sample(
-            ecmwf_latlons[0], ecmwf_latlons[1], frame_timestamp,
+    if has_nwp:
+        from librewxr.data.nowcast import (
+            NWP_FLOW_NORTH, NWP_FLOW_SOUTH, NWP_FLOW_WEST,
         )
-        # Precompute radar coverage so we can distinguish "clear sky under
-        # radar" from "outside radar coverage" when deciding whether to
-        # fall through to ECMWF arrows.
+        nwp_latlons = tile_pixel_latlons(z, x, y, tile_size)
+        # Presence gate: the chain's own precip at the point, above the
+        # noise floor.  This fixes the "HRRR precip present but IFS dry"
+        # miss where the old IFS-hardcoded path suppressed arrows.
+        nwp_precip = nwp_chain.sample(
+            nwp_latlons[0], nwp_latlons[1], frame_timestamp,
+        )
+        # Derive raster pixel size from the loaded array's shape so a
+        # resolution-knob change between cycles can't drift out of sync.
+        nwp_res = (NWP_FLOW_NORTH - NWP_FLOW_SOUTH) / (nwp_flow.shape[0] - 1)
+        # Precompute radar coverage so we can distinguish "clear sky
+        # under radar" from "outside radar coverage" when deciding
+        # whether to fall through to the composite NWP arrows.  Per the
+        # user's chosen behavior, radar coverage suppresses NWP arrows
+        # even when the radar flow is zero/stationary.
         if region_info:
-            lat_grid, lon_grid = ecmwf_latlons
+            lat_grid, lon_grid = nwp_latlons
             radar_coverage = np.zeros(lat_grid.shape, dtype=bool)
             for r in regions:
                 radar_coverage |= sample_coverage(r.name, lat_grid, lon_grid)
@@ -762,7 +777,7 @@ def _draw_motion_arrows(
                     # Only claim the pixel if it's within actual radar
                     # coverage (clear sky).  Pixels inside the region's
                     # bounding box but outside station coverage should
-                    # fall through to ECMWF.
+                    # fall through to the composite NWP arrows.
                     if radar_coverage is None or radar_coverage[ty, tx]:
                         found = True
                         break
@@ -801,36 +816,38 @@ def _draw_motion_arrows(
                 found = True
                 break  # Used this region for this grid point
 
-            # ECMWF fallback: only if no radar region claimed this pixel
-            if not found and has_ecmwf:
-                if ecmwf_precip[ty, tx] < noise_threshold:
+            # Composite NWP flow fallback: only if no radar region claimed
+            # this pixel (either no radar data here, or the radar frame
+            # says "dry" outside coverage).
+            if not found and has_nwp:
+                if nwp_precip[ty, tx] < noise_threshold:
                     continue  # Below noise floor — not visible on tile
 
-                lat = float(ecmwf_latlons[0][ty, tx])
-                lon = float(ecmwf_latlons[1][ty, tx])
+                lat = float(nwp_latlons[0][ty, tx])
+                lon = float(nwp_latlons[1][ty, tx])
 
-                # Convert lat/lon to ECMWF grid indices
-                er = (NORTH - lat) / PIXEL_SIZE
-                ec = (lon - WEST) / PIXEL_SIZE
-                eri = min(max(int(er), 0), GRID_HEIGHT - 1)
-                eci = min(max(int(ec), 0), GRID_WIDTH - 1)
+                # Convert lat/lon to composite raster indices
+                nr = (NWP_FLOW_NORTH - lat) / nwp_res
+                nc = (lon - NWP_FLOW_WEST) / nwp_res
+                nri = min(max(int(nr), 0), nwp_flow.shape[0] - 1)
+                nci = min(max(int(nc), 0), nwp_flow.shape[1] - 1)
 
-                fx = float(ecmwf_flow[eri, eci, 0])
-                fy = float(ecmwf_flow[eri, eci, 1])
+                fx = float(nwp_flow[nri, nci, 0])
+                fy = float(nwp_flow[nri, nci, 1])
 
-                # Local scale: ECMWF grid pixels per tile pixel
-                # Use lat/lon difference to compute the Jacobian
+                # Local scale: composite raster pixels per tile pixel.
+                # Use lat/lon difference to compute the Jacobian.
                 tx1 = min(tx + 1, tile_size - 1)
                 ty1 = min(ty + 1, tile_size - 1)
                 tx0 = max(tx - 1, 0)
                 ty0 = max(ty - 1, 0)
 
-                dlat_dy = (ecmwf_latlons[0][ty1, tx] - ecmwf_latlons[0][ty0, tx]) / (ty1 - ty0)
-                dlon_dx = (ecmwf_latlons[1][ty, tx1] - ecmwf_latlons[1][ty, tx0]) / (tx1 - tx0)
+                dlat_dy = (nwp_latlons[0][ty1, tx] - nwp_latlons[0][ty0, tx]) / (ty1 - ty0)
+                dlon_dx = (nwp_latlons[1][ty, tx1] - nwp_latlons[1][ty, tx0]) / (tx1 - tx0)
 
-                # Convert degrees to ECMWF grid pixels
-                drow_dy = -dlat_dy / PIXEL_SIZE  # negative: lat decreases as row increases
-                dcol_dx = dlon_dx / PIXEL_SIZE
+                # Convert degrees to composite raster pixels
+                drow_dy = -dlat_dy / nwp_res  # negative: lat decreases as row increases
+                dcol_dx = dlon_dx / nwp_res
 
                 if abs(dcol_dx) < 1e-8 or abs(drow_dy) < 1e-8:
                     continue

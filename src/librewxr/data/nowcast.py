@@ -85,6 +85,29 @@ _MIN_PREV_NONZERO_PX = 1000
 # range from 0.01° to 0.05° per pixel.
 _MAX_FLOW_KM_PER_HOUR = 200.0
 
+# ── Composite NWP flow raster geometry ────────────────────────────────
+#
+# The arrow overlay outside radar coverage historically fell through to
+# a single IFS optical-flow field (``ecmwf_grid._flow``).  The hybrid
+# arrow path replaces that with a *composite* flow raster built from
+# ``NWPChain.sample()`` over a fixed lat/lon grid at T and T−1, so it
+# reflects whichever regional NWP source is active at each point
+# (HRRR over CONUS, ICON-EU over Europe, JMA MSM over Japan, ...) and
+# not just IFS.  The per-region radar flow (``NowcastStore._flows``)
+# still wins inside radar coverage; this raster only fills NWP-only
+# pixels, so the radar-coverage boundary-artifact problem that
+# ``_clamp_flow`` / the coverage-degradation guard exist to contain
+# does not apply here — NWP grids have full-domain coverage with no
+# station-range holes, and feather seams are smooth precip transitions.
+#
+# North/South/West are fixed; the resolution comes from
+# ``settings.arrow_nwp_flow_resolution_deg`` (default 0.25°).  The
+# renderer derives the per-pixel step from the loaded array's shape
+# so a knob change between cycles can't drift out of sync.
+NWP_FLOW_NORTH = 90.0
+NWP_FLOW_SOUTH = -90.0
+NWP_FLOW_WEST = -180.0
+
 
 def _coverage_degraded(prev: np.ndarray, latest: np.ndarray) -> tuple[bool, int, int]:
     """Detect partial-coverage degradation between two consecutive frames.
@@ -166,6 +189,11 @@ class NowcastStore:
     def __init__(self, cache_dir: Path | None = None):
         self._frames: dict[int, NowcastFrame] = {}
         self._flows: dict[str, np.ndarray] = {}
+        # Composite NWP optical-flow field (one global raster) used by
+        # the arrow overlay outside radar coverage.  Distinct filename
+        # prefix (``nwp_flow.dat``) keeps it clear of the radar-flow
+        # ``flow_*.dat`` cleanup glob and its own replace path below.
+        self._nwp_flow: np.ndarray | None = None
         self._lock = asyncio.Lock()
         if cache_dir is not None:
             self._memmap_dir = Path(cache_dir) / "nowcast"
@@ -253,6 +281,32 @@ class NowcastStore:
         async with self._lock:
             return dict(self._flows)
 
+    async def replace_nwp_flow(self, flow: np.ndarray | None) -> None:
+        """Update the single composite NWP optical-flow raster (or clear it).
+
+        The NWP flow is a single global field, so unlike ``replace_flows``
+        there's no per-region dict to swap — just one memmap-backed
+        array stored as ``nwp_flow.dat``.  Passing ``None`` clears it
+        (arrows outside radar coverage then simply don't render until
+        the next cycle rebuilds it).
+        """
+        async with self._lock:
+            old = self._nwp_flow
+            self._nwp_flow = None
+            if old is not None and hasattr(old, "filename"):
+                try:
+                    Path(str(old.filename)).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if flow is None:
+                return
+            self._nwp_flow = self._to_memmap("nwp_flow", flow)
+
+    async def get_nwp_flow(self) -> np.ndarray | None:
+        """Return the composite NWP optical-flow raster, or ``None``."""
+        async with self._lock:
+            return self._nwp_flow
+
     @property
     def data_bytes(self) -> int:
         """Total bytes across all nowcast frame arrays and flow fields."""
@@ -262,11 +316,14 @@ class NowcastStore:
                 total += arr.nbytes
         for arr in self._flows.values():
             total += arr.nbytes
+        if self._nwp_flow is not None:
+            total += int(self._nwp_flow.nbytes)
         return total
 
     def clear(self) -> None:
         self._frames.clear()
         self._flows.clear()
+        self._nwp_flow = None
 
     def __getstate__(self) -> dict:
         """Serialize state for cross-process reload (multi-worker mode)."""
@@ -291,10 +348,18 @@ class NowcastStore:
                 arr.dtype.str,
                 list(arr.shape),
             ]
+        nwp_flow_state = None
+        if self._nwp_flow is not None:
+            nwp_flow_state = [
+                os.path.basename(str(self._nwp_flow.filename)),
+                self._nwp_flow.dtype.str,
+                list(self._nwp_flow.shape),
+            ]
         return {
             "memmap_dir": str(self._memmap_dir),
             "frames": frames_state,
             "flows": flows_state,
+            "nwp_flow": nwp_flow_state,
         }
 
     def __setstate__(self, state: dict) -> None:
@@ -323,9 +388,22 @@ class NowcastStore:
                 shape=tuple(shape),
             )
 
+        new_nwp_flow = None
+        # Older snapshots written before the hybrid arrow path landed
+        # omit ``nwp_flow``; treat absence the same as "not computed".
+        nwp_state = state.get("nwp_flow")
+        if nwp_state is not None:
+            nw_basename, nw_dtype, nw_shape = nwp_state
+            new_nwp_flow = np.memmap(
+                memmap_dir / nw_basename,
+                dtype=np.dtype(nw_dtype), mode="r",
+                shape=tuple(nw_shape),
+            )
+
         self._memmap_dir = memmap_dir
         self._frames = new_frames
         self._flows = new_flows
+        self._nwp_flow = new_nwp_flow
         self._persistent = True
         if not hasattr(self, "_lock"):
             self._lock = asyncio.Lock()
@@ -361,6 +439,7 @@ class NowcastGenerator:
         nowcast_store: NowcastStore,
         cache=None,
         nowcast_contributions: list | None = None,
+        nwp_chain=None,
     ):
         self._store = store          # FrameStore (past radar)
         self._nowcast_store = nowcast_store
@@ -369,6 +448,12 @@ class NowcastGenerator:
         self._by_region = {
             c.region_name: c for c in self._contributions
         }
+        # NWPChain used by the hybrid arrow path to build the composite
+        # flow raster outside radar coverage.  ``None`` in tests or in
+        # deployments with every NWP source disabled; the generator
+        # then simply skips Phase A-NWP and arrows outside radar
+        # coverage don't render.
+        self._nwp_chain = nwp_chain
 
     async def generate(self) -> None:
         """Generate nowcast frames from the two most recent radar frames.
@@ -469,6 +554,19 @@ class NowcastGenerator:
         # The flows swap is unconditional — the arrow overlay depends on
         # it in both the nowcast-on and arrow-flow-only paths.
         await self._nowcast_store.replace_flows(flows)
+
+        # Phase A-NWP — composite global flow raster for the hybrid
+        # arrow path.  Only the arrow overlay reads this (nowcast
+        # extrapolation doesn't), so gate on ``arrow_flow_enabled``.
+        # When the flag is off, clear any prior raster so a stale field
+        # can't leak arrows in a deployment that just disabled it.
+        if settings.arrow_flow_enabled and self._nwp_chain is not None:
+            nwp_flow = await asyncio.to_thread(
+                self._compute_nwp_flow_sync, prev_ts, latest_ts, interval,
+            )
+            await self._nowcast_store.replace_nwp_flow(nwp_flow)
+        else:
+            await self._nowcast_store.replace_nwp_flow(None)
 
         # The frames swap only matters in the nowcast-on path; skipping
         # it on the arrow-flow-only path leaves NowcastStore._frames
@@ -658,6 +756,62 @@ class NowcastGenerator:
             len(flows), len(external_by_region), elapsed,
         )
         return frames, flows
+
+    def _compute_nwp_flow_sync(
+        self, prev_ts: int, latest_ts: int, interval: int,
+    ) -> np.ndarray | None:
+        """Build the composite NWP optical-flow raster for the hybrid arrow path.
+
+        Samples ``NWPChain.sample()`` over the fixed lat/lon grid (extent
+        set by ``NWP_FLOW_NORTH/SOUTH/WEST``, resolution by
+        ``settings.arrow_nwp_flow_resolution_deg``) at ``prev_ts`` and
+        ``latest_ts`` to get two composite precip snapshots reflecting
+        whichever regional NWP source is active at each point, then runs
+        Farneback between them.  One pass replaces the IFS-only flow
+        field that the arrow overlay previously special-cased — every
+        regional source (HRRR / ICON-EU / JMA MSM / ...) draws arrows
+        automatically once it joins the chain, with no per-source
+        ``sample_flow`` plumbing.
+
+        Units are raster-pixels per ``interval``-second step, matching
+        how the per-region radar flow is also per-step.  The renderer
+        finite-diffs the (lat, lon) → raster (row, col) mapping for the
+        Jacobian, just as it does for radar regions.
+
+        Returns ``None`` when the chain has no data at either timestamp
+        — the arrow overlay then simply doesn't render outside radar
+        coverage until the next cycle rebuilds it.
+        """
+        chain = self._nwp_chain
+        if chain is None or not chain.has_data():
+            return None
+
+        res = settings.arrow_nwp_flow_resolution_deg
+        lat_count = int(round((NWP_FLOW_NORTH - NWP_FLOW_SOUTH) / res)) + 1
+        lon_count = int(round(360.0 / res))
+        lats = np.linspace(
+            NWP_FLOW_NORTH, NWP_FLOW_SOUTH, lat_count, dtype=np.float32,
+        )
+        lons = np.linspace(
+            NWP_FLOW_WEST, NWP_FLOW_WEST + 360.0 - res, lon_count,
+            dtype=np.float32,
+        )
+        # np.meshgrid(indexing='xy') → lon_grid, lat_grid both shape
+        # (lat_count, lon_count); row index runs N→S, col index W→E.
+        lon_grid, lat_grid = np.meshgrid(lons, lats)
+
+        prev = chain.sample(lat_grid, lon_grid, prev_ts, bilinear=False)
+        latest = chain.sample(lat_grid, lon_grid, latest_ts, bilinear=False)
+
+        # If the second snapshot is all-zero (NWP fetch gap),
+        # Farneback would happily produce spurious flow from noise; bail.
+        if not prev.any() or not latest.any():
+            return None
+
+        flow = _compute_flow(
+            prev, latest, target_dim=settings.arrow_flow_target_dim,
+        )
+        return flow
 
 
 # ---------------------------------------------------------------------------

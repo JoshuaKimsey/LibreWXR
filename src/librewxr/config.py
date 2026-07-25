@@ -381,6 +381,16 @@ class Settings(BaseSettings):
     # needs the pixel sharpness).  No effect when nowcast is on, since that
     # path uses the module constant ``_TARGET_FLOW_DIM`` in nowcast.py.
     arrow_flow_target_dim: int = 500
+    # Resolution of the global composite NWP flow raster used by the
+    # arrow overlay outside radar coverage, in degrees.  0.25 (default)
+    # gives a 720×360 float32 grid (~2 MB, <1s Farneback/cycle).  The
+    # 32/48px arrow draw grid can't resolve finer detail at most zooms,
+    # so coarser is cheaper for no visible loss.  Finer values help
+    # only at high zoom inside small convective cells — which inside
+    # radar coverage already get the fine per-region radar flow, so
+    # the composite only fills NWP-only regions where sub-0.25° detail
+    # doesn't matter.  Advanced tuning; not exposed in .env.example.
+    arrow_nwp_flow_resolution_deg: float = 0.25
     cache_dir: str = ""  # Persistent cache directory for fetched grids; empty = in-memory only
 
     # Multi-worker tile-server split.  When render_only is True, this

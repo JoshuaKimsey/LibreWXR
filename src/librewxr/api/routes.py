@@ -195,7 +195,9 @@ async def health():
             "enabled": settings.nowcast_enabled,
             "arrow_flow_enabled": settings.arrow_flow_enabled,
             "arrow_flow_target_dim": settings.arrow_flow_target_dim,
+            "arrow_nwp_flow_resolution_deg": settings.arrow_nwp_flow_resolution_deg,
             "flows": len(await nowcast_store.get_flows() or {}) if nowcast_store else 0,
+            "nwp_flow": await nowcast_store.get_nwp_flow() is not None if nowcast_store else False,
             "frames": await nowcast_store.get_timestamps() if nowcast_store else [],
             "count": len(await nowcast_store.get_timestamps()) if nowcast_store else 0,
         },
@@ -374,24 +376,23 @@ async def radar_tile(
         tile_cache.put(geom_key, geom)
 
     flow_regions = None
-    ecmwf_flow = None
+    nwp_flow = None
     if arrow_style:
         if nowcast_store is not None:
             flow_regions = await nowcast_store.get_flows() or None
-        if ecmwf_grid is not None and ecmwf_grid.flow is not None:
-            ecmwf_flow = ecmwf_grid.flow
+            nwp_flow = await nowcast_store.get_nwp_flow()
 
     tile_bytes = await asyncio.to_thread(
         present_tile,
         geom,
         color_scheme=color,
         fmt=ext,
-        arrow_style=arrow_style if (flow_regions or ecmwf_flow is not None) else "",
+        arrow_style=arrow_style if (flow_regions or nwp_flow is not None) else "",
         flow_regions=flow_regions,
         frame_regions=frame.regions if frame is not None else None,
         enabled_regions=enabled_regions,
-        ecmwf_flow=ecmwf_flow,
-        ecmwf_grid=ecmwf_grid,
+        nwp_flow=nwp_flow,
+        nwp_chain=nwp_chain,
         frame_timestamp=timestamp,
         z=z, x=x, y=y,
     )

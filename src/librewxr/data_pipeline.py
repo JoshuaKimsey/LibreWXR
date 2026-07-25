@@ -167,6 +167,7 @@ async def run_pipeline() -> None:
         nowcast_generator = NowcastGenerator(
             store, nowcast_store, cache=tile_cache,
             nowcast_contributions=nowcast_contribs,
+            nwp_chain=nwp_chain,
         )
         external_names = [c.region_name for c in nowcast_contribs]
         if settings.nowcast_enabled:

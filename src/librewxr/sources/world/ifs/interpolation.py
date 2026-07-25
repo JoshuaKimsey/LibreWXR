@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 def interpolate_timesteps(
     timesteps: dict[int, tuple[np.ndarray, np.ndarray]],
     interval_seconds: int = 600,
-) -> tuple[dict[int, tuple[np.ndarray, np.ndarray]], np.ndarray | None]:
+) -> dict[int, tuple[np.ndarray, np.ndarray]]:
     """Create sub-hourly IFS frames by optical-flow interpolation.
 
     Adapter shim: splits the IFS ``(precip, snow)`` tuple-dict into
@@ -35,17 +35,19 @@ def interpolate_timesteps(
             = 10 min, matching the radar cadence).
 
     Returns:
-        Tuple of (new dict containing both original and interpolated
-        timesteps, last computed flow field or None).  The flow field
-        is used by the renderer to draw IFS-derived motion arrows.
+        New dict containing both original and interpolated timesteps.
+        The warp's internal flow field is no longer surfaced — the
+        hybrid arrow path builds a composite NWP flow raster instead
+        (see ``NowcastGenerator._compute_nwp_flow_sync``), so IFS no
+        longer needs to carry its own flow for arrow rendering.
     """
     if len(timesteps) < 2:
-        return dict(timesteps), None
+        return dict(timesteps)
 
     precip_by_ts = {ts: t[0] for ts, t in timesteps.items()}
     snow_by_ts = {ts: t[1] for ts, t in timesteps.items()}
 
-    aug_precip, aug_snow, last_flow = interpolate_run(
+    aug_precip, aug_snow, _last_flow = interpolate_run(
         precip_by_ts,
         snow_by_ts,
         target_interval_seconds=interval_seconds,
@@ -61,4 +63,4 @@ def interpolate_timesteps(
         if snow is not None and snow.dtype != np.bool_:
             snow = snow.astype(bool)
         result[ts] = (aug_precip[ts], snow)
-    return result, last_flow
+    return result

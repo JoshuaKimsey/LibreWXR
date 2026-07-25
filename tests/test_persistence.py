@@ -112,7 +112,6 @@ class TestECMWFGridPersistence:
         consumer = ECMWFGrid(cache_dir=tmp_path)
         consumer.__setstate__(snapshot)
         assert consumer.timestep_count == 0
-        assert consumer.flow is None
         assert consumer.reference_time is None
 
     def test_populated_roundtrip(self, tmp_path: Path) -> None:

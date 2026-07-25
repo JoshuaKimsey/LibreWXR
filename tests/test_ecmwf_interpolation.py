@@ -30,9 +30,8 @@ def _make_blob(cy: int, cx: int, radius: int = 20, value: int = 150) -> np.ndarr
 class TestInterpolateTimesteps:
     def test_single_timestep_unchanged(self):
         ts = {1000: (np.zeros((H, W), dtype=np.uint8), np.zeros((H, W), dtype=bool))}
-        result, flow = interpolate_timesteps(ts)
+        result = interpolate_timesteps(ts)
         assert list(result.keys()) == [1000]
-        assert flow is None
 
     def test_creates_intermediate_frames(self):
         precip = np.full((H, W), 100, dtype=np.uint8)
@@ -41,13 +40,11 @@ class TestInterpolateTimesteps:
             0: (precip.copy(), snow.copy()),
             3600: (precip.copy(), snow.copy()),
         }
-        result, flow = interpolate_timesteps(ts, interval_seconds=600)
+        result = interpolate_timesteps(ts, interval_seconds=600)
         # 3600 / 600 = 6 slots, endpoints included → 5 intermediates
         assert len(result) == 7
         expected_times = [0, 600, 1200, 1800, 2400, 3000, 3600]
         assert sorted(result.keys()) == expected_times
-        assert flow is not None
-        assert flow.shape == (H, W, 2)
 
     def test_preserves_original_frames(self):
         precip0 = np.full((H, W), 80, dtype=np.uint8)
@@ -57,7 +54,7 @@ class TestInterpolateTimesteps:
             0: (precip0, snow.copy()),
             3600: (precip1, snow.copy()),
         }
-        result, _flow = interpolate_timesteps(ts, interval_seconds=600)
+        result = interpolate_timesteps(ts, interval_seconds=600)
         # Original frames should be byte-identical
         assert np.array_equal(result[0][0], precip0)
         assert np.array_equal(result[3600][0], precip1)
@@ -69,10 +66,9 @@ class TestInterpolateTimesteps:
             0: (precip.copy(), snow.copy()),
             600: (precip.copy(), snow.copy()),
         }
-        result, flow = interpolate_timesteps(ts, interval_seconds=600)
+        result = interpolate_timesteps(ts, interval_seconds=600)
         # Gap == interval → nothing to interpolate
         assert len(result) == 2
-        assert flow is None
 
     def test_multiple_pairs(self):
         precip = np.full((H, W), 100, dtype=np.uint8)
@@ -82,10 +78,9 @@ class TestInterpolateTimesteps:
             3600: (precip.copy(), snow.copy()),
             7200: (precip.copy(), snow.copy()),
         }
-        result, flow = interpolate_timesteps(ts, interval_seconds=600)
+        result = interpolate_timesteps(ts, interval_seconds=600)
         # 2 pairs × 5 intermediates + 3 originals = 13
         assert len(result) == 13
-        assert flow is not None
 
     def test_clear_sky_stays_clear(self):
         """No-precipitation frames should produce all-zero intermediates."""
@@ -95,7 +90,7 @@ class TestInterpolateTimesteps:
             0: (precip.copy(), snow.copy()),
             3600: (precip.copy(), snow.copy()),
         }
-        result, _flow = interpolate_timesteps(ts, interval_seconds=600)
+        result = interpolate_timesteps(ts, interval_seconds=600)
         for t, (p, s) in result.items():
             assert (p == 0).all(), f"Non-zero precip at t={t}"
             assert not s.any(), f"Snow at t={t}"

@@ -349,7 +349,7 @@ class TestECMWFFallbackRendering:
             color_scheme=2,
             fmt="png",
             enabled_regions=["USCOMP"],
-            ecmwf_grid=grid,
+
             nwp_chain=NWPChain([grid]),
         )
         assert len(tile_bytes) > 0
@@ -369,7 +369,7 @@ class TestECMWFFallbackRendering:
             color_scheme=2,
             fmt="png",
             enabled_regions=["USCOMP"],
-            ecmwf_grid=None,
+
         )
         img = Image.open(io.BytesIO(tile_bytes)).convert("RGBA")
         arr = np.array(img)
@@ -469,7 +469,7 @@ class TestECMWFFallbackRendering:
             snow=True,
             fmt="png",
             enabled_regions=["USCOMP"],
-            ecmwf_grid=grid,
+
             nwp_chain=chain,
         )
 
@@ -481,7 +481,7 @@ class TestECMWFFallbackRendering:
             snow=False,
             fmt="png",
             enabled_regions=["USCOMP"],
-            ecmwf_grid=grid,
+
             nwp_chain=chain,
         )
 

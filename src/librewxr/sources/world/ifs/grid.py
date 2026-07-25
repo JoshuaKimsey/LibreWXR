@@ -64,7 +64,6 @@ class ECMWFGrid:
         self._sorted_timestamps: list[int] = []
         self._reference_time: str | None = None
         self._fs: fsspec.AbstractFileSystem | None = None
-        self._flow: np.ndarray | None = None  # Global optical flow field
         if cache_dir is not None:
             self._memmap_dir = Path(cache_dir) / "ecmwf_ifs"
             self._persistent = True
@@ -128,18 +127,11 @@ class ECMWFGrid:
 
     @property
     def data_bytes(self) -> int:
-        """Total bytes across all timestep arrays and flow field."""
+        """Total bytes across all timestep arrays."""
         total = 0
         for precip_dbz, snow_mask in self._timesteps.values():
             total += precip_dbz.nbytes + snow_mask.nbytes
-        if self._flow is not None:
-            total += self._flow.nbytes
         return total
-
-    @property
-    def flow(self) -> np.ndarray | None:
-        """The latest global optical flow field, or None if not available."""
-        return self._flow
 
     def _get_fs(self) -> fsspec.AbstractFileSystem:
         if self._fs is None:
@@ -330,9 +322,7 @@ class ECMWFGrid:
         if settings.ecmwf_interpolation and len(new_timesteps) >= 2:
             from librewxr.sources.world.ifs.interpolation import interpolate_timesteps
 
-            new_timesteps, ecmwf_flow = interpolate_timesteps(new_timesteps)
-        else:
-            ecmwf_flow = None
+            new_timesteps = interpolate_timesteps(new_timesteps)
 
         # Move all arrays to memory-mapped files so the OS page cache
         # manages physical RAM instead of pinning ~284 MB on the heap.
@@ -342,10 +332,6 @@ class ECMWFGrid:
                 self._to_memmap(f"{ts}_precip", precip),
                 self._to_memmap(f"{ts}_snow", snow),
             )
-        if ecmwf_flow is not None:
-            self._flow = self._to_memmap("flow", ecmwf_flow)
-        else:
-            self._flow = None
 
         self._timesteps = new_timesteps
         self._sorted_timestamps = sorted(new_timesteps.keys())
@@ -596,18 +582,10 @@ class ECMWFGrid:
                     list(snow.shape),
                 ],
             }
-        flow_state = None
-        if self._flow is not None:
-            flow_state = [
-                os.path.basename(str(self._flow.filename)),
-                self._flow.dtype.str,
-                list(self._flow.shape),
-            ]
         return {
             "memmap_dir": str(self._memmap_dir),
             "reference_time": self._reference_time,
             "timesteps": timesteps_state,
-            "flow": flow_state,
         }
 
     def __setstate__(self, state: dict) -> None:
@@ -634,20 +612,10 @@ class ECMWFGrid:
             )
             new_timesteps[int(ts_str)] = (precip, snow)
 
-        new_flow = None
-        if state["flow"] is not None:
-            flow_basename, flow_dtype, flow_shape = state["flow"]
-            new_flow = np.memmap(
-                memmap_dir / flow_basename,
-                dtype=np.dtype(flow_dtype), mode="r",
-                shape=tuple(flow_shape),
-            )
-
         self._memmap_dir = memmap_dir
         self._timesteps = new_timesteps
         self._sorted_timestamps = sorted(new_timesteps.keys())
         self._reference_time = state["reference_time"]
-        self._flow = new_flow
         self._fs = None  # lazily recreated if needed
         self._persistent = True
 
@@ -659,7 +627,6 @@ class ECMWFGrid:
         wipes the temp directory like before.
         """
         self._timesteps.clear()
-        self._flow = None
         self._fs = None
         if self._persistent:
             logger.info("ECMWF memmaps retained on disk at %s", self._memmap_dir)

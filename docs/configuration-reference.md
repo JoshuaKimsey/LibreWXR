@@ -1036,16 +1036,16 @@ The model side is taken from the active NWP chain — **HRRR over CONUS, HRDPS o
 
 ### `LIBREWXR_ARROW_FLOW_ENABLED`
 
-The `/v2/radar/...` tile endpoint accepts an `?arrows=` query param that overlays semi-transparent precipitation-direction arrows on areas with active precipitation. Arrows key off per-region optical flow computed between the two most recent radar frames; ECMWF IFS wind is a fallback only outside radar coverage.
+The `/v2/radar/...` tile endpoint accepts an `?arrows=` query param that overlays semi-transparent precipitation-direction arrows on areas with active precipitation. Arrows key off per-region optical flow computed between the two most recent radar frames; outside radar coverage, a single **composite NWP flow raster** (built from `NWPChain.sample()` at T and T−1) drives the arrows — reflecting whichever regional NWP source is active at each point (HRRR over CONUS, ICON-EU over Europe, JMA MSM over Japan, IFS elsewhere) rather than IFS alone.
 
 Before this toggle existed, optical flow was computed only as a byproduct of nowcast generation — so disabling `LIBREWXR_NOWCAST_ENABLED` silently broke arrow direction (every tile fell through to the coarse ECMWF IFS wind field, producing the "incorrect, randomly placed" arrows reported in [issue #7](https://github.com/JoshuaKimsey/LibreWXR/issues/7)).
 
-With this toggle on (the default), arrows get real radar storm motion regardless of the nowcast state:
+With this toggle on (the default), arrows get real storm motion regardless of the nowcast state — both from radar (per-region, fine-grained) and from the composite NWP raster (one global field, coarse but covers every NWP source at once):
 
 | `nowcast_enabled` | `arrow_flow_enabled` | Flow CPU | Arrows | Nowcast frames |
 |---|---|---|---|---|
-| `true`  | (any)   | full | correct (radar flow) | generated |
-| `false` | `true`  | ~25-35% of full nowcast | **correct** (radar flow at reduced resolution) | none |
+| `true`  | (any)   | full | correct (radar + composite NWP flow) | generated |
+| `false` | `true`  | ~25-35% of full nowcast | **correct** (radar + composite NWP flow at reduced resolution) | none |
 | `false` | `false` | zero | suppressed entirely | none |
 
 | | |
@@ -1054,6 +1054,8 @@ With this toggle on (the default), arrows get real radar storm motion regardless
 | **Type** | boolean |
 
 Note: Farneback optical flow is the expensive part of the nowcast pipeline (~90% of the per-cycle ~44s in the default 13-region config); extrapolation/IFS-blend is comparatively cheap. Disabling nowcast but keeping arrow flow on therefore saves only **~10-20% CPU** vs full nowcast — not ~90%. **The real escape hatch for CPU-conscious operators is disabling both `nowcast_enabled` and `arrow_flow_enabled`** — that fully suppresses the overlay (the `?arrows=` query becomes a no-op) and pays zero flow CPU.
+
+Inside radar coverage, the per-region radar flow wins (arrows reflect observed storm motion, even when stationary). Outside radar coverage, the composite NWP flow fills in — arrow presence is gated on the NWP chain's own precip at the point (above the noise floor), so arrows now appear wherever the chain shows precip, not just where IFS does. This fixes the long-standing "HRRR precip present but IFS dry → no arrows" gap.
 
 ### `LIBREWXR_ARROW_FLOW_TARGET_DIM`
 
@@ -1067,6 +1069,17 @@ Longest dimension (in pixels) passed to the Farneback optical-flow algorithm whe
 Arrows draw on a 32-pixel (256-tile) or 48-pixel (512-tile) grid and downsample flow ~10-30x while drawing, so a high-resolution flow field is wasted work for arrow purposes — 500 reaches the arrow-visible quality ceiling at roughly 4× the speed of the 1000-pixel field used for nowcast extrapolation (which feeds `cv2.remap` and needs the pixel sharpness).
 
 **No effect when nowcast is on** — that path uses the module constant `_TARGET_FLOW_DIM = 1000` in `nowcast.py`, so the two paths no longer share tuning. If you turn nowcast back on, you don't need to revisit this setting.
+
+### `LIBREWXR_ARROW_NWP_FLOW_RESOLUTION_DEG`
+
+Resolution of the global composite NWP flow raster used by the arrow overlay outside radar coverage, in degrees. One Farneback pass per fetch cycle over two `NWPChain.sample()` snapshots at T and T−1.
+
+| | |
+|---|---|
+| **Default** | `0.25` |
+| **Type** | float |
+
+At 0.25° the raster is 721×1440 float32 (~8 MB). The 32/48px arrow draw grid can't resolve finer detail at most zooms, so coarser is cheaper for no visible loss. Finer values help only at high zoom inside small convective cells — and inside radar coverage those cells already get the fine per-region radar flow (which wins by construction), so the composite only fills NWP-only regions where sub-0.25° detail doesn't matter. This is an advanced tuning knob not surfaced in `.env.example`.
 
 ---
 
