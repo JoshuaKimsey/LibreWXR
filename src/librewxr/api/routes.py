@@ -70,6 +70,14 @@ alerts_store = None  # AlertsStore | None
 alerts_fetcher = None  # WMOAlertsFetcher | None
 alerts_enabled: bool = False
 
+# MCP server — set by main.py during startup (only when settings.mcp_enabled
+# is True AND the [mcp] extra successfully imported + mounted).  ``mcp_mounted``
+# distinguishes "config asked for MCP but the build/import failed" (False)
+# from "MCP endpoint is live and answering" (True).
+mcp_mounted: bool = False
+mcp_path: str = "/mcp"
+mcp_tools: list[str] = []
+
 # NWS point-lookup cache: {(lat, lon): (timestamp, list[GeoJSONFeature])}
 _nws_point_cache: dict[tuple[float, float], tuple[float, list[GeoJSONFeature]]] = {}
 _NWS_CACHE_TTL = 300  # 5 minutes
@@ -246,6 +254,12 @@ async def health():
             "last_updated": int(alerts_store.last_updated) if alerts_store is not None else 0,
             "ingest_ok": alerts_store.fetch_success if alerts_store is not None else False,
         } if alerts_enabled else {"enabled": False},
+        "mcp": {
+            "enabled": settings.mcp_enabled,
+            "mounted": mcp_mounted,
+            "path": mcp_path,
+            "tools": list(mcp_tools),
+        } if settings.mcp_enabled else {"enabled": False},
     }
 
 

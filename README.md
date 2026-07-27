@@ -35,7 +35,8 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Persistent disk cache** — radar / NWP / satellite / alerts data are cached to disk with atomic writes, surviving restarts and container recreation without re-downloading from upstream. Configurable via `LIBREWXR_CACHE_DIR` (required in multi mode)
 - **Memory-efficient storage** — radar frames, NWP grids, satellite frames, and nowcast data are all backed by memory-mapped files, letting the OS page cache manage physical RAM instead of pinning data on the heap. Pages are reclaimed under memory pressure and re-faulted on access
 - **Smart fetch optimization** — radar sources skip re-downloading frames already in memory (only ~1 of 12 frames is new each cycle), NWP models skip redundant S3 fetches when the model run hasn't changed, and parallel NWP fetches are concurrency-capped via `LIBREWXR_NWP_FETCH_CONCURRENCY` so peak transient RAM stays bounded
-- **Health endpoint** — `/health` for monitoring uptime, per-component memory breakdown, frame count, NWP chain status, alerts status, and cache state
+- **Health endpoint** — `/health` for monitoring uptime, per-component memory breakdown, frame count, NWP chain status, alerts status, MCP mount state, and cache state
+- **MCP server** for AI agents — query precipitation nowcast and active weather alerts via Model Context Protocol. HTTP transport mounted at `/mcp/` for n8n-style automation; stdio transport for local agents like Claude Desktop. See [MCP server](#mcp-server-librewxr-extension) below.
 - **Fully configurable** — all tunable parameters exposed via environment variables
 
 ## Current Limitations
@@ -190,6 +191,8 @@ cd LibreWXR
 python3 -m venv .venv
 source .venv/bin/activate
 pip install .
+# Optional extras:
+#   pip install -e ".[mcp]"   # MCP server (AI agents, n8n, Claude Desktop)
 cp .env.example .env
 # Edit .env to taste
 python -m librewxr.main
@@ -387,7 +390,22 @@ Returns `503` if `LIBREWXR_ALERTS_ENABLED=false`.
 GET /health
 ```
 
-Returns server status, frame count, cache usage, NWP chain state, satellite cache state, alerts status, and per-component memory breakdown.
+Returns server status, frame count, cache usage, NWP chain state, satellite cache state, alerts status, MCP mount state, and per-component memory breakdown.
+
+#### MCP Server (LibreWXR extension)
+
+LibreWXR exposes an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) endpoint for AI agents and automation pipelines. Two tools are available:
+
+- `get_precip_nowcast(lat, lon, minutes=60)` — returns future precipitation frames (up to 60 minutes ahead) with dBZ, rain rate (mm/h), data source (`radar` | `nwp` | `none`), blend weight, and coverage (`in_range` | `out_of_range`).
+- `get_active_alerts(lat, lon, radius_km=25, severity=None)` — returns a GeoJSON FeatureCollection of WMO CAP alerts within `radius_km`, enriched with US NWS point alerts for US locations. Returns an empty collection when alerts are disabled or none match; never raises.
+
+The endpoint is mounted at `LIBREWXR_MCP_PATH` (default `/mcp/`) when the `[mcp]` extra is installed and `LIBREWXR_MCP_ENABLED=true` (the default). Failures (missing extra, build error) are silently skipped so the REST API still boots; the `/health` endpoint surfaces the actual mount state as `mcp: {enabled, mounted, path, tools}`.
+
+Two transport modes:
+- **HTTP (primary, default, for n8n / hosted agents):** POST a JSON-RPC `initialize` request to `<public_url>/mcp/` (note the trailing slash), then call tools via JSON-RPC `tools/call`. The session id is carried in the `Mcp-Session-Id` header.
+- **stdio (for local agents like Claude Desktop):** run `python -m librewxr.mcp` (or the `librewxr-mcp` console entry). Requires `LIBREWXR_CACHE_DIR` pointing at the same shared volume a running LibreWXR server (single or multi mode) writes `state.json` into.
+
+See [`docs/mcp-server.md`](docs/mcp-server.md) for full install instructions, transport configuration, example client configs (Claude Desktop, n8n), and the tool reference.
 
 ## Configuration
 
@@ -460,6 +478,11 @@ the inline comments in [`src/librewxr/config.py`](src/librewxr/config.py).
 | `LIBREWXR_RENDER_ONLY` | `false` | When `1`, skip fetcher / NWP / satellite init and only render tiles from the snapshot |
 | `LIBREWXR_STATE_POLL_INTERVAL` | `1.0` | Seconds between state.json mtime polls in render-only mode |
 | `LIBREWXR_STATE_WAIT_TIMEOUT` | `300` | Seconds to wait for the first state.json on cold start (0 = forever) |
+| **MCP server** | | |
+| `LIBREWXR_MCP_ENABLED` | `true` | Master switch for the MCP HTTP transport (mounted inside the FastAPI app). When `false`, no `/mcp` route is mounted. The standalone stdio entry (`python -m librewxr.mcp`) is unaffected. |
+| `LIBREWXR_MCP_PATH` | `/mcp` | URL path where the MCP HTTP transport is mounted. See the trailing-slash note in [MCP server](#mcp-server-librewxr-extension). |
+
+Requires `pip install -e ".[mcp]"` (adds `fastmcp`). Full reference: [`docs/configuration-reference.md`](docs/configuration-reference.md).
 
 See `.env.example` for detailed descriptions and tuning guidance for each setting.
 
