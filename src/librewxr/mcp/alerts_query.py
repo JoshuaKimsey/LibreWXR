@@ -12,12 +12,38 @@ import logging
 import math
 import time
 
-from shapely.geometry import Point, Polygon, mapping
+from shapely.geometry import Point, Polygon, MultiPolygon, mapping
 
 from librewxr.api.models import AlertsResponse, GeoJSONFeature, AlertProperties
 from librewxr.api.routes import _alert_not_expired, _fetch_nws_point_alerts, _parse_cap_time
 
 logger = logging.getLogger(__name__)
+
+
+def _reproject_to_km_plane(
+    geometry, lon: float, lat: float,
+    deg_to_km_lon: float, deg_to_km_lat: float,
+):
+    """Reproject a shapely Polygon or MultiPolygon to a km-plane centred on (lon, lat).
+
+    Uses the equirectangular cos(lat) approximation (matches the formula at
+    ``librewxr.data.coverage``:67-72): x_km = (px - lon) * 111 * cos(lat),
+    y_km = (py - lat) * 111.  Returns a Polygon (input was Polygon) or a
+    MultiPolygon (input was MultiPolygon) in km-plane coordinates suitable
+    for intersection testing against ``Point(0, 0).buffer(radius_km)``.
+    """
+    if isinstance(geometry, MultiPolygon):
+        return MultiPolygon([
+            Polygon([
+                ((px - lon) * deg_to_km_lon, (py - lat) * deg_to_km_lat)
+                for px, py in sub.exterior.coords
+            ])
+            for sub in geometry.geoms
+        ])
+    return Polygon([
+        ((px - lon) * deg_to_km_lon, (py - lat) * deg_to_km_lat)
+        for px, py in geometry.exterior.coords
+    ])
 
 
 async def alerts_within_radius(
@@ -78,17 +104,16 @@ async def alerts_within_radius(
         if alert.polygon is None:
             continue
 
-        # Radius filter: reproject polygon exterior coordinates to a local
-        # km-plane centred on (lon, lat), then test intersection with a
-        # circle of the given radius.
-        reprojected_coords = [
-            ((px - lon) * deg_to_km_lon, (py - lat) * deg_to_km_lat)
-            for px, py in alert.polygon.exterior.coords
-        ]
-        reprojected_poly = Polygon(reprojected_coords)
+        # Radius filter: reproject the alert's polygon (which may be a
+        # MultiPolygon for alerts spanning disjoint areas, e.g. multi-
+        # county warnings) to a local km-plane centred on (lon, lat),
+        # then test intersection with a circle of the given radius.
+        reprojected = _reproject_to_km_plane(
+            alert.polygon, lon, lat, deg_to_km_lon, deg_to_km_lat,
+        )
 
         within_radius = (
-            circle.intersects(reprojected_poly)
+            circle.intersects(reprojected)
             or alert.polygon.contains(query_point)
         )
 

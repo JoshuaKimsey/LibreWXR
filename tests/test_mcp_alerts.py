@@ -5,7 +5,7 @@
 filtering and NWS enrichment."""
 
 import pytest
-from shapely.geometry import Polygon
+from shapely.geometry import MultiPolygon, Polygon
 
 from librewxr.api.models import AlertProperties, AlertsResponse, GeoJSONFeature
 from librewxr.data.alerts_store import AlertEntry
@@ -195,3 +195,54 @@ async def test_alerts_within_radius_nws_failure_degrades(monkeypatch):
     result = await alerts_within_radius(store, 40.0, -100.0, 25.0)
     assert len(result.features) == 1
     assert result.features[0].properties.title == "WMO Only"
+
+
+@pytest.mark.mcp
+async def test_alerts_within_radius_multipolygon():
+    """A ``MultiPolygon`` alert (e.g. multi-county warning) must not crash the tool.
+
+    Regression test for the live production bug where the radius filter
+    accessed ``alert.polygon.exterior.coords`` directly, which only exists
+    on Polygon — MultiPolygon raises AttributeError. The fix reprojects
+    each constituent Polygon; the alert is included when ANY constituent
+    is within radius.
+    """
+    # Query point: near equator, lon=0 (same as other tests).
+    lat, lon = 0.0, 0.0
+
+    # Build a MultiPolygon: one part within 25 km of origin, one ~167 km away.
+    near_poly = Polygon([
+        (-0.1, -0.1), (0.1, -0.1), (0.1, 0.1), (-0.1, 0.1),
+        (-0.1, -0.1),
+    ])
+    far_poly = Polygon([
+        (-0.1, 1.5), (0.1, 1.5), (0.1, 1.7), (-0.1, 1.7),
+        (-0.1, 1.5),
+    ])
+    multi = MultiPolygon([near_poly, far_poly])
+
+    alert = AlertEntry(
+        source_id="wmo-multipolygon-test",
+        event="Severe Thunderstorm Warning",
+        description="Multi-county warning (test fixture)",
+        severity="Severe",
+        effective="2025-01-01T00:00:00+00:00",
+        expires="2099-01-01T00:00:00+00:00",
+        area_desc="Near area + far area",
+        url="https://example.com/wmo-multipolygon",
+        polygon=multi,
+    )
+
+    store = _MockAlertsStore([alert])
+
+    result = await alerts_within_radius(store, lat, lon, radius_km=25.0)
+
+    assert len(result.features) == 1, (
+        f"Expected the MultiPolygon alert to be included (one part in radius), "
+        f"got {len(result.features)} features"
+    )
+    assert result.features[0].properties.title == "Severe Thunderstorm Warning"
+    assert result.features[0].properties.severity == "Severe"
+    # The geometry should be the original MultiPolygon (mapping() handles both)
+    assert result.features[0].geometry is not None
+    assert result.features[0].geometry["type"] == "MultiPolygon"
