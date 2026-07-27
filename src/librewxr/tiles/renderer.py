@@ -936,8 +936,8 @@ def _draw_storm_cells(
         return img
 
     cell_color = (40, 40, 40, 200) if style == "dark" else (255, 255, 255, 200)
-    arrow_color = (40, 40, 40, 180) if style == "dark" else (255, 255, 255, 160)
-    line_w = 2 if tile_size <= 256 else 3
+    arrow_color = (40, 40, 40, 230) if style == "dark" else (255, 255, 255, 230)
+    line_w = 3 if tile_size <= 256 else 4
 
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
@@ -1001,9 +1001,9 @@ def _draw_storm_cells(
                 dy = float(cell["motion_dy_px"])
                 raw_len = math.hypot(dx, dy)
                 if raw_len > 1e-9:
-                    speed_scale = 4.0
-                    min_len = 5.0
-                    max_len = 20.0
+                    speed_scale = 6.0
+                    min_len = 8.0
+                    max_len = 28.0
                     target_len = min(max(raw_len * speed_scale, min_len), max_len)
                     adx = dx / raw_len * target_len
                     ady = dy / raw_len * target_len

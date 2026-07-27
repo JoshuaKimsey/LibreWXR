@@ -69,6 +69,7 @@ class StormCellStore:
         self._cells: dict[str, np.ndarray] = {}
         self._counts: dict[str, int] = {}  # actual cell count per region (vs MAX cap)
         self._last_updated: float = 0.0
+        self._detected_at_timestamp: int = 0
         self._lock = asyncio.Lock()
         if cache_dir is not None:
             self._memmap_dir = Path(cache_dir) / "storm_cells"
@@ -95,7 +96,11 @@ class StormCellStore:
         os.replace(tmp, final)
         return np.memmap(final, dtype=data.dtype, mode="r", shape=data.shape)
 
-    async def replace_cells(self, cells_by_region: dict[str, np.ndarray]) -> None:
+    async def replace_cells(
+        self,
+        cells_by_region: dict[str, np.ndarray],
+        detected_at_timestamp: int = 0,
+    ) -> None:
         """Atomically replace all detected cells.
 
         ``cells_by_region`` maps region name -> structured ndarray of shape
@@ -133,6 +138,7 @@ class StormCellStore:
             self._cells = new_cells
             self._counts = new_counts
             self._last_updated = time.time()
+            self._detected_at_timestamp = detected_at_timestamp
 
     async def get_cells(self) -> dict[str, np.ndarray]:
         """Return the latest per-region cell arrays (fixed-size, NaN-padded).
@@ -156,6 +162,11 @@ class StormCellStore:
         return self._last_updated
 
     @property
+    def detected_at_timestamp(self) -> int:
+        """The radar frame timestamp the current detection was run on."""
+        return self._detected_at_timestamp
+
+    @property
     def total_count(self) -> int:
         """Total detected cells across all regions (sum of per-region counts)."""
         return sum(self._counts.values())
@@ -176,6 +187,7 @@ class StormCellStore:
             "cells": cells_state,
             "counts": dict(self._counts),
             "last_updated": self._last_updated,
+            "detected_at_timestamp": self._detected_at_timestamp,
         }
 
     def __setstate__(self, state: dict) -> None:
@@ -199,6 +211,7 @@ class StormCellStore:
         self._cells = new_cells
         self._counts = dict(state.get("counts", {}))
         self._last_updated = float(state.get("last_updated", 0.0))
+        self._detected_at_timestamp = int(state.get("detected_at_timestamp", 0))
         self._persistent = True
         if not hasattr(self, "_lock"):
             self._lock = asyncio.Lock()
@@ -416,7 +429,10 @@ class StormCellGenerator:
                 settings_min_area_km2(),
             )
 
-            await self._storm_cell_store.replace_cells(cells_by_region)
+            await self._storm_cell_store.replace_cells(
+                cells_by_region,
+                detected_at_timestamp=latest.timestamp,
+            )
             total = sum(len(arr) for arr in cells_by_region.values())
             logger.info(
                 "Storm-cell detection: %d cells across %d region(s)",

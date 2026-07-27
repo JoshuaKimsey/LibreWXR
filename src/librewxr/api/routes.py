@@ -413,8 +413,13 @@ async def radar_tile(
     cells_by_region = None
     cell_counts = None
     if cell_style and storm_cell_store is not None:
-        cells_by_region = await storm_cell_store.get_cells() or None
-        cell_counts = await storm_cell_store.get_counts() or None
+        # Only show cells on the frame the detection actually ran on --
+        # showing current-detected cells on past or nowcast frames is
+        # misleading (the cells represent "what storms are detected RIGHT
+        # NOW", not historical positions).
+        if timestamp == storm_cell_store.detected_at_timestamp:
+            cells_by_region = await storm_cell_store.get_cells() or None
+            cell_counts = await storm_cell_store.get_counts() or None
 
     tile_bytes = await asyncio.to_thread(
         present_tile,
