@@ -348,6 +348,11 @@
         <option value="light">Arrows: Light</option>
         <option value="dark">Arrows: Dark</option>
     </select>
+    <select id="cellsToggle" onchange="changeCells()">
+        <option value="">Cells: Off</option>
+        <option value="light">Cells: Light</option>
+        <option value="dark">Cells: Dark</option>
+    </select>
     <select id="themeSelect" onchange="changeTheme()">
         <option value="dark">Dark Theme</option>
         <option value="light">Light Theme</option>
@@ -421,6 +426,7 @@ var isLoading = false;
 var layerCache = {};
 var currentColorScheme = 10;
 var arrowsMode = '';
+var cellsMode = '';
 var activeSource = 'local';
 var activeLayer = 'radar'; // 'radar' | 'satellite' | 'both'
 var activeTheme = 'dark';
@@ -496,6 +502,7 @@ function changeLayer() {
     var isSatOnly = (activeLayer === 'satellite');
     document.getElementById('colorScheme').style.display = isSatOnly ? 'none' : '';
     document.getElementById('arrowsToggle').style.display = isSatOnly ? 'none' : '';
+    document.getElementById('cellsToggle').style.display = isSatOnly ? 'none' : '';
     reinitialize();
 }
 
@@ -507,6 +514,12 @@ function changeColorScheme() {
 
 function changeArrows() {
     arrowsMode = document.getElementById('arrowsToggle').value;
+    clearAllLayers();
+    showFrame(animationPosition);
+}
+
+function changeCells() {
+    cellsMode = document.getElementById('cellsToggle').value;
     clearAllLayers();
     showFrame(animationPosition);
 }
@@ -550,8 +563,11 @@ function getFrameDelay(position) {
 
 // === TILE LAYERS ===
 function createRadarLayer(frame, pane) {
-    var arrowsParam = arrowsMode ? '?arrows=' + arrowsMode : '';
-    var url = getHost() + frame.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/' + currentColorScheme + '/1_1.webp' + arrowsParam;
+    var params = [];
+    if (arrowsMode) params.push('arrows=' + arrowsMode);
+    if (cellsMode) params.push('cells=' + cellsMode);
+    var queryString = params.length ? '?' + params.join('&') : '';
+    var url = getHost() + frame.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/' + currentColorScheme + '/1_1.webp' + queryString;
     var layer = new L.TileLayer(url, {
         tileSize: 256,
         opacity: 0.001,
