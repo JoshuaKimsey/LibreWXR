@@ -293,6 +293,7 @@ class RadarFetcher:
         now_rounded = int(time.time() // interval) * interval
         await self._fetch_timestamps([(now_rounded, "live", 0)])
         await self._run_nowcast()
+        await self._run_storm_cells()
 
     async def _run_nowcast(self) -> None:
         """Trigger nowcast generation if enabled."""

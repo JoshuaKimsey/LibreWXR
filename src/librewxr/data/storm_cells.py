@@ -255,7 +255,11 @@ def detect_storm_cells(
             continue
 
         # Threshold: pixels >= threshold are part of candidate cells.
-        binary = (frame_uint8 >= pixel_threshold).astype(np.uint8)
+        # ascontiguousarray guards against memmap-backed frames that may
+        # not be C-contiguous -- cv2 requires a contiguous uint8 input.
+        binary = np.ascontiguousarray(
+            (frame_uint8 >= pixel_threshold).astype(np.uint8)
+        )
 
         # cv2.connectedComponentsWithStats returns:
         #   num_labels (int), labels (H, W int32), stats (N, 5 int32),
@@ -385,32 +389,43 @@ class StormCellGenerator:
         previous cycle's cells (if any) stay in the store until the next
         successful cycle.
         """
-        latest = await self._frame_store.get_latest_frame()
-        if latest is None:
-            return
+        latest = None
+        try:
+            latest = await self._frame_store.get_latest_frame()
+            if latest is None:
+                return
 
-        # Read the latest flow (if available) so the sync worker has it.
-        flows_by_region = None
-        if self._nowcast_store is not None:
-            flows_by_region = await self._nowcast_store.get_flows() or None
+            # Read the latest flow (if available) so the sync worker has it.
+            flows_by_region = None
+            if self._nowcast_store is not None:
+                flows_by_region = await self._nowcast_store.get_flows() or None
 
-        # Run the CPU-bound detection in a thread.
-        cells_by_region = await asyncio.to_thread(
-            _detect_sync,
-            latest.regions,
-            settings.get_enabled_regions(),
-            flows_by_region,
-            settings_fetch_interval(),
-            settings_min_dbz(),
-            settings_min_area_km2(),
-        )
+            # Run the CPU-bound detection in a thread.
+            cells_by_region = await asyncio.to_thread(
+                _detect_sync,
+                latest.regions,
+                settings.get_enabled_regions(),
+                flows_by_region,
+                settings_fetch_interval(),
+                settings_min_dbz(),
+                settings_min_area_km2(),
+            )
 
-        await self._storm_cell_store.replace_cells(cells_by_region)
-        total = sum(len(arr) for arr in cells_by_region.values())
-        logger.info(
-            "Storm-cell detection: %d cells across %d region(s)",
-            total, len(cells_by_region),
-        )
+            await self._storm_cell_store.replace_cells(cells_by_region)
+            total = sum(len(arr) for arr in cells_by_region.values())
+            logger.info(
+                "Storm-cell detection: %d cells across %d region(s)",
+                total, len(cells_by_region),
+            )
+        except Exception:
+            logger.exception(
+                "StormCellGenerator.generate() failed -- "
+                "latest=%s, frame_regions=%s, nowcast_store=%s",
+                latest is not None,
+                list(latest.regions.keys()) if latest is not None else [],
+                type(self._nowcast_store).__name__ if self._nowcast_store else None,
+            )
+            raise
 
 
 def _detect_sync(
