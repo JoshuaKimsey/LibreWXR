@@ -93,11 +93,14 @@ def lcc_forward(
     phi = np.radians(lat)
     lam = np.radians(lon)
 
-    rho = DMI_DINI_SPHERE_RADIUS * _F / np.tan(np.pi / 4 + phi / 2) ** _N
-    theta = _N * (lam - _LON_0_RAD)
+    # See hrrr/grid.py for the errstate rationale (LCC singularity at
+    # the antipodal pole; out-of-domain NaN/inf filtered downstream).
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rho = DMI_DINI_SPHERE_RADIUS * _F / np.tan(np.pi / 4 + phi / 2) ** _N
+        theta = _N * (lam - _LON_0_RAD)
 
-    x = rho * np.sin(theta)
-    y = _RHO_0 - rho * np.cos(theta)
+        x = rho * np.sin(theta)
+        y = _RHO_0 - rho * np.cos(theta)
     return x, y
 
 

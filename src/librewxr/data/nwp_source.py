@@ -138,7 +138,12 @@ class NWPChain:
             contribution[relevant] = sample_vals.astype(np.float32, copy=False)
             out += weight * contribution
             remaining *= 1.0 - feather
-        return np.clip(out + 0.5, 0, 255).astype(np.uint8)
+        # NaN values from out-of-domain LCC projections (HRRR, DINI,
+        # WRF-SMN) can flow through the feather-weighted blend into
+        # ``out``.  clip + astype on NaN produces a RuntimeWarning;
+        # the resulting 0 values are filtered by domain_mask downstream.
+        with np.errstate(invalid="ignore"):
+            return np.clip(out + 0.5, 0, 255).astype(np.uint8)
 
     def get_snow_mask(
         self,

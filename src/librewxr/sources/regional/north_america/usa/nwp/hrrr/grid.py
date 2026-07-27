@@ -81,11 +81,17 @@ def lcc_forward(
     phi = np.radians(lat)
     lam = np.radians(lon)
 
-    rho = HRRR_SPHERE_RADIUS * _F / np.tan(np.pi / 4 + phi / 2) ** _N
-    theta = _N * (lam - _LON_0_RAD)
+    # The LCC forward projection has a singularity at the pole opposite
+    # the projection origin (tan(pi/4 + phi/2) -> 0 or inf as phi -> +/-pi/2).
+    # Out-of-domain lat/lon points produce NaN/inf here, which is expected
+    # and harmless -- domain_mask / feather_mask filter those points
+    # downstream.  Suppress the warnings so they don't clutter startup logs.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rho = HRRR_SPHERE_RADIUS * _F / np.tan(np.pi / 4 + phi / 2) ** _N
+        theta = _N * (lam - _LON_0_RAD)
 
-    x = rho * np.sin(theta)
-    y = _RHO_0 - rho * np.cos(theta)
+        x = rho * np.sin(theta)
+        y = _RHO_0 - rho * np.cos(theta)
     return x, y
 
 
