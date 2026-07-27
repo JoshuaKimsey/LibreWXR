@@ -61,6 +61,18 @@ maps = [
     "pyproj>=3.6",
 ]
 
+# MCP (Model Context Protocol) server.  Optional so the base install
+# stays lean for operators who don't use the MCP tool layer.  Pin
+# ``>=3.4.4`` to skip the 3.4.3 Host/Origin validation regression window
+# (reverted to opt-in in 3.4.4); 3.4.3 breaks in-process HTTP mounting
+# behind a reverse proxy — LibreWXR's documented deployment shape.
+mcp = [
+    "fastmcp>=3.4.4",
+]
+
+[project.scripts]
+librewxr-mcp = "librewxr.mcp.server:main"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
@@ -84,4 +96,5 @@ markers = [
     "wrf_smn: SMN Argentina WRF-DET LCC grid and NetCDF4 decode tests",
     "jma_msm: JMA Mesoscale Model lat/lon grid, .om decode, and fetch tests",
     "alerts: WMO CAP weather alerts tests",
+    "mcp: MCP server tool and transport tests",
 ]

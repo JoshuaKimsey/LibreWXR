@@ -28,6 +28,7 @@ This document is the **full** reference for every setting LibreWXR understands. 
 - [Persistent Cache](#persistent-cache)
 - [Performance and Reliability](#performance-and-reliability)
 - [Tile Request Tracking](#tile-request-tracking)
+- [MCP Server](#mcp-server)
 - [RAM Sizing Guide](#ram-sizing-guide)
 - [Example Configurations](#example-configurations)
 
@@ -1243,7 +1244,39 @@ Cap on per-tile counter entries. When full, the table halves (drops the lower ha
 
 ---
 
-## RAM Sizing Guide
+## MCP Server
+
+LibreWXR ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes data tools to LLM agents. Two transports are available: an **HTTP transport** mounted inside the main FastAPI app (reachable by any HTTP-based MCP client — n8n, Claude Code in proxy mode, custom scripts), and a **stdio transport** that runs as a standalone process for local desktop agents like Claude Desktop.
+
+Both transports require the optional `[mcp]` extra:
+
+```bash
+pip install -e ".[mcp]"
+```
+
+Without the extra, the HTTP transport is silently disabled at startup with a logged warning, and the stdio entry point (`python -m librewxr.mcp` / `librewxr-mcp`) won't import.
+
+### `LIBREWXR_MCP_ENABLED`
+
+Master switch for the MCP HTTP transport. When `false`, no MCP route is mounted and the MCP lifespan is not combined — the app boots lean without any MCP overhead.
+
+The standalone stdio entry point (`python -m librewxr.mcp` / `librewxr-mcp`) is **unaffected** by this flag — it runs independently, reads `state.json` from `LIBREWXR_CACHE_DIR`, and polls its mtime to stay in sync with the running server.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+### `LIBREWXR_MCP_PATH`
+
+URL path where the MCP HTTP transport is mounted inside the FastAPI app. Change this if you need a different endpoint path (e.g. `/api/mcp`) — for example, if your reverse proxy already uses `/mcp` for something else, or you want the endpoint under an API prefix.
+
+| | |
+|---|---|
+| **Default** | `/mcp` |
+| **Type** | string |
+
+---
 
 ### Single-container mode
 

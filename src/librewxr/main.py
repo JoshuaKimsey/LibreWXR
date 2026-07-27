@@ -17,7 +17,7 @@ from librewxr.api import routes
 from librewxr.config import settings
 from librewxr.data.coverage import build_coverage_masks, build_feather_masks
 from librewxr.data.fetcher import RadarFetcher
-from librewxr.data.master_state import apply_state, load_state, state_mtime
+from librewxr.data.master_state import apply_state, dump_state, load_state, state_mtime
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.store import FrameStore
@@ -527,6 +527,30 @@ async def lifespan(app: FastAPI):
                 restored[-1].timestamp,
             )
 
+    # Single-mode state.json dump: mirrors data_pipeline.py:218-232 so a
+    # stdio MCP transport (``python -m librewxr.mcp``) can run alongside
+    # a single-mode server and read the snapshot.  Gated on
+    # ``LIBREWXR_CACHE_DIR`` -- without a cache dir there's nowhere to
+    # write and ``dump_state`` would raise.  Only dumps in single mode;
+    # multi mode's pipeline owns the snapshot.
+    on_cycle_complete = None
+    if settings.cache_dir:
+        from pathlib import Path
+        state_cache_dir = Path(settings.cache_dir)
+        state_stores: dict[str, object] = {
+            "frame_store": store,
+            **nwp_grids_by_slug,
+            **satellite_grids_by_slug,
+            "nowcast_store": nowcast_store,
+            "alerts_store": alerts_store,
+        }
+
+        async def on_cycle_complete() -> None:
+            try:
+                dump_state(state_stores, state_cache_dir)
+            except Exception:
+                logger.exception("Failed to dump state snapshot (single mode)")
+
     fetcher = RadarFetcher(
         store, cache,
         nwp_contributions=nwp_contribs,
@@ -534,6 +558,7 @@ async def lifespan(app: FastAPI):
         nowcast_generator=nowcast_generator,
         warmer=warmer,
         radar_cache=radar_cache,
+        on_cycle_complete=on_cycle_complete,
     )
     routes.radar_cache = radar_cache
     routes.radar_fetcher = fetcher
@@ -590,7 +615,33 @@ async def lifespan(app: FastAPI):
     logger.info("LibreWXR shutdown complete")
 
 
-app = FastAPI(title="LibreWXR", version="0.1.0", lifespan=lifespan)
+# --- MCP HTTP transport ------------------------------------------------
+# Build the FastMCP HTTP app once at module load, gated on the [mcp]
+# extra being importable AND ``LIBREWXR_MCP_ENABLED``.  The MCP app's
+# lifespan is combined with ``lifespan`` via ``combine_lifespans`` so
+# its session manager starts AFTER LibreWXR's stores are wired (single
+# mode + multi render-only both flow through the one ``lifespan``
+# function, so a single combine call covers both modes -- the R2
+# refinement from the build plan).  If the [mcp] extra is missing or
+# the build throws, MCP is silently disabled and the app boots lean.
+mcp_app = None
+combined_lifespan = lifespan
+if settings.mcp_enabled:
+    try:
+        from fastmcp.utilities.lifespan import combine_lifespans
+
+        from librewxr.mcp.server import build_mcp_http_app
+
+        mcp_app = build_mcp_http_app()
+        combined_lifespan = combine_lifespans(lifespan, mcp_app.lifespan)
+        logger.info("MCP HTTP transport built; will mount at %s", settings.mcp_path)
+    except Exception:
+        logger.exception(
+            "MCP HTTP app build failed; MCP transport disabled. "
+            "Install with `pip install -e '.[mcp]'` to enable."
+        )
+
+app = FastAPI(title="LibreWXR", version="0.1.0", lifespan=combined_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -601,6 +652,9 @@ app.add_middleware(
 
 app.include_router(routes.router)
 
+if mcp_app is not None:
+    app.mount(settings.mcp_path, mcp_app)
+    logger.info("MCP HTTP transport mounted at %s", settings.mcp_path)
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):

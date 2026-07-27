@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     host: str | None = None
     port: int = 8080
     public_url: str = "http://localhost:8080"
+
+    # MCP (Model Context Protocol) server.  When enabled (default) the
+    # MCP HTTP transport is mounted inside the FastAPI app at
+    # ``mcp_path``; a separate stdio transport is available via
+    # ``python -m librewxr.mcp`` (requires LIBREWXR_CACHE_DIR).
+    mcp_enabled: bool = True
+    mcp_path: str = "/mcp"
+
     # Optional direct TLS termination.  Leave both unset (the default) to
     # serve plain HTTP and let a reverse proxy / tunnel handle TLS.  Set
     # both to absolute paths to have uvicorn serve HTTPS itself.
