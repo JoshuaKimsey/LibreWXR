@@ -60,6 +60,7 @@ class RadarFetcher:
         nwp_contributions: list[NWPContribution] | None = None,
         satellite_contributions: list[SatelliteContribution] | None = None,
         nowcast_generator=None,
+        storm_cell_generator=None,
         warmer=None,
         radar_cache=None,
         on_cycle_complete: Callable[[], Awaitable[None] | None] | None = None,
@@ -84,6 +85,7 @@ class RadarFetcher:
             satellite_contributions or []
         )
         self._nowcast_generator = nowcast_generator
+        self._storm_cell_generator = storm_cell_generator
         self._warmer = warmer
         self._radar_cache = radar_cache
         self._on_cycle_complete = on_cycle_complete
@@ -219,6 +221,7 @@ class RadarFetcher:
         try:
             await self._fetch_all_frames()
             await self._run_nowcast()
+            await self._run_storm_cells()
             await self._fire_cycle_complete()
             if self._warmer is not None and settings.warm_overview_zoom >= 0:
                 await self._warmer.warm_latest()
@@ -244,6 +247,7 @@ class RadarFetcher:
             try:
                 await self._fetch_all_frames()
                 await self._run_nowcast()
+                await self._run_storm_cells()
                 await self._fire_cycle_complete()
                 self._schedule_warm()
             except Exception:
@@ -297,6 +301,14 @@ class RadarFetcher:
                 await self._nowcast_generator.generate()
             except Exception:
                 logger.exception("Nowcast generation failed")
+
+    async def _run_storm_cells(self) -> None:
+        """Trigger storm-cell detection if enabled."""
+        if self._storm_cell_generator is not None:
+            try:
+                await self._storm_cell_generator.generate()
+            except Exception:
+                logger.exception("Storm-cell detection failed")
 
     async def _fetch_auxiliary_grids(self) -> None:
         """Fetch every enabled NWP grid and kick off background satellite fetches.

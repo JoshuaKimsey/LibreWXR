@@ -228,6 +228,9 @@ def present_tile(
     z: int = 0,
     x: int = 0,
     y: int = 0,
+    cell_style: str = "",
+    cells_by_region: dict[str, np.ndarray] | None = None,
+    cell_counts: dict[str, int] | None = None,
 ) -> bytes:
     """Render a cached ``TileGeometry`` to encoded bytes.
 
@@ -282,6 +285,17 @@ def present_tile(
             nwp_flow=nwp_flow,
             nwp_chain=nwp_chain,
             frame_timestamp=frame_timestamp,
+        )
+
+    if cell_style and cells_by_region:
+        regions = overlapping_regions(z, x, y, enabled_regions)
+        if frame_regions:
+            regions_with_data = [r for r in regions if r.name in frame_regions]
+        else:
+            regions_with_data = []
+        img = _draw_storm_cells(
+            img, cells_by_region, cell_counts or {}, regions_with_data,
+            z, x, y, geom.tile_size, cell_style,
         )
 
     return _encode_image(img, fmt)
@@ -893,6 +907,124 @@ def _draw_motion_arrows(
                 ],
                 fill=arrow_color,
             )
+
+    return Image.alpha_composite(img, overlay)
+
+
+def _draw_storm_cells(
+    img: Image.Image,
+    cells_by_region: dict[str, np.ndarray],
+    cell_counts: dict[str, int],
+    valid_regions: list,
+    z: int,
+    x: int,
+    y: int,
+    tile_size: int,
+    style: str,
+) -> Image.Image:
+    """Draw storm-cell markers (filled circles) + motion arrows on the tile.
+
+    For each detected cell whose centroid falls within the tile's coverage
+    of its region, draws a filled circle sized by area_km2 and (when motion
+    data is available) a motion-vector arrow from the optical flow at the
+    cell's centroid.  The centroid -> tile-pixel mapping uses a
+    nearest-neighbor search on the precomputed ``region_pixel_indices_fractional``
+    grid, which handles all projections (latlon, laea, tmerc) without
+    needing an inverse projection.
+    """
+    if not cells_by_region or not valid_regions:
+        return img
+
+    cell_color = (40, 40, 40, 200) if style == "dark" else (255, 255, 255, 200)
+    arrow_color = (40, 40, 40, 180) if style == "dark" else (255, 255, 255, 160)
+    line_w = 2 if tile_size <= 256 else 3
+
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    for r in valid_regions:
+        cells = cells_by_region.get(r.name)
+        if cells is None or len(cells) == 0:
+            continue
+        count = cell_counts.get(r.name, 0)
+        if count == 0:
+            continue
+
+        # Precompute the region-pixel -> tile-pixel mapping for this region+tile.
+        # row_f[ty, tx] = fractional region-row for tile-pixel (ty, tx).
+        # row_i[ty, tx] = integer region-row, or -1 if outside the region.
+        row_f, col_f = region_pixel_indices_fractional(r, z, x, y, tile_size)
+        row_i, col_i = region_pixel_indices(r, z, x, y, tile_size)
+        valid_mask = row_i >= 0
+        if not valid_mask.any():
+            continue
+
+        # Precompute the valid region-pixel range for a quick cell-in-tile check.
+        valid_rows = row_f[valid_mask]
+        valid_cols = col_f[valid_mask]
+        row_min, row_max = float(valid_rows.min()), float(valid_rows.max())
+        col_min, col_max = float(valid_cols.min()), float(valid_cols.max())
+
+        for i in range(count):
+            cell = cells[i]
+            cr = float(cell["centroid_row"])
+            cc = float(cell["centroid_col"])
+
+            # Quick bounds check: is the cell within the tile's region coverage?
+            # The +-2 padding accounts for sub-pixel rounding at the tile edges.
+            if not (row_min - 2 <= cr <= row_max + 2 and col_min - 2 <= cc <= col_max + 2):
+                continue
+
+            # Nearest-neighbor: find the tile pixel whose region-pixel coords
+            # are closest to the cell's centroid.  This is projection-agnostic
+            # because row_f/col_f already encode the forward projection.
+            d2 = np.where(valid_mask, (row_f - cr) ** 2 + (col_f - cc) ** 2, np.inf)
+            flat_idx = int(d2.argmin())
+            ty, tx = divmod(flat_idx, tile_size)
+
+            # Circle radius scaled by area (log scale -- area spans orders of
+            # magnitude from ~25 km^2 single cells to ~10000 km^2 MCSs).
+            area = float(cell["area_km2"])
+            radius = max(3.0, min(12.0, 3.0 + math.log10(max(area, 1.0)) * 3.0))
+
+            # Draw filled circle at the centroid.
+            draw.ellipse(
+                [(tx - radius, ty - radius), (tx + radius, ty + radius)],
+                fill=cell_color,
+                outline=cell_color,
+            )
+
+            # Draw motion arrow if speed is available and non-zero.
+            speed = float(cell["motion_speed_kmh"])
+            if not math.isnan(speed) and speed > 0:
+                dx = float(cell["motion_dx_px"])
+                dy = float(cell["motion_dy_px"])
+                raw_len = math.hypot(dx, dy)
+                if raw_len > 1e-9:
+                    speed_scale = 4.0
+                    min_len = 5.0
+                    max_len = 20.0
+                    target_len = min(max(raw_len * speed_scale, min_len), max_len)
+                    adx = dx / raw_len * target_len
+                    ady = dy / raw_len * target_len
+
+                    # Arrow biased toward the tip (60% forward) -- same as
+                    # _draw_motion_arrows.
+                    x0 = tx - adx * 0.4
+                    y0 = ty - ady * 0.4
+                    x1 = tx + adx * 0.6
+                    y1 = ty + ady * 0.6
+                    draw.line([(x0, y0), (x1, y1)], fill=arrow_color, width=line_w)
+                    angle = math.atan2(ady, adx)
+                    head_len = max(4.0, min(8.0, math.hypot(adx, ady) * 0.35))
+                    ha = 0.45
+                    draw.polygon([
+                        (x1, y1),
+                        (x1 - head_len * math.cos(angle - ha),
+                         y1 - head_len * math.sin(angle - ha)),
+                        (x1 - head_len * math.cos(angle + ha),
+                         y1 - head_len * math.sin(angle + ha)),
+                    ], fill=arrow_color)
 
     return Image.alpha_composite(img, overlay)
 

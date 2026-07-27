@@ -37,6 +37,7 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Smart fetch optimization** — radar sources skip re-downloading frames already in memory (only ~1 of 12 frames is new each cycle), NWP models skip redundant S3 fetches when the model run hasn't changed, and parallel NWP fetches are concurrency-capped via `LIBREWXR_NWP_FETCH_CONCURRENCY` so peak transient RAM stays bounded
 - **Health endpoint** — `/health` for monitoring uptime, per-component memory breakdown, frame count, NWP chain status, alerts status, MCP mount state, and cache state
 - **MCP server** for AI agents — query precipitation nowcast and active weather alerts via Model Context Protocol. HTTP transport mounted at `/mcp/` for n8n-style automation; stdio transport for local agents like Claude Desktop. See [MCP server](#mcp-server-librewxr-extension) below.
+- **Storm-cell detection** — convective cells detected on radar frames each cycle via connected-component labeling at a configurable dBZ threshold. Overlay them on tiles with `?cells=light|dark` (parallel to `?arrows=`). See [Storm-Cell Detection](docs/storm-cells.md).
 - **Fully configurable** — all tunable parameters exposed via environment variables
 
 ## Current Limitations
@@ -319,6 +320,20 @@ GET /v2/radar/{timestamp}/{size}/{z}/{x}/{y}/{color}/{smooth}_{snow}.{ext}
 | Parameter | Values | Description |
 |---|---|---|
 | `arrows` | `light`, `dark` | Draw precipitation motion arrows (light for dark maps, dark for light maps) |
+| `cells` | `light`, `dark` | Draw detected storm-cell markers (light for dark maps, dark for light maps) |
+
+**Examples with query parameters:**
+
+```
+# With motion arrows (light for dark maps, dark for light maps)
+https://api.librewxr.net/v2/radar/{timestamp}/256/{z}/{x}/{y}/10/1_1.png?arrows=light
+
+# With storm-cell overlay (detected cells + motion arrows at each centroid)
+https://api.librewxr.net/v2/radar/{timestamp}/256/{z}/{x}/{y}/10/1_1.png?cells=light
+
+# Combined: motion arrows + storm cells
+https://api.librewxr.net/v2/radar/{timestamp}/256/{z}/{x}/{y}/10/1_1.png?arrows=light&cells=light
+```
 
 **Color schemes:**
 
@@ -481,6 +496,10 @@ the inline comments in [`src/librewxr/config.py`](src/librewxr/config.py).
 | **MCP server** | | |
 | `LIBREWXR_MCP_ENABLED` | `true` | Master switch for the MCP HTTP transport (mounted inside the FastAPI app). When `false`, no `/mcp` route is mounted. The standalone stdio entry (`python -m librewxr.mcp`) is unaffected. |
 | `LIBREWXR_MCP_PATH` | `/mcp` | URL path where the MCP HTTP transport is mounted. See the trailing-slash note in [MCP server](#mcp-server-librewxr-extension). |
+| **Storm-cell detection** | | |
+| `LIBREWXR_STORM_CELLS_ENABLED` | `true` | Master switch for storm-cell detection. When `false`, no detection runs and `?cells=` has no effect. |
+| `LIBREWXR_STORM_CELLS_MIN_DBZ` | `40` | Minimum dBZ for a pixel to be part of a detected cell. |
+| `LIBREWXR_STORM_CELLS_MIN_AREA_KM2` | `25.0` | Minimum cell area in km^2 — filters out noise/small cells. |
 
 Requires `pip install -e ".[mcp]"` (adds `fastmcp`). Full reference: [`docs/configuration-reference.md`](docs/configuration-reference.md).
 

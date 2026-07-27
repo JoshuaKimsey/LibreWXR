@@ -399,6 +399,13 @@ class Settings(BaseSettings):
     # the composite only fills NWP-only regions where sub-0.25° detail
     # doesn't matter.  Advanced tuning; not exposed in .env.example.
     arrow_nwp_flow_resolution_deg: float = 0.25
+    # Storm-cell detection (for the ?cells= tile overlay + future MCP tool).
+    # Runs cv2 connectedComponentsWithStats on the latest radar frame each
+    # fetch cycle; detected cells + their motion vectors are stored in
+    # StormCellStore and read by the renderer's present_tile on demand.
+    storm_cells_enabled: bool = True
+    storm_cells_min_dbz: int = 40  # Minimum dBZ for a pixel to be part of a cell
+    storm_cells_min_area_km2: float = 25.0  # Minimum cell area in km^2 (filter noise/small cells)
     cache_dir: str = ""  # Persistent cache directory for fetched grids; empty = in-memory only
 
     # Multi-worker tile-server split.  When render_only is True, this

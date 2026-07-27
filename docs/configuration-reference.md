@@ -23,6 +23,7 @@ This document is the **full** reference for every setting LibreWXR understands. 
   - [South American: WRF-SMN](#south-american-wrf-smn)
   - [East Asia: JMA MSM](#east-asia-jma-msm)
 - [Nowcasting](#nowcasting)
+- [Storm-Cell Detection](#storm-cell-detection)
 - [Satellite (GMGSI)](#satellite-gmgsi)
 - [Weather Alerts (WMO CAP)](#weather-alerts-wmo-cap)
 - [Persistent Cache](#persistent-cache)
@@ -1090,6 +1091,47 @@ Resolution of the global composite NWP flow raster used by the arrow overlay out
 | **Type** | float |
 
 At 0.25° the raster is 721×1440 float32 (~8 MB). The 32/48px arrow draw grid can't resolve finer detail at most zooms, so coarser is cheaper for no visible loss. Finer values help only at high zoom inside small convective cells — and inside radar coverage those cells already get the fine per-region radar flow (which wins by construction), so the composite only fills NWP-only regions where sub-0.25° detail doesn't matter. This is an advanced tuning knob not surfaced in `.env.example`.
+
+---
+
+## Storm-Cell Detection
+
+Storm-cell detection uses OpenCV `connectedComponentsWithStats` on the latest radar frame to identify convective cells, compute their centroids and motion vectors (from the nowcast optical flow), and store them in `StormCellStore`. The renderer overlays cell outlines and arrows on radar tiles via the `?cells=light|dark` query parameter.
+
+Detection runs once per fetch cycle, after nowcast generation, so it can reuse the just-computed optical flow. The data is included in the `state.json` snapshot so multi-mode render workers can serve it without running detection themselves.
+
+### `LIBREWXR_STORM_CELLS_ENABLED`
+
+Master switch for storm-cell detection. When `false`, no detection runs and the `?cells=` query parameter is a no-op on the tile endpoint.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+### `LIBREWXR_STORM_CELLS_MIN_DBZ`
+
+Minimum dBZ threshold for a pixel to be considered part of a storm cell. Pixels below this value are ignored by the connected-components algorithm.
+
+| | |
+|---|---|
+| **Default** | `40` |
+| **Type** | integer |
+| **Unit** | dBZ |
+
+40 dBZ corresponds to moderate convection — the typical boundary between light stratiform rain and organized convective cores. Lower values (e.g., 35) will detect more diffuse cells but may increase false positives from bright-band contamination and ground clutter.
+
+### `LIBREWXR_STORM_CELLS_MIN_AREA_KM2`
+
+Minimum area for a connected component to be reported as a storm cell, in square kilometres. Filters out noise, speckle, and very small convective cores.
+
+| | |
+|---|---|
+| **Default** | `25.0` |
+| **Type** | float |
+| **Unit** | km² |
+
+At 25 km², a cell needs to be roughly 5×5 km to register — well below the size of a single thunderstorm cell (~10-50 km² at the lower end), while still filtering out speckle and isolated clutter pixels. Increase to e.g. 100 km² to report only the largest organized mesoscale features. Decrease to e.g. 5 km² for very fine-grained detection, at the cost of more noise.
 
 ---
 

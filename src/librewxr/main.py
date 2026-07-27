@@ -19,6 +19,7 @@ from librewxr.data.coverage import build_coverage_masks, build_feather_masks
 from librewxr.data.fetcher import RadarFetcher
 from librewxr.data.master_state import apply_state, dump_state, load_state, state_mtime
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
+from librewxr.data.storm_cells import StormCellGenerator, StormCellStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.store import FrameStore
 from librewxr.sources import (
@@ -181,6 +182,11 @@ async def _render_only_lifespan(app: FastAPI):
         if (settings.nowcast_enabled or settings.arrow_flow_enabled)
         else None
     )
+    storm_cell_store = (
+        StormCellStore(cache_dir=cache_dir)
+        if settings.storm_cells_enabled
+        else None
+    )
     alerts_store = AlertsStore() if settings.alerts_enabled else None
 
     stores: dict[str, object | None] = {
@@ -188,6 +194,7 @@ async def _render_only_lifespan(app: FastAPI):
         **nwp_grids_by_slug,
         **satellite_grids_by_slug,
         "nowcast_store": nowcast_store,
+        "storm_cell_store": storm_cell_store,
         "alerts_store": alerts_store,
     }
 
@@ -221,6 +228,7 @@ async def _render_only_lifespan(app: FastAPI):
     }
     ecmwf_grid = nwp_grids_by_slug.get("ecmwf_grid")
     nowcast_store = stores["nowcast_store"]
+    storm_cell_store = stores["storm_cell_store"]
     alerts_store = stores["alerts_store"]
 
     enabled = settings.get_enabled_regions()
@@ -275,6 +283,7 @@ async def _render_only_lifespan(app: FastAPI):
     routes.satellite_grids = satellite_grids_by_slug
     routes.tile_warmer = None
     routes.nowcast_store = nowcast_store
+    routes.storm_cell_store = storm_cell_store
     routes.tile_request_tracker = tile_request_tracker
     routes.start_time = time.time()
     routes.enabled_regions = enabled
@@ -340,6 +349,8 @@ async def _render_only_lifespan(app: FastAPI):
         store.cleanup()
         if nowcast_store is not None:
             nowcast_store.cleanup()
+        if storm_cell_store is not None:
+            storm_cell_store.cleanup()
         logger.info("Render-only worker shutdown complete")
 
 
@@ -430,6 +441,21 @@ async def lifespan(app: FastAPI):
                 settings.arrow_flow_target_dim,
             )
 
+    # Storm-cell detection store + generator.  Constructed whenever
+    # storm_cells is on -- the detection runs each cycle after nowcast
+    # generation so it can reuse the just-computed optical flow.
+    storm_cell_store = None
+    storm_cell_generator = None
+    if settings.storm_cells_enabled:
+        storm_cell_store = StormCellStore()
+        storm_cell_generator = StormCellGenerator(
+            store, storm_cell_store, nowcast_store=nowcast_store,
+        )
+        logger.info("Storm-cell detection enabled (min_dbz=%d, min_area=%.1f km^2)",
+                     settings.storm_cells_min_dbz, settings.storm_cells_min_area_km2)
+    else:
+        logger.info("Storm-cell detection: disabled (LIBREWXR_STORM_CELLS_ENABLED=false)")
+
     # Separate thread pools for direct requests and background warming.
     # Direct requests get their own pool so they are never queued behind
     # warming tasks.  The warmer gets an equal-sized pool so it can use
@@ -503,6 +529,7 @@ async def lifespan(app: FastAPI):
     routes.satellite_grids = satellite_grids_by_slug
     routes.tile_warmer = warmer
     routes.nowcast_store = nowcast_store
+    routes.storm_cell_store = storm_cell_store
     routes.tile_request_tracker = tile_request_tracker
     routes.start_time = time.time()
     routes.enabled_regions = enabled
@@ -542,6 +569,7 @@ async def lifespan(app: FastAPI):
             **nwp_grids_by_slug,
             **satellite_grids_by_slug,
             "nowcast_store": nowcast_store,
+            "storm_cell_store": storm_cell_store,
             "alerts_store": alerts_store,
         }
 
@@ -556,6 +584,7 @@ async def lifespan(app: FastAPI):
         nwp_contributions=nwp_contribs,
         satellite_contributions=satellite_contribs,
         nowcast_generator=nowcast_generator,
+        storm_cell_generator=storm_cell_generator,
         warmer=warmer,
         radar_cache=radar_cache,
         on_cycle_complete=on_cycle_complete,
@@ -610,6 +639,8 @@ async def lifespan(app: FastAPI):
     request_executor.shutdown(wait=False)
     if nowcast_store is not None:
         nowcast_store.cleanup()
+    if storm_cell_store is not None:
+        storm_cell_store.cleanup()
     cache.clear()
     store.cleanup()
     logger.info("LibreWXR shutdown complete")

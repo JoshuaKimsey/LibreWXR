@@ -35,6 +35,7 @@ from librewxr.data.coverage import build_coverage_masks, build_feather_masks
 from librewxr.data.fetcher import RadarFetcher
 from librewxr.data.master_state import dump_state
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
+from librewxr.data.storm_cells import StormCellGenerator, StormCellStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.radar_cache import RadarFrameCache
 from librewxr.data.regions import REGIONS
@@ -184,6 +185,16 @@ async def run_pipeline() -> None:
                 settings.arrow_flow_target_dim,
             )
 
+    storm_cell_store = None
+    storm_cell_generator = None
+    if settings.storm_cells_enabled:
+        storm_cell_store = StormCellStore(cache_dir=cache_dir)
+        storm_cell_generator = StormCellGenerator(
+            store, storm_cell_store, nowcast_store=nowcast_store,
+        )
+        logger.info("Storm-cell detection enabled (min_dbz=%d, min_area=%.1f km^2)",
+                     settings.storm_cells_min_dbz, settings.storm_cells_min_area_km2)
+
     # RadarFrameCache lets the pipeline restart and re-populate its
     # FrameStore from the prior session's frames before the first fetch
     # completes — without it, render workers would see an empty
@@ -212,6 +223,7 @@ async def run_pipeline() -> None:
         **nwp_grids_by_slug,
         **satellite_grids_by_slug,
         "nowcast_store": nowcast_store,
+        "storm_cell_store": storm_cell_store,
         "alerts_store": alerts_store,
     }
 
@@ -226,6 +238,7 @@ async def run_pipeline() -> None:
         nwp_contributions=nwp_contribs,
         satellite_contributions=satellite_contribs,
         nowcast_generator=nowcast_generator,
+        storm_cell_generator=storm_cell_generator,
         warmer=None,  # tile warming is the render workers' job
         radar_cache=radar_cache,
         on_cycle_complete=on_cycle_complete,
@@ -275,6 +288,8 @@ async def run_pipeline() -> None:
             await alerts_fetcher.close()
         if nowcast_store is not None:
             nowcast_store.cleanup()
+        if storm_cell_store is not None:
+            storm_cell_store.cleanup()
         store.cleanup()
         logger.info("Pipeline shutdown complete")
 

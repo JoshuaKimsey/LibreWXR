@@ -59,6 +59,7 @@ nwp_chain = None  # NWPChain | None
 satellite_grids: dict[str, object] = {}
 tile_warmer = None  # TileWarmer | None
 nowcast_store = None  # NowcastStore | None
+storm_cell_store = None  # StormCellStore | None
 radar_cache = None  # RadarFrameCache | None
 radar_fetcher = None  # RadarFetcher | None
 tile_request_tracker: TileRequestTracker | None = None
@@ -260,6 +261,12 @@ async def health():
             "path": mcp_path,
             "tools": list(mcp_tools),
         } if settings.mcp_enabled else {"enabled": False},
+        "storm_cells": {
+            "enabled": settings.storm_cells_enabled,
+            "count": storm_cell_store.total_count if storm_cell_store is not None else 0,
+            "last_updated": int(storm_cell_store.last_updated) if storm_cell_store is not None else 0,
+            "per_region": await storm_cell_store.get_counts() if storm_cell_store is not None else {},
+        } if settings.storm_cells_enabled else {"enabled": False},
     }
 
 
@@ -323,6 +330,7 @@ async def radar_tile(
     smooth_snow: str = Path(pattern=r"^\d+_\d+$"),
     ext: str = Path(pattern=r"^(png|webp)$"),
     arrows: str = Query(default=""),
+    cells: str = Query(default=""),
 ) -> Response:
     """Rain Viewer-compatible tile endpoint."""
     logger.debug("Tile request: z=%d x=%d y=%d color=%d smooth_snow=%s ext=%s", z, x, y, color, smooth_snow, ext)
@@ -347,6 +355,12 @@ async def radar_tile(
         arrow_style = "light"
     elif arrows == "dark":
         arrow_style = "dark"
+
+    cell_style = ""
+    if cells in ("1", "true", "light"):
+        cell_style = "light"
+    elif cells == "dark":
+        cell_style = "dark"
 
     # Geometry cache: keyed only on inputs that affect the sampled values
     # (radar source + viewport + smoothing + snow-mask presence).  Color
@@ -396,6 +410,12 @@ async def radar_tile(
             flow_regions = await nowcast_store.get_flows() or None
             nwp_flow = await nowcast_store.get_nwp_flow()
 
+    cells_by_region = None
+    cell_counts = None
+    if cell_style and storm_cell_store is not None:
+        cells_by_region = await storm_cell_store.get_cells() or None
+        cell_counts = await storm_cell_store.get_counts() or None
+
     tile_bytes = await asyncio.to_thread(
         present_tile,
         geom,
@@ -409,6 +429,9 @@ async def radar_tile(
         nwp_chain=nwp_chain,
         frame_timestamp=timestamp,
         z=z, x=x, y=y,
+        cell_style=cell_style if cells_by_region else "",
+        cells_by_region=cells_by_region,
+        cell_counts=cell_counts,
     )
 
     if tile_warmer is not None:
