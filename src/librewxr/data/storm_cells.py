@@ -183,8 +183,13 @@ class StormCellStore:
         memmap_dir = Path(state["memmap_dir"])
         new_cells: dict[str, np.ndarray] = {}
         for name, (basename, dtype_info, shape) in state["cells"].items():
-            # dtype_info is a list of (name, format) tuples from descr.
-            dtype = np.dtype(dtype_info)
+            # dtype_info comes from dtype.descr as a list of (name, format)
+            # tuples, but JSON serialization (dump_state -> json.dumps ->
+            # json.loads -> apply_state) converts tuples to lists.  numpy
+            # requires tuples for structured dtype field specs, so convert
+            # each inner list back to a tuple.  tuple(tuple(x)) is a no-op
+            # when x is already a tuple (the in-memory test path).
+            dtype = np.dtype([tuple(item) for item in dtype_info])
             new_cells[name] = np.memmap(
                 memmap_dir / basename,
                 dtype=dtype, mode="r",
