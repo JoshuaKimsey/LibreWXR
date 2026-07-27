@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 
-"""MCP pure tool functions for precipitation nowcast and weather alerts.
+"""MCP pure tool functions for precipitation nowcast, weather alerts,
+and storm-cell queries.
 
 These functions accept stores as explicit arguments so that both the HTTP
 transport (reading ``routes.*`` globals) and the stdio transport (building
@@ -9,11 +10,13 @@ its own stores) can call them identically.  No module-level mutable state.
 """
 
 import logging
+import math
 import time
 
 import numpy as np
 
 from librewxr.api.models import AlertsResponse
+from librewxr.data.regions import REGIONS
 from librewxr.mcp.alerts_query import alerts_within_radius
 from librewxr.mcp.sampling import (
     dbz_to_rate_mmh,
@@ -21,6 +24,7 @@ from librewxr.mcp.sampling import (
     resolve_region_for_point,
     sample_nowcast_at_point,
 )
+from librewxr.mcp.storm_cells import cell_pixel_to_latlon
 
 logger = logging.getLogger(__name__)
 
@@ -184,3 +188,91 @@ async def get_active_alerts(
         return AlertsResponse(type="FeatureCollection", features=[])
 
     return await alerts_within_radius(alerts_store, lat, lon, radius_km, severity)
+
+
+async def get_storm_cells(
+    storm_cell_store,
+    lat: float,
+    lon: float,
+    radius_km: float = 100.0,
+) -> list[dict]:
+    """Query detected storm cells within a radius of a geographic point.
+
+    Returns a list of cell dicts, each with lat/lon centroid, area, max
+    dBZ, and motion vector (speed + heading).  Cells are filtered to
+    those within ``radius_km`` of (lat, lon) using the equirectangular
+    cos(lat) approximation.  Returns an empty list when storm-cell
+    detection is disabled or no cells are within range; never raises.
+
+    Parameters
+    ----------
+    storm_cell_store : StormCellStore | None
+        The global storm-cell store (None when detection is disabled).
+    lat : float
+        Query latitude in degrees.
+    lon : float
+        Query longitude in degrees.
+    radius_km : float
+        Search radius in kilometres (default 100.0 -- wider than the
+        alerts default because storm cells are sparser than alerts).
+
+    Returns
+    -------
+    list[dict]
+        One dict per detected cell within radius.  Each dict has:
+        ``lat``, ``lon``, ``area_km2``, ``max_dbz``, ``motion_speed_kmh``,
+        ``motion_heading_deg``, ``region``.
+    """
+    if storm_cell_store is None:
+        return []
+
+    cells_by_region = await storm_cell_store.get_cells()
+    counts = await storm_cell_store.get_counts()
+    if not cells_by_region or not counts:
+        return []
+
+    # Equirectangular cos(lat) distance -- same formula as alerts_query.py.
+    cos_lat = math.cos(math.radians(lat))
+    deg_to_km_lat = 111.0
+    deg_to_km_lon = 111.0 * cos_lat
+    radius_km_sq = radius_km * radius_km
+
+    results: list[dict] = []
+    for region_name, cells in cells_by_region.items():
+        count = counts.get(region_name, 0)
+        if count == 0:
+            continue
+
+        region = REGIONS.get(region_name)
+        if region is None:
+            continue
+
+        for i in range(count):
+            cell = cells[i]
+            cr = float(cell["centroid_row"])
+            cc = float(cell["centroid_col"])
+
+            # Convert pixel coords to lat/lon.
+            cell_lat, cell_lon = cell_pixel_to_latlon(region, cr, cc)
+
+            # Radius filter: equirectangular distance.
+            dlat_km = (cell_lat - lat) * deg_to_km_lat
+            dlon_km = (cell_lon - lon) * deg_to_km_lon
+            d2 = dlat_km * dlat_km + dlon_km * dlon_km
+            if d2 > radius_km_sq:
+                continue
+
+            speed = float(cell["motion_speed_kmh"])
+            heading = float(cell["motion_heading_deg"])
+
+            results.append({
+                "lat": cell_lat,
+                "lon": cell_lon,
+                "area_km2": float(cell["area_km2"]),
+                "max_dbz": float(cell["max_dbz"]),
+                "motion_speed_kmh": speed if not math.isnan(speed) else None,
+                "motion_heading_deg": heading if not math.isnan(heading) else None,
+                "region": region_name,
+            })
+
+    return results

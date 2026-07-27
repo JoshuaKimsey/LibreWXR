@@ -89,6 +89,33 @@ def _register_tools(mcp: FastMCP) -> None:
         )
         return result.model_dump()
 
+    @mcp.tool(name="get_storm_cells")
+    async def _storm_cells_tool(
+        lat: float,
+        lon: float,
+        radius_km: float = 100.0,
+    ) -> list[dict]:
+        """Get detected storm cells within a radius of a geographic point.
+
+        Returns a list of convective cells detected on the latest radar
+        frame, each with lat/lon centroid, area (km^2), max dBZ, and
+        motion vector (speed in km/h + compass heading).  Filtered to
+        cells within ``radius_km`` of the query point.  Returns an empty
+        list when storm-cell detection is disabled or no cells are within
+        range; never raises.
+
+        Args:
+            lat: Query latitude in degrees (-90 to 90).
+            lon: Query longitude in degrees (-180 to 180).
+            radius_km: Search radius in kilometres (default 100.0).
+        """
+        return await tools.get_storm_cells(
+            routes.storm_cell_store,
+            lat,
+            lon,
+            radius_km,
+        )
+
 
 def build_mcp_http_app():
     """Build the FastMCP instance for the HTTP transport.

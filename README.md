@@ -409,10 +409,11 @@ Returns server status, frame count, cache usage, NWP chain state, satellite cach
 
 #### MCP Server (LibreWXR extension)
 
-LibreWXR exposes an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) endpoint for AI agents and automation pipelines. Two tools are available:
+LibreWXR exposes an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) endpoint for AI agents and automation pipelines. Three tools are available:
 
 - `get_precip_nowcast(lat, lon, minutes=60)` — returns future precipitation frames (up to 60 minutes ahead) with dBZ, rain rate (mm/h), data source (`radar` | `nwp` | `none`), blend weight, and coverage (`in_range` | `out_of_range`).
 - `get_active_alerts(lat, lon, radius_km=25, severity=None)` — returns a GeoJSON FeatureCollection of WMO CAP alerts within `radius_km`, enriched with US NWS point alerts for US locations. Returns an empty collection when alerts are disabled or none match; never raises.
+- `get_storm_cells(lat, lon, radius_km=100)` — returns a list of detected storm cells within `radius_km` of the point. Each cell dict: `{lat, lon, area_km2, max_dbz, motion_speed_kmh, motion_heading_deg, region}`. Returns an empty list when detection is disabled or no cells are within range; never raises.
 
 The endpoint is mounted at `LIBREWXR_MCP_PATH` (default `/mcp/`) when the `[mcp]` extra is installed and `LIBREWXR_MCP_ENABLED=true` (the default). Failures (missing extra, build error) are silently skipped so the REST API still boots; the `/health` endpoint surfaces the actual mount state as `mcp: {enabled, mounted, path, tools}`.
 
