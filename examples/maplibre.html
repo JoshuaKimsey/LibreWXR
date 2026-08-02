@@ -4,8 +4,7 @@
     <title>LibreWXR - MapLibre Example</title>
     <meta charset="utf-8"/>
     <meta content="width=device-width, initial-scale=1.0" name="viewport">
-    <link href="https://unpkg.com/maplibre-gl/dist/maplibre-gl.css" rel="stylesheet"/>
-    <script src="https://unpkg.com/maplibre-gl/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@^6.0.0/dist/maplibre-gl.css" rel="stylesheet"/>
     <style>
         /* === THEME VARIABLES === */
         [data-theme="dark"] {
@@ -385,7 +384,8 @@
     </div>
 </div>
 
-<script>
+<script type="module">
+import * as maplibregl from 'https://unpkg.com/maplibre-gl@^6.0.0/dist/maplibre-gl.mjs';
 // === CONFIGURATION ===
 var TILE_SIZE = 512;
 var RADAR_OPACITY = 0.8;
@@ -1253,6 +1253,16 @@ map.on('load', function() {
     loadApiData();
     startAutoRefresh();
 });
+
+// MapLibre v6 ESM: inline-event-handler targets must be hoisted to window
+// (module scope does not leak to the global object like classic scripts do).
+window.changeSource = changeSource;
+window.changeLayer = changeLayer;
+window.changeColorScheme = changeColorScheme;
+window.changeArrows = changeArrows;
+window.changeCells = changeCells;
+window.changeTheme = changeTheme;
+window.playStop = playStop;
 </script>
 
 </body>
