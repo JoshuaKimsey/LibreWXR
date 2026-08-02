@@ -6,7 +6,7 @@ import logging
 import time
 import psutil
 
-from fastapi import APIRouter, HTTPException, Path, Query, Response
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 
 from datetime import datetime
 
@@ -20,11 +20,12 @@ from librewxr.api.models import (
     SatelliteData,
     WeatherMapsResponse,
 )
+from librewxr.api.conditional import compute_etag, conditional_response
 from librewxr.colors.schemes import SCHEME_NAMES
 from librewxr.config import settings
 from librewxr.data.store import FrameStore
 from librewxr.memory import detect_memory_limit_mb
-from librewxr.tiles.cache import TileCache
+from librewxr.tiles.cache import CachedRender, TileCache
 from librewxr.tiles.coordinates import coord_cache_bytes, coord_cache_stats
 from librewxr.tiles.renderer import (
     compute_tile_geometry,
@@ -174,6 +175,28 @@ async def health():
         "other_mb": round(other_bytes / (1024 * 1024), 1),
     })
 
+    # Split the tile cache into its three entry kinds: satellite render
+    # entries (``"sat"``-prefixed keys), geometry entries (int timestamp +
+    # 6-element viewport key), and present render entries (int timestamp +
+    # 9-element viewport/visual key).  Each kind is reported with its own
+    # count and byte total.
+    cache_kind_geometry = 0
+    cache_kind_geometry_bytes = 0
+    cache_kind_present = 0
+    cache_kind_present_bytes = 0
+    cache_kind_satellite = 0
+    cache_kind_satellite_bytes = 0
+    for key, size in tile_cache.entries():
+        if key[0] == "sat":
+            cache_kind_satellite += 1
+            cache_kind_satellite_bytes += size
+        elif key and isinstance(key[0], int) and len(key) == 7:
+            cache_kind_geometry += 1
+            cache_kind_geometry_bytes += size
+        elif key and isinstance(key[0], int) and len(key) == 10:
+            cache_kind_present += 1
+            cache_kind_present_bytes += size
+
     return {
         "status": "ok" if frame_count > 0 else "degraded",
         "uptime_seconds": uptime,
@@ -195,6 +218,12 @@ async def health():
             "entries": tile_cache.size,
             "used_mb": round(tile_cache.total_bytes / (1024 * 1024), 1),
             "max_mb": settings.tile_cache_mb,
+            "geometry_entries": cache_kind_geometry,
+            "geometry_bytes": cache_kind_geometry_bytes,
+            "present_entries": cache_kind_present,
+            "present_bytes": cache_kind_present_bytes,
+            "satellite_entries": cache_kind_satellite,
+            "satellite_bytes": cache_kind_satellite_bytes,
         },
         **_nwp_grid_health_blocks(),
         "nwp_chain": {
@@ -321,6 +350,7 @@ async def weather_maps() -> WeatherMapsResponse:
 
 @router.get("/v2/radar/{timestamp}/{size}/{z}/{x}/{y}/{color}/{smooth_snow}.{ext}")
 async def radar_tile(
+    request: Request,
     timestamp: int,
     size: int = Path(ge=256, le=512),
     z: int = Path(ge=0),
@@ -421,23 +451,61 @@ async def radar_tile(
             cells_by_region = await storm_cell_store.get_cells() or None
             cell_counts = await storm_cell_store.get_counts() or None
 
-    tile_bytes = await asyncio.to_thread(
-        present_tile,
-        geom,
-        color_scheme=color,
-        fmt=ext,
-        arrow_style=arrow_style if (flow_regions or nwp_flow is not None) else "",
-        flow_regions=flow_regions,
-        frame_regions=frame.regions if frame is not None else None,
-        enabled_regions=enabled_regions,
-        nwp_flow=nwp_flow,
-        nwp_chain=nwp_chain,
-        frame_timestamp=timestamp,
-        z=z, x=x, y=y,
-        cell_style=cell_style if cells_by_region else "",
-        cells_by_region=cells_by_region,
-        cell_counts=cell_counts,
-    )
+    is_plain = not arrows and not cells
+
+    if is_plain:
+        # Present-stage cache: one entry per visual variant of the same
+        # geometry.  Stores the encoded bytes plus the ETag so a present
+        # cache hit skips both ``present_tile`` and the ETag hash.
+        present_key = (
+            timestamp, z, x, y, tile_size, smooth, snow,
+            color, ext, settings.webp_quality,
+        )
+        cached = tile_cache.get(present_key)
+        if isinstance(cached, CachedRender):
+            tile_bytes = cached.data
+            etag = cached.etag
+        else:
+            tile_bytes = await asyncio.to_thread(
+                present_tile,
+                geom,
+                color_scheme=color,
+                fmt=ext,
+                arrow_style=arrow_style if (flow_regions or nwp_flow is not None) else "",
+                flow_regions=flow_regions,
+                frame_regions=frame.regions if frame is not None else None,
+                enabled_regions=enabled_regions,
+                nwp_flow=nwp_flow,
+                nwp_chain=nwp_chain,
+                frame_timestamp=timestamp,
+                z=z, x=x, y=y,
+                cell_style=cell_style if cells_by_region else "",
+                cells_by_region=cells_by_region,
+                cell_counts=cell_counts,
+            )
+            etag = compute_etag(tile_bytes)
+            tile_cache.put(present_key, CachedRender(data=tile_bytes, etag=etag))
+    else:
+        # Overlay requests (arrows / cells) evolve under the same
+        # timestamp, so their rendered bytes are never cached.
+        tile_bytes = await asyncio.to_thread(
+            present_tile,
+            geom,
+            color_scheme=color,
+            fmt=ext,
+            arrow_style=arrow_style if (flow_regions or nwp_flow is not None) else "",
+            flow_regions=flow_regions,
+            frame_regions=frame.regions if frame is not None else None,
+            enabled_regions=enabled_regions,
+            nwp_flow=nwp_flow,
+            nwp_chain=nwp_chain,
+            frame_timestamp=timestamp,
+            z=z, x=x, y=y,
+            cell_style=cell_style if cells_by_region else "",
+            cells_by_region=cells_by_region,
+            cell_counts=cell_counts,
+        )
+        etag = compute_etag(tile_bytes)
 
     if tile_warmer is not None:
         # When the cache hit short-circuited the frame fetch, we still
@@ -463,15 +531,18 @@ async def radar_tile(
     latest_ts = max(timestamps) if timestamps else None
     max_age = 7200 if (latest_ts is not None and timestamp < latest_ts) else 300
 
-    return Response(
-        content=tile_bytes,
-        media_type=_content_type(ext),
-        headers={"Cache-Control": f"public, max-age={max_age}"},
+    return conditional_response(
+        request=request,
+        body=tile_bytes,
+        etag=etag,
+        content_type=_content_type(ext),
+        max_age=max_age,
     )
 
 
 @router.get("/v2/coverage/0/{size}/{z}/{x}/{y}/0/0_0.png")
 async def coverage_tile(
+    request: Request,
     size: int = Path(ge=256, le=512),
     z: int = Path(ge=0),
     x: int = Path(ge=0),
@@ -499,15 +570,20 @@ async def coverage_tile(
         enabled_regions=enabled_regions,
     )
 
-    return Response(
-        content=tile_bytes,
-        media_type="image/png",
-        headers={"Cache-Control": "public, max-age=300"},
+    etag = compute_etag(tile_bytes)
+
+    return conditional_response(
+        request=request,
+        body=tile_bytes,
+        etag=etag,
+        content_type="image/png",
+        max_age=300,
     )
 
 
 @router.get("/v2/satellite/{timestamp}/{size}/{z}/{x}/{y}/0/0_0.{ext}")
 async def satellite_tile(
+    request: Request,
     timestamp: int,
     size: int = Path(ge=256, le=512),
     z: int = Path(ge=0),
@@ -546,15 +622,30 @@ async def satellite_tile(
     else:
         raise HTTPException(status_code=503, detail="Satellite data not available")
 
+    # Older-than-latest frames are immutable; give them a long max-age.
+    # Computed before the lookup so cache hits get the same semantics.
+    sat_timestamps = gmgsi_lw.timestamps
+    latest_sat_ts = max(sat_timestamps) if sat_timestamps else None
+    max_age = 7200 if (latest_sat_ts is not None and timestamp < latest_sat_ts) else 300
+
     # Distinct cache keys per backing so a runtime swap (e.g. VIS ingest
     # catching up after restart) doesn't serve stale composites.
     cache_key = ("sat", backing, timestamp, z, x, y, tile_size, ext)
     cached = tile_cache.get(cache_key)
     if cached is not None:
-        return Response(
-            content=cached,
-            media_type=_content_type(ext),
-            headers={"Cache-Control": "public, max-age=300"},
+        if isinstance(cached, CachedRender):
+            tile_bytes = cached.data
+            etag = cached.etag
+        else:
+            # Legacy raw-bytes entry (pre-ETag cache format).
+            tile_bytes = cached
+            etag = compute_etag(cached)
+        return conditional_response(
+            request=request,
+            body=tile_bytes,
+            etag=etag,
+            content_type=_content_type(ext),
+            max_age=max_age,
         )
 
     if backing == "gmgsi_composite":
@@ -576,18 +667,16 @@ async def satellite_tile(
             timestamp=timestamp,
             fmt=ext,
         )
-    sat_timestamps = gmgsi_lw.timestamps
+    etag = compute_etag(tile_bytes)
 
-    tile_cache.put(cache_key, tile_bytes)
+    tile_cache.put(cache_key, CachedRender(data=tile_bytes, etag=etag))
 
-    # Older-than-latest frames are immutable; give them a long max-age.
-    latest_sat_ts = max(sat_timestamps) if sat_timestamps else None
-    max_age = 7200 if (latest_sat_ts is not None and timestamp < latest_sat_ts) else 300
-
-    return Response(
-        content=tile_bytes,
-        media_type=_content_type(ext),
-        headers={"Cache-Control": f"public, max-age={max_age}"},
+    return conditional_response(
+        request=request,
+        body=tile_bytes,
+        etag=etag,
+        content_type=_content_type(ext),
+        max_age=max_age,
     )
 
 

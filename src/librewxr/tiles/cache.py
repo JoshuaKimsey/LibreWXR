@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 from collections import OrderedDict
+from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Protocol
 
@@ -16,6 +17,21 @@ def _size_of(value: Any) -> int:
     if isinstance(value, (bytes, bytearray, memoryview)):
         return len(value)
     return int(value.nbytes)
+
+
+@dataclass
+class CachedRender:
+    """An encoded tile plus its ETag, stored under a present-stage cache key.
+
+    ``TileCache`` already accepts any object exposing ``nbytes``; this wraps the
+    encoded bytes so the ETag is reused on cache hits without re-hashing.
+    """
+    data: bytes
+    etag: str
+
+    @property
+    def nbytes(self) -> int:
+        return len(self.data) + len(self.etag.encode("ascii"))
 
 
 class TileCache:
@@ -75,6 +91,11 @@ class TileCache:
         with self._lock:
             self._cache.clear()
             self._total_bytes = 0
+
+    def entries(self) -> list[tuple[tuple, int]]:
+        """Return ``(key, size_bytes)`` for every cached entry (read-only snapshot)."""
+        with self._lock:
+            return [(key, _size_of(value)) for key, value in self._cache.items()]
 
     def _evict_to_budget(self) -> None:
         """Evict oldest entries until total bytes is within budget."""
