@@ -82,3 +82,49 @@ class TestTileRequestTracker:
         assert stats["tracked_tiles"] == 2
         kept = {(t["x"], t["y"]) for t in stats["top"]}
         assert kept == {(0, 0), (1, 1)}
+
+    def test_record_fast_path_increments_reason_and_total(self):
+        tracker = TileRequestTracker()
+        tracker.record_fast_path("tier2_past_radar")
+        tracker.record_fast_path("tier2_past_radar")
+        tracker.record_fast_path("case_a_no_nwp_empty_radar")
+
+        stats = tracker.stats()
+        assert stats["fast_path"]["total"] == 3
+        assert stats["fast_path"]["by_reason"]["tier2_past_radar"] == 2
+        assert stats["fast_path"]["by_reason"]["case_a_no_nwp_empty_radar"] == 1
+
+    def test_record_cache_hit_miss_and_hit_rate(self):
+        tracker = TileRequestTracker()
+        tracker.record_cache_hit()
+        tracker.record_cache_hit()
+        tracker.record_cache_miss()
+        tracker.record_cache_miss()
+        tracker.record_cache_miss()
+
+        stats = tracker.stats()
+        assert stats["cache"]["hits"] == 2
+        assert stats["cache"]["misses"] == 3
+        assert stats["cache"]["hit_rate"] == pytest.approx(0.4)
+
+        # Fresh tracker with no activity: hit_rate defaults to 0.0.
+        empty = TileRequestTracker().stats()
+        assert empty["cache"]["hits"] == 0
+        assert empty["cache"]["misses"] == 0
+        assert empty["cache"]["hit_rate"] == 0.0
+
+    def test_stats_keeps_all_existing_keys(self):
+        tracker = TileRequestTracker()
+        tracker.record(7, 1, 1)
+        tracker.record_fast_path("tier2_past_radar")
+        tracker.record_cache_hit()
+
+        stats = tracker.stats()
+        for key in (
+            "min_zoom", "max_entries", "tracked_tiles", "total_requests",
+            "hot_threshold", "hot_tiles", "by_zoom", "top",
+        ):
+            assert key in stats
+        # Additive keys also present.
+        assert "fast_path" in stats
+        assert "cache" in stats

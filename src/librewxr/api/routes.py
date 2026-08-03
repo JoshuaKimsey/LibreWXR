@@ -400,6 +400,16 @@ async def radar_tile(
     geom_key = (timestamp, z, x, y, tile_size, smooth, snow)
     geom = tile_cache.get(geom_key)
 
+    # Geometry-stage cache outcome: this is the meaningful hit/miss for
+    # "is the fast path helping" — a transparent geometry that comes back
+    # from the cache was paid for on an earlier request, so only the
+    # miss-side fast-path counter below attributes the work to this one.
+    if tile_request_tracker is not None:
+        if geom is not None:
+            tile_request_tracker.record_cache_hit()
+        else:
+            tile_request_tracker.record_cache_miss()
+
     # We need the radar frame whenever geometry must be computed AND
     # whenever arrows are requested (arrow rendering needs live frame
     # data + flow fields).  Skip the fetch on pure cache hits without
@@ -432,6 +442,12 @@ async def radar_tile(
             nowcast_blend=nowcast_blend,
         )
         tile_cache.put(geom_key, geom)
+        # Only fire on the cold-compute path: a fast-path label here means
+        # this request actually paid for the empty-tile work (cache hits
+        # of a previously-computed transparent geometry are already counted
+        # by ``record_cache_hit`` above, not a fast-path firing now).
+        if tile_request_tracker is not None and geom.fast_path is not None:
+            tile_request_tracker.record_fast_path(geom.fast_path)
 
     flow_regions = None
     nwp_flow = None

@@ -22,6 +22,9 @@ class TileRequestTracker:
         self._min_zoom = min_zoom
         self._max_entries = max_entries
         self._counts: Counter[tuple[int, int, int]] = Counter()
+        self._fast_path_counts: dict[str, int] = {}  # reason -> count
+        self._cache_hits: int = 0
+        self._cache_misses: int = 0
         self._lock = Lock()
 
     def record(self, z: int, x: int, y: int) -> None:
@@ -47,6 +50,21 @@ class TileRequestTracker:
         keep = self._counts.most_common(self._max_entries // 2)
         self._counts = Counter(dict(keep))
 
+    def record_fast_path(self, reason: str) -> None:
+        """Record that a fast-path transparent geometry was produced."""
+        with self._lock:
+            self._fast_path_counts[reason] = self._fast_path_counts.get(reason, 0) + 1
+
+    def record_cache_hit(self) -> None:
+        """Record a geometry-stage cache hit."""
+        with self._lock:
+            self._cache_hits += 1
+
+    def record_cache_miss(self) -> None:
+        """Record a geometry-stage cache miss."""
+        with self._lock:
+            self._cache_misses += 1
+
     def stats(self, top_n: int = 10, hot_threshold: int = 5) -> dict:
         """Snapshot for the /health endpoint.
 
@@ -66,6 +84,10 @@ class TileRequestTracker:
                 bucket = by_zoom.setdefault(z, {"tiles": 0, "requests": 0})
                 bucket["tiles"] += 1
                 bucket["requests"] += count
+            fast_path_total = sum(self._fast_path_counts.values())
+            fast_path_by_reason = dict(self._fast_path_counts)
+            cache_hits = self._cache_hits
+            cache_misses = self._cache_misses
         return {
             "min_zoom": self._min_zoom,
             "max_entries": self._max_entries,
@@ -78,4 +100,17 @@ class TileRequestTracker:
                 {"z": z, "x": x, "y": y, "count": count}
                 for (z, x, y), count in top_items
             ],
+            "fast_path": {
+                "total": fast_path_total,
+                "by_reason": fast_path_by_reason,
+            },
+            "cache": {
+                "hits": cache_hits,
+                "misses": cache_misses,
+                "hit_rate": (
+                    cache_hits / (cache_hits + cache_misses)
+                    if (cache_hits + cache_misses) > 0
+                    else 0.0
+                ),
+            },
         }

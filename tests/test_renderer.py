@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 import io
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
 from librewxr.tiles.renderer import (
     TileGeometry,
     _compute_blur_radius,
+    _compute_nwp_only_geometry,
     compute_tile_geometry,
     present_tile,
     render_coverage_tile,
@@ -103,12 +105,15 @@ class TestTileGeometryCache:
     color scheme + format + arrow style.  These tests pin that contract."""
 
     def test_compute_returns_geometry(self, sample_frame_data):
+        # (5, 7, 12) is the tile that overlaps the sample data block
+        # (tile (4, 3, 5) is empty there — see TestEmptyTileFastPath).
         regions = {"USCOMP": sample_frame_data}
         geom = compute_tile_geometry(
-            regions, z=4, x=3, y=5, tile_size=256,
+            regions, z=5, x=7, y=12, tile_size=256,
         )
         assert isinstance(geom, TileGeometry)
         assert not geom.is_transparent
+        assert geom.values.max() > 0, "test fixture has no data at this tile"
         assert geom.values.shape == (256, 256)
         assert geom.values.dtype == np.uint8
         assert geom.snow_mask is None  # snow defaults to False
@@ -229,3 +234,281 @@ class TestBlurRadius:
         x, y = self._lonlat_to_tile(10.0, 50.0, z)
         r = _compute_blur_radius(opera, z, x, y, 256)
         assert r <= 256 / 32 + 1e-6, f"blur {r} exceeded safety cap"
+
+
+class TestEmptyTileFastPath:
+    """The empty-tile fast path: transparent sentinel for precip-empty tiles.
+
+    Tier 1 (post-sample) catches NWP-sampled-empty and nowcast-empty cases;
+    Tier 2 (pre-sample, past-radar path only) skips ``nwp_chain.sample``
+    entirely when the chain reports no precip in the tile bbox.  Both must
+    be display-exact: never transparent when the old code rendered a pixel.
+    """
+
+    # Tile (z=4, x=3, y=5) sits over empty composite space — the sample
+    # frame fixture has no data there (verified: values.max() == 0 on the
+    # pre-fast-path code), so it is the canonical "empty radar" tile.
+    _EMPTY_TILE = (4, 3, 5)
+
+    @staticmethod
+    def _empty_uscomp() -> np.ndarray:
+        return np.zeros((COMPOSITE_HEIGHT, COMPOSITE_WIDTH), dtype=np.uint8)
+
+    @classmethod
+    def _populated_uscomp(cls, value: int) -> np.ndarray:
+        """USCOMP frame with ``value`` at every region pixel tile (4,3,5) samples."""
+        from librewxr.data.regions import REGIONS
+        from librewxr.tiles.coordinates import region_pixel_indices
+
+        data = cls._empty_uscomp()
+        row_idx, col_idx = region_pixel_indices(REGIONS["USCOMP"], 4, 3, 5, 256)
+        in_bounds = (row_idx >= 0) & (col_idx >= 0)
+        data[row_idx[in_bounds], col_idx[in_bounds]] = value
+        return data
+
+    @staticmethod
+    def _gate_chain(has_precip: bool) -> MagicMock:
+        chain = MagicMock()
+        chain.has_data.return_value = True
+        chain.has_precip_in_bbox.return_value = has_precip
+        return chain
+
+    def test_empty_frame_regions_no_nwp_is_transparent(self):
+        """(a) No radar regions + no NWP -> transparent sentinel."""
+        geom = compute_tile_geometry({}, z=3, x=0, y=3, tile_size=256, nwp_chain=None)
+        assert geom.is_transparent is True
+
+    def test_tier2_gate_skips_sample(self):
+        """(b) Empty radar + no NWP precip in bbox -> transparent, no sample."""
+        z, x, y = self._EMPTY_TILE
+        chain = self._gate_chain(has_precip=False)
+        geom = compute_tile_geometry(
+            {"USCOMP": self._empty_uscomp()}, z, x, y, tile_size=256,
+            nwp_chain=chain, frame_timestamp=1700000000,
+        )
+        assert geom.is_transparent is True
+        chain.sample.assert_not_called()
+
+    def test_tier2_gate_pass_through_fills(self, monkeypatch):
+        """(c) Bbox gate says precip possible -> falls through to the fill."""
+        from librewxr.tiles import renderer as renderer_mod
+
+        monkeypatch.setattr(
+            renderer_mod, "sample_coverage",
+            lambda name, lat, lon: np.zeros(lat.shape, dtype=bool),
+        )
+        z, x, y = self._EMPTY_TILE
+        chain = self._gate_chain(has_precip=True)
+        chain.sample.return_value = np.full((256, 256), 100, dtype=np.uint8)
+        geom = compute_tile_geometry(
+            {"USCOMP": self._empty_uscomp()}, z, x, y, tile_size=256,
+            nwp_chain=chain, frame_timestamp=1700000000,
+        )
+        assert geom.is_transparent is False
+        chain.sample.assert_called()
+        assert (geom.values == 100).all()
+
+    def test_radar_present_never_transparent(self):
+        """(d) Any radar pixel >= threshold -> fast path never fires."""
+        regions = {"USCOMP": self._populated_uscomp(255)}
+        z, x, y = self._EMPTY_TILE
+
+        # No NWP at all: Case A must not fire.
+        geom = compute_tile_geometry(regions, z, x, y, tile_size=256, nwp_chain=None)
+        assert geom.is_transparent is False
+        assert (geom.values >= 84).any()
+
+        # With NWP whose bbox gate claims no precip: Tier 2 must not fire
+        # either (the gate requires radar_empty).
+        chain = self._gate_chain(has_precip=False)
+        chain.sample.return_value = np.zeros((256, 256), dtype=np.uint8)
+        geom2 = compute_tile_geometry(
+            regions, z, x, y, tile_size=256,
+            nwp_chain=chain, frame_timestamp=1700000000,
+        )
+        assert geom2.is_transparent is False
+        assert (geom2.values >= 84).any()
+
+    def test_nowcast_empty_tier1_transparent(self):
+        """(e) Nowcast blend all-zero (both_zero) -> Tier 1 transparent."""
+        z, x, y = self._EMPTY_TILE
+        chain = self._gate_chain(has_precip=False)
+        chain.sample.return_value = np.zeros((256, 256), dtype=np.uint8)
+        geom = compute_tile_geometry(
+            {"USCOMP": self._empty_uscomp()}, z, x, y, tile_size=256,
+            nwp_chain=chain, frame_timestamp=1700000000, nowcast_blend=0.5,
+        )
+        assert geom.is_transparent is True
+
+    def test_noise_floor_disabled_predicate(self, monkeypatch):
+        """(f) Thresholding off -> low radar values are NOT "empty"."""
+        from librewxr.config import settings
+
+        # Values in [1, 84) — below threshold under default settings.
+        regions = {"USCOMP": self._populated_uscomp(50)}
+        z, x, y = self._EMPTY_TILE
+
+        # Enabled (noise_floor_dbz=10.0 -> threshold 84): radar_empty,
+        # no NWP -> Case A fast path.
+        geom = compute_tile_geometry(regions, z, x, y, tile_size=256, nwp_chain=None)
+        assert geom.is_transparent is True
+
+        # Disabled (threshold 0): any pixel counts -> not empty.
+        monkeypatch.setattr(settings, "noise_floor_dbz", -33.0)
+        geom2 = compute_tile_geometry(regions, z, x, y, tile_size=256, nwp_chain=None)
+        assert geom2.is_transparent is False
+        assert (geom2.values == 50).any()
+
+    def test_fast_path_bytes_match_transparent_sentinel(self):
+        """(g) Fast-path geometries encode byte-identically to the sentinel."""
+        z, x, y = self._EMPTY_TILE
+        geom_a = compute_tile_geometry(
+            {"USCOMP": self._empty_uscomp()}, z, x, y, tile_size=256, nwp_chain=None,
+        )
+        chain = self._gate_chain(has_precip=False)
+        geom_b = compute_tile_geometry(
+            {"USCOMP": self._empty_uscomp()}, z, x, y, tile_size=256,
+            nwp_chain=chain, frame_timestamp=1700000000,
+        )
+        ref = TileGeometry.transparent(256)
+        for fmt in ("png", "webp"):
+            assert present_tile(geom_a, color_scheme=2, fmt=fmt) == present_tile(
+                ref, color_scheme=2, fmt=fmt
+            )
+            assert present_tile(geom_b, color_scheme=2, fmt=fmt) == present_tile(
+                ref, color_scheme=2, fmt=fmt
+            )
+
+    def test_noise_floor_still_zeroes_below_threshold_fill(self, monkeypatch):
+        """(k) Regression: NWP fill below threshold is still zeroed post-refactor."""
+        from librewxr.tiles import renderer as renderer_mod
+
+        monkeypatch.setattr(
+            renderer_mod, "sample_coverage",
+            lambda name, lat, lon: np.zeros(lat.shape, dtype=bool),
+        )
+        z, x, y = self._EMPTY_TILE
+        chain = self._gate_chain(has_precip=True)
+        arr = np.full((256, 256), 50, dtype=np.uint8)  # below threshold 84
+        arr[0, 0] = 200  # above threshold: keeps the tile alive past Tier 1
+        chain.sample.return_value = arr
+        geom = compute_tile_geometry(
+            {"USCOMP": self._empty_uscomp()}, z, x, y, tile_size=256,
+            nwp_chain=chain, frame_timestamp=1700000000,
+        )
+        assert geom.is_transparent is False
+        assert (geom.values == 50).sum() == 0, "below-threshold fill not zeroed"
+        assert (geom.values == 200).sum() == 1
+
+    def test_nwp_only_tier2_gate_skips_sample(self):
+        """(l) _compute_nwp_only_geometry: no precip in bbox -> transparent."""
+        chain = self._gate_chain(has_precip=False)
+        z, x, y = self._EMPTY_TILE
+        geom = _compute_nwp_only_geometry(
+            chain, z, x, y, tile_size=256, smooth=False, snow=False,
+            frame_timestamp=1700000000,
+        )
+        assert geom.is_transparent is True
+        chain.sample.assert_not_called()
+
+    def test_frame_regions_not_mutated(self):
+        """(q) The radar-empty predicate never mutates the input frame."""
+        regions = {"USCOMP": self._populated_uscomp(255)}
+        data = regions["USCOMP"]
+        snapshot = data.copy()
+        z, x, y = self._EMPTY_TILE
+        chain = self._gate_chain(has_precip=True)
+        chain.sample.return_value = np.zeros((256, 256), dtype=np.uint8)
+        compute_tile_geometry(
+            regions, z, x, y, tile_size=256,
+            nwp_chain=chain, frame_timestamp=1700000000,
+        )
+        assert np.array_equal(data, snapshot), "frame_regions array was mutated"
+
+    @pytest.mark.parametrize("scenario", [
+        "no_regions_no_nwp",
+        "tier2_past_radar",
+        "case_a_no_nwp_empty_radar",
+        "tier1_post_fill",
+        "tier1_post_blend",
+        "tier2_nwp_only",
+        "tier1_nwp_only_post_sample",
+    ])
+    def test_fast_path_reason_propagation(self, scenario):
+        """(m) Each fast-path return site labels its transparent geometry.
+
+        The scenario name doubles as the expected ``fast_path`` reason so
+        the parametrization is (input scenario, expected string) in one.
+        """
+        z, x, y = self._EMPTY_TILE
+        ts = 1700000000
+        empty = self._empty_uscomp()
+        if scenario == "no_regions_no_nwp":
+            geom = compute_tile_geometry(
+                {}, z=3, x=0, y=3, tile_size=256, nwp_chain=None,
+            )
+        elif scenario == "tier2_past_radar":
+            geom = compute_tile_geometry(
+                {"USCOMP": empty}, z, x, y, tile_size=256,
+                nwp_chain=self._gate_chain(has_precip=False), frame_timestamp=ts,
+            )
+        elif scenario == "case_a_no_nwp_empty_radar":
+            geom = compute_tile_geometry(
+                {"USCOMP": empty}, z, x, y, tile_size=256, nwp_chain=None,
+            )
+        elif scenario == "tier1_post_fill":
+            chain = self._gate_chain(has_precip=True)
+            chain.sample.return_value = np.zeros((256, 256), dtype=np.uint8)
+            geom = compute_tile_geometry(
+                {"USCOMP": empty}, z, x, y, tile_size=256,
+                nwp_chain=chain, frame_timestamp=ts,
+            )
+        elif scenario == "tier1_post_blend":
+            chain = self._gate_chain(has_precip=False)
+            chain.sample.return_value = np.zeros((256, 256), dtype=np.uint8)
+            geom = compute_tile_geometry(
+                {"USCOMP": empty}, z, x, y, tile_size=256,
+                nwp_chain=chain, frame_timestamp=ts, nowcast_blend=0.5,
+            )
+        elif scenario == "tier2_nwp_only":
+            geom = _compute_nwp_only_geometry(
+                self._gate_chain(has_precip=False), z, x, y, tile_size=256,
+                smooth=False, snow=False, frame_timestamp=ts,
+            )
+        else:  # tier1_nwp_only_post_sample
+            chain = self._gate_chain(has_precip=True)
+            chain.sample.return_value = np.zeros((256, 256), dtype=np.uint8)
+            geom = _compute_nwp_only_geometry(
+                chain, z, x, y, tile_size=256,
+                smooth=False, snow=False, frame_timestamp=ts,
+            )
+        assert geom.is_transparent is True
+        assert geom.fast_path == scenario
+
+    def test_non_transparent_geometry_fast_path_none(self, sample_frame_data):
+        """(n) Real (non-transparent) geometries carry no fast-path label."""
+        regions = {"USCOMP": sample_frame_data}
+        geom = compute_tile_geometry(
+            regions, z=5, x=7, y=12, tile_size=256,
+        )
+        assert geom.is_transparent is False
+        assert geom.fast_path is None
+
+    def test_transparent_default_fast_path_none(self):
+        """(o) transparent() without fast_path leaves the field None."""
+        assert TileGeometry.transparent(256).fast_path is None
+
+    def test_fast_path_label_does_not_affect_present_bytes(self):
+        """(p) fast_path is metadata only: labeled geometry presents identically."""
+        z, x, y = self._EMPTY_TILE
+        geom_b = compute_tile_geometry(
+            {"USCOMP": self._empty_uscomp()}, z, x, y, tile_size=256,
+            nwp_chain=self._gate_chain(has_precip=False), frame_timestamp=1700000000,
+        )
+        ref = TileGeometry.transparent(256)
+        assert geom_b.fast_path is not None
+        assert ref.fast_path is None
+        for fmt in ("png", "webp"):
+            assert present_tile(geom_b, color_scheme=2, fmt=fmt) == present_tile(
+                ref, color_scheme=2, fmt=fmt
+            )

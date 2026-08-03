@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 import io
+import json
 
 import numpy as np
 import pytest
@@ -487,3 +488,129 @@ class TestECMWFFallbackRendering:
 
         # Snow and rain tiles should differ in color
         assert tile_snow != tile_rain
+
+
+class TestPrecipBBox:
+    """IFS precip-bbox fast-path state: computation + state round-trips."""
+
+    def test_compute_precip_bbox_no_precip_returns_none(self):
+        """(j) No cells >= noise threshold -> None (no precip anywhere)."""
+        grid = ECMWFGrid()
+        arr = np.zeros((GRID_HEIGHT, GRID_WIDTH), dtype=np.uint8)
+        assert grid._compute_precip_bbox(arr, 1000) is None
+
+    def test_compute_precip_bbox_below_threshold_returns_none(self):
+        """Cells in [1, threshold) are below the noise floor -> None."""
+        grid = ECMWFGrid()
+        arr = np.zeros((GRID_HEIGHT, GRID_WIDTH), dtype=np.uint8)
+        arr[900, 1000] = 50  # 50 < 84 (default noise_floor_dbz=10.0)
+        assert grid._compute_precip_bbox(arr, 1000) is None
+
+    def test_compute_precip_bbox_antimeridian_returns_none(self):
+        """(j) Precip at both col 0 (-180) and col 3599 (~+180) -> None.
+
+        The raw longitude span exceeds 180 deg, so the non-wrapping bbox
+        would be garbage — bail conservatively.
+        """
+        grid = ECMWFGrid()
+        arr = np.zeros((GRID_HEIGHT, GRID_WIDTH), dtype=np.uint8)
+        arr[900, 0] = 200
+        arr[900, GRID_WIDTH - 1] = 200
+        assert grid._compute_precip_bbox(arr, 1000) is None
+
+    def test_compute_precip_bbox_normal(self):
+        """A compact precip blob produces an expanded, clamped bbox."""
+        grid = ECMWFGrid()
+        arr = np.zeros((GRID_HEIGHT, GRID_WIDTH), dtype=np.uint8)
+        arr[800:901, 1000:1201] = 200  # rows 800..900, cols 1000..1200
+        bbox = grid._compute_precip_bbox(arr, 1000)
+        assert bbox is not None
+        w, s, e, n = bbox
+        # Row 800 -> lat 90 - 80 = 10; row 900 -> lat 0.
+        # Col 1000 -> lon -180 + 100 = -80; col 1200 -> lon -60.
+        assert n == pytest.approx(10.0 + 0.2)
+        assert s == pytest.approx(0.0 - 0.2)
+        assert w == pytest.approx(-80.0 - 0.2)
+        assert e == pytest.approx(-60.0 + 0.2)
+
+    def test_precip_bbox_missing_ts_returns_none(self):
+        """(m) Unknown timestamp -> None (conservative)."""
+        grid = ECMWFGrid()
+        assert grid.precip_bbox(12345) is None
+
+    def test_getstate_emits_string_keys_and_lists(self):
+        """__getstate__ encodes bboxes with str keys + list values."""
+        grid = ECMWFGrid()
+        precip = grid._to_memmap("1000_precip", np.zeros((8, 8), dtype=np.uint8))
+        snow = grid._to_memmap("1000_snow", np.zeros((8, 8), dtype=bool))
+        grid._timesteps[1000] = (precip, snow)
+        grid._sorted_timestamps = [1000]
+        grid._precip_bboxes[1000] = (-90.0, 20.0, -70.0, 40.0)
+        grid._precip_bboxes[2000] = None
+
+        state = grid.__getstate__()
+        assert state["_precip_bboxes"]["1000"] == [-90.0, 20.0, -70.0, 40.0]
+        assert state["_precip_bboxes"]["2000"] is None
+
+    def test_setstate_restores_int_keys_and_tuples(self):
+        """(i) __setstate__ converts string keys back to ints, lists to tuples."""
+        grid = ECMWFGrid.__new__(ECMWFGrid)
+        state = {
+            "memmap_dir": "/tmp/whatever",
+            "reference_time": "2026-04-05T00:00:00Z",
+            "timesteps": {},
+            "_precip_bboxes": {
+                "1000": [-90.0, 20.0, -70.0, 40.0],
+                "2000": None,
+            },
+        }
+        grid.__setstate__(state)
+        assert grid.precip_bbox(1000) == (-90.0, 20.0, -70.0, 40.0)
+        assert grid.precip_bbox(2000) is None
+        assert grid.precip_bbox(9999) is None
+
+    def test_setstate_without_bbox_key_initializes_empty(self):
+        """State dicts predating the bbox field restore with an empty dict."""
+        grid = ECMWFGrid.__new__(ECMWFGrid)
+        state = {
+            "memmap_dir": "/tmp/whatever",
+            "reference_time": None,
+            "timesteps": {},
+        }
+        grid.__setstate__(state)
+        assert grid._precip_bboxes == {}
+        assert grid.precip_bbox(1000) is None
+
+    def test_full_getstate_setstate_round_trip(self):
+        """bboxes survive a full memmap-based getstate -> setstate round trip."""
+        grid = ECMWFGrid()
+        precip = grid._to_memmap("1000_precip", np.zeros((8, 8), dtype=np.uint8))
+        snow = grid._to_memmap("1000_snow", np.zeros((8, 8), dtype=bool))
+        grid._timesteps[1000] = (precip, snow)
+        grid._sorted_timestamps = [1000]
+        grid._precip_bboxes[1000] = (-90.0, 20.0, -70.0, 40.0)
+
+        state = grid.__getstate__()
+        new = ECMWFGrid.__new__(ECMWFGrid)
+        new.__setstate__(state)
+        assert new.precip_bbox(1000) == (-90.0, 20.0, -70.0, 40.0)
+        assert new.precip_bbox(2000) is None
+
+    def test_json_round_trip_preserves_bboxes(self):
+        """(n) json.dumps/loads (str keys, lists) -> int keys, tuples."""
+        grid = ECMWFGrid.__new__(ECMWFGrid)
+        state = {
+            "memmap_dir": "/tmp/whatever",
+            "reference_time": None,
+            "timesteps": {},
+            "_precip_bboxes": {
+                "1000": [-90.0, 20.0, -70.0, 40.0],
+                "2000": None,
+            },
+        }
+        json_state = json.loads(json.dumps(state))
+        grid.__setstate__(json_state)
+        assert grid._precip_bboxes == {
+            1000: (-90.0, 20.0, -70.0, 40.0),
+            2000: None,
+        }

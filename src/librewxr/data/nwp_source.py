@@ -15,6 +15,14 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
+# NOTE: ``precip_bbox`` is deliberately NOT a member of the runtime-checkable
+# ``NWPSource`` Protocol: ``@runtime_checkable`` isinstance() requires every
+# protocol member to exist on the concrete class, which would fail for the
+# regional sources that intentionally don't implement it (spec: no regional
+# source edits).  ``NWPChain.has_precip_in_bbox`` probes it via ``getattr``
+# instead, so an absent method is equivalent to "conservative always has
+# precip".  Optional methods are documented in the chain instead.
+
 
 @runtime_checkable
 class NWPSource(Protocol):
@@ -101,6 +109,65 @@ class NWPChain:
 
     def __init__(self, sources: list[NWPSource]):
         self._sources = list(sources)
+        self._domain_bboxes: list[tuple[float, float, float, float] | None] = []
+        for src in self._sources:
+            self._domain_bboxes.append(self._probe_domain_bbox(src))
+
+    @staticmethod
+    def _probe_domain_bbox(src) -> tuple[float, float, float, float] | None:
+        """Probe src.domain_mask on a 1-degree global grid once at init.
+
+        domain_mask is projection-only for every concrete NWP source (verified: reads
+        only grid constants, never _timesteps), so this is safe on a freshly-constructed
+        grid without timestep data loaded.
+        """
+        lat = np.linspace(90.0, -90.0, 181, dtype=np.float32)
+        lon = np.linspace(-180.0, 180.0, 361, dtype=np.float32)
+        lat_grid, lon_grid = np.meshgrid(lat, lon, indexing="ij")
+        try:
+            mask = src.domain_mask(lat_grid, lon_grid)
+        except Exception:
+            return None
+        if not mask.any():
+            return None
+        lat_any = mask.any(axis=1)
+        lon_any = mask.any(axis=0)
+        min_lat = float(lat[lat_any].min()) - 1.0
+        max_lat = float(lat[lat_any].max()) + 1.0
+        min_lon = float(lon[lon_any].min()) - 1.0
+        max_lon = float(lon[lon_any].max()) + 1.0
+        min_lat = max(min_lat, -90.0); max_lat = min(max_lat, 90.0)
+        min_lon = max(min_lon, -180.0); max_lon = min(max_lon, 180.0)
+        return (min_lon, min_lat, max_lon, max_lat)
+
+    @staticmethod
+    def _bbox_intersects(a: tuple[float, float, float, float],
+                         b: tuple[float, float, float, float]) -> bool:
+        """AABB intersection. Both bboxes are (west, south, east, north), non-wrapping."""
+        return a[0] <= b[2] and a[2] >= b[0] and a[1] <= b[3] and a[3] >= b[1]
+
+    def has_precip_in_bbox(self, timestamp: int,
+                           tile_bbox: tuple[float, float, float, float]) -> bool:
+        """Return whether any NWP source may have precip in ``tile_bbox``.
+
+        Conservative: returns True (assume precip) when a source is unsupported,
+        when its precip_bbox is missing/antimeridian-spanning, or on any error.
+        """
+        for src, dom_bbox in zip(self._sources, self._domain_bboxes):
+            if dom_bbox is None or not self._bbox_intersects(dom_bbox, tile_bbox):
+                continue  # source doesn't cover this tile
+            bbox_fn = getattr(src, "precip_bbox", None)
+            if bbox_fn is None:
+                return True  # unsupported source — assume has precip
+            try:
+                bbox = bbox_fn(timestamp)
+            except Exception:
+                return True  # error — conservative
+            if bbox is None:
+                return True  # missing/antimeridian-spanning — assume has precip
+            if self._bbox_intersects(bbox, tile_bbox):
+                return True
+        return False
 
     @property
     def sources(self) -> list[NWPSource]:

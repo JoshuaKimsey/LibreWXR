@@ -61,6 +61,11 @@ class ECMWFGrid:
     def __init__(self, cache_dir: Path | None = None):
         # dict mapping Unix timestamp -> (precip_dbz uint8, snow_mask bool)
         self._timesteps: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        # dict mapping Unix timestamp -> precip bbox (west, south, east, north)
+        # or None (no precip / antimeridian-spanning / unsupported).  Computed
+        # at decode time so the renderer can fast-path empty tiles without
+        # sampling the full grid.
+        self._precip_bboxes: dict[int, tuple[float, float, float, float] | None] = {}
         self._sorted_timestamps: list[int] = []
         self._reference_time: str | None = None
         self._fs: fsspec.AbstractFileSystem | None = None
@@ -310,7 +315,15 @@ class ECMWFGrid:
                 vt = future_to_vt[future]
                 try:
                     precip_dbz, snow_mask = future.result()
-                    new_timesteps[self._vt_to_unix(vt)] = (precip_dbz, snow_mask)
+                    ts_unix = self._vt_to_unix(vt)
+                    new_timesteps[ts_unix] = (precip_dbz, snow_mask)
+                    # The precip array is still on the heap here (the memmap
+                    # loop below hasn't run yet).  Per-key dict updates are
+                    # atomic under the GIL, so the fetcher thread can write
+                    # while render threads read.
+                    self._precip_bboxes[ts_unix] = self._compute_precip_bbox(
+                        precip_dbz, ts_unix,
+                    )
                 except Exception:
                     logger.warning("Failed to fetch ECMWF timestep %s", vt, exc_info=True)
 
@@ -336,6 +349,13 @@ class ECMWFGrid:
         self._timesteps = new_timesteps
         self._sorted_timestamps = sorted(new_timesteps.keys())
         self._reference_time = ref_time
+        # Prune bboxes for timesteps that were dropped this cycle.  Atomic
+        # whole-dict swap: the new dict is fully built before assignment, so
+        # concurrent readers never see a partially-pruned dict.
+        self._precip_bboxes = {
+            ts: b for ts, b in self._precip_bboxes.items()
+            if ts in self._timesteps
+        }
 
         logger.info(
             "ECMWF IFS updated: ref=%s, %d timesteps loaded (%s)",
@@ -347,6 +367,57 @@ class ECMWFGrid:
             ),
         )
         return True
+
+    def _compute_precip_bbox(
+        self,
+        precip_dbz: np.ndarray,
+        ts_unix: int,
+    ) -> tuple[float, float, float, float] | None:
+        """Compute the precip bbox of a just-decoded heap array, post noise floor.
+
+        Returns None for: no precip anywhere, or antimeridian-spanning precip
+        (longitude span > 180 deg). Both are conservative — the chain treats
+        None as "assume has precip" so no Tile is wrongly fast-pathed to
+        transparent.
+        """
+        # Match the renderer's noise-floor predicate: cells >= pixel_threshold
+        # are "has precip". When thresholding is disabled, pixel_threshold = 0
+        # (any non-zero counts). noise_floor_dbz is strictly global (no
+        # per-request override), so fetch-time and render-time thresholds are
+        # guaranteed consistent.
+        from librewxr.config import settings
+        if settings.noise_floor_dbz > -32:
+            threshold = int((settings.noise_floor_dbz + 32) * 2)
+        else:
+            threshold = 0
+        nz_rows, nz_cols = np.where(precip_dbz >= threshold)
+        if nz_rows.size == 0:
+            return None  # no precip anywhere
+        # Grid orientation (verified): row = (NORTH - lat)/PIXEL_SIZE (row 0 =
+        # 90N, north-to-south); col = (lon - WEST)/PIXEL_SIZE (col 0 = -180,
+        # west-to-east).
+        min_lat = NORTH - nz_rows.max() * PIXEL_SIZE
+        max_lat = NORTH - nz_rows.min() * PIXEL_SIZE
+        min_lon = WEST + nz_cols.min() * PIXEL_SIZE
+        max_lon = WEST + nz_cols.max() * PIXEL_SIZE
+        # Expand +0.2 deg to cover bilinear interpolation reach and tile-edge
+        # pixel centers (the renderer samples at pixel centers, which sit
+        # slightly inside tile_bounds; +0.2 deg >> 1 IFS cell + half a
+        # Mercator pixel).
+        min_lat -= 0.2
+        max_lat += 0.2
+        min_lon -= 0.2
+        max_lon += 0.2
+        # Clamp to the IFS grid extent.
+        min_lat = max(min_lat, SOUTH)
+        max_lat = min(max_lat, NORTH)
+        min_lon = max(min_lon, WEST)
+        max_lon = min(max_lon, EAST)
+        # Antimeridian-spanning precip (storms near both +180 and -180) would
+        # produce a huge non-wrapping bbox; bail conservatively.
+        if (max_lon - min_lon) > 180.0:
+            return None
+        return (min_lon, min_lat, max_lon, max_lat)
 
     def _fetch_one_timestep(
         self,
@@ -562,6 +633,10 @@ class ECMWFGrid:
         """True if any timestep is loaded."""
         return bool(self._sorted_timestamps)
 
+    def precip_bbox(self, timestamp: int) -> tuple[float, float, float, float] | None:
+        """Return the precip bbox for ``timestamp`` or None (missing/unsupported)."""
+        return self._precip_bboxes.get(timestamp)
+
     def __getstate__(self) -> dict:
         """Serialize state for cross-process reload (multi-worker mode).
 
@@ -582,10 +657,17 @@ class ECMWFGrid:
                     list(snow.shape),
                 ],
             }
+        # JSON requires string keys, so encode the bbox as a list of 4
+        # floats or None.
+        bbox_state = {
+            str(ts): (list(bbox) if bbox is not None else None)
+            for ts, bbox in self._precip_bboxes.items()
+        }
         return {
             "memmap_dir": str(self._memmap_dir),
             "reference_time": self._reference_time,
             "timesteps": timesteps_state,
+            "_precip_bboxes": bbox_state,
         }
 
     def __setstate__(self, state: dict) -> None:
@@ -612,10 +694,20 @@ class ECMWFGrid:
             )
             new_timesteps[int(ts_str)] = (precip, snow)
 
+        # Restore precip bboxes with int keys.  JSON coerces int keys to
+        # strings, so convert back; the .get(..., {}) default handles state
+        # dicts that predate the bbox field.
+        bbox_state = state.get("_precip_bboxes", {})
+        new_precip_bboxes = {
+            int(ts_str): (tuple(v) if v is not None else None)
+            for ts_str, v in bbox_state.items()
+        }
+
         self._memmap_dir = memmap_dir
         self._timesteps = new_timesteps
         self._sorted_timestamps = sorted(new_timesteps.keys())
         self._reference_time = state["reference_time"]
+        self._precip_bboxes = new_precip_bboxes
         self._fs = None  # lazily recreated if needed
         self._persistent = True
 

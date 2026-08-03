@@ -18,6 +18,7 @@ from librewxr.tiles.coordinates import (
     region_pixel_indices_fractional,
     region_pixel_indices_fractional_padded,
     region_pixel_indices_padded,
+    tile_bounds,
     tile_pixel_latlons,
     tile_pixel_latlons_padded,
 )
@@ -53,9 +54,16 @@ class TileGeometry:
     pad: int  # padding on each side; 0 unless blur will be applied
     blur_radius: float  # 0.0 = no blur
     is_transparent: bool = False
+    # Fast-path outcome label, populated ONLY on transparent geometries so
+    # routes.py can classify which empty-tile fast path fired without
+    # reaching into compute internals.  ``None`` for real (non-transparent)
+    # geometries.  String values are the Tier 1 / Tier 2 vocabulary in the
+    # transparent return sites of ``compute_tile_geometry`` /
+    # ``_compute_nwp_only_geometry``.
+    fast_path: str | None = None
 
     @classmethod
-    def transparent(cls, tile_size: int) -> "TileGeometry":
+    def transparent(cls, tile_size: int, fast_path: str | None = None) -> "TileGeometry":
         """Sentinel for tiles with neither radar nor NWP coverage."""
         return cls(
             values=np.empty((0, 0), dtype=np.uint8),
@@ -64,6 +72,7 @@ class TileGeometry:
             pad=0,
             blur_radius=0.0,
             is_transparent=True,
+            fast_path=fast_path,
         )
 
     @property
@@ -112,7 +121,7 @@ def compute_tile_geometry(
             return _compute_nwp_only_geometry(
                 nwp_chain, z, x, y, tile_size, smooth, snow, frame_timestamp,
             )
-        return TileGeometry.transparent(tile_size)
+        return TileGeometry.transparent(tile_size, fast_path="no_regions_no_nwp")
 
     # Determine blur radius from local geometry: scale Gaussian kernel
     # to the number of tile pixels covered by a single region pixel.
@@ -139,6 +148,30 @@ def compute_tile_geometry(
             smooth, use_blur, pad,
         )
 
+    # Compute the noise-floor threshold ONCE here for the radar-empty
+    # predicate.  IMPORTANT: this is NON-MUTATING — do not touch `values`
+    # (it may be a view into the memmap frame).  The existing post-NWP
+    # noise-floor block below still runs unchanged and does the actual
+    # zeroing (with its own copy).
+    pixel_threshold = (
+        int((settings.noise_floor_dbz + 32) * 2)
+        if settings.noise_floor_dbz > -32 else 0
+    )
+    radar_empty = not (values >= pixel_threshold).any()
+
+    # Tier 2: pre-sample NWP precip-bbox gate (past-radar path only).
+    # Nowcast precip != IFS precip (extrapolated convection can exist
+    # where IFS has none), so the bbox is not a valid proxy for nowcast
+    # and is excluded.
+    if has_nwp and nowcast_blend is None and radar_empty:
+        if not nwp_chain.has_precip_in_bbox(frame_timestamp, tile_bounds(z, x, y)):
+            return TileGeometry.transparent(tile_size, fast_path="tier2_past_radar")
+
+    # Case A: no NWP at all and radar sample is empty — transparent,
+    # no further work.
+    if not has_nwp and radar_empty:
+        return TileGeometry.transparent(tile_size, fast_path="case_a_no_nwp_empty_radar")
+
     # Fill uncovered pixels from NWP precipitation data.  For nowcast
     # frames, blend extrapolated radar with NWP using temporal weight +
     # spatial feathering at coverage boundaries.
@@ -158,6 +191,18 @@ def compute_tile_geometry(
         pixel_threshold = int((settings.noise_floor_dbz + 32) * 2)
         values = values.copy()
         values[values < pixel_threshold] = 0
+
+    # Tier 1: post-NWP-fill empty check.  If after fill/blend + noise
+    # floor the tile is all-zero (NWP also sampled empty, or nowcast
+    # blend produced empty), return transparent BEFORE the snow-mask
+    # step (no precip = nothing to phase-classify).
+    if not values.any():
+        return TileGeometry.transparent(
+            tile_size,
+            fast_path=(
+                "tier1_post_blend" if nowcast_blend is not None else "tier1_post_fill"
+            ),
+        )
 
     snow_mask = None
     if snow and nwp_chain is not None:
@@ -185,6 +230,12 @@ def _compute_nwp_only_geometry(
     frame_timestamp: int | None,
 ) -> TileGeometry:
     """Geometry for a tile entirely from NWP (no radar regions overlap)."""
+    # Tier 2: skip the full-grid NWP sample entirely when no source can
+    # have precip in this tile's bbox.  Reuses the same
+    # ``has_precip_in_bbox`` gate as the past-radar path.
+    if not nwp_chain.has_precip_in_bbox(frame_timestamp, tile_bounds(z, x, y)):
+        return TileGeometry.transparent(tile_size, fast_path="tier2_nwp_only")
+
     lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
     values = nwp_chain.sample(
         lat_grid, lon_grid, frame_timestamp, bilinear=smooth,
@@ -194,6 +245,11 @@ def _compute_nwp_only_geometry(
         pixel_threshold = int((settings.noise_floor_dbz + 32) * 2)
         values = values.copy()
         values[values < pixel_threshold] = 0
+
+    # Tier 1: post-sample empty check — all-zero after the noise floor
+    # means nothing to render, so bail before the snow-mask step.
+    if not values.any():
+        return TileGeometry.transparent(tile_size, fast_path="tier1_nwp_only_post_sample")
 
     snow_mask = None
     if snow:
