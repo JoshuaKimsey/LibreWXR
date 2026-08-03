@@ -70,6 +70,51 @@ class TestFrameStorePersistence:
         finally:
             store.cleanup()
 
+    @pytest.mark.asyncio
+    async def test_frame_versions_roundtrip_through_json(self, tmp_path: Path) -> None:
+        """frame_versions survives a JSON round-trip with string-key coercion."""
+        cache = tmp_path / "cache"
+        producer = FrameStore(max_frames=4, cache_dir=cache)
+        arr = np.zeros((4, 4), dtype=np.uint8)
+        await producer.add_frame(RadarFrame(timestamp=1700000000, regions={"A": arr}))
+        # Merge into the same timestamp -> version bumps to 2.
+        await producer.add_frame(RadarFrame(timestamp=1700000000, regions={"B": arr}))
+        await producer.add_frame(RadarFrame(timestamp=1700000600, regions={"A": arr}))
+
+        assert producer._frame_versions == {1700000000: 2, 1700000600: 1}
+
+        snapshot = _roundtrip(producer.__getstate__())
+        # JSON coerces int keys to strings.
+        assert snapshot["frame_versions"] == {"1700000000": 2, "1700000600": 1}
+
+        consumer = FrameStore(max_frames=4)  # placeholder before restore
+        consumer.__setstate__(snapshot)
+        assert consumer._frame_versions == {1700000000: 2, 1700000600: 1}
+
+    @pytest.mark.asyncio
+    async def test_eviction_removes_version_entry(self, tmp_path: Path) -> None:
+        """Evicting the oldest frame drops its version entry too."""
+        cache = tmp_path / "cache"
+        store = FrameStore(max_frames=2, cache_dir=cache)
+        arr = np.zeros((4, 4), dtype=np.uint8)
+        await store.add_frame(RadarFrame(timestamp=1700000000, regions={"A": arr}))
+        await store.add_frame(RadarFrame(timestamp=1700000600, regions={"A": arr}))
+        assert 1700000000 in store._frame_versions
+        await store.add_frame(RadarFrame(timestamp=1700001200, regions={"A": arr}))
+        assert 1700000000 not in store._frame_versions
+        assert store._frame_versions == {1700000600: 1, 1700001200: 1}
+
+    def test_setstate_without_frame_versions_defaults_empty(self, tmp_path: Path) -> None:
+        """Snapshots written by pre-fix code (no frame_versions) restore empty."""
+        cache = tmp_path / "cache"
+        producer = FrameStore(max_frames=4, cache_dir=cache)
+        snapshot = producer.__getstate__()
+        # Hand-craft a pre-fix state: same shape, but no frame_versions key.
+        del snapshot["frame_versions"]
+        consumer = FrameStore(max_frames=4)
+        consumer.__setstate__(snapshot)
+        assert consumer._frame_versions == {}
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # NowcastStore — populated round-trip

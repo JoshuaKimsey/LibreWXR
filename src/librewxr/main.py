@@ -142,6 +142,87 @@ async def _wait_for_state(cache_dir, timeout: float) -> None:
             last_logged = elapsed
 
 
+def _compute_cache_invalidation(
+    prev_payload: dict | None,
+    cur_payload: dict,
+) -> tuple[set[int] | None, bool]:
+    """Decide what to invalidate in the tile cache after a state.json poll.
+
+    Returns ``(timestamps, full_clear)``:
+    - ``(None, True)``       — clear the whole cache (signature changed; rare).
+    - ``(ts_set, False)``    — call ``invalidate_timestamp(ts)`` for each ``ts``.
+
+    The "signature" is the tuple of (store_name, reference_time) for every
+    store with a ``reference_time`` field, plus (ecmwf_grid, sorted(timesteps))
+    to catch hourly timestep slides that keep ``reference_time`` unchanged.
+    On any signature change → full clear, because cached geometry may have
+    sampled stale NWP content.
+
+    Targeted invalidation covers: radar frame evictions + version bumps
+    (merges), and all nowcast timestamps (content regenerates every cycle —
+    the 5 overlapping timestamps have stale content; full-set invalidation
+    preserves correctness without per-frame versioning on NowcastStore).
+    """
+    if prev_payload is None:
+        # First poll — nothing to diff against; full clear (matches the
+        # pre-diff unconditional cache.clear() on the first refresh).
+        return None, True
+
+    cur_stores = cur_payload.get("stores", {})
+    prev_stores = prev_payload.get("stores", {})
+    store_names = set(cur_stores) | set(prev_stores)
+
+    def _signature(stores: dict) -> tuple:
+        items: list[tuple] = []
+        for name in store_names:
+            items.append((name, stores.get(name, {}).get("reference_time")))
+            if name == "ecmwf_grid":
+                # Hourly timestep slides re-key the same unix timestamps
+                # with different content while ``reference_time`` stays
+                # stable.  JSON coerces int keys to strings, but only the
+                # sorted key *set* is compared, so string keys are fine.
+                ts_keys = sorted(stores.get(name, {}).get("timesteps", {}).keys())
+                items.append(("ecmwf_grid_timesteps", tuple(ts_keys)))
+        return tuple(sorted(items))
+
+    if _signature(cur_stores) != _signature(prev_stores):
+        return None, True
+
+    invalidate: set[int] = set()
+
+    # FrameStore content versions: a timestamp removed (evicted) or bumped
+    # (region merge) means its cached geometry is stale.  Keys arrive as
+    # strings (JSON coercion); convert to int on read.
+    prev_versions = {
+        int(k): v
+        for k, v in prev_stores.get("frame_store", {}).get("frame_versions", {}).items()
+    }
+    cur_versions = {
+        int(k): v
+        for k, v in cur_stores.get("frame_store", {}).get("frame_versions", {}).items()
+    }
+    for ts in prev_versions:
+        if ts not in cur_versions:
+            invalidate.add(ts)
+        elif cur_versions[ts] != prev_versions[ts]:
+            invalidate.add(ts)
+
+    # Nowcast: the sliding forecast window persists most timestamps across
+    # cycles, but their content is regenerated every cycle — treat every
+    # timestamp in either snapshot as stale.
+    prev_nowcast = {
+        int(f["timestamp"])
+        for f in prev_stores.get("nowcast_store", {}).get("frames", [])
+    }
+    cur_nowcast = {
+        int(f["timestamp"])
+        for f in cur_stores.get("nowcast_store", {}).get("frames", [])
+    }
+    invalidate |= prev_nowcast | cur_nowcast
+
+    return invalidate, False
+
+
 @asynccontextmanager
 async def _render_only_lifespan(app: FastAPI):
     """Lifespan for tile-server workers in the multi-worker split.
@@ -298,10 +379,11 @@ async def _render_only_lifespan(app: FastAPI):
     routes.alerts_enabled = alerts_store is not None
 
     last_mtime = state_mtime(cache_dir)
+    last_payload: dict | None = None
     poller_stop = asyncio.Event()
 
     async def _poll_state() -> None:
-        nonlocal last_mtime
+        nonlocal last_mtime, last_payload
         while not poller_stop.is_set():
             try:
                 await asyncio.wait_for(
@@ -322,9 +404,21 @@ async def _render_only_lifespan(app: FastAPI):
                 logger.debug(
                     "Render worker refreshed: %s", ", ".join(refreshed),
                 )
-                # Newly-loaded frames may have invalidated cached tiles —
-                # safest to clear, the worker will repopulate on demand.
-                cache.clear()
+
+                # Diff-based cache invalidation: preserve cached geometry
+                # for radar timestamps whose content didn't change between
+                # snapshots.  Full clear only when a NWP content signature
+                # changed (IFS ref_time, IFS timestep set, or any NWP
+                # store's reference_time).
+                ts_to_invalidate, full_clear = _compute_cache_invalidation(
+                    last_payload, payload,
+                )
+                if full_clear:
+                    cache.clear()
+                else:
+                    for ts in ts_to_invalidate:
+                        cache.invalidate_timestamp(ts)
+                last_payload = payload
             except Exception:
                 logger.exception("Failed to refresh state from %s", cache_dir)
 

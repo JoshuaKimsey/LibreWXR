@@ -36,6 +36,12 @@ class FrameStore:
     def __init__(self, max_frames: int = 12, cache_dir: Path | None = None):
         self._max_frames = max_frames
         self._frames: list[RadarFrame] = []
+        # Per-timestamp content version: set to 1 when a new frame is
+        # appended, bumped on every merge into an existing timestamp, and
+        # removed on eviction.  Render workers diff this against the
+        # previous state.json snapshot to decide which cached tiles stay
+        # valid across fetch cycles.
+        self._frame_versions: dict[int, int] = {}
         self._lock = asyncio.Lock()
         if cache_dir is not None:
             self._memmap_dir = Path(cache_dir) / "radar"
@@ -99,6 +105,13 @@ class FrameStore:
             for existing in self._frames:
                 if existing.timestamp == frame.timestamp:
                     existing.regions = {**existing.regions, **frame.regions}
+                    # Content changed for an unchanged timestamp (e.g. a
+                    # transient region-fetch failure carried forward then
+                    # filled in) — bump the version so render workers know
+                    # the cached geometry for this timestamp is stale.
+                    self._frame_versions[frame.timestamp] = (
+                        self._frame_versions.get(frame.timestamp, 0) + 1
+                    )
                     return None, True
 
             evicted_ts = None
@@ -106,9 +119,11 @@ class FrameStore:
                 evicted = self._frames.pop(0)
                 evicted_ts = evicted.timestamp
                 self._cleanup_timestamp(evicted_ts)
+                self._frame_versions.pop(evicted_ts, None)
 
             self._frames.append(frame)
             self._frames.sort(key=lambda f: f.timestamp)
+            self._frame_versions[frame.timestamp] = 1
             return evicted_ts, False
 
     async def get_frame(self, timestamp: int) -> RadarFrame | None:
@@ -171,6 +186,13 @@ class FrameStore:
                 }
                 for f in self._frames
             ],
+            # String keys so the dict survives JSON round-trips (int keys
+            # would be coerced to strings anyway); __setstate__ converts
+            # back.  The version counter is monotonic and stays correct
+            # across dumps — do NOT clear it here on dump.
+            "frame_versions": {
+                str(ts): v for ts, v in self._frame_versions.items()
+            },
         }
 
     def __setstate__(self, state: dict) -> None:
@@ -202,6 +224,11 @@ class FrameStore:
         self._max_frames = max_frames
         self._memmap_dir = memmap_dir
         self._frames = new_frames
+        # JSON coerces int keys to strings; convert back.  The .get(..., {})
+        # default handles snapshots written before this field existed.
+        self._frame_versions = {
+            int(k): v for k, v in state.get("frame_versions", {}).items()
+        }
         self._persistent = True
         if not hasattr(self, "_lock"):
             self._lock = asyncio.Lock()
