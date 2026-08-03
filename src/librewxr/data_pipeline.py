@@ -239,7 +239,7 @@ async def run_pipeline() -> None:
         satellite_contributions=satellite_contribs,
         nowcast_generator=nowcast_generator,
         storm_cell_generator=storm_cell_generator,
-        warmer=None,  # tile warming is the render workers' job
+        warmer=None,  # tile warming is single-mode only; multi mode has no warmer (the empty-tile fast path + per-worker LRU cover it)
         radar_cache=radar_cache,
         on_cycle_complete=on_cycle_complete,
     )

@@ -30,7 +30,7 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Weather alerts (WMO CAP)** — global weather alerts polled every 5 minutes from severeweather.wmo.int, with MeteoAlarm geocodes for European polygon resolution. Surfaced through a Rain Viewer-extension alerts API (`/v2/alerts/...`). Configurable via `LIBREWXR_ALERTS_ENABLED`
 - **Snow detection** — per-pixel snow/rain classification. Regional NWP sources classify natively from their own 2-metre temperature field (HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, ICON-EU, JMA MSM); ECMWF IFS snowfall ratio fills everywhere else
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
-- **Tile cache warming** — background pre-rendering for smooth animation playback
+- **Tile cache warming (single mode)** — background pre-rendering for smooth animation playback
 - **Multi-worker tile-server split** — optional production deployment splits the data pipeline from a pool of render workers that share state via memmap files. Lets every core actually do work instead of being GIL-bound at one. Pick the mode with `COMPOSE_PROFILES=multi` in `.env` (vs `single`)
 - **Persistent disk cache** — radar / NWP / satellite / alerts data are cached to disk with atomic writes, surviving restarts and container recreation without re-downloading from upstream. Configurable via `LIBREWXR_CACHE_DIR` (required in multi mode)
 - **Memory-efficient storage** — radar frames, NWP grids, satellite frames, and nowcast data are all backed by memory-mapped files, letting the OS page cache manage physical RAM instead of pinning data on the heap. Pages are reclaimed under memory pressure and re-faulted on access
@@ -481,9 +481,9 @@ the inline comments in [`src/librewxr/config.py`](src/librewxr/config.py).
 | `LIBREWXR_NOISE_FLOOR_DBZ` | `10.0` | Min dBZ to display (-32 = disabled) |
 | `LIBREWXR_DESPECKLE_MIN_NEIGHBORS` | `3` | Speckle filter strength (0 = disabled) |
 | `LIBREWXR_WEBP_QUALITY` | `65` | WebP quality (100 = lossless, <100 = lossy) |
-| `LIBREWXR_WARMER_THREADS` | *mode* | Background tile warming threads per worker (single: 0 = CPU count - 1; multi: 4) |
-| `LIBREWXR_WARM_COORD_ZOOM` | `6` | Pre-warm coordinate caches up to this zoom at startup (0 = disable) |
-| `LIBREWXR_WARM_OVERVIEW_ZOOM` | `4` | Pre-render overview tiles up to this zoom after each fetch (-1 = disable) |
+| `LIBREWXR_WARMER_THREADS` | *mode* | Background tile warming pool size (single: 0 = CPU count - 1; multi: 4 sizes the request-executor pool, not warming — warming is single-mode only) |
+| `LIBREWXR_WARM_COORD_ZOOM` | `6` | Pre-warm coordinate caches up to this zoom at startup (0 = disable; runs only in the pipeline parent in multi mode) |
+| `LIBREWXR_WARM_OVERVIEW_ZOOM` | `4` | Pre-render overview tiles up to this zoom after each fetch (single mode only; -1 = disable) |
 | **Deployment mode + workers** | | |
 | `COMPOSE_PROFILES` | `single` | `single` or `multi` — picks compose services AND app-side per-mode defaults |
 | `LIBREWXR_MODE` | *(from `COMPOSE_PROFILES`)* | Override mode when not using docker compose |
@@ -632,7 +632,7 @@ Tiles are served with `Cache-Control: public, max-age=300`, so any caching rever
 [ICON-EU]          ──┼───┤    (per-source feather +   │
 [AROME-OM family]  ──┤   │     specificity-first      │
 [WRF-SMN]          ──┤   │     blending)              ├──> [FastAPI + Tile Renderer]
-[JMA MSM]          ──┤   │                            │      (LRU cache + tile warmer)
+[JMA MSM]          ──┤   │                            │      (LRU cache; tile warmer in single mode only)
 [ECMWF IFS]        ──┘   │                            │
                           │                            │
                           └─> [Optical Flow Interp] ───┤      [Satellite Tile Renderer]

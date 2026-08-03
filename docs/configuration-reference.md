@@ -407,18 +407,18 @@ These caches are the largest RAM consumer after frame data. Reducing this saves 
 
 ### `LIBREWXR_WARMER_THREADS`
 
-Thread pool size for background tile cache warming, **per worker**. When a tile is requested, the warmer pre-computes the geometry for that same tile position at all other timestamps in the background, so animation playback is smooth without waiting for each frame to render on demand. Warming covers all color schemes and output formats automatically because the cache stores pre-presentation geometry, not encoded bytes.
+Thread pool size for background tile cache warming, **single mode only** — in multi mode no `TileWarmer` is instantiated in render workers, and the 4-thread multi default sizes the request-executor pool used to compute tile geometry, not a warming pool. When a tile is requested, the warmer pre-computes the geometry for that same tile position at all other timestamps in the background, so animation playback is smooth without waiting for each frame to render on demand. Warming covers all color schemes and output formats automatically because the cache stores pre-presentation geometry, not encoded bytes.
 
 | | |
 |---|---|
 | **Default** | `0` (single: auto = CPU count - 1) / `4` (multi) — set 0 or unset to use the mode default |
 | **Type** | integer |
 
-In multi mode the default is 4 per worker — many workers each with a full thread pool would oversubscribe the rack.
+The empty-tile fast path (see `tile_requests.fast_path` in `/health`) and per-worker LRU caches cover the cold-render case in multi mode.
 
 ### `LIBREWXR_WARM_COORD_ZOOM`
 
-Pre-warm coordinate caches up to this zoom level at startup. Coordinate caches store tile-to-region pixel index mappings; warming them eliminates cold-start latency from trigonometric projections.
+Pre-warm coordinate caches up to this zoom level at startup. Coordinate caches store tile-to-region pixel index mappings; warming them eliminates cold-start latency from trigonometric projections. In multi mode, this runs only in the pipeline parent process; serving workers build their coordinate caches lazily on first request.
 
 | | |
 |---|---|
@@ -429,7 +429,7 @@ Each zoom level adds ~4x the tiles of the previous (zoom 6 = ~5,500 tiles). Set 
 
 ### `LIBREWXR_WARM_OVERVIEW_ZOOM`
 
-Pre-render overview tiles up to this zoom level after each fetch cycle. Ensures zoomed-out views are served instantly from cache.
+**Single mode only.** Pre-render overview tiles up to this zoom level after each fetch cycle. Ensures zoomed-out views are served instantly from cache. In multi mode the fetch cycle lives in a separate pipeline process with `warmer=None`, so these settings do nothing; overview tiles in multi mode are served cold on first request and then cached per-worker. The empty-tile fast path (`tile_requests.fast_path` in `/health`) makes cold renders cheap for precip-empty tiles.
 
 | | |
 |---|---|
@@ -440,9 +440,9 @@ At zoom 4, ~341 tiles per timestamp. Set to `-1` to disable.
 
 ### `LIBREWXR_WARM_OVERVIEW_ZOOM_REGIONAL`
 
-Pre-render higher-zoom tiles ONLY where they overlap an enabled region's bounding box. Skips ocean / desert / unpopulated tiles that no one would zoom into.
+**Single mode only.** Pre-render higher-zoom tiles ONLY where they overlap an enabled region's bounding box. Skips ocean / desert / unpopulated tiles that no one would zoom into.
 
-Applies between `LIBREWXR_WARM_OVERVIEW_ZOOM` (exclusive) and this value (inclusive).
+Applies between `LIBREWXR_WARM_OVERVIEW_ZOOM` (exclusive) and this value (inclusive). In multi mode these settings do nothing, as described under `LIBREWXR_WARM_OVERVIEW_ZOOM` above.
 
 | | |
 |---|---|
@@ -1270,7 +1270,7 @@ When enabled, per-tile request counts at high zooms are recorded in memory and s
 
 ### `LIBREWXR_TILE_TRACKING_MIN_ZOOM`
 
-Track only zoom levels at or above this value. Lower zooms are pre-warmed already so they don't need observation.
+Track only zoom levels at or above this value. Lower zooms are already cheap to render so they don't need observation.
 
 | | |
 |---|---|
@@ -1400,7 +1400,7 @@ Then run:
 docker compose up -d
 ```
 
-The mode automatically picks per-worker tile cache, coord cache, and warmer-thread defaults (128 MB / 512 entries / 4 threads per worker). Bump `LIBREWXR_NWP_FETCH_CONCURRENCY` above the default 4 if your pipeline container has the RAM headroom.
+The mode automatically picks per-worker tile cache, coord cache, and render thread defaults (128 MB / 512 entries / 4 threads per worker). Bump `LIBREWXR_NWP_FETCH_CONCURRENCY` above the default 4 if your pipeline container has the RAM headroom.
 
 Defaults: pipeline cap 12 GB, render cap 18 GB, total ~16 GB RSS in practice.
 

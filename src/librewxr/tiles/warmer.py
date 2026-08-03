@@ -15,7 +15,9 @@ logger = logging.getLogger(__name__)
 
 
 class TileWarmer:
-    """Pre-computes tile geometry for other timestamps when a cache miss occurs.
+    """Single mode only. In multi mode the fetcher and renderers are separate processes and this class is never instantiated; the empty-tile fast path + per-worker LRU cover the cold-render case.
+
+    Pre-computes tile geometry for other timestamps when a cache miss occurs.
 
     Overview warming is demand-driven: past and nowcast tiles are only
     pre-computed after a user requests a corresponding frame type. The
