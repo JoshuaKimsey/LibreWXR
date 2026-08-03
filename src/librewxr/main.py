@@ -21,6 +21,7 @@ from librewxr.data.master_state import apply_state, dump_state, load_state, stat
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.storm_cells import StormCellGenerator, StormCellStore
 from librewxr.data.nwp_source import NWPChain
+from librewxr.data.precip_mask import PrecipMaskStore
 from librewxr.data.store import FrameStore
 from librewxr.sources import (
     collect_nowcast_contributions,
@@ -270,6 +271,11 @@ async def _render_only_lifespan(app: FastAPI):
     )
     alerts_store = AlertsStore() if settings.alerts_enabled else None
 
+    # Per-timestamp global precip mask, built by the pipeline and
+    # snapshotted into state.json.  Re-mmaps the mask files read-only;
+    # render workers query it instead of probing the NWP chain.
+    precip_mask_store = PrecipMaskStore(cache_dir=cache_dir)
+
     stores: dict[str, object | None] = {
         "frame_store": store,
         **nwp_grids_by_slug,
@@ -277,6 +283,7 @@ async def _render_only_lifespan(app: FastAPI):
         "nowcast_store": nowcast_store,
         "storm_cell_store": storm_cell_store,
         "alerts_store": alerts_store,
+        "precip_mask": precip_mask_store,
     }
 
     payload = load_state(cache_dir)
@@ -377,6 +384,11 @@ async def _render_only_lifespan(app: FastAPI):
     routes.alerts_store = alerts_store
     routes.alerts_fetcher = None
     routes.alerts_enabled = alerts_store is not None
+    # The precip mask rides the snapshot; a pre-fix pipeline that never
+    # dumps one leaves ``stores["precip_mask"]`` as None after the drop
+    # loop above, so routes.precip_mask stays None and the renderer's
+    # Tier 2 gate is skipped (falls back to the old Tier 1 behavior).
+    routes.precip_mask = stores["precip_mask"]
 
     last_mtime = state_mtime(cache_dir)
     last_payload: dict | None = None

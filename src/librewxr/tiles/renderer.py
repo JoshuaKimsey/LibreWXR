@@ -3,6 +3,7 @@
 import io
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -22,6 +23,9 @@ from librewxr.tiles.coordinates import (
     tile_pixel_latlons,
     tile_pixel_latlons_padded,
 )
+
+if TYPE_CHECKING:
+    from librewxr.data.precip_mask import PrecipMaskStore
 
 
 # ---------------------------------------------------------------------------
@@ -57,9 +61,9 @@ class TileGeometry:
     # Fast-path outcome label, populated ONLY on transparent geometries so
     # routes.py can classify which empty-tile fast path fired without
     # reaching into compute internals.  ``None`` for real (non-transparent)
-    # geometries.  String values are the Tier 1 / Tier 2 vocabulary in the
-    # transparent return sites of ``compute_tile_geometry`` /
-    # ``_compute_nwp_only_geometry``.
+    # geometries.  String values are the Tier 1 / Tier 2 (precip-mask)
+    # vocabulary in the transparent return sites of
+    # ``compute_tile_geometry`` / ``_compute_nwp_only_geometry``.
     fast_path: str | None = None
 
     @classmethod
@@ -102,6 +106,7 @@ def compute_tile_geometry(
     enabled_regions: list[str] | None = None,
     frame_timestamp: int | None = None,
     nowcast_blend: float | None = None,
+    precip_mask=None,  # PrecipMaskStore | None — multi-mode only
 ) -> TileGeometry:
     """Compute the cacheable geometry for a tile.
 
@@ -120,6 +125,7 @@ def compute_tile_geometry(
         if has_nwp:
             return _compute_nwp_only_geometry(
                 nwp_chain, z, x, y, tile_size, smooth, snow, frame_timestamp,
+                precip_mask,
             )
         return TileGeometry.transparent(tile_size, fast_path="no_regions_no_nwp")
 
@@ -159,13 +165,17 @@ def compute_tile_geometry(
     )
     radar_empty = not (values >= pixel_threshold).any()
 
-    # Tier 2: pre-sample NWP precip-bbox gate (past-radar path only).
-    # Nowcast precip != IFS precip (extrapolated convection can exist
-    # where IFS has none), so the bbox is not a valid proxy for nowcast
-    # and is excluded.
-    if has_nwp and nowcast_blend is None and radar_empty:
-        if not nwp_chain.has_precip_in_bbox(frame_timestamp, tile_bounds(z, x, y)):
-            return TileGeometry.transparent(tile_size, fast_path="tier2_past_radar")
+    # Tier 2: pre-sample global precip-mask gate (multi-mode only).  The
+    # mask ORs radar regions + all NWP source samples + nowcast regions
+    # into one coarse boolean grid per timestamp, so the gate fires for
+    # the past-radar path AND the nowcast path together — Tier 3 (the
+    # nowcast bbox) is folded in.  Single mode has no mask
+    # (``precip_mask is None``) and falls through to the existing Tier 1 /
+    # Case A paths unchanged.
+    if has_nwp and radar_empty and precip_mask is not None:
+        if not precip_mask.has_precip_in_bbox(frame_timestamp, tile_bounds(z, x, y)):
+            label = "tier2_mask_nowcast" if nowcast_blend is not None else "tier2_mask_past"
+            return TileGeometry.transparent(tile_size, fast_path=label)
 
     # Case A: no NWP at all and radar sample is empty — transparent,
     # no further work.
@@ -228,13 +238,17 @@ def _compute_nwp_only_geometry(
     smooth: bool,
     snow: bool,
     frame_timestamp: int | None,
+    precip_mask=None,  # PrecipMaskStore | None — multi-mode only
 ) -> TileGeometry:
     """Geometry for a tile entirely from NWP (no radar regions overlap)."""
-    # Tier 2: skip the full-grid NWP sample entirely when no source can
-    # have precip in this tile's bbox.  Reuses the same
-    # ``has_precip_in_bbox`` gate as the past-radar path.
-    if not nwp_chain.has_precip_in_bbox(frame_timestamp, tile_bounds(z, x, y)):
-        return TileGeometry.transparent(tile_size, fast_path="tier2_nwp_only")
+    # Tier 2: skip the full-grid NWP sample entirely when the global
+    # precip mask has no precip in this tile's bbox.  Same mask gate as
+    # the past-radar / nowcast paths (multi-mode only; skipped when the
+    # mask is absent).
+    if precip_mask is not None and not precip_mask.has_precip_in_bbox(
+        frame_timestamp, tile_bounds(z, x, y),
+    ):
+        return TileGeometry.transparent(tile_size, fast_path="tier2_mask_nwp_only")
 
     lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
     values = nwp_chain.sample(

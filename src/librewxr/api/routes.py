@@ -54,6 +54,7 @@ tile_cache: TileCache | None = None
 nwp_grids: dict[str, object] = {}
 ecmwf_grid = None  # ECMWFGrid | None — special-cased by /v2/radar arrows
 nwp_chain = None  # NWPChain | None
+precip_mask = None  # PrecipMaskStore | None — set by main.py (multi mode only)
 # GMGSI satellite sources keyed by slug (gmgsi_lw_grid, gmgsi_vis_grid).
 # Routes index by slug so the /health endpoint and tile dispatcher
 # auto-pick up new channels without per-source plumbing.
@@ -440,6 +441,7 @@ async def radar_tile(
             enabled_regions=enabled_regions,
             frame_timestamp=timestamp,
             nowcast_blend=nowcast_blend,
+            precip_mask=precip_mask,
         )
         tile_cache.put(geom_key, geom)
         # Only fire on the cold-compute path: a fast-path label here means

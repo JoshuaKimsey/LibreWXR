@@ -37,6 +37,7 @@ from librewxr.data.master_state import dump_state
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.storm_cells import StormCellGenerator, StormCellStore
 from librewxr.data.nwp_source import NWPChain
+from librewxr.data.precip_mask import PrecipMaskStore
 from librewxr.data.radar_cache import RadarFrameCache
 from librewxr.data.regions import REGIONS
 from librewxr.data.store import FrameStore
@@ -216,6 +217,13 @@ async def run_pipeline() -> None:
     # via apply_state instead.
     alerts_store = AlertsStore() if settings.alerts_enabled else None
 
+    # Per-timestamp global precip mask (the Tier 2 empty-tile gate's
+    # replacement).  Built from every source's combined contribution
+    # (radar + all NWP samples + nowcast) each cycle, then snapshotted
+    # into state.json so render workers query it via memmap without
+    # touching the NWP chain.  Multi-mode only.
+    precip_mask_store = PrecipMaskStore(cache_dir=cache_dir)
+
     # Stores keyed by slug — render-only workers consume the same keys
     # via ``apply_state``.  None entries are skipped by dump_state.
     stores = {
@@ -225,9 +233,14 @@ async def run_pipeline() -> None:
         "nowcast_store": nowcast_store,
         "storm_cell_store": storm_cell_store,
         "alerts_store": alerts_store,
+        "precip_mask": precip_mask_store,
     }
 
     async def on_cycle_complete() -> None:
+        try:
+            await precip_mask_store.build(stores, nwp_chain, settings)
+        except Exception:
+            logger.exception("Failed to build precip mask")
         try:
             dump_state(stores, cache_dir)
         except Exception:
