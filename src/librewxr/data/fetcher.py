@@ -53,6 +53,13 @@ class RadarFetcher:
     # masking a genuine multi-cycle outage.
     _CARRY_FORWARD_MAX_INTERVALS = 2
 
+    # Debounce window for on_cycle_complete triggers (initial backfill,
+    # end of cycle, frame merges, satellite background fetches).  Multiple
+    # triggers within the window collapse into a single trailing-edge
+    # invocation so the full state.json serialisation runs at most once per
+    # burst instead of up to 3-4x per fetch cycle.
+    _CYCLE_COMPLETE_DEBOUNCE_S = 30.0
+
     def __init__(
         self,
         store: FrameStore,
@@ -89,6 +96,13 @@ class RadarFetcher:
         self._warmer = warmer
         self._radar_cache = radar_cache
         self._on_cycle_complete = on_cycle_complete
+        # Coalescer state for the cycle-complete dump (see
+        # _fire_cycle_complete): triggers within one debounce window
+        # collapse into a single trailing-edge invocation.
+        self._cycle_complete_debounce = self._CYCLE_COMPLETE_DEBOUNCE_S
+        self._cycle_complete_task: asyncio.Task | None = None
+        self._cycle_complete_dirty = False
+        self._closed = False
         self._task: asyncio.Task | None = None
         self._satellite_tasks: dict[str, asyncio.Task] = {}
         self._enabled_regions = [
@@ -179,6 +193,19 @@ class RadarFetcher:
         logger.info("Radar fetcher started (backfill running in background)")
 
     async def stop(self) -> None:
+        # No new cycle-complete dumps may be scheduled once shutdown
+        # begins, and any windowed dump still pending must be cancelled so
+        # no orphaned timer task outlives the fetcher.  The dump task is
+        # cancelled before the main loop task because the loop may be
+        # blocked awaiting it inside _fire_cycle_complete.
+        self._closed = True
+        pending_dump = getattr(self, "_cycle_complete_task", None)
+        if pending_dump is not None and not pending_dump.done():
+            pending_dump.cancel()
+            try:
+                await pending_dump
+            except asyncio.CancelledError:
+                pass
         if self._task:
             self._task.cancel()
             try:
@@ -222,7 +249,11 @@ class RadarFetcher:
             await self._fetch_all_frames()
             await self._run_nowcast()
             await self._run_storm_cells()
-            await self._fire_cycle_complete()
+            # Fire-and-forget: the dump runs at the trailing edge of the
+            # debounce window in the background, so the fetch loop is not
+            # stalled and the imminent cycle-end trigger folds into this
+            # same window.
+            asyncio.create_task(self._fire_cycle_complete("initial-backfill"))
             if self._warmer is not None and settings.warm_overview_zoom >= 0:
                 await self._warmer.warm_latest()
             self._schedule_warm()
@@ -248,7 +279,11 @@ class RadarFetcher:
                 await self._fetch_all_frames()
                 await self._run_nowcast()
                 await self._run_storm_cells()
-                await self._fire_cycle_complete()
+                # Fire-and-forget (see initial-backfill site): the dump
+                # lands at the trailing edge of the window without stalling
+                # the loop, and any satellite completion inside the window
+                # is folded into the same invocation.
+                asyncio.create_task(self._fire_cycle_complete("end-of-cycle"))
                 self._schedule_warm()
             except Exception:
                 logger.exception("Error in fetch loop")
@@ -258,21 +293,118 @@ class RadarFetcher:
             )
             release_memory()
 
-    async def _fire_cycle_complete(self) -> None:
-        """Invoke the on_cycle_complete hook if set; never propagate failure.
+    async def _fire_cycle_complete(self, reason: str = "cycle") -> None:
+        """Coalesced invocation of the on_cycle_complete hook.
 
-        The data-pipeline process uses this to dump a cross-process state
-        snapshot.  A failed dump must never kill the fetcher loop — render
-        workers will simply read the previous snapshot.
+        Every trigger site (end of cycle, frame merges, satellite
+        background fetches) funnels through here.  Multiple triggers
+        within ``_cycle_complete_debounce`` seconds collapse into a single
+        trailing-edge invocation: the first trigger becomes the burst
+        leader and waits out the window, and later triggers in the window
+        are folded in — the dump reads the live stores at fire time, so
+        their state is captured by the one invocation.  A trigger that
+        arrives after the window closes starts a fresh burst, so a
+        satellite that completes after the cycle-end dump still produces
+        a dump within one debounce window of its completion instead of
+        waiting for the next cycle.  An end-of-cycle trigger is never
+        debounced away: it either leads a burst (whose dump is guaranteed
+        to run) or is captured by the burst currently pending.
+
+        Trigger sites either await this directly (the satellite background
+        task, which must see the dump complete before it returns) or wrap
+        it in ``asyncio.create_task`` (cycle-end / merge / backfill sites,
+        so the fetch loop is never stalled by a window).  Either way the
+        leader's dump is guaranteed to run and the caller blocks for at
+        most one window.  The on_cycle_complete callback interface is
+        unchanged.
         """
         if self._on_cycle_complete is None:
             return
+        self._init_cycle_complete_state()
+        if self._closed:
+            return
+        task = self._cycle_complete_task
+        if task is not None and not task.done():
+            # A windowed dump is already pending — fold this trigger into
+            # it instead of serialising the snapshot again.
+            self._cycle_complete_dirty = True
+            logger.debug(
+                "on_cycle_complete trigger (%s) coalesced into pending dump",
+                reason,
+            )
+            return
+        self._cycle_complete_task = asyncio.create_task(
+            self._cycle_complete_runner(reason)
+        )
         try:
-            result = self._on_cycle_complete()
-            if inspect.isawaitable(result):
-                await result
+            await self._cycle_complete_task
+        finally:
+            # The runner may have replaced the attribute with a follow-up
+            # window (a trigger landed while the invocation was running) —
+            # only clear it when the task we awaited really finished.
+            if (
+                self._cycle_complete_task is not None
+                and self._cycle_complete_task.done()
+            ):
+                self._cycle_complete_task = None
+
+    async def _cycle_complete_runner(self, reason: str) -> None:
+        """Trailing-edge window for one trigger burst, then invoke the hook.
+
+        Sleeps out the debounce window so burst members coalesce, then
+        invokes the callback exactly once — the live-state read at that
+        point captures every trigger that joined the burst.  A trigger
+        that lands while the invocation is running may have been missed by
+        the live read, so a follow-up window is scheduled for it.
+        """
+        try:
+            await asyncio.sleep(self._cycle_complete_debounce)
+        except asyncio.CancelledError:
+            raise
+        # Triggers folded into this burst are captured by the dump about
+        # to run; reset the latch before invoking so only triggers that
+        # arrive during the invocation can re-arm it.
+        self._cycle_complete_dirty = False
+        await self._invoke_on_cycle_complete(reason)
+        if self._cycle_complete_dirty:
+            self._cycle_complete_dirty = False
+            self._cycle_complete_task = asyncio.create_task(
+                self._cycle_complete_runner(reason)
+            )
+
+    async def _invoke_on_cycle_complete(self, reason: str) -> None:
+        """Invoke the on_cycle_complete hook exactly once; never propagate failure.
+
+        The hook may be a coroutine function (both call sites — main.py
+        and data_pipeline.py — use ``async def``) or a plain sync
+        function.  A sync hook's serialisation would block the loop, so it
+        runs in a worker thread.  A failed dump must never kill the fetch
+        loop — render workers simply read the previous snapshot.
+        """
+        hook = self._on_cycle_complete
+        try:
+            if inspect.iscoroutinefunction(hook):
+                await hook()
+            else:
+                await asyncio.to_thread(hook)
         except Exception:
-            logger.exception("on_cycle_complete hook failed")
+            logger.exception("on_cycle_complete hook failed (%s)", reason)
+
+    def _init_cycle_complete_state(self) -> None:
+        """Lazily initialise coalescer state.
+
+        Production fetchers get it in ``__init__``; fetchers built via
+        ``__new__`` in tests bypass that, so initialise on first use.  Test
+        fetchers use a tiny debounce window so the coalesced invocation
+        path is exercised without making each awaited call sleep the full
+        production window.
+        """
+        if "_cycle_complete_task" in self.__dict__:
+            return
+        self._cycle_complete_debounce = 0.05
+        self._cycle_complete_task = None
+        self._cycle_complete_dirty = False
+        self._closed = False
 
     def _schedule_warm(self) -> None:
         """Re-trigger overview warming for any previously-requested categories.
@@ -428,7 +560,7 @@ class RadarFetcher:
             return
         release_memory()
         if new_frames:
-            await self._fire_cycle_complete()
+            await self._fire_cycle_complete("satellite")
 
     async def _fetch_all_frames(self) -> None:
         """Fetch frames for all enabled regions to fill the store.
@@ -612,20 +744,29 @@ class RadarFetcher:
                 # stale tiles that were rendered without the new regions.
                 self._cache.invalidate_timestamp(ts)
                 any_merged = True
-            if self._radar_cache is not None:
+            if self._radar_cache is not None and not self._store._persistent:
                 try:
-                    # Synchronous memmap writes run in a worker thread.
+                    # In persistent mode the FrameStore's own memmaps
+                    # (<cache_dir>/radar/<ts>_<region>.dat) already persist
+                    # every frame; RadarFrameCache.write_frame would write a
+                    # second, identical copy of each region array into the
+                    # same directory.  Only a non-persistent store (temp
+                    # memmaps, e.g. single mode) needs the radar cache's
+                    # copy to survive restarts.  Synchronous memmap writes
+                    # run in a worker thread.
                     await asyncio.to_thread(self._radar_cache.write_frame, frame)
                 except Exception:
                     logger.exception("Failed to persist radar frame %d", ts)
             added += 1
 
         # Merges only invalidate the pipeline's local cache, which the
-        # render workers don't share.  Dump state.json now so the workers
-        # poll the mtime change and flush their own tile caches without
-        # waiting for the end-of-cycle snapshot.
+        # render workers don't share.  Dump state.json so the workers poll
+        # the mtime change and flush their own tile caches without waiting
+        # for the end-of-cycle snapshot.  Fire-and-forget: the cycle-end
+        # trigger follows within the debounce window, so the two collapse
+        # into a single trailing-edge dump that captures both.
         if any_merged:
-            await self._fire_cycle_complete()
+            asyncio.create_task(self._fire_cycle_complete("frame-merge"))
 
         if self._radar_cache is not None and frames_by_ts:
             try:

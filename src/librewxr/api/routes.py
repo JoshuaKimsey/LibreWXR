@@ -634,6 +634,36 @@ async def coverage_tile(
     if frame is None:
         raise HTTPException(status_code=503, detail="No radar data available")
 
+    # Cache the encoded coverage tile bytes keyed on the content that
+    # determines them: the latest frame's timestamp + viewport.  The
+    # endpoint is always PNG (fixed URL), so the format is constant and
+    # needs no key element.  The "cov" namespace prefix mirrors the
+    # satellite endpoint's "sat" keys - it can't collide with the radar
+    # geometry/present keys (which start with the int timestamp), and it
+    # deliberately sits outside ``invalidate_timestamp`` (which sweeps
+    # by ``key[0] == timestamp``): coverage tracks only the latest frame,
+    # so a new frame re-keys the entries and the old ones age out through
+    # the LRU, same as satellite.  ``enabled_regions`` is fixed at
+    # startup, so it's not in the key (the radar geometry path treats it
+    # the same way).
+    cache_key = ("cov", frame.timestamp, z, x, y, tile_size)
+    cached = tile_cache.get(cache_key)
+    if cached is not None:
+        if isinstance(cached, CachedRender):
+            tile_bytes = cached.data
+            etag = cached.etag
+        else:
+            # Legacy raw-bytes entry (pre-ETag cache format).
+            tile_bytes = cached
+            etag = compute_etag(cached)
+        return conditional_response(
+            request=request,
+            body=tile_bytes,
+            etag=etag,
+            content_type="image/png",
+            max_age=300,
+        )
+
     tile_bytes = await asyncio.to_thread(
         render_coverage_tile,
         frame_regions=frame.regions,
@@ -643,6 +673,7 @@ async def coverage_tile(
     )
 
     etag = compute_etag(tile_bytes)
+    tile_cache.put(cache_key, CachedRender(data=tile_bytes, etag=etag))
 
     return conditional_response(
         request=request,

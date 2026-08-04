@@ -12,8 +12,13 @@ boundary.
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import logging
 import math
+import os
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -310,3 +315,342 @@ def sample_feather(
     result = feather[row_c, col_c]
     result[~in_bounds] = 0.0
     return result
+
+
+# ---------------------------------------------------------------------------
+# Persistent mask cache: shared read-only memmaps across processes
+# ---------------------------------------------------------------------------
+# Multi-mode deployments start one pipeline process plus N render workers;
+# every one of them used to rebuild the identical coverage + feather masks
+# at boot (~30 MB of station-circle rasterisation + cv2.distanceTransform
+# per process).  Whoever builds first now persists the masks under
+# ``<cache_dir>/coverage_masks/``; every other process memmaps the files
+# read-only instead of rebuilding.  ``mask_signature`` pins every input
+# that determines mask content, so a parameter change (station lists, range
+# overrides, coverage polygons, enabled regions, resolution / feather
+# constants, format version) busts the cache and the caller falls back to an
+# in-process build — which then re-persists for the next boot.
+
+# Subdirectory of the cache dir holding the mask files.
+MASK_CACHE_DIRNAME = "coverage_masks"
+# Bump when the on-disk layout or the metadata schema changes.
+MASK_FORMAT_VERSION = 1
+
+
+def _normalize_polygon(polygon) -> list[list[list[float]]]:
+    """Canonical, hash-stable form of a coverage polygon for signatures.
+
+    Mirrors the ring normalisation in ``_build_region_polygon_mask``:
+    ring order is irrelevant to ``cv2.fillPoly`` output, so rings are
+    sorted, and coordinates are rounded to 1e-6 deg (far below the 0.05°
+    mask grid) so float noise can't perturb the signature.
+    """
+    if polygon and isinstance(polygon[0][0], (int, float)):
+        rings = [polygon]
+    else:
+        rings = polygon
+    normalized = [
+        [[round(float(lat), 6), round(float(lon), 6)] for lat, lon in ring]
+        for ring in rings
+    ]
+    normalized.sort(key=json.dumps)
+    return normalized
+
+
+def _signature_regions(
+    station_map: dict[str, list[tuple[float, float]]],
+    coverage_polygons: (
+        dict[str, list[tuple[float, float]] | list[list[tuple[float, float]]]]
+        | None
+    ),
+) -> list[str]:
+    """Sorted region names a build would produce masks for.
+
+    Mirrors ``build_coverage_masks``: polygon regions (present in
+    ``REGIONS``) first, then station regions not shadowed by a polygon.
+    """
+    coverage_polygons = coverage_polygons or {}
+    names: set[str] = set()
+    for name in coverage_polygons:
+        if name in REGIONS:
+            names.add(name)
+    for name in station_map:
+        if name in coverage_polygons:
+            continue
+        if name in REGIONS:
+            names.add(name)
+    return sorted(names)
+
+
+def mask_signature(
+    enabled_regions: list[str],
+    station_map: dict[str, list[tuple[float, float]]],
+    range_overrides: dict[str, float] | None = None,
+    coverage_polygons: (
+        dict[str, list[tuple[float, float]] | list[list[tuple[float, float]]]]
+        | None
+    ) = None,
+) -> str:
+    """SHA-256 hex hash of every parameter that determines mask content.
+
+    Covers the mask/feather constants (resolution, default radar range,
+    feather distance), the enabled region set, the per-region station
+    coordinates, range overrides, coverage polygons, and each region's
+    bbox (which fixes the grid shape).  Any change invalidates persisted
+    masks, so ``load_masks`` only reuses files built from identical
+    parameters.
+    """
+    range_overrides = range_overrides or {}
+    coverage_polygons = coverage_polygons or {}
+    payload: dict = {
+        "format": MASK_FORMAT_VERSION,
+        "mask_resolution_deg": MASK_RESOLUTION_DEG,
+        "default_radar_range_km": DEFAULT_RADAR_RANGE_KM,
+        "feather_distance_px": FEATHER_DISTANCE_PX,
+        "enabled_regions": sorted(enabled_regions),
+        "regions": {},
+    }
+    for name in _signature_regions(station_map, coverage_polygons):
+        region = REGIONS.get(name)
+        entry: dict = {
+            "bbox": (
+                [region.west, region.south, region.east, region.north]
+                if region is not None
+                else None
+            ),
+        }
+        if name in coverage_polygons:
+            entry["source"] = "polygon"
+            entry["polygon"] = _normalize_polygon(coverage_polygons[name])
+        else:
+            entry["source"] = "stations"
+            stations = sorted(station_map.get(name, []))
+            entry["stations"] = [
+                [round(float(lat), 6), round(float(lon), 6)]
+                for lat, lon in stations
+            ]
+            entry["range_km"] = range_overrides.get(name, DEFAULT_RADAR_RANGE_KM)
+        payload["regions"][name] = entry
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _write_memmap_atomic(path: Path, array: np.ndarray) -> None:
+    """Write ``array`` to ``path`` atomically (unique tmp + ``os.replace``).
+
+    The tmp name embeds the pid so concurrent savers (e.g. several
+    workers right after a cache wipe) never write the same tmp file;
+    ``os.replace`` is atomic, so readers only ever see a complete file.
+    """
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    tmp.unlink(missing_ok=True)
+    mm = np.memmap(tmp, dtype=array.dtype, mode="w+", shape=array.shape)
+    mm[:] = array
+    mm.flush()
+    del mm
+    os.replace(tmp, path)
+
+
+def save_masks(
+    cache_dir: str | Path,
+    enabled_regions: list[str],
+    station_map: dict[str, list[tuple[float, float]]],
+    range_overrides: dict[str, float] | None = None,
+    coverage_polygons: (
+        dict[str, list[tuple[float, float]] | list[list[tuple[float, float]]]]
+        | None
+    ) = None,
+) -> bool:
+    """Persist the built coverage + feather masks under ``cache_dir``.
+
+    Call after ``build_coverage_masks`` + ``build_feather_masks``.  Writes
+    one ``<region>.coverage.dat`` (bool) and ``<region>.feather.dat``
+    (float32) per region plus a ``masks.json`` manifest carrying the
+    content signature, per-region shapes/dtypes, and grid geometry — all
+    atomically, so concurrent savers are safe (last writer wins).
+
+    Returns ``True`` when the masks were written.  Returns ``False``
+    without writing when the module globals don't match the given
+    parameters — masks must have been built from exactly these inputs,
+    otherwise the persisted arrays would silently disagree with the
+    manifest signature.
+    """
+    mask_dir = Path(cache_dir) / MASK_CACHE_DIRNAME
+    mask_dir.mkdir(parents=True, exist_ok=True)
+
+    expected = set(_signature_regions(station_map, coverage_polygons))
+    if set(_COVERAGE_MASKS) != expected or set(_FEATHER_MASKS) != expected:
+        logger.warning(
+            "Skipping mask persistence: built masks (%d/%d regions) don't "
+            "match the given parameters (%d regions)",
+            len(_COVERAGE_MASKS), len(_FEATHER_MASKS), len(expected),
+        )
+        return False
+
+    regions: dict[str, dict] = {}
+    for region_name, (mask, west, south, dx, dy) in _COVERAGE_MASKS.items():
+        feather = _FEATHER_MASKS[region_name][0]
+        _write_memmap_atomic(mask_dir / f"{region_name}.coverage.dat", mask)
+        _write_memmap_atomic(mask_dir / f"{region_name}.feather.dat", feather)
+        regions[region_name] = {
+            "coverage": {"shape": list(mask.shape), "dtype": str(mask.dtype)},
+            "feather": {"shape": list(feather.shape), "dtype": str(feather.dtype)},
+            "west": west,
+            "south": south,
+            "dx": dx,
+            "dy": dy,
+        }
+
+    manifest = {
+        "format_version": MASK_FORMAT_VERSION,
+        "signature": mask_signature(
+            enabled_regions, station_map, range_overrides, coverage_polygons,
+        ),
+        "regions": regions,
+    }
+    manifest_path = mask_dir / "masks.json"
+    tmp_manifest = manifest_path.with_name(f"masks.json.tmp.{os.getpid()}")
+    tmp_manifest.write_text(json.dumps(manifest, sort_keys=True))
+    os.replace(tmp_manifest, manifest_path)
+    logger.info(
+        "Persisted %d coverage/feather mask pair(s) under %s",
+        len(regions), mask_dir,
+    )
+    return True
+
+
+def load_masks(
+    cache_dir: str | Path,
+    enabled_regions: list[str],
+    station_map: dict[str, list[tuple[float, float]]],
+    range_overrides: dict[str, float] | None = None,
+    coverage_polygons: (
+        dict[str, list[tuple[float, float]] | list[list[tuple[float, float]]]]
+        | None
+    ) = None,
+) -> bool:
+    """Install persisted masks from ``cache_dir`` as read-only memmaps.
+
+    Succeeds only when the manifest's signature matches the CURRENT build
+    parameters and every required region is present with the expected
+    shape/dtype.  On success the memmaps replace the module-global mask
+    dicts (``sample_coverage`` / ``sample_feather`` read them identically);
+    on any mismatch returns ``False`` and leaves those dicts untouched so
+    the caller falls back to an in-process build.
+    """
+    mask_dir = Path(cache_dir) / MASK_CACHE_DIRNAME
+    manifest_path = mask_dir / "masks.json"
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError):
+        return False
+    if manifest.get("format_version") != MASK_FORMAT_VERSION:
+        return False
+    if (
+        manifest.get("signature")
+        != mask_signature(
+            enabled_regions, station_map, range_overrides, coverage_polygons,
+        )
+    ):
+        return False
+
+    expected_regions = set(_signature_regions(station_map, coverage_polygons))
+    manifest_regions = manifest.get("regions", {})
+    if not isinstance(manifest_regions, dict) or set(manifest_regions) != expected_regions:
+        return False
+
+    coverage_out: dict[str, tuple[np.ndarray, float, float, float, float]] = {}
+    feather_out: dict[str, tuple[np.ndarray, float, float, float, float]] = {}
+    for region_name, info in manifest_regions.items():
+        try:
+            cov_info = info["coverage"]
+            feat_info = info["feather"]
+            cov_shape = tuple(cov_info["shape"])
+            feat_shape = tuple(feat_info["shape"])
+            cov_dtype = np.dtype(cov_info["dtype"])
+            feat_dtype = np.dtype(feat_info["dtype"])
+            if cov_dtype != np.dtype(bool) or feat_dtype != np.dtype(np.float32):
+                return False
+            coverage_path = mask_dir / f"{region_name}.coverage.dat"
+            feather_path = mask_dir / f"{region_name}.feather.dat"
+            if not coverage_path.is_file() or not feather_path.is_file():
+                return False
+            # Reject truncated files up front: memmap would silently map
+            # them (accessing the missing tail faults on read), so verify
+            # the on-disk size matches rows * cols * itemsize exactly.
+            if (
+                coverage_path.stat().st_size
+                != int(np.prod(cov_shape)) * cov_dtype.itemsize
+                or feather_path.stat().st_size
+                != int(np.prod(feat_shape)) * feat_dtype.itemsize
+            ):
+                return False
+            coverage_mm = np.memmap(
+                coverage_path, dtype=cov_dtype, mode="r", shape=cov_shape,
+            )
+            feather_mm = np.memmap(
+                feather_path, dtype=feat_dtype, mode="r", shape=feat_shape,
+            )
+            west = float(info["west"])
+            south = float(info["south"])
+            dx = float(info["dx"])
+            dy = float(info["dy"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+        coverage_out[region_name] = (coverage_mm, west, south, dx, dy)
+        feather_out[region_name] = (feather_mm, west, south, dx, dy)
+
+    _COVERAGE_MASKS.clear()
+    _COVERAGE_MASKS.update(coverage_out)
+    _FEATHER_MASKS.clear()
+    _FEATHER_MASKS.update(feather_out)
+    logger.info(
+        "Loaded %d persisted coverage/feather mask pair(s) from %s",
+        len(coverage_out), mask_dir,
+    )
+    return True
+
+
+def persist_masks_in_background(
+    cache_dir: str | Path,
+    enabled_regions: list[str],
+    station_map: dict[str, list[tuple[float, float]]],
+    range_overrides: dict[str, float] | None = None,
+    coverage_polygons: (
+        dict[str, list[tuple[float, float]] | list[list[tuple[float, float]]]]
+        | None
+    ) = None,
+) -> asyncio.Task:
+    """Offload ``save_masks`` to a worker thread; never blocks the caller.
+
+    Boot-time convenience for async lifespans: the tens-of-MB write runs
+    on the loop's default executor while startup continues.  Failures are
+    logged, not raised — a failed save just means the next boot rebuilds.
+    Keep the returned task referenced for the process lifetime so it can't
+    be garbage-collected mid-write.
+    """
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            save_masks, cache_dir, enabled_regions, station_map,
+            range_overrides, coverage_polygons,
+        )
+    )
+
+    def _log_failure(fut: asyncio.Task) -> None:
+        if fut.cancelled():
+            return
+        exc = fut.exception()
+        if exc is not None:
+            logger.error("Failed to persist coverage/feather masks: %s", exc)
+            return
+        # ``save_masks`` now reports refusals through its return value;
+        # surface those (masks not matching the parameters) as a warning
+        # instead of logging success.  The next boot simply rebuilds.
+        if fut.result() is False:
+            logger.warning(
+                "Skipped persisting coverage/feather masks: built masks "
+                "don't match the current parameters",
+            )
+
+    task.add_done_callback(_log_failure)
+    return task

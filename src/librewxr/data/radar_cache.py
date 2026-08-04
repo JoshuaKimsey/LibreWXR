@@ -26,6 +26,15 @@ class RadarFrameCache:
     is silently dropped, so a code-side region resize can't restore
     broken data.
 
+    The cache directory is shared with the ``FrameStore``'s persistent
+    memmaps (``<ts>_<region>.dat``), which are the canonical on-disk
+    radar frames whenever the store runs in persistent mode — the fetcher
+    then skips ``write_frame`` and this class reads the FrameStore files
+    back on restart instead.  The legacy ``radar_<ts>_<region>.dat``
+    files written by ``write_frame`` are still produced when the store is
+    non-persistent (single mode), so the load path understands both
+    layouts and prefers the FrameStore memmap when both exist.
+
     Cleanup is driven by the in-memory ``FrameStore`` ring buffer:
     anything that's been evicted from memory is also evicted from disk.
     """
@@ -38,8 +47,27 @@ class RadarFrameCache:
     def _file_path(self, unix_ts: int, region_name: str) -> Path:
         return self._dir / f"radar_{unix_ts}_{region_name}.dat"
 
+    def _framestore_file_path(self, unix_ts: int, region_name: str) -> Path:
+        """Path of the FrameStore's memmap for a (timestamp, region)."""
+        return self._dir / f"{unix_ts}_{region_name}.dat"
+
+    def _resolve_region_file(
+        self, unix_ts: int, region_name: str,
+    ) -> Path | None:
+        """Resolve the on-disk file for a (timestamp, region).
+
+        Prefers the FrameStore memmap (the canonical persistent copy when
+        the store runs in persistent mode) over the legacy ``radar_*``
+        file.  Returns ``None`` when neither exists.
+        """
+        framestore_path = self._framestore_file_path(unix_ts, region_name)
+        if framestore_path.exists():
+            return framestore_path
+        legacy = self._file_path(unix_ts, region_name)
+        return legacy if legacy.exists() else None
+
     def has(self, unix_ts: int, region_name: str) -> bool:
-        return self._file_path(unix_ts, region_name).exists()
+        return self._resolve_region_file(unix_ts, region_name) is not None
 
     def write_frame(self, frame: RadarFrame) -> None:
         """Write every region in a frame to disk atomically."""
@@ -69,11 +97,13 @@ class RadarFrameCache:
         timestamp with at least one valid region is returned as a frame
         with whatever subset of regions survived validation.
 
-        Self-healing: timestamps discovered by scanning ``radar_*_*.dat``
-        files are unioned with whatever ``metadata.json`` declares, so a
-        crash mid-backfill that leaves the metadata stale doesn't orphan
-        valid frame files. If a per-region shape isn't recorded in
-        metadata, ``np.memmap`` validates by file size at read time.
+        Self-healing: timestamps discovered by scanning the on-disk frame
+        files (FrameStore memmaps ``<ts>_<region>.dat`` and legacy
+        ``radar_*_*.dat`` files) are unioned with whatever
+        ``metadata.json`` declares, so a crash mid-backfill that leaves
+        the metadata stale doesn't orphan valid frame files. If a
+        per-region shape isn't recorded in metadata, ``np.memmap``
+        validates by file size at read time.
         """
         meta = self._load_metadata() or {}
 
@@ -109,8 +139,10 @@ class RadarFrameCache:
                 if cached_meta is not None:
                     cached_shape = tuple(cached_meta.get("shape", []))
                     if cached_shape != expected_shape:
-                        # Region was reshaped in code — drop the stale file.
+                        # Region was reshaped in code — drop any stale
+                        # copies in either on-disk layout.
                         self._file_path(ts, name).unlink(missing_ok=True)
+                        self._framestore_file_path(ts, name).unlink(missing_ok=True)
                         continue
                 # Either the region's shape is recorded and matches, or
                 # metadata doesn't know about it — fall through and let
@@ -123,13 +155,21 @@ class RadarFrameCache:
         return frames
 
     def _scan_timestamps(self) -> set[int]:
-        """Enumerate timestamps from radar_<ts>_<region>.dat filenames."""
+        """Enumerate timestamps from both on-disk radar frame layouts.
+
+        ``radar_<ts>_<region>.dat`` (legacy cache files) and
+        ``<ts>_<region>.dat`` (FrameStore memmaps) both live in this
+        directory.
+        """
         result: set[int] = set()
-        for path in self._dir.glob("radar_*.dat"):
+        for path in self._dir.glob("*.dat"):
             stem_parts = path.stem.split("_")
-            if len(stem_parts) >= 3:
+            # radar_<ts>_<region>.dat -> ts at index 1; <ts>_<region>.dat
+            # -> ts at index 0.
+            idx = 1 if stem_parts and stem_parts[0] == "radar" else 0
+            if len(stem_parts) > idx:
                 try:
-                    result.add(int(stem_parts[1]))
+                    result.add(int(stem_parts[idx]))
                 except ValueError:
                     pass
         return result
@@ -137,8 +177,8 @@ class RadarFrameCache:
     def _read_region(
         self, unix_ts: int, region_name: str, shape: tuple[int, int]
     ) -> np.ndarray | None:
-        path = self._file_path(unix_ts, region_name)
-        if not path.exists():
+        path = self._resolve_region_file(unix_ts, region_name)
+        if path is None:
             return None
         try:
             return np.memmap(path, dtype=DTYPE, mode="r", shape=shape)
@@ -173,8 +213,13 @@ class RadarFrameCache:
             return None
 
     def stats(self) -> dict:
-        """Return a snapshot of disk-cache state for the /health endpoint."""
-        files = list(self._dir.glob("radar_*.dat"))
+        """Return a snapshot of on-disk radar frame state for /health.
+
+        Counts both layouts that share this directory: the legacy
+        ``radar_*`` files and the FrameStore memmaps that are the
+        canonical persistent copy.
+        """
+        files = list(self._dir.glob("*.dat"))
         total_bytes = 0
         timestamps: set[int] = set()
         for path in files:
@@ -183,9 +228,10 @@ class RadarFrameCache:
             except OSError:
                 continue
             stem_parts = path.stem.split("_")
-            if len(stem_parts) >= 3:
+            idx = 1 if stem_parts and stem_parts[0] == "radar" else 0
+            if len(stem_parts) > idx:
                 try:
-                    timestamps.add(int(stem_parts[1]))
+                    timestamps.add(int(stem_parts[idx]))
                 except ValueError:
                     pass
         return {
@@ -196,20 +242,42 @@ class RadarFrameCache:
         }
 
     def cleanup(self, active_timestamps: list[int]) -> None:
-        """Remove .dat files for timestamps no longer in the active set."""
+        """Remove radar frame files for timestamps no longer in the active set.
+
+        Covers both on-disk layouts that share this directory: the legacy
+        ``radar_<ts>_<region>.dat`` files (written when the FrameStore is
+        non-persistent) and the FrameStore's own ``<ts>_<region>.dat``
+        memmaps (the canonical persistent copy, normally removed by the
+        store's own eviction — this is the safety net for crash leftovers).
+        A legacy file that duplicates an existing FrameStore file is also
+        removed: it is identical data left behind by a pre-dedupe session,
+        superseded by the FrameStore copy.
+        """
         active = set(active_timestamps)
         removed = 0
-        for path in self._dir.glob("radar_*.dat"):
+        for path in self._dir.glob("*.dat"):
             stem_parts = path.stem.split("_")
-            if len(stem_parts) < 3:
+            idx = 1 if stem_parts and stem_parts[0] == "radar" else 0
+            if len(stem_parts) <= idx:
                 continue
             try:
-                ts = int(stem_parts[1])
+                ts = int(stem_parts[idx])
             except ValueError:
                 continue
-            if ts not in active:
-                path.unlink(missing_ok=True)
-                removed += 1
+            if ts in active:
+                if (
+                    stem_parts[0] == "radar"
+                    and len(stem_parts) > 2
+                ):
+                    # Duplicate of an existing FrameStore memmap — drop the
+                    # legacy copy (identical bytes, same directory).
+                    region_name = "_".join(stem_parts[2:])
+                    if self._framestore_file_path(ts, region_name).exists():
+                        path.unlink(missing_ok=True)
+                        removed += 1
+                continue
+            path.unlink(missing_ok=True)
+            removed += 1
 
         for path in self._dir.glob("*.tmp"):
             path.unlink(missing_ok=True)

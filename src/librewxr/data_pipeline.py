@@ -32,7 +32,11 @@ import cv2
 from librewxr.config import settings
 from librewxr.data.alerts_fetcher import WMOAlertsFetcher
 from librewxr.data.alerts_store import AlertsStore
-from librewxr.data.coverage import build_coverage_masks, build_feather_masks
+from librewxr.data.coverage import (
+    build_coverage_masks,
+    build_feather_masks,
+    persist_masks_in_background,
+)
 from librewxr.data.fetcher import RadarFetcher
 from librewxr.data.master_state import dump_state
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
@@ -99,6 +103,11 @@ def _setup_logging() -> None:
 
 logger = logging.getLogger(__name__)
 
+# The mask-persistence background task.  Held at module scope for the
+# process lifetime so it can't be garbage-collected mid-write (the write
+# is tens of MB); ``run_pipeline`` assigns it once at startup.
+_mask_save_task: asyncio.Task | None = None
+
 
 async def run_pipeline() -> None:
     """Construct the pipeline, run until signalled, then shut down cleanly."""
@@ -150,6 +159,15 @@ async def run_pipeline() -> None:
         coverage_polygons=coverage_polygons,
     )
     build_feather_masks()
+    # Persist the built masks once so render workers memmap them read-only
+    # instead of rebuilding ~30 MB each at boot.  Background thread: the
+    # write is tens of MB and must not delay the first fetch cycle.  Keep
+    # the task referenced at module scope for the process lifetime so it
+    # can't be garbage-collected mid-write.
+    global _mask_save_task
+    _mask_save_task = persist_masks_in_background(
+        cache_dir, enabled, station_map, range_overrides, coverage_polygons,
+    )
 
     nowcast_store = None
     nowcast_generator = None

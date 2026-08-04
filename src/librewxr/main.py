@@ -18,7 +18,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from librewxr.api import routes
 from librewxr.config import settings
-from librewxr.data.coverage import build_coverage_masks, build_feather_masks
+from librewxr.data.coverage import (
+    build_coverage_masks,
+    build_feather_masks,
+    load_masks,
+    persist_masks_in_background,
+)
 from librewxr.data.fetcher import RadarFetcher
 from librewxr.data.master_state import (
     _load_and_apply_state,
@@ -103,6 +108,27 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+
+# The background mask-persistence task, held for the process lifetime so it
+# can't be garbage-collected mid-write (see ``_hold_mask_save_task``).  Only
+# one lifespan runs per process, so a single module-level slot suffices.
+_mask_save_task: asyncio.Task | None = None
+
+
+def _hold_mask_save_task(app: FastAPI, task: asyncio.Task) -> None:
+    """Keep the background mask-save task referenced for the process lifetime.
+
+    Real FastAPI apps expose ``app.state``; the minimal stubs used by the
+    lifespan tests don't, so fall back to a module-level reference.  Either
+    way the task survives until process exit and can't be garbage-collected
+    mid-write (the write is tens of MB).
+    """
+    state = getattr(app, "state", None)
+    if state is not None:
+        state.mask_save_task = task
+    else:
+        global _mask_save_task
+        _mask_save_task = task
 
 
 def _clear_coord_caches() -> None:
@@ -379,12 +405,29 @@ async def _render_only_lifespan(app: FastAPI):
 
     enabled = settings.get_enabled_regions()
     station_map, range_overrides, coverage_polygons = collect_radar_coverage_metadata(settings)
-    build_coverage_masks(
-        station_map,
-        range_overrides=range_overrides,
-        coverage_polygons=coverage_polygons,
-    )
-    build_feather_masks()
+    # Prefer the persisted masks (read-only memmap) when the pipeline has
+    # already saved a set built from identical parameters; otherwise build
+    # exactly as before and persist so the next worker/boot gets a hit.
+    # A miss never blocks boot on the pipeline: it just falls back to
+    # building in-process.
+    if not load_masks(
+        cache_dir, enabled, station_map, range_overrides, coverage_polygons,
+    ):
+        build_coverage_masks(
+            station_map,
+            range_overrides=range_overrides,
+            coverage_polygons=coverage_polygons,
+        )
+        build_feather_masks()
+        # Keep the task referenced for the worker's lifetime so it can't
+        # be garbage-collected mid-write (tens of MB of file I/O).
+        _hold_mask_save_task(
+            app,
+            persist_masks_in_background(
+                cache_dir, enabled, station_map, range_overrides,
+                coverage_polygons,
+            ),
+        )
 
     # Chain order mirrors ``collect_nwp_contributions`` (sorted by
     # priority) — only include grids that survived the snapshot drop
@@ -620,12 +663,36 @@ async def lifespan(app: FastAPI):
     # settings (e.g. NA source = MRMS pulls in NEXRAD + Canadian; NA
     # source = IEM pulls NEXRAD only).
     station_map, range_overrides, coverage_polygons = collect_radar_coverage_metadata(settings)
-    build_coverage_masks(
-        station_map,
-        range_overrides=range_overrides,
-        coverage_polygons=coverage_polygons,
+    # Prefer the persisted masks (read-only memmap) when a previous boot —
+    # single-mode itself or a co-located multi-mode pipeline sharing the
+    # dir — has already saved a set built from identical parameters,
+    # mirroring the render-only workers.  Otherwise build exactly as
+    # before and persist so the next boot gets a hit.  Gated on cache_dir
+    # being set: non-persistent deployments keep current behaviour (always
+    # build in-process, never save).  A persisted-mask miss never blocks
+    # boot — it just falls back to building in-process.
+    masks_loaded = nwp_cache_dir is not None and load_masks(
+        nwp_cache_dir, enabled, station_map, range_overrides,
+        coverage_polygons,
     )
-    build_feather_masks()
+    if not masks_loaded:
+        build_coverage_masks(
+            station_map,
+            range_overrides=range_overrides,
+            coverage_polygons=coverage_polygons,
+        )
+        build_feather_masks()
+        if nwp_cache_dir is not None:
+            # Saved in a background thread so startup isn't held up by the
+            # tens-of-MB write; keep the task referenced for the process
+            # lifetime so it can't be garbage-collected mid-write.
+            _hold_mask_save_task(
+                app,
+                persist_masks_in_background(
+                    nwp_cache_dir, enabled, station_map, range_overrides,
+                    coverage_polygons,
+                ),
+            )
 
     # Nowcast store and generator.  Constructed whenever nowcast is on
     # OR arrow_flow is on — the latter reuses NowcastGenerator's
