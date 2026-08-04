@@ -3,9 +3,11 @@
 import asyncio
 import logging
 import os
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import cv2
 from fastapi import FastAPI, Request
@@ -18,7 +20,13 @@ from librewxr.api import routes
 from librewxr.config import settings
 from librewxr.data.coverage import build_coverage_masks, build_feather_masks
 from librewxr.data.fetcher import RadarFetcher
-from librewxr.data.master_state import apply_state, dump_state, load_state, state_mtime
+from librewxr.data.master_state import (
+    _load_and_apply_state,
+    apply_state,
+    dump_state,
+    load_state,
+    state_mtime,
+)
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.storm_cells import StormCellGenerator, StormCellStore
 from librewxr.data.nwp_source import NWPChain
@@ -455,15 +463,20 @@ async def _render_only_lifespan(app: FastAPI):
     routes.precip_mask = stores["precip_mask"]
 
     last_mtime = state_mtime(cache_dir)
-    last_payload: dict | None = None
+    # Seed the diff from the boot payload so the first poll skips unchanged stores.
+    last_payload: dict | None = payload
     poller_stop = asyncio.Event()
 
     async def _poll_state() -> None:
         nonlocal last_mtime, last_payload
         while not poller_stop.is_set():
             try:
+                # Jitter the poll cadence (uniform over [0.5, 1.5] x
+                # interval) so the 16 render workers don't hit state.json
+                # in lockstep on every pipeline cycle.
                 await asyncio.wait_for(
-                    poller_stop.wait(), timeout=settings.state_poll_interval,
+                    poller_stop.wait(),
+                    timeout=settings.state_poll_interval * (0.5 + random.random()),
                 )
                 return
             except asyncio.TimeoutError:
@@ -472,10 +485,17 @@ async def _render_only_lifespan(app: FastAPI):
             if mtime is None or mtime == last_mtime:
                 continue
             try:
-                payload = load_state(cache_dir)
+                # load_state (json.loads) + apply_state (memmap re-opens)
+                # run in a worker thread — see _load_and_apply_state for
+                # the thread-safety basis.  The diff-based cache
+                # invalidation stays on the loop: it compares payload
+                # content, not in-memory store state, so skipping
+                # __setstate__ for unchanged stores never affects it.
+                payload, refreshed = await asyncio.to_thread(
+                    _load_and_apply_state, cache_dir, stores, last_payload,
+                )
                 if payload is None:
                     continue
-                refreshed = apply_state(payload, stores)
                 last_mtime = mtime
                 logger.debug(
                     "Render worker refreshed: %s", ", ".join(refreshed),

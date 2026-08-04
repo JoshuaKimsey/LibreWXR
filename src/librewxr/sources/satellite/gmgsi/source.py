@@ -32,6 +32,7 @@ import fsspec
 import numpy as np
 import xarray as xr
 
+from librewxr.config import settings
 from librewxr.sources._helpers import HDF5_LOCK
 
 logger = logging.getLogger(__name__)
@@ -139,7 +140,11 @@ class GMGSISource:
         )
         if self._channel_cache_dir is not None:
             self._channel_cache_dir.mkdir(parents=True, exist_ok=True)
-            self._load_cached_frames()
+            # Render workers defer to apply_state (their single load
+            # path); skip the constructor load so frames aren't re-opened
+            # twice.
+            if not settings.render_only:
+                self._load_cached_frames()
 
     # ── Public state ──
 

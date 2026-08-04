@@ -189,3 +189,89 @@ def test_state_mtime_advances_after_each_dump(tmp_path: Path) -> None:
     second = state_mtime(tmp_path)
     assert second is not None
     assert second >= first
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Incremental reload: per-store payload diffing
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class _FakeStore:
+    """Minimal store that counts how often ``__setstate__`` runs."""
+
+    def __init__(self) -> None:
+        self.loads = 0
+
+    def __setstate__(self, state: dict) -> None:
+        self.loads += 1
+        self.state = state
+
+
+def _payload(**store_states) -> dict:
+    return {"version": STATE_VERSION, "written_at": 0, "stores": dict(store_states)}
+
+
+def test_apply_state_loads_every_store_on_first_apply() -> None:
+    """Boot path: no previous payload -> every store's __setstate__ runs."""
+    stores = {
+        "frame_store": _FakeStore(),
+        "hrrr_grid": _FakeStore(),
+    }
+    payload = _payload(frame_store={"reference_time": 1}, hrrr_grid={"run_ts": 2})
+
+    refreshed = apply_state(payload, stores)
+
+    assert sorted(refreshed) == ["frame_store", "hrrr_grid"]
+    assert stores["frame_store"].loads == 1
+    assert stores["hrrr_grid"].loads == 1
+
+
+def test_apply_state_skips_unchanged_stores() -> None:
+    """A second payload where only one store changed reloads only that store."""
+    stores = {
+        "frame_store": _FakeStore(),
+        "hrrr_grid": _FakeStore(),
+    }
+    payload1 = _payload(frame_store={"reference_time": 1}, hrrr_grid={"run_ts": 2})
+    apply_state(payload1, stores)
+
+    # Next cycle: frame_store moved, hrrr_grid identical.
+    payload2 = _payload(frame_store={"reference_time": 2}, hrrr_grid={"run_ts": 2})
+    refreshed = apply_state(payload2, stores, prev_payload=payload1)
+
+    assert refreshed == ["frame_store"]
+    assert stores["frame_store"].loads == 2
+    assert stores["hrrr_grid"].loads == 1
+
+
+def test_apply_state_without_prev_payload_reloads_everything() -> None:
+    """Omitting prev_payload (no apply history) always reloads every store."""
+    stores = {"frame_store": _FakeStore()}
+    payload = _payload(frame_store={"reference_time": 1})
+
+    apply_state(payload, stores)
+    refreshed = apply_state(payload, stores)
+
+    assert refreshed == ["frame_store"]
+    assert stores["frame_store"].loads == 2
+
+
+def test_apply_state_reloads_new_store_not_in_prev() -> None:
+    """A store absent from the previous payload must load even if another
+    store's sub-dict is identical (e.g. a store enabled mid-run)."""
+    stores = {
+        "frame_store": _FakeStore(),
+        "nowcast_store": _FakeStore(),
+    }
+    payload1 = _payload(frame_store={"reference_time": 1})
+    apply_state(payload1, stores)
+
+    payload2 = _payload(
+        frame_store={"reference_time": 1},
+        nowcast_store={"frames": [{"timestamp": 100}]},
+    )
+    refreshed = apply_state(payload2, stores, prev_payload=payload1)
+
+    assert refreshed == ["nowcast_store"]
+    assert stores["frame_store"].loads == 1
+    assert stores["nowcast_store"].loads == 1

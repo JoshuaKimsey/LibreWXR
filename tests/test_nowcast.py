@@ -742,7 +742,13 @@ class TestArrowFlowGating:
 
         flows = await store.get_flows()
         assert "USCOMP" in flows
-        assert flows["USCOMP"].shape == (H, W, 2)
+        # Flows are stored at the resolution they were computed at
+        # (longest dim ≤ target_dim), not upscaled to the region grid —
+        # with arrow_flow_target_dim=200 on a 120x240 grid the stored
+        # field is reduced.  Vectors remain in full-res pixel units; the
+        # arrow overlay maps coordinates when sampling.
+        assert max(flows["USCOMP"].shape[:2]) <= 200
+        assert flows["USCOMP"].shape[2] == 2
         # Phase B skipped — no nowcast frames were written to the store,
         # which is what radar_tile expects on a nowcast-disabled deploy.
         assert await store.get_timestamps() == []

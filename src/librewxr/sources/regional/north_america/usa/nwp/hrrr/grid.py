@@ -588,7 +588,9 @@ class HRRRGrid:
             self._persistent,
         )
 
-        if self._persistent:
+        # Render workers defer to apply_state (their single load path);
+        # skip the constructor load so memmaps aren't re-opened twice.
+        if self._persistent and not settings.render_only:
             self._load_cached_frames()
 
     # ── Memory management ────────────────────────────────────────────

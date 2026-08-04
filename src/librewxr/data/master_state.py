@@ -117,7 +117,11 @@ def load_state(cache_dir: Path) -> dict[str, Any] | None:
     return payload
 
 
-def apply_state(payload: dict[str, Any], stores: dict[str, Any]) -> list[str]:
+def apply_state(
+    payload: dict[str, Any],
+    stores: dict[str, Any],
+    prev_payload: dict[str, Any] | None = None,
+) -> list[str]:
     """Call ``__setstate__`` on every matching store in ``stores``.
 
     Args:
@@ -126,17 +130,35 @@ def apply_state(payload: dict[str, Any], stores: dict[str, Any]) -> list[str]:
             value is ``None`` are skipped (e.g. disabled by config).
             Stores present in ``payload["stores"]`` but absent (or
             ``None``) here are silently ignored.
+        prev_payload: the previously-applied parsed payload.  A store
+            whose payload sub-dict is equal to the previous one is
+            skipped entirely — on cycles with no new NWP model run every
+            grid payload is identical, which eliminates most of the
+            ~800 memmap re-opens per poll.  ``None`` (boot path, or a
+            caller with no apply history) reloads every store.
 
     Returns:
         List of store names that were successfully refreshed.
     """
     refreshed: list[str] = []
     snapshot = payload.get("stores", {})
+    prev_snapshot = prev_payload.get("stores", {}) if prev_payload else {}
     for name, obj in stores.items():
         if obj is None:
             continue
         store_state = snapshot.get(name)
         if store_state is None:
+            continue
+        # Incremental reload: skip stores whose payload sub-dict is
+        # identical to the previously-applied snapshot.  Comparison is
+        # on the parsed dicts (deep ==), not raw JSON strings.
+        #
+        # KNOWN EXCEPTION: alerts_store and storm_cell_store embed a
+        # last_updated wall-clock in their payload, so they compare
+        # unequal every cycle and always reload.  Accepted — they are
+        # tiny.
+        prev_state = prev_snapshot.get(name)
+        if prev_snapshot and prev_state == store_state:
             continue
         try:
             obj.__setstate__(store_state)
@@ -157,3 +179,36 @@ def state_mtime(cache_dir: Path) -> float | None:
         return path.stat().st_mtime
     except FileNotFoundError:
         return None
+
+
+def _load_and_apply_state(
+    cache_dir: Path,
+    stores: dict[str, object | None],
+    prev_payload: dict | None,
+) -> tuple[dict | None, list[str]]:
+    """Read + diff + apply a state snapshot, off the event loop.
+
+    Runs in a worker thread via :func:`asyncio.to_thread` so the
+    ``json.loads`` and memmap re-open cost of ``load_state`` +
+    ``apply_state`` never blocks the event loop.  Thread-safety basis
+    for applying store state from a thread while renders run in other
+    threads:
+    (a) the GIL makes every reference assignment in ``__setstate__``
+        atomic;
+    (b) every ``__setstate__`` builds new structures and then swaps
+        references — verified for FrameStore, NowcastStore,
+        PrecipMaskStore, StormCellStore, AlertsStore, the IFS / HRRR /
+        HRRR-Alaska / HRDPS / ICON-EU / DMI-DINI / JMA-MSM / WRF-SMN /
+        AROME grids, and the GMGSI satellite source; old structures are
+        never mutated in place;
+    (c) in-flight renders hold references to the old structures, so the
+        old memmap inodes stay alive until those renders release them.
+
+    Returns ``(payload, refreshed)``; ``payload`` is ``None`` when the
+    snapshot file vanished between the mtime check and the read.
+    """
+    payload = load_state(cache_dir)
+    if payload is None:
+        return None, []
+    refreshed = apply_state(payload, stores, prev_payload=prev_payload)
+    return payload, refreshed

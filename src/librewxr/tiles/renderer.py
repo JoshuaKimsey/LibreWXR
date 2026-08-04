@@ -790,6 +790,36 @@ def _bilinear_sample(
     return np.clip(result + 0.5, 0, 255).astype(np.uint8)
 
 
+def _sample_flow_at(
+    flow: np.ndarray, row: float, col: float,
+    region_h: int, region_w: int,
+) -> tuple[float, float]:
+    """Sample a per-region flow field at a full-res region pixel.
+
+    Radar flows are stored at the resolution they were computed at
+    (longest dim ≤ 1000 px, see ``nowcast._compute_flow_low``), not
+    upscaled to the region grid.  Full-res coordinates are mapped into
+    the stored grid with the same center mapping ``cv2.resize`` uses
+    when it upscales a low-res field (``(p + 0.5) * (small / full) -
+    0.5``) and the nearest stored pixel is sampled — equivalent to
+    sampling the upscaled field at the same point without materialising
+    a full-res copy.  The vector values themselves are already in
+    full-res pixel units, so no magnitude scaling is applied.  When the
+    field is full-res this degenerates to the legacy
+    ``int(row) / int(col)`` sampling.
+    """
+    fh, fw = flow.shape[0], flow.shape[1]
+    if fh == region_h and fw == region_w:
+        rf = int(row)
+        cf = int(col)
+    else:
+        rf = int(round((row + 0.5) * fh / region_h - 0.5))
+        cf = int(round((col + 0.5) * fw / region_w - 0.5))
+    rf = min(max(rf, 0), fh - 1)
+    cf = min(max(cf, 0), fw - 1)
+    return float(flow[rf, cf, 0]), float(flow[rf, cf, 1])
+
+
 def _draw_motion_arrows(
     img: Image.Image,
     flow_regions: dict[str, np.ndarray] | None,
@@ -913,11 +943,13 @@ def _draw_motion_arrows(
                     continue
 
                 flow = flow_regions[r.name]
-                rf = min(max(int(row_f[ty, tx]), 0), flow.shape[0] - 1)
-                cf = min(max(int(col_f[ty, tx]), 0), flow.shape[1] - 1)
-
-                fx = float(flow[rf, cf, 0])
-                fy = float(flow[rf, cf, 1])
+                # Flow is stored at reduced resolution (≤ 1000 px target
+                # dim); sample it at the tile pixel's full-res region
+                # coordinates via the resize center mapping.
+                fx, fy = _sample_flow_at(
+                    flow, row_f[ty, tx], col_f[ty, tx],
+                    r.height, r.width,
+                )
 
                 # Local scale: region pixels per tile pixel (finite diff)
                 tx1 = min(tx + 1, tile_size - 1)

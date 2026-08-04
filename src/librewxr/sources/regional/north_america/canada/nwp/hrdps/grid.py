@@ -481,7 +481,9 @@ class HRDPSGrid:
             HRDPS_GRID_RLON_ORIGIN, HRDPS_GRID_RLAT_ORIGIN_NORTH,
             HRDPS_LA1, HRDPS_LO1,
         )
-        if self._persistent:
+        # Render workers defer to apply_state (their single load path);
+        # skip the constructor load so memmaps aren't re-opened twice.
+        if self._persistent and not settings.render_only:
             self._load_cached_frames()
 
     # ── Cache management ──────────────────────────────────────────────

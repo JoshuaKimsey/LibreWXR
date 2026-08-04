@@ -44,8 +44,13 @@ from librewxr.config import settings
 logger = logging.getLogger(__name__)
 
 # Target longest dimension for optical flow computation.
-# Larger grids are downscaled to this for speed, then flow vectors are
-# upscaled back to full resolution.
+# Larger grids are downscaled to this for speed.  The flow is stored
+# (and memmapped) at this reduced resolution — the full-resolution
+# field is only materialised transiently at warp time in
+# ``_extrapolate_forward``, or sampled at reduced resolution by the
+# arrow overlay.  Persisted flow storage for USCOMP drops from
+# ~527 MB to ~3.5 MB this way (see ``_compute_flow_low`` /
+# ``_upscale_flow``).
 _TARGET_FLOW_DIM = 1000
 
 # Farneback optical flow parameters (same tuning as ecmwf_interpolation).
@@ -188,6 +193,9 @@ class NowcastStore:
 
     def __init__(self, cache_dir: Path | None = None):
         self._frames: dict[int, NowcastFrame] = {}
+        # Per-region optical flow, stored at the resolution it was
+        # COMPUTED at (longest dim ≤ _TARGET_FLOW_DIM, vectors in
+        # full-res pixel units) — consumers upscale at the point of use.
         self._flows: dict[str, np.ndarray] = {}
         # Composite NWP optical-flow field (one global raster) used by
         # the arrow overlay outside radar coverage.  Distinct filename
@@ -263,7 +271,14 @@ class NowcastStore:
             return sorted(self._frames.keys())
 
     async def replace_flows(self, flows: dict[str, np.ndarray]) -> None:
-        """Update the latest optical flow vectors."""
+        """Update the latest optical flow vectors.
+
+        Flows are stored at their computed (reduced, ≤ target-dim)
+        resolution in full-res pixel units — see ``_compute_flow_low``.
+        Consumers that need full-resolution coordinates upscale at the
+        point of use (``_upscale_flow`` for the warp path; coordinate-
+        mapped sampling in the arrow overlay and storm-cell detection).
+        """
         async with self._lock:
             # Clean up old flow memmap files
             for path in self._memmap_dir.glob("flow_*.dat"):
@@ -607,10 +622,14 @@ class NowcastGenerator:
         between the two frames, apply the coverage-degradation guard
         and the magnitude clamp, and accumulate into ``flows``.  The
         target flow resolution is ``_TARGET_FLOW_DIM`` when
-        ``extrapolate`` is true (the nowcast path needs full-res flow
-        to feed ``cv2.remap``) or ``settings.arrow_flow_target_dim``
+        ``extrapolate`` is true or ``settings.arrow_flow_target_dim``
         when false (the arrow overlay downsamples flow ~10-30x while
-        drawing, so a high-resolution field is wasted work).
+        drawing, so a high-resolution field is wasted work).  Flows are
+        stored at the resolution they were COMPUTED at (≤ target dim)
+        with vectors pre-scaled to full-resolution pixel units — the
+        full-res field is only materialised transiently at warp time
+        (``_extrapolate_forward``) or sampled at reduced resolution by
+        the arrow overlay, never persisted.
 
         Phase B — extrapolation: for each forecast step, prefer an
         external ``NowcastContribution`` frame for the validtime when
@@ -628,9 +647,11 @@ class NowcastGenerator:
         """
         t0 = time.monotonic()
         external_by_region = external_by_region or {}
-        # Flow target resolution: full for the nowcast extrapolation
-        # feed to cv2.remap; reduced for the arrow-only path (arrows
-        # draw on a 32/48px grid and downsample the flow anyway).
+        # Flow target resolution: _TARGET_FLOW_DIM for the nowcast
+        # extrapolation feed (stored at this reduced resolution and
+        # upscaled only at warp time); reduced for the arrow-only path
+        # (arrows draw on a 32/48px grid and downsample the flow
+        # anyway).
         flow_target_dim = (
             _TARGET_FLOW_DIM if extrapolate else settings.arrow_flow_target_dim
         )
@@ -641,6 +662,11 @@ class NowcastGenerator:
         # external source returned no frame (transient miss).
         from librewxr.data.regions import REGIONS as _ALL_REGIONS  # local import: avoid circular at module load
         flows: dict[str, np.ndarray] = {}
+        # Unclamped low-res flows for the extrapolation phase (bit-exact
+        # warp path — see the clamp comment in the loop) plus the
+        # per-region clamp bound.  Both are tiny (≤ target-dim arrays).
+        warp_flows: dict[str, np.ndarray] = {}
+        flow_clamps: dict[str, float] = {}
         for region_name in latest_regions:
             data0 = prev_regions.get(region_name)
             data1 = latest_regions.get(region_name)
@@ -655,11 +681,47 @@ class NowcastGenerator:
                     region_name, prev_nz, latest_nz,
                 )
                 continue
-            flow = _compute_flow(data0, data1, target_dim=flow_target_dim)
+            flow_small, scale = _compute_flow_low(
+                data0, data1, target_dim=flow_target_dim,
+            )
+            # Store the flow at the resolution it was computed at, with
+            # vectors pre-multiplied by 1/scale so they stay in
+            # full-resolution pixel units.  Consumers upscale with
+            # ``_upscale_flow`` at the point of use (warp time / arrow
+            # sampling); because cv2.resize is linear this is bitwise
+            # identical to the legacy store-full-res pipeline.  USCOMP
+            # flow storage drops from ~527 MB to ~3.5 MB.
+            flow_unclamped = (
+                flow_small * (1.0 / scale)
+                if scale < 1.0 else flow_small
+            )
             # Cap unphysical motion vectors before extrapolation.  Without
             # this, Farneback's polynomial fit at data/no-data boundaries
             # reports 50-200+ px/step magnitudes, which the inverse-warp
             # then renders as vertical streaks of fake precipitation.
+            #
+            # Clamp placement (see also ``_extrapolate_forward``):
+            #  * The STORED field (arrows, storm-cell detection) is
+            #    clamped at low resolution.  Upscaling is a linear
+            #    convex-combination operation, so every upscaled vector
+            #    has magnitude ≤ the cap whenever the low-res source is
+            #    capped — the max-displacement guarantee for consumers
+            #    holds exactly as before, and when no vector exceeds the
+            #    cap the clamp is a no-op identical to the old order.
+            #  * The WARP path stays bit-identical to the old pipeline
+            #    by clamping the UPSCALED field at warp time (the old
+            #    code clamped the full-res field once after upscaling).
+            #    Clamping before upscaling would NOT reproduce it: an
+            #    over-cap vector spreads over a ~1/scale² full-res
+            #    neighbourhood, and capping it before the spread changes
+            #    the interpolated directions/magnitudes in that band.
+            #    ``warp_flows`` therefore carries the unclamped field and
+            #    ``flow_clamps`` the per-region cap; when the low-res
+            #    clamp below is a no-op (no over-cap vector anywhere),
+            #    the upscaled field is provably ≤ the cap too, so the
+            #    warp-time clamp is skipped and both paths share one
+            #    array.  The stored clamped field is what the arrow
+            #    overlay / storm cells sample, keeping them bounded.
             region_def = _ALL_REGIONS.get(region_name)
             if region_def is not None:
                 ps_y = (
@@ -668,8 +730,13 @@ class NowcastGenerator:
                     else region_def.pixel_size
                 )
                 max_px = _max_flow_pixels(ps_y, interval)
-                flow = _clamp_flow(flow, max_px)
-            flows[region_name] = flow
+                clamped = _clamp_flow(flow_unclamped, max_px)
+                if clamped is not flow_unclamped:
+                    flow_clamps[region_name] = max_px
+                flows[region_name] = clamped
+            else:
+                flows[region_name] = flow_unclamped
+            warp_flows[region_name] = flow_unclamped
 
         # Arrow-flow-only path: Phase A is the whole job.  Return an
         # empty frame list so the caller skips the nowcast store swap
@@ -693,6 +760,14 @@ class NowcastGenerator:
         forecast_regions: set[str] = set(flows.keys()) | set(external_by_region.keys())
         if not forecast_regions:
             return [], {}
+
+        # Precompute the float32 mgrid coordinate grids ONCE per region
+        # instead of rebuilding them for every forecast step — xs/ys are
+        # identical across all 6 steps (only map_x/map_y, which are
+        # steps·flow away from them, vary per step).  Built lazily on
+        # first use so regions fully served by an external contribution
+        # never allocate them.
+        coord_grids: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 
         # Generate extrapolated frames for each step
         frames: list[NowcastFrame] = []
@@ -733,10 +808,20 @@ class NowcastGenerator:
                 if external_frame is not None:
                     regions[region_name] = external_frame
                     continue
-                flow = flows.get(region_name)
+                flow = warp_flows.get(region_name)
                 data = latest_regions.get(region_name)
                 if flow is not None and data is not None:
-                    regions[region_name] = _extrapolate_forward(data, flow, step)
+                    grids = coord_grids.get(region_name)
+                    if grids is None:
+                        h, w = data.shape
+                        ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+                        grids = (ys, xs)
+                        coord_grids[region_name] = grids
+                    ys, xs = grids
+                    regions[region_name] = _extrapolate_forward(
+                        data, flow, step, xs=xs, ys=ys,
+                        max_px=flow_clamps.get(region_name),
+                    )
                 # else: no external for this step, no internal flow —
                 # skip this region for this step.  Renderer falls back
                 # to NWP fill which is the correct behaviour for an
@@ -818,19 +903,29 @@ class NowcastGenerator:
 # Optical flow helpers
 # ---------------------------------------------------------------------------
 
-def _compute_flow(
+def _compute_flow_low(
     frame0: np.ndarray, frame1: np.ndarray,
     target_dim: int = _TARGET_FLOW_DIM,
-) -> np.ndarray:
-    """Compute dense optical flow with adaptive downscaling.
+) -> tuple[np.ndarray, float]:
+    """Compute dense optical flow at reduced resolution.
 
     Downscales so the longest dimension is ~``target_dim`` pixels,
-    computes Farneback flow, then upscales the flow vectors to the
-    original resolution.  ``target_dim`` defaults to the module constant
-    ``_TARGET_FLOW_DIM`` (full-res, used by the nowcast extrapolation
-    feed to ``cv2.remap``); the arrow-only path passes
-    ``settings.arrow_flow_target_dim`` (lower — arrows downsample flow
-    ~10-30x while drawing, so a high-resolution field is wasted work).
+    computes Farneback flow, and returns ``(flow_small, scale)`` where
+    ``flow_small`` is the flow on the small grid (vector units are
+    small-grid pixels per step — NOT yet scaled to full resolution) and
+    ``scale`` is the downscale factor
+    (``min(target_dim / max(h, w), 1.0)``; ``1.0`` when no downscaling
+    happened).  ``target_dim`` defaults to the module constant
+    ``_TARGET_FLOW_DIM`` (the nowcast extrapolation feed); the
+    arrow-only path passes ``settings.arrow_flow_target_dim`` (lower —
+    arrows draw on a coarse grid, so a high-resolution field is wasted
+    work).
+
+    Callers choose where to upscale: ``_compute_flow`` materialises the
+    full-resolution field (legacy one-shot contract, still used by the
+    composite NWP flow raster and tests), while the nowcast pipeline
+    stores the small field and only upscales it transiently at warp
+    time — see ``_upscale_flow`` and the ``NowcastStore`` storage note.
     """
     h, w = frame0.shape
     scale = min(target_dim / max(h, w), 1.0)
@@ -844,19 +939,64 @@ def _compute_flow(
         flow_small = cv2.calcOpticalFlowFarneback(
             small0, small1, flow=None, **_FARNEBACK,
         )
+        return flow_small, scale
 
+    flow = cv2.calcOpticalFlowFarneback(
+        frame0, frame1, flow=None, **_FARNEBACK,
+    )
+    return flow, 1.0
+
+
+def _upscale_flow(
+    flow_low: np.ndarray, target_shape: tuple[int, int],
+) -> np.ndarray:
+    """Upscale a reduced-resolution flow field to ``target_shape``.
+
+    ``flow_low`` must be in *full-resolution pixel units* — callers
+    pre-multiply the small-grid vectors by ``1/scale`` when the field is
+    stored (see ``_generate_sync``).  Because ``cv2.resize`` is a
+    linear operation, ``resize(v * c) == resize(v) * c`` bitwise for
+    float32, so upscaling a pre-scaled low-res field reproduces the
+    legacy ``_compute_flow`` result (which resized first and scaled
+    afterwards) exactly — no further magnitude scaling is applied here.
+
+    Returns ``flow_low`` unchanged when the shapes already match (the
+    region was small enough to never downscale).
+    """
+    h, w = target_shape
+    if flow_low.shape[0] == h and flow_low.shape[1] == w:
+        return flow_low
+    return cv2.resize(flow_low, (w, h), interpolation=cv2.INTER_LINEAR)
+
+
+def _compute_flow(
+    frame0: np.ndarray, frame1: np.ndarray,
+    target_dim: int = _TARGET_FLOW_DIM,
+) -> np.ndarray:
+    """Compute dense optical flow, upscaled to the input resolution.
+
+    Downscales so the longest dimension is ~``target_dim`` pixels,
+    computes Farneback flow, then upscales the flow vectors to the
+    original resolution (resize first, then scale by ``1/scale`` — the
+    operation ``_upscale_flow`` reproduces at warp time).  Kept as a
+    convenience for callers that need the full-resolution field in one
+    shot (the composite NWP flow raster and tests); the nowcast
+    pipeline itself stores the reduced-resolution field instead.
+    """
+    h, w = frame0.shape
+    flow_small, scale = _compute_flow_low(frame0, frame1, target_dim)
+    if scale < 1.0:
         flow = cv2.resize(flow_small, (w, h), interpolation=cv2.INTER_LINEAR)
         flow *= 1.0 / scale  # scale vectors to full resolution
-    else:
-        flow = cv2.calcOpticalFlowFarneback(
-            frame0, frame1, flow=None, **_FARNEBACK,
-        )
-
-    return flow
+        return flow
+    return flow_small
 
 
 def _extrapolate_forward(
     frame: np.ndarray, flow: np.ndarray, steps: int,
+    xs: np.ndarray | None = None,
+    ys: np.ndarray | None = None,
+    max_px: float | None = None,
 ) -> np.ndarray:
     """Warp *frame* forward by *steps* × flow using inverse remap.
 
@@ -864,9 +1004,34 @@ def _extrapolate_forward(
     After warping, rescales the result to preserve the total precipitation
     energy of the source frame — bilinear interpolation in cv2.remap
     tends to smooth peak values, causing artificial intensity loss.
+
+    ``flow`` is normally the store's reduced-resolution field (see
+    ``_compute_flow_low``); it is upscaled to the frame grid here at
+    warp time (``_upscale_flow`` — the same resize math the old code
+    applied at storage time, so results are numerically identical).
+    Full-resolution flows (small regions, tests) pass through
+    untouched.  ``xs``/``ys`` are optional precomputed float32
+    coordinate grids — ``_generate_sync`` builds them once per region
+    and reuses them across forecast steps (they are identical for every
+    step); when omitted they are built here (direct-call / test path).
+
+    ``max_px`` optionally applies ``_clamp_flow`` to the upscaled field
+    right here — the old pipeline clamped the full-res field once after
+    upscaling, and clamping after upscale (not before) is what keeps
+    the warp output bit-identical.  ``_generate_sync`` passes the
+    per-region cap only when the stored low-res clamp actually fired;
+    otherwise the upscaled field is provably within the cap already
+    (bilinear upscaling is a convex combination) and the clamp would be
+    a no-op, so it is skipped to avoid a full-res magnitude pass per
+    step.
     """
     h, w = frame.shape
-    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    if flow.shape[0] != h or flow.shape[1] != w:
+        flow = _upscale_flow(flow, (h, w))
+    if max_px is not None:
+        flow = _clamp_flow(flow, max_px)
+    if xs is None or ys is None:
+        ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
 
     map_x = xs - steps * flow[..., 0]
     map_y = ys - steps * flow[..., 1]

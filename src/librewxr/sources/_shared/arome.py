@@ -187,7 +187,9 @@ class AROMEOverseasGrid:
             "%s memmap directory: %s (persistent=%s)",
             self.friendly_name, self._memmap_dir, self._persistent,
         )
-        if self._persistent:
+        # Render workers defer to apply_state (their single load path);
+        # skip the constructor load so memmaps aren't re-opened twice.
+        if self._persistent and not settings.render_only:
             self._load_cached_frames()
 
     def _frame_path(self, run_ts: int, lead_seconds: int) -> Path:

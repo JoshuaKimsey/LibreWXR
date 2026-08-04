@@ -247,8 +247,9 @@ def detect_storm_cells(
         latest_frame_regions: region name -> uint8 (H, W) dBZ-encoded frame.
         enabled_regions: region names to consider (others are skipped).
         flows_by_region: optional region name -> (H, W, 2) float32 optical
-            flow field.  When ``None`` or a region is absent, motion
-            fields are set to 0 / NaN.
+            flow field (vectors in full-res pixel units; may be stored at
+            reduced resolution, ≤ 1000 px target dim).  When ``None`` or
+            a region is absent, motion fields are set to 0 / NaN.
         min_dbz: minimum dBZ threshold for a pixel to be part of a cell.
         min_area_km2: minimum cell area in km^2.
         fetch_interval_s: the flow field's time interval in seconds (used
@@ -328,11 +329,24 @@ def detect_storm_cells(
             motion_speed_kmh = float("nan")
             motion_heading_deg = float("nan")
             if flow is not None:
-                # Sample flow at the rounded+clipped centroid pixel.
-                fr = int(round(centroid_row))
-                fc = int(round(centroid_col))
-                fr = max(0, min(fr, flow.shape[0] - 1))
-                fc = max(0, min(fc, flow.shape[1] - 1))
+                # Sample flow at the centroid pixel.  Flows are stored
+                # at the resolution they were computed at (≤ 1000 px
+                # target dim, vectors in full-res pixel units — see
+                # nowcast._compute_flow_low), so full-res centroid
+                # coordinates are mapped into the stored grid with the
+                # same center mapping cv2.resize uses when it upscales a
+                # low-res field.  Full-res fields (small regions, tests)
+                # sample directly as before.
+                fh, fw = flow.shape[0], flow.shape[1]
+                frame_h, frame_w = frame_uint8.shape
+                if fh == frame_h and fw == frame_w:
+                    fr = int(round(centroid_row))
+                    fc = int(round(centroid_col))
+                else:
+                    fr = int(round((centroid_row + 0.5) * fh / frame_h - 0.5))
+                    fc = int(round((centroid_col + 0.5) * fw / frame_w - 0.5))
+                fr = max(0, min(fr, fh - 1))
+                fc = max(0, min(fc, fw - 1))
                 fx = float(flow[fr, fc, 0])  # pixel displacement over fetch_interval
                 fy = float(flow[fr, fc, 1])
 
