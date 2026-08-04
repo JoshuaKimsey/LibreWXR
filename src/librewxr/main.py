@@ -224,6 +224,53 @@ def _compute_cache_invalidation(
     return invalidate, False
 
 
+def _drop_absent_stores(stores: dict, refreshed: list[str]) -> None:
+    """Null stores absent from the first state snapshot.
+
+    Drops genuinely-disabled providers (e.g. ICON-EU in a CONUS-only
+    deployment) so the NWP chain and routes don't dispatch to empty grids.
+    Infrastructure stores that are constructed unconditionally and are
+    always shipped once the pipeline supports them - ``frame_store`` and
+    ``precip_mask`` - are exempt: a stale/legacy first snapshot (e.g. an
+    in-place upgrade from a pre-mask build) must not permanently kill the
+    precip mask, because :func:`apply_state` skips ``None`` stores and the
+    poller could never bring it back.  The mask store repopulates in place
+    via ``__setstate__`` on the next poll once the pipeline ships masks.
+    """
+    keep = {"frame_store", "precip_mask"}
+    for name in list(stores.keys()):
+        if name not in refreshed and name not in keep:
+            stores[name] = None
+
+
+def _maybe_resurrect_precip_mask(
+    stores: dict, payload: dict, cache_dir,
+) -> bool:
+    """Heal a render worker whose precip mask was nulled at boot.
+
+    Workers that started against a pre-``precip_mask`` ``state.json`` had
+    their :class:`PrecipMaskStore` dropped by the boot-time drop loop and,
+    because :func:`apply_state` skips ``None`` stores, could never recover
+    it - so the Tier 2 empty-tile gate stayed dead for the life of the
+    process.  This re-instantiates the store from the current snapshot so
+    the gate self-heals on the first poll after the pipeline ships masks,
+    without a process restart.
+
+    Returns ``True`` if the store was resurrected this call.  Idempotent:
+    a no-op once the store is live, or while the snapshot still lacks the
+    ``precip_mask`` entry.
+    """
+    if stores.get("precip_mask") is not None:
+        return False
+    snap = payload.get("stores", {}).get("precip_mask")
+    if snap is None:
+        return False
+    store = PrecipMaskStore(cache_dir=cache_dir)
+    store.__setstate__(snap)
+    stores["precip_mask"] = store
+    return True
+
+
 @asynccontextmanager
 async def _render_only_lifespan(app: FastAPI):
     """Lifespan for tile-server workers in the multi-worker split.
@@ -299,11 +346,13 @@ async def _render_only_lifespan(app: FastAPI):
     )
 
     # Stores that didn't appear in the snapshot are useless (e.g. ICON-EU
-    # in a CONUS-only deployment) — drop the references so the NWP chain
-    # and routes don't dispatch to empty grids.
-    for name in list(stores.keys()):
-        if name not in refreshed and name != "frame_store":
-            stores[name] = None
+    # in a CONUS-only deployment) - drop the references so the NWP chain
+    # and routes don't dispatch to empty grids.  Infrastructure stores
+    # that are constructed unconditionally (frame_store, precip_mask) are
+    # exempt: a stale/legacy first snapshot must not permanently kill the
+    # precip mask, since apply_state skips None stores and the poller
+    # could not otherwise bring it back.
+    _drop_absent_stores(stores, refreshed)
     # Rebuild the slug → grid dict from the (post-drop) stores so the
     # routes / chain only see grids that actually loaded from disk.
     nwp_grids_by_slug = {
@@ -384,10 +433,15 @@ async def _render_only_lifespan(app: FastAPI):
     routes.alerts_store = alerts_store
     routes.alerts_fetcher = None
     routes.alerts_enabled = alerts_store is not None
-    # The precip mask rides the snapshot; a pre-fix pipeline that never
-    # dumps one leaves ``stores["precip_mask"]`` as None after the drop
-    # loop above, so routes.precip_mask stays None and the renderer's
-    # Tier 2 gate is skipped (falls back to the old Tier 1 behavior).
+    # The precip mask rides the snapshot.  The store is constructed
+    # unconditionally and exempt from the boot-time drop loop above, so
+    # routes.precip_mask is always a live PrecipMaskStore here.  When the
+    # first snapshot lacks mask data (e.g. an in-place upgrade from a
+    # pre-mask build) the store starts empty and returns conservative
+    # True on every query (Tier 2 gate off -> Tier 1 fallback); the
+    # poller's apply_state then populates it via __setstate__ once the
+    # pipeline ships masks, and _maybe_resurrect_precip_mask is a safety
+    # net for any future path that nulls the store mid-run.
     routes.precip_mask = stores["precip_mask"]
 
     last_mtime = state_mtime(cache_dir)
@@ -416,6 +470,14 @@ async def _render_only_lifespan(app: FastAPI):
                 logger.debug(
                     "Render worker refreshed: %s", ", ".join(refreshed),
                 )
+
+                # Heal a precip mask that was permanently nulled at boot
+                # (e.g. the worker started against a pre-mask legacy
+                # state.json).  Self-heals on the first poll after the
+                # pipeline ships a mask entry; no restart needed.
+                if _maybe_resurrect_precip_mask(stores, payload, cache_dir):
+                    routes.precip_mask = stores["precip_mask"]
+                    logger.info("Precip mask resurrected from state snapshot")
 
                 # Diff-based cache invalidation: preserve cached geometry
                 # for radar timestamps whose content didn't change between

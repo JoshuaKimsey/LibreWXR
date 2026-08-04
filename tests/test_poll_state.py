@@ -12,7 +12,11 @@ from __future__ import annotations
 
 import pytest
 
-from librewxr.main import _compute_cache_invalidation
+from librewxr.main import (
+    _compute_cache_invalidation,
+    _drop_absent_stores,
+    _maybe_resurrect_precip_mask,
+)
 
 pytestmark = pytest.mark.store
 
@@ -169,3 +173,48 @@ def test_prev_payload_without_frame_store_is_backward_compatible():
     ts_set, full_clear = _compute_cache_invalidation(prev, cur)
     assert full_clear is False
     assert ts_set == set()
+
+
+def test_drop_absent_stores_keeps_precip_mask_against_stale_snapshot():
+    """A legacy first snapshot lacking precip_mask must not permanently
+    null the mask store - it would be unrecoverable because apply_state
+    skips None stores.  frame_store and precip_mask are both exempt.
+    """
+    frame_store = object()
+    precip_mask = object()
+    icon_eu = object()
+    stores = {
+        "frame_store": frame_store,
+        "precip_mask": precip_mask,
+        "icon_eu_grid": icon_eu,
+    }
+    # Stale snapshot: frame_store refreshed, precip_mask + icon_eu absent.
+    refreshed = ["frame_store"]
+    _drop_absent_stores(stores, refreshed)
+    assert stores["frame_store"] is frame_store     # exempt (always shipped)
+    assert stores["precip_mask"] is precip_mask     # exempt - THE FIX
+    assert stores["icon_eu_grid"] is None          # genuinely-absent grid dropped
+
+
+def test_maybe_resurrect_precip_mask_heals_nulled_store(tmp_path):
+    """A worker whose precip mask was nulled at boot self-heals on the
+    first poll whose snapshot carries a precip_mask entry.  Idempotent.
+    """
+    stores = {"precip_mask": None, "frame_store": object()}
+    payload = {"stores": {"precip_mask": {"version": 1, "masks": {}}}}
+    assert _maybe_resurrect_precip_mask(stores, payload, tmp_path) is True
+    assert stores["precip_mask"] is not None
+    # Idempotent: already live -> no-op.
+    assert _maybe_resurrect_precip_mask(stores, payload, tmp_path) is False
+    # The recovered store is re-readable: __setstate__ tolerates missing
+    # mask files (empty masks -> conservative True on query, not a crash).
+    assert stores["precip_mask"].has_precip_in_bbox(12345, (-10, -5, -8, 0))
+
+
+def test_maybe_resurrect_precip_mask_noop_when_snapshot_lacks_it(tmp_path):
+    """While the snapshot still has no precip_mask, the resurrection is a
+    no-op and leaves the store None (conservative fallback to Tier 1)."""
+    stores = {"precip_mask": None}
+    payload = {"stores": {}}
+    assert _maybe_resurrect_precip_mask(stores, payload, tmp_path) is False
+    assert stores["precip_mask"] is None
