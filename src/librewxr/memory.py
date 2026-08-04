@@ -2,13 +2,22 @@
 # Copyright (C) 2026 Joshua Kimsey
 """Memory pressure monitor — safety net to prevent OOM kills.
 
-Periodically checks process RSS against the container/system memory
-limit and proactively evicts caches before the OOM killer intervenes.
+Periodically checks the container's reclaimable (non-file-backed) cgroup
+memory against the container/system memory limit and proactively evicts
+caches before the OOM killer intervenes.  The decision metric excludes
+clean file-backed page cache: in multi mode every render worker memmaps
+the same snapshot files, so those pages are shared, clean, and
+kernel-reclaimable — they are not actionable pressure.  Each worker also
+jitters its thresholds by a small fixed offset and requires two
+consecutive over-threshold checks before evicting, so one cgroup spike
+does not trip all workers in the same instant.
 """
 import asyncio
 import ctypes
 import gc
 import logging
+import random
+from dataclasses import dataclass
 from pathlib import Path
 
 import psutil
@@ -70,29 +79,137 @@ def detect_memory_limit_mb(override_mb: int = 0) -> int:
     return psutil.virtual_memory().total // (1024 * 1024)
 
 
-def _read_cgroup_memory_usage() -> int | None:
-    """Return the cgroup's current memory usage in bytes, or None.
+@dataclass(frozen=True)
+class CgroupUsage:
+    """Reclaimable-aware container usage snapshot.
+
+    ``decision_bytes`` is the figure threshold checks compare against the
+    limit: ``anon + shmem`` on cgroup v2 (from ``memory.stat``),
+    ``rss + shmem`` on cgroup v1, falling back to the raw cgroup usage
+    file when the stat file can't be parsed.  ``total_bytes`` is the raw
+    cgroup usage (``memory.current`` / ``memory.usage_in_bytes``) kept
+    for logging and diagnostics — it includes the clean file-backed page
+    cache the kernel reclaims on its own.
+    """
+
+    decision_bytes: int
+    total_bytes: int
+    label: str
+    stat_based: bool
+
+
+def _read_int(path: Path) -> int | None:
+    """Read a single unsigned integer from ``path``, or None on any failure."""
+    try:
+        return int(path.read_text().strip())
+    except (FileNotFoundError, ValueError, PermissionError, OSError):
+        return None
+
+
+def _read_stat_sum(path: Path, fields: tuple[str, ...]) -> int | None:
+    """Sum the named counters from a cgroup ``memory.stat`` file.
+
+    Returns ``None`` when the file is missing/unreadable or any requested
+    counter is absent or malformed, so callers can fall back to the raw
+    usage file instead of crashing the monitor.
+    """
+    try:
+        lines = path.read_text().splitlines()
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    values: dict[str, int] = {}
+    for line in lines:
+        key, _, raw = line.partition(" ")
+        if key in fields:
+            try:
+                values[key] = int(raw)
+            except ValueError:
+                return None
+    return sum(values.values()) if len(values) == len(fields) else None
+
+
+def _read_cgroup_memory_usage() -> CgroupUsage | None:
+    """Return a reclaimable-aware cgroup usage snapshot, or None.
 
     Captures every process in the container — important in multi-worker
     mode where each render worker's own RSS is only a fraction of the
     container's total.  Falls back to ``None`` outside containers so
     callers can use per-process RSS instead.
-    """
-    # cgroup v2
-    try:
-        v2 = Path("/sys/fs/cgroup/memory.current").read_text().strip()
-        return int(v2)
-    except (FileNotFoundError, ValueError, PermissionError):
-        pass
 
-    # cgroup v1
-    try:
-        v1 = Path("/sys/fs/cgroup/memory/memory.usage_in_bytes").read_text().strip()
-        return int(v1)
-    except (FileNotFoundError, ValueError, PermissionError):
-        pass
+    The decision metric deliberately excludes clean file-backed page
+    cache.  In multi mode all workers memmap the same snapshot files;
+    those pages are shared, clean, and kernel-reclaimable, so the kernel
+    reclaims them on its own under pressure and counting them would make
+    every worker act on pressure that is not actionable.  ``anon`` (private
+    heap) and ``shmem`` (tmpfs/shared pages — NOT cleanly reclaimable) are
+    the parts that matter; tmpfs-backed cache dirs stay correctly counted
+    because they live in ``shmem``.  The bulk of the memmap page cache
+    lives in ``file`` and is intentionally excluded.
+    """
+    # cgroup v2 — decision metric is anon + shmem from memory.stat.
+    stat_sum = _read_stat_sum(
+        Path("/sys/fs/cgroup/memory.stat"), ("anon", "shmem")
+    )
+    total = _read_int(Path("/sys/fs/cgroup/memory.current"))
+    if stat_sum is not None:
+        return CgroupUsage(
+            decision_bytes=stat_sum,
+            total_bytes=total if total is not None else stat_sum,
+            label="anon+shmem",
+            stat_based=True,
+        )
+    if total is not None:
+        return CgroupUsage(
+            decision_bytes=total,
+            total_bytes=total,
+            label="cgroup",
+            stat_based=False,
+        )
+
+    # cgroup v1 — decision metric is rss + shmem from memory.stat.
+    stat_sum = _read_stat_sum(
+        Path("/sys/fs/cgroup/memory/memory.stat"), ("rss", "shmem")
+    )
+    total = _read_int(Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"))
+    if stat_sum is not None:
+        return CgroupUsage(
+            decision_bytes=stat_sum,
+            total_bytes=total if total is not None else stat_sum,
+            label="rss+shmem",
+            stat_based=True,
+        )
+    if total is not None:
+        return CgroupUsage(
+            decision_bytes=total,
+            total_bytes=total,
+            label="cgroup",
+            stat_based=False,
+        )
 
     return None
+
+
+def _jittered_thresholds(
+    warn: float = _WARN_THRESHOLD,
+    evict_tiles: float = _EVICT_TILES_THRESHOLD,
+    evict_all: float = _EVICT_ALL_THRESHOLD,
+) -> tuple[float, float, float]:
+    """Apply the per-process random offsets, preserving warn < evict < clear.
+
+    The offsets are fixed for the process lifetime (applied once at
+    monitor init), so 16 workers in one cgroup trip at slightly different
+    usage levels instead of all firing in lock-step.  With the base
+    constants the ranges can't overlap, but clamp defensively anyway in
+    case the bases ever drift closer together.
+    """
+    warn = warn + random.uniform(-0.01, 0.01)
+    evict_tiles = evict_tiles + random.uniform(-0.02, 0.02)
+    evict_all = evict_all + random.uniform(-0.02, 0.02)
+    if evict_tiles <= warn:
+        evict_tiles = warn + 0.001
+    if evict_all <= evict_tiles:
+        evict_all = evict_tiles + 0.001
+    return warn, evict_tiles, evict_all
 
 
 class MemoryMonitor:
@@ -112,15 +229,49 @@ class MemoryMonitor:
         self._check_interval = check_interval
         self._task: asyncio.Task | None = None
         self._process = psutil.Process()
+        # Per-process threshold jitter: each worker in a shared cgroup
+        # gets a small fixed offset so they don't all trip at the exact
+        # same usage level.  Jittered into instance attributes only —
+        # the module-level base constants are never mutated.
+        (
+            self._warn_threshold,
+            self._evict_tiles_threshold,
+            self._evict_all_threshold,
+        ) = _jittered_thresholds()
+        # Hysteresis counters: an eviction level only acts after two
+        # consecutive checks above its (jittered) threshold; the counter
+        # resets whenever a check falls below the level.
+        self._evict_streak = 0
+        self._clear_streak = 0
+        # One-time debug log when memory.stat can't be parsed and the raw
+        # cgroup usage file is used for decisions instead.
+        self._logged_usage_fallback = False
+        # Raw cgroup usage (MB) from the most recent check, for
+        # diagnostics; None outside containers.
+        self._cgroup_total_mb: int | None = None
+
+    @property
+    def cgroup_total_mb(self) -> int | None:
+        """Raw cgroup usage in MB from the most recent check (None outside containers)."""
+        return self._cgroup_total_mb
 
     async def start(self) -> None:
         scope = "container (cgroup)" if _read_cgroup_memory_usage() is not None else "process"
+        logger.debug(
+            "Memory monitor base thresholds: warn=%.0f%%, evict_tiles=%.0f%%, "
+            "evict_all=%.0f%% (jittered per-worker: warn=%.0f%%, evict_tiles=%.0f%%, "
+            "evict_all=%.0f%%)",
+            _WARN_THRESHOLD * 100, _EVICT_TILES_THRESHOLD * 100,
+            _EVICT_ALL_THRESHOLD * 100,
+            self._warn_threshold * 100, self._evict_tiles_threshold * 100,
+            self._evict_all_threshold * 100,
+        )
         logger.info(
             "Memory monitor started (scope=%s, limit=%d MB, check every %ds, "
             "warn=%.0f%%, evict_tiles=%.0f%%, evict_all=%.0f%%)",
             scope, self._limit_mb, self._check_interval,
-            _WARN_THRESHOLD * 100, _EVICT_TILES_THRESHOLD * 100,
-            _EVICT_ALL_THRESHOLD * 100,
+            self._warn_threshold * 100, self._evict_tiles_threshold * 100,
+            self._evict_all_threshold * 100,
         )
         self._task = asyncio.create_task(self._loop())
 
@@ -149,33 +300,67 @@ class MemoryMonitor:
         # every worker sees the same shared pressure and they all evict
         # their local caches in concert.  Falls back to per-process RSS
         # outside containers (local dev, single-process deployments).
-        cgroup_usage = _read_cgroup_memory_usage()
-        if cgroup_usage is not None:
-            rss = cgroup_usage
+        #
+        # The decision metric is the cgroup's kernel-irreclaimable share
+        # (anon + shmem on v2, rss + shmem on v1) rather than the raw
+        # total: in multi mode all workers memmap the same snapshot
+        # files, and those file-backed pages are shared, clean, and
+        # kernel-reclaimable — the kernel reclaims them on its own under
+        # pressure, so counting them would make every worker act on
+        # pressure that is not actionable.
+        usage_info = _read_cgroup_memory_usage()
+        if usage_info is not None:
+            decision_bytes = usage_info.decision_bytes
+            total_bytes = usage_info.total_bytes
+            if not usage_info.stat_based and not self._logged_usage_fallback:
+                self._logged_usage_fallback = True
+                logger.debug(
+                    "cgroup memory.stat unreadable — falling back to raw cgroup usage file"
+                )
         else:
-            rss = self._process.memory_info().rss
-        usage = rss / self._limit_bytes
+            decision_bytes = self._process.memory_info().rss
+            total_bytes = decision_bytes
+        usage = decision_bytes / self._limit_bytes
 
-        if usage >= _EVICT_ALL_THRESHOLD:
-            logger.warning(
-                "Memory critical: %d MB / %d MB (%.0f%%) — clearing tile + coord caches",
-                rss // (1024 * 1024), self._limit_mb, usage * 100,
-            )
-            self._tile_cache.clear()
-            self._clear_coord_caches()
-            release_memory()
+        decision_mb = decision_bytes // (1024 * 1024)
+        total_mb = total_bytes // (1024 * 1024)
+        self._cgroup_total_mb = total_mb if usage_info is not None else None
+        label = usage_info.label if usage_info is not None else "rss"
 
-        elif usage >= _EVICT_TILES_THRESHOLD:
-            freed = self._tile_cache.evict_half()
-            release_memory()
-            logger.warning(
-                "Memory pressure: %d MB / %d MB (%.0f%%) — evicted %.1f MB of tiles",
-                rss // (1024 * 1024), self._limit_mb, usage * 100,
-                freed / (1024 * 1024),
-            )
+        if usage >= self._evict_all_threshold:
+            self._clear_streak += 1
+            self._evict_streak = 0
+            if self._clear_streak >= 2:
+                logger.warning(
+                    "Memory critical: %d MB (%s) / %d MB (%.0f%%; cgroup total %d MB) — "
+                    "clearing tile + coord caches",
+                    decision_mb, label, self._limit_mb, usage * 100, total_mb,
+                )
+                self._tile_cache.clear()
+                self._clear_coord_caches()
+                release_memory()
 
-        elif usage >= _WARN_THRESHOLD:
+        elif usage >= self._evict_tiles_threshold:
+            self._evict_streak += 1
+            self._clear_streak = 0
+            if self._evict_streak >= 2:
+                freed = self._tile_cache.evict_half()
+                release_memory()
+                logger.warning(
+                    "Memory pressure: %d MB (%s) / %d MB (%.0f%%; cgroup total %d MB) — "
+                    "evicted %.1f MB of tiles",
+                    decision_mb, label, self._limit_mb, usage * 100, total_mb,
+                    freed / (1024 * 1024),
+                )
+
+        elif usage >= self._warn_threshold:
+            self._evict_streak = 0
+            self._clear_streak = 0
             logger.info(
-                "Memory usage elevated: %d MB / %d MB (%.0f%%)",
-                rss // (1024 * 1024), self._limit_mb, usage * 100,
+                "Memory usage elevated: %d MB (%s) / %d MB (%.0f%%; cgroup total %d MB)",
+                decision_mb, label, self._limit_mb, usage * 100, total_mb,
             )
+
+        else:
+            self._evict_streak = 0
+            self._clear_streak = 0
