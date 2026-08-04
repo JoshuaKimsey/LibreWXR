@@ -360,7 +360,6 @@ class TestDecodeOrientation:
     """
 
     def test_decode_flips_south_up_grib(self, monkeypatch):
-        from contextlib import contextmanager
         from librewxr.sources.regional.north_america.usa.nwp.hrrr import grid as hgm
 
         # Synthetic cfgrib-style output: row 0 at lat=21°N, row last at lat=53°N
@@ -386,12 +385,7 @@ class TestDecodeOrientation:
             },
         )
 
-        @contextmanager
-        def _noop():
-            yield
-
         monkeypatch.setattr(xr, "open_dataset", lambda *a, **kw: fake_ds)
-        monkeypatch.setattr(hgm, "_suppress_eccodes_stderr", _noop)
 
         arr = hgm.decode_refc_message(b"ignored bytes")
         assert arr is not None
@@ -403,7 +397,6 @@ class TestDecodeOrientation:
 
     def test_decode_does_not_double_flip_north_up_grib(self, monkeypatch):
         """If cfgrib ever changes to return north-up natively, don't re-flip."""
-        from contextlib import contextmanager
         from librewxr.sources.regional.north_america.usa.nwp.hrrr import grid as hgm
 
         refc_data = np.zeros((HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH), dtype=np.float32)
@@ -429,12 +422,7 @@ class TestDecodeOrientation:
             },
         )
 
-        @contextmanager
-        def _noop():
-            yield
-
         monkeypatch.setattr(xr, "open_dataset", lambda *a, **kw: fake_ds)
-        monkeypatch.setattr(hgm, "_suppress_eccodes_stderr", _noop)
 
         arr = hgm.decode_refc_message(b"ignored bytes")
         # Already north-up; markers should stay where they are

@@ -454,11 +454,6 @@ async def find_2t_message_offset(
 # ── GRIB2 message decode ──────────────────────────────────────────────
 
 
-def _suppress_eccodes_stderr():
-    from librewxr.sources._helpers import _suppress_eccodes_stderr as _s
-    return _s()
-
-
 def decode_tp_message(grib_bytes: bytes) -> np.ndarray | None:
     """Decode a single GRIB2 ``tp`` message into a 2D float32 array.
 
@@ -474,12 +469,11 @@ def decode_tp_message(grib_bytes: bytes) -> np.ndarray | None:
         with tempfile.NamedTemporaryFile(suffix=".grib2", delete=False) as tmp:
             tmp.write(grib_bytes)
             tmp_path = tmp.name
-        with _suppress_eccodes_stderr():
-            ds = xr.open_dataset(
-                tmp_path,
-                engine="cfgrib",
-                backend_kwargs={"indexpath": ""},
-            )
+        ds = xr.open_dataset(
+            tmp_path,
+            engine="cfgrib",
+            backend_kwargs={"indexpath": ""},
+        )
         ds = ds.compute()
     except Exception:
         logger.exception("Failed to decode DMI DINI tp GRIB2 message")
@@ -544,12 +538,11 @@ def decode_2t_message(grib_bytes: bytes) -> np.ndarray | None:
         with tempfile.NamedTemporaryFile(suffix=".grib2", delete=False) as tmp:
             tmp.write(grib_bytes)
             tmp_path = tmp.name
-        with _suppress_eccodes_stderr():
-            ds = xr.open_dataset(
-                tmp_path,
-                engine="cfgrib",
-                backend_kwargs={"indexpath": ""},
-            )
+        ds = xr.open_dataset(
+            tmp_path,
+            engine="cfgrib",
+            backend_kwargs={"indexpath": ""},
+        )
         ds = ds.compute()
     except Exception:
         logger.exception("Failed to decode DMI DINI 2t GRIB2 message")
@@ -1100,7 +1093,7 @@ class DMIDiniGrid:
             return -1
         grib_bytes = resp.content
 
-        accum = decode_tp_message(grib_bytes)
+        accum = await asyncio.to_thread(decode_tp_message, grib_bytes)
         if accum is None:
             return -1
 
@@ -1185,7 +1178,7 @@ class DMIDiniGrid:
             logger.warning("DMI DINI 2t fetch failed for %s: %s", url, e)
             return
 
-        t2_celsius = decode_2t_message(resp.content)
+        t2_celsius = await asyncio.to_thread(decode_2t_message, resp.content)
         if t2_celsius is None:
             return
 

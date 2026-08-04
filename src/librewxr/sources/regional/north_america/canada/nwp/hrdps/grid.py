@@ -338,11 +338,6 @@ def file_url(run: datetime, step_hour: int) -> str:
 # ── GRIB2 decode ──────────────────────────────────────────────────────
 
 
-def _suppress_eccodes_stderr():
-    from librewxr.sources._helpers import _suppress_eccodes_stderr as _s
-    return _s()
-
-
 def decode_apcp_message(grib_bytes: bytes) -> np.ndarray | None:
     """Decode a single GRIB2 ``APCP-Accum1h_Sfc`` message into a 2D float32.
 
@@ -364,12 +359,11 @@ def decode_apcp_message(grib_bytes: bytes) -> np.ndarray | None:
         with tempfile.NamedTemporaryFile(suffix=".grib2", delete=False) as tmp:
             tmp.write(grib_bytes)
             tmp_path = tmp.name
-        with _suppress_eccodes_stderr():
-            ds = xr.open_dataset(
-                tmp_path,
-                engine="cfgrib",
-                backend_kwargs={"indexpath": ""},
-            )
+        ds = xr.open_dataset(
+            tmp_path,
+            engine="cfgrib",
+            backend_kwargs={"indexpath": ""},
+        )
         ds = ds.compute()
     except Exception:
         logger.exception("Failed to decode HRDPS APCP GRIB2 message")
@@ -769,7 +763,9 @@ class HRDPSGrid:
             return -1
         grib_bytes = resp.content
 
-        rate_mm_per_hour = decode_apcp_message(grib_bytes)
+        rate_mm_per_hour = await asyncio.to_thread(
+            decode_apcp_message, grib_bytes,
+        )
         if rate_mm_per_hour is None:
             return -1
 

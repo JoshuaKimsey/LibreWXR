@@ -329,10 +329,23 @@ def overlapping_regions(
     """Return list of regions that overlap a given tile.
 
     Sorted by pixel_size ascending (finest resolution first).
+
+    Calls the LRU-cached ``_overlapping_regions_cached`` with the enabled
+    list normalized to a hashable tuple; a fresh list is returned each
+    time so callers can't mutate the cached entry.
     """
     if enabled is None:
-        enabled = list(REGIONS.keys())
+        enabled_names = tuple(REGIONS.keys())
+    else:
+        enabled_names = tuple(enabled)
+    return list(_overlapping_regions_cached(z, x, y, enabled_names))
 
+
+@lru_cache(maxsize=settings.coord_cache_size)
+def _overlapping_regions_cached(
+    z: int, x: int, y: int, enabled: tuple[str, ...]
+) -> list[RegionDef]:
+    """Cached body of ``overlapping_regions`` (see its docstring)."""
     result = []
     for name in enabled:
         region = REGIONS.get(name)

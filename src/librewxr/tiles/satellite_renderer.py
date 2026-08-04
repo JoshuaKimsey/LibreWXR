@@ -159,5 +159,6 @@ def _encode_image(img: Image.Image, fmt: str) -> bytes:
         else:
             img.save(buf, format="WEBP", quality=q)
     else:
-        img.save(buf, format="PNG", optimize=False)
+        # PNG is lossless at any compression level; 1 is the fastest.
+        img.save(buf, format="PNG", optimize=False, compress_level=1)
     return buf.getvalue()

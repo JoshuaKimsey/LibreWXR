@@ -324,7 +324,6 @@ class TestDecodeOrientation:
     """
 
     def test_decode_flips_south_up_grib(self, monkeypatch):
-        from contextlib import contextmanager
         from librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska import grid as hagm
 
         refc_data = np.zeros(
@@ -352,14 +351,7 @@ class TestDecodeOrientation:
             },
         )
 
-        @contextmanager
-        def _noop():
-            yield
-
         monkeypatch.setattr(xr, "open_dataset", lambda *a, **kw: fake_ds)
-        # Patch the lazy-imported _suppress_eccodes_stderr inside the module
-        import librewxr.sources._helpers as _sources_mod
-        monkeypatch.setattr(_sources_mod, "_suppress_eccodes_stderr", _noop)
 
         arr = hagm.decode_refc_message(b"ignored bytes")
         assert arr is not None
@@ -371,7 +363,6 @@ class TestDecodeOrientation:
 
     def test_decode_does_not_double_flip_north_up_grib(self, monkeypatch):
         """If cfgrib ever returns north-up natively, don't re-flip."""
-        from contextlib import contextmanager
         from librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska import grid as hagm
 
         refc_data = np.zeros(
@@ -399,13 +390,7 @@ class TestDecodeOrientation:
             },
         )
 
-        @contextmanager
-        def _noop():
-            yield
-
         monkeypatch.setattr(xr, "open_dataset", lambda *a, **kw: fake_ds)
-        import librewxr.sources._helpers as _sources_mod
-        monkeypatch.setattr(_sources_mod, "_suppress_eccodes_stderr", _noop)
 
         arr = hagm.decode_refc_message(b"ignored bytes")
         # Already north-up; markers should stay where they are

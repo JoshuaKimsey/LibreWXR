@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 
 from rich.logging import RichHandler
+import cv2
 
 from librewxr.config import settings
 from librewxr.data.alerts_fetcher import WMOAlertsFetcher
@@ -309,6 +310,8 @@ async def run_pipeline() -> None:
 
 def main() -> None:
     _setup_logging()
+    # The pipeline's heavy cv2 work (Farneback nowcast flow) runs once per fetch cycle; 8 threads is ample for the <=1000px flow grids and stays well inside the pipeline container's CPU cap.
+    cv2.setNumThreads(8)
     try:
         asyncio.run(run_pipeline())
     except KeyboardInterrupt:

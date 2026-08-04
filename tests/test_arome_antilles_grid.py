@@ -388,9 +388,7 @@ class TestZR:
 
 class TestDecodeOrientation:
     def test_decode_no_flip_when_north_up(self, monkeypatch):
-        from contextlib import contextmanager
         from librewxr.sources.regional.caribbean.nwp.arome_antilles import grid as ant
-        from librewxr.sources._shared import arome as arome_shared
 
         # Synthetic cfgrib output: row 0 at the NORTHERN edge (correct).
         tp = np.zeros((AROME_ANT_GRID_HEIGHT, AROME_ANT_GRID_WIDTH), dtype=np.float32)
@@ -412,12 +410,7 @@ class TestDecodeOrientation:
             coords={"latitude": lat, "longitude": lon},
         )
 
-        @contextmanager
-        def _noop():
-            yield
-
         monkeypatch.setattr(xr, "open_dataset", lambda *a, **kw: fake_ds)
-        monkeypatch.setattr(arome_shared, "_suppress_eccodes_stderr", _noop)
 
         arr = ant.decode_tp_message(b"ignored")
         assert arr is not None
@@ -428,9 +421,7 @@ class TestDecodeOrientation:
     def test_decode_flips_south_up_grib(self, monkeypatch):
         """Defensive: if cfgrib ever returns the file south-up, the flip
         should self-correct on the latitude coord."""
-        from contextlib import contextmanager
         from librewxr.sources.regional.caribbean.nwp.arome_antilles import grid as ant
-        from librewxr.sources._shared import arome as arome_shared
 
         tp = np.zeros((AROME_ANT_GRID_HEIGHT, AROME_ANT_GRID_WIDTH), dtype=np.float32)
         tp[0, 100] = 5.0    # marker at "row 0" (now south)
@@ -451,12 +442,7 @@ class TestDecodeOrientation:
             coords={"latitude": lat, "longitude": lon},
         )
 
-        @contextmanager
-        def _noop():
-            yield
-
         monkeypatch.setattr(xr, "open_dataset", lambda *a, **kw: fake_ds)
-        monkeypatch.setattr(arome_shared, "_suppress_eccodes_stderr", _noop)
 
         arr = ant.decode_tp_message(b"ignored")
         assert arr is not None

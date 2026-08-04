@@ -89,9 +89,13 @@ class FrameStore:
         Returns (evicted_timestamp | None, was_merged).
         """
         async with self._lock:
-            # Convert regions to memory-mapped files
+            # Convert regions to memory-mapped files.  The write +
+            # flush runs in a worker thread (USCOMP is ~63 MB) while the
+            # async lock still serialises concurrent add_frame calls.
             for name, data in list(frame.regions.items()):
-                frame.regions[name] = self._to_memmap(frame.timestamp, name, data)
+                frame.regions[name] = await asyncio.to_thread(
+                    self._to_memmap, frame.timestamp, name, data,
+                )
 
             # Merge into existing frame if same timestamp.
             # Copy-on-write: build a NEW regions dict and swap the reference instead of

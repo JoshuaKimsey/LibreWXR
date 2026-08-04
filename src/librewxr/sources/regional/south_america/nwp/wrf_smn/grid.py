@@ -979,7 +979,10 @@ class WRFSMNGrid:
                 logger.warning("WRF-SMN fetch failed for %s: %s", url, e)
             return -1
 
-        accum = decode_pp_message(resp.content)
+        # NetCDF4/HDF5 decode runs in a worker thread; the shared
+        # ``HDF5_LOCK`` is taken inside ``decode_pp_message`` so the
+        # HDF5 library is still single-owner at any instant.
+        accum = await asyncio.to_thread(decode_pp_message, resp.content)
         if accum is None:
             return -1
 
@@ -991,7 +994,9 @@ class WRFSMNGrid:
         # in °C in the source file; threshold matches the other regional
         # NWP sources.
         if (run_ts, lead_seconds) not in self._snow_masks:
-            t2 = decode_t2_message(resp.content)
+            # Same worker-thread pattern as the PP decode above; T2 is
+            # also read under HDF5_LOCK inside ``decode_t2_message``.
+            t2 = await asyncio.to_thread(decode_t2_message, resp.content)
             if t2 is not None:
                 threshold = settings.regional_snow_temp_threshold
                 snow = compute_snow_mask(t2, threshold)

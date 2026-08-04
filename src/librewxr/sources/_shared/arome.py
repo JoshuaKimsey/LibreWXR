@@ -49,7 +49,6 @@ import httpx
 import numpy as np
 
 from librewxr.config import settings
-from librewxr.sources._helpers import _suppress_eccodes_stderr
 
 logger = logging.getLogger(__name__)
 
@@ -349,15 +348,14 @@ class AROMEOverseasGrid:
             with tempfile.NamedTemporaryFile(suffix=".grib2", delete=False) as tmp:
                 tmp.write(grib_bytes)
                 tmp_path = tmp.name
-            with _suppress_eccodes_stderr():
-                ds = xr.open_dataset(
-                    tmp_path,
-                    engine="cfgrib",
-                    backend_kwargs={
-                        "indexpath": "",
-                        "filter_by_keys": {"shortName": "tp"},
-                    },
-                )
+            ds = xr.open_dataset(
+                tmp_path,
+                engine="cfgrib",
+                backend_kwargs={
+                    "indexpath": "",
+                    "filter_by_keys": {"shortName": "tp"},
+                },
+            )
             ds = ds.compute()
         except Exception:
             logger.exception(
@@ -649,7 +647,9 @@ class AROMEOverseasGrid:
             return -1
         grib_bytes = resp.content
 
-        accum = self.decode_tp_message(grib_bytes)
+        # cfgrib decode runs in a worker thread — a full GRIB2 parse
+        # blocks the loop for seconds on the larger overseas grids.
+        accum = await asyncio.to_thread(self.decode_tp_message, grib_bytes)
         if accum is None:
             return -1
 

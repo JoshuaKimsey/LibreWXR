@@ -212,10 +212,6 @@ def file_url(run: datetime, step_hour: int, param: str) -> str:
 
 # ── GRIB2 decode + bzip2 unpack ───────────────────────────────────────
 
-def _suppress_eccodes_stderr():
-    from librewxr.sources._helpers import _suppress_eccodes_stderr as _s
-    return _s()
-
 
 def decode_tp_message(grib_bytes: bytes) -> np.ndarray | None:
     """Decode an ICON-EU ``tot_prec`` GRIB2 message into a 2D float32 array.
@@ -232,12 +228,11 @@ def decode_tp_message(grib_bytes: bytes) -> np.ndarray | None:
         with tempfile.NamedTemporaryFile(suffix=".grib2", delete=False) as tmp:
             tmp.write(grib_bytes)
             tmp_path = tmp.name
-        with _suppress_eccodes_stderr():
-            ds = xr.open_dataset(
-                tmp_path,
-                engine="cfgrib",
-                backend_kwargs={"indexpath": ""},
-            )
+        ds = xr.open_dataset(
+            tmp_path,
+            engine="cfgrib",
+            backend_kwargs={"indexpath": ""},
+        )
         ds = ds.compute()
     except Exception:
         logger.exception("Failed to decode ICON-EU tot_prec GRIB2 message")
@@ -303,12 +298,11 @@ def decode_t_2m_message(grib_bytes: bytes) -> np.ndarray | None:
         with tempfile.NamedTemporaryFile(suffix=".grib2", delete=False) as tmp:
             tmp.write(grib_bytes)
             tmp_path = tmp.name
-        with _suppress_eccodes_stderr():
-            ds = xr.open_dataset(
-                tmp_path,
-                engine="cfgrib",
-                backend_kwargs={"indexpath": ""},
-            )
+        ds = xr.open_dataset(
+            tmp_path,
+            engine="cfgrib",
+            backend_kwargs={"indexpath": ""},
+        )
         ds = ds.compute()
     except Exception:
         logger.exception("Failed to decode ICON-EU T_2M GRIB2 message")
@@ -838,12 +832,13 @@ class ICONEUGrid:
             return -1
 
         try:
-            grib_bytes = decompress_bz2(resp.content)
+            # bz2 decompress + cfgrib decode run in a worker thread.
+            grib_bytes = await asyncio.to_thread(decompress_bz2, resp.content)
         except Exception:
             logger.exception("ICON-EU bz2 decompress failed for %s", url)
             return -1
 
-        accum = decode_tp_message(grib_bytes)
+        accum = await asyncio.to_thread(decode_tp_message, grib_bytes)
         if accum is None:
             return -1
 

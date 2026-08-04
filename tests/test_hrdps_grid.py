@@ -255,7 +255,6 @@ class TestZR:
 
 class TestDecodeOrientation:
     def test_decode_flips_south_up_grib(self, monkeypatch):
-        from contextlib import contextmanager
         from librewxr.sources.regional.north_america.canada.nwp.hrdps import grid as h
 
         # Synthetic cfgrib output: row 0 at the SOUTHERN edge (matches
@@ -286,12 +285,7 @@ class TestDecodeOrientation:
             },
         )
 
-        @contextmanager
-        def _noop():
-            yield
-
         monkeypatch.setattr(xr, "open_dataset", lambda *a, **kw: fake_ds)
-        monkeypatch.setattr(h, "_suppress_eccodes_stderr", _noop)
 
         arr = h.decode_apcp_message(b"ignored")
         assert arr is not None

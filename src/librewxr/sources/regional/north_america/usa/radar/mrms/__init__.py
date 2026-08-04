@@ -29,7 +29,6 @@ from .source import (
     MRMSSource,
     _parse_mrms_grib2,
     _resample_mrms_to_region,
-    _suppress_eccodes_stderr,
 )
 from .stations import STATION_MAP
 
@@ -41,7 +40,6 @@ __all__ = [
     "STATION_MAP",
     "_parse_mrms_grib2",
     "_resample_mrms_to_region",
-    "_suppress_eccodes_stderr",
     "radar_provider",
 ]
 

@@ -187,7 +187,7 @@ class ZQRSource:
         await self._client.aclose()
 ```
 
-If the upstream is GRIB2-based, wrap the cfgrib call in `_suppress_eccodes_stderr()` from `_helpers` to muzzle the library's non-actionable `dataTime` warnings.
+If the upstream is GRIB2-based, run the cfgrib decode inside `await asyncio.to_thread(...)` (it's CPU-heavy — don't block the event loop) and rely on `librewxr.sources._helpers`, which redirects the eccodes C library's default-context logging to `/dev/null` once at import, to muzzle the library's non-actionable `dataTime` warnings.
 
 ### `__init__.py` (the provider)
 

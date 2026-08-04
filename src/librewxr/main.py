@@ -7,6 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
+import cv2
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -391,9 +392,18 @@ async def _render_only_lifespan(app: FastAPI):
         ", ".join(s.name for s in nwp_chain.sources),
     )
 
+    # 16 render workers x small tiles would oversubscribe the 48-thread host at OpenCV's default hardware-concurrency pool; in multi mode each worker only does per-tile blurs so 2 threads is ample.
+    cv2.setNumThreads(2)
     pool_size = settings.warmer_threads or max((os.cpu_count() or 4) - 1, 1)
     request_executor = ThreadPoolExecutor(max_workers=pool_size)
+    # Separate present pool: the cheap ``present_tile`` tail (colorize,
+    # encode) runs here so it never queues behind long geometry computes
+    # on the shared default executor during a cold-tile burst.  Half the
+    # compute pool, floored at 2 - presents are short-lived, computes are
+    # the bottleneck.
+    present_executor = ThreadPoolExecutor(max_workers=max(2, pool_size // 2))
     asyncio.get_running_loop().set_default_executor(request_executor)
+    routes.present_executor = present_executor
 
     mem_limit = detect_memory_limit_mb(settings.memory_limit_mb)
     monitor = MemoryMonitor(
@@ -498,12 +508,32 @@ async def _render_only_lifespan(app: FastAPI):
 
     poller_task = asyncio.create_task(_poll_state())
     await monitor.start()
-    logger.info(
-        "Render-only worker ready (cache_dir=%s, regions=%s, tile_cache=%d MB)",
-        cache_dir, ", ".join(enabled), settings.tile_cache_mb,
-    )
 
     try:
+        # Pre-warm coordinate caches so the first tile requests at each zoom
+        # don't pay the cost of trigonometric projections and array allocations.
+        # Mirrors the single-mode lifespan call; here the compute pool
+        # (request_executor) plays the single-mode warmer's role.  Kept inside
+        # the try so a warm failure still tears down both executors.
+        if settings.warm_coord_zoom > 0:
+            start = time.time()
+            loop = asyncio.get_running_loop()
+            warmed = await loop.run_in_executor(
+                request_executor,
+                warm_coordinate_caches,
+                enabled,
+                settings.warm_coord_zoom,
+            )
+            logger.info(
+                "Coordinate caches warmed: %d entries up to zoom %d (%.2fs)",
+                warmed, settings.warm_coord_zoom, time.time() - start,
+            )
+
+        logger.info(
+            "Render-only worker ready (cache_dir=%s, regions=%s, tile_cache=%d MB)",
+            cache_dir, ", ".join(enabled), settings.tile_cache_mb,
+        )
+
         yield
     finally:
         poller_stop.set()
@@ -513,6 +543,10 @@ async def _render_only_lifespan(app: FastAPI):
             logger.exception("Poller shutdown error")
         await monitor.stop()
         request_executor.shutdown(wait=False)
+        present_executor.shutdown(wait=False)
+        # Unwire the routes handle so a stale reference to a shut-down pool
+        # can never be scheduled against (single mode always keeps None).
+        routes.present_executor = None
         cache.clear()
         store.cleanup()
         if nowcast_store is not None:
@@ -629,6 +663,10 @@ async def lifespan(app: FastAPI):
     # warming tasks.  The warmer gets an equal-sized pool so it can use
     # all cores when no requests are active.  Brief over-subscription
     # when both are active is handled well by the OS scheduler.
+    # OpenCV's thread pool is intentionally left at its default here —
+    # single mode shares one process between rendering and nowcast
+    # generation, and the Farneback optical-flow work wants several
+    # threads.
     pool_size = settings.warmer_threads or max((os.cpu_count() or 4) - 1, 1)
     request_executor = ThreadPoolExecutor(max_workers=pool_size)
     warmer_executor = ThreadPoolExecutor(max_workers=pool_size)

@@ -37,7 +37,7 @@ from librewxr.data.regions import RegionDef
 from librewxr.data.retry import retry_get
 # Shared with the NWP grid modules — kept in ``data/sources.py`` until
 # Phase 3/4 of the refactor relocates it.
-from librewxr.sources._helpers import _dbz_float_to_uint8, _suppress_eccodes_stderr
+from librewxr.sources._helpers import _dbz_float_to_uint8
 
 from .products import MRMS_PRODUCTS
 
@@ -237,7 +237,9 @@ class MRMSSource:
                 return None
 
             try:
-                ds = _parse_mrms_grib2(resp.content)
+                # gzip decompress + cfgrib decode run in a worker thread
+                # (full-CONUS GRIB2 parse can take seconds).
+                ds = await asyncio.to_thread(_parse_mrms_grib2, resp.content)
             except EOFError:
                 # Truncated download (server dropped connection mid-stream).
                 # Retry the full download cycle once before giving up.
@@ -259,7 +261,9 @@ class MRMSSource:
             if ds is None:
                 return None
 
-            return _resample_mrms_to_region(ds, region)
+            # Bilinear resample of the full CONUS grid — also heavy, so
+            # run it in a worker thread.
+            return await asyncio.to_thread(_resample_mrms_to_region, ds, region)
 
         return None
 
@@ -346,9 +350,7 @@ def _parse_mrms_grib2(data: bytes) -> xr.Dataset | None:
         tmp = tempfile.NamedTemporaryFile(suffix=".grib2", delete=False)
         tmp.write(raw)
         tmp.close()
-        # Suppress eccodes "truncating time" noise written directly to stderr.
-        with _suppress_eccodes_stderr():
-            ds = xr.open_dataset(tmp.name, engine="cfgrib")
+        ds = xr.open_dataset(tmp.name, engine="cfgrib")
         # Force load into memory so the temp file can be deleted
         ds = ds.compute()
         return ds

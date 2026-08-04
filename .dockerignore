@@ -1,0 +1,15 @@
+# Keep secrets and bulk out of the docker build context.
+.git/
+.venv/
+.env
+docker-compose.override.yml
+docker-compose.override.proposed.yml
+cloudflared/
+cache/
+docs/
+tests/
+scripts/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/

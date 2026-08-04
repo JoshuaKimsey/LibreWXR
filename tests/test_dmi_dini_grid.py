@@ -235,7 +235,6 @@ class TestZR:
 
 class TestDecodeOrientation:
     def test_decode_flips_south_up_grib(self, monkeypatch):
-        from contextlib import contextmanager
         from librewxr.sources.regional.europe.nwp.dmi_dini import grid as dmi
 
         # Synthetic cfgrib output: row 0 at the SOUTHERN edge.
@@ -262,12 +261,7 @@ class TestDecodeOrientation:
             },
         )
 
-        @contextmanager
-        def _noop():
-            yield
-
         monkeypatch.setattr(xr, "open_dataset", lambda *a, **kw: fake_ds)
-        monkeypatch.setattr(dmi, "_suppress_eccodes_stderr", _noop)
 
         arr = dmi.decode_tp_message(b"ignored")
         assert arr is not None
@@ -675,7 +669,6 @@ class TestDecode2TOrientation:
     """``decode_2t_message`` flips south-up GRIBs and converts Kelvin → Celsius."""
 
     def test_decode_flips_south_up_and_converts_kelvin(self, monkeypatch):
-        from contextlib import contextmanager
         from librewxr.sources.regional.europe.nwp.dmi_dini import grid as dmi
 
         # Synthetic cfgrib output in Kelvin: row 0 at southern edge.
@@ -704,12 +697,7 @@ class TestDecode2TOrientation:
             },
         )
 
-        @contextmanager
-        def _noop():
-            yield
-
         monkeypatch.setattr(xr, "open_dataset", lambda *a, **kw: fake_ds)
-        monkeypatch.setattr(dmi, "_suppress_eccodes_stderr", _noop)
 
         arr = decode_2t_message(b"ignored")
         assert arr is not None

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 import asyncio
+import functools
 import httpx
 import logging
 import time
@@ -67,6 +68,22 @@ radar_fetcher = None  # RadarFetcher | None
 tile_request_tracker: TileRequestTracker | None = None
 start_time: float = 0.0
 enabled_regions: list[str] | None = None
+
+# Tile present pool - set by main.py.  Multi-mode render workers get a
+# dedicated executor for the cheap ``present_tile`` tail (colorize/encode)
+# so those jobs never queue behind long geometry computes on the shared
+# default executor under a cold-tile burst.  Single mode leaves this None
+# and the tile endpoints fall back to ``asyncio.to_thread`` (the loop
+# default executor), byte-identical to the pre-split behaviour.
+present_executor = None  # ThreadPoolExecutor | None
+
+# Latest-timestamp TTL cache for the radar tile hot path:
+# (monotonic time, timestamp list).  ``radar_tile`` only needs the latest
+# frame to pick the Cache-Control ``max_age`` bucket (300 s vs 7200 s), so
+# re-querying the store lock on every request is wasted contention; 5 s of
+# staleness is immaterial next to those buckets.
+_latest_ts_cache: tuple[float, list[int]] | None = None
+_LATEST_TS_TTL = 5.0
 
 # WMO alerts — set by main.py during startup
 alerts_store = None  # AlertsStore | None
@@ -349,6 +366,45 @@ async def weather_maps() -> WeatherMapsResponse:
     )
 
 
+async def _latest_timestamps_cached() -> list[int]:
+    """Latest radar timestamps with a 5 s TTL.
+
+    The tile hot path only needs the latest frame to pick the Cache-Control
+    ``max_age`` bucket, so re-querying the store lock on every request is
+    wasted contention.  Degrades to ``[]`` when the store isn't wired
+    (``frame_store`` None -> no frames -> ``latest_ts`` None -> 300 s
+    bucket), matching the single-mode no-store behaviour.
+    """
+    global _latest_ts_cache
+    now = time.monotonic()
+    if _latest_ts_cache is not None and now - _latest_ts_cache[0] < _LATEST_TS_TTL:
+        return _latest_ts_cache[1]
+    if frame_store is None:
+        _latest_ts_cache = (now, [])
+        return []
+    timestamps = await frame_store.get_timestamps()
+    _latest_ts_cache = (now, timestamps)
+    return timestamps
+
+
+async def _present_tile_async(geom, **kwargs) -> bytes:
+    """Run ``present_tile`` off the event loop.
+
+    Multi-mode render workers get a dedicated present pool
+    (``routes.present_executor``) so cheap colorize/encode jobs never queue
+    behind long geometry computes on the shared default executor.  Single
+    mode leaves ``present_executor`` None and falls back to
+    ``asyncio.to_thread`` - byte-identical to the pre-split behaviour.
+    """
+    if present_executor is not None:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            present_executor,
+            functools.partial(present_tile, geom, **kwargs),
+        )
+    return await asyncio.to_thread(present_tile, geom, **kwargs)
+
+
 @router.get("/v2/radar/{timestamp}/{size}/{z}/{x}/{y}/{color}/{smooth_snow}.{ext}")
 async def radar_tile(
     request: Request,
@@ -484,8 +540,7 @@ async def radar_tile(
             tile_bytes = cached.data
             etag = cached.etag
         else:
-            tile_bytes = await asyncio.to_thread(
-                present_tile,
+            tile_bytes = await _present_tile_async(
                 geom,
                 color_scheme=color,
                 fmt=ext,
@@ -506,8 +561,7 @@ async def radar_tile(
     else:
         # Overlay requests (arrows / cells) evolve under the same
         # timestamp, so their rendered bytes are never cached.
-        tile_bytes = await asyncio.to_thread(
-            present_tile,
+        tile_bytes = await _present_tile_async(
             geom,
             color_scheme=color,
             fmt=ext,
@@ -530,7 +584,7 @@ async def radar_tile(
         # need a frame_type for the warmer.  Cheap lookup against the
         # in-memory timestamp list.
         if not need_frame:
-            past_timestamps = await frame_store.get_timestamps()
+            past_timestamps = await _latest_timestamps_cached()
             is_nowcast = timestamp not in past_timestamps
         asyncio.ensure_future(
             tile_warmer.warm(
@@ -545,7 +599,7 @@ async def radar_tile(
 
     # Historical frames are immutable once backfill is complete — cache them
     # for their full 2-hour lifetime.  Latest and nowcast frames still evolve.
-    timestamps = await frame_store.get_timestamps()
+    timestamps = await _latest_timestamps_cached()
     latest_ts = max(timestamps) if timestamps else None
     max_age = 7200 if (latest_ts is not None and timestamp < latest_ts) else 300
 

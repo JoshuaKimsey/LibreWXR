@@ -550,7 +550,11 @@ class RadarFetcher:
                     result = await self._blend_cacomp(result, region, ts, source_type, source_arg)  # noqa: E501
 
             if settings.despeckle_min_neighbors > 0:
-                result = _despeckle(result, settings.despeckle_min_neighbors)
+                # Full-region numpy convolution (USCOMP ~63 MB) — run in
+                # a worker thread.
+                result = await asyncio.to_thread(
+                    _despeckle, result, settings.despeckle_min_neighbors,
+                )
 
             frames_by_ts[ts][region.name] = result
 
@@ -610,7 +614,8 @@ class RadarFetcher:
                 any_merged = True
             if self._radar_cache is not None:
                 try:
-                    self._radar_cache.write_frame(frame)
+                    # Synchronous memmap writes run in a worker thread.
+                    await asyncio.to_thread(self._radar_cache.write_frame, frame)
                 except Exception:
                     logger.exception("Failed to persist radar frame %d", ts)
             added += 1
@@ -727,36 +732,54 @@ class RadarFetcher:
             logger.info("CACOMP: MSC data available again, resuming blend")
         self._cacomp_msc_available = True
 
-        # Build the MRMS extent mask at the region's pixel resolution.
-        # Lats go north-to-south (row 0 = northernmost pixel) to match
-        # the data array convention used by the renderer.
-        ps_y = region._ps_y
-        north_center = region.north - ps_y / 2
-        south_center = region.south + ps_y / 2
-        lats = np.linspace(north_center, south_center, region.height)
-        lons = np.arange(region.west, region.east, region.pixel_size)
-
-        mrms_south, mrms_north, mrms_west, mrms_east = MRMS_EXTENTS["USCOMP"]
-        mrms_extent_mask = (
-            (lats[:, None] >= mrms_south) &
-            (lats[:, None] <= mrms_north) &
-            (lons[None, :] >= mrms_west) &
-            (lons[None, :] <= mrms_east)
+        # Mask construction + blending is full-region numpy work (tens of
+        # MB of temporaries for CACOMP) — run it in a worker thread.
+        return await asyncio.to_thread(
+            _blend_cacomp_arrays, mrms_data, msc_data, region,
         )
 
-        # Blend: start with MSC, overlay MRMS where available
-        result = msc_data.copy()
-        # Only overlay MRMS where it has actual data (non-zero) within its extent
-        mrms_has_data = (mrms_data > 0) & mrms_extent_mask
-        result[mrms_has_data] = mrms_data[mrms_has_data]
 
-        # Outside MRMS extent, keep MSC as-is (including zeros for no data)
-        # Inside MRMS extent but where MRMS has no data (value=0), also keep
-        # MSC if it has data — but only if MSC data exists.
-        mrms_extent_nodata = mrms_extent_mask & (mrms_data == 0) & (msc_data > 0)
-        result[mrms_extent_nodata] = msc_data[mrms_extent_nodata]
+def _blend_cacomp_arrays(
+    mrms_data: np.ndarray,
+    msc_data: np.ndarray,
+    region: RegionDef,
+) -> np.ndarray:
+    """Blend MRMS and MSC Canada arrays for CACOMP (pure numpy).
 
-        return result
+    Runs in a worker thread from ``RadarFetcher._blend_cacomp`` so the
+    full-region mask build and boolean-indexed assignment never block
+    the event loop.
+    """
+    # Build the MRMS extent mask at the region's pixel resolution.
+    # Lats go north-to-south (row 0 = northernmost pixel) to match
+    # the data array convention used by the renderer.
+    ps_y = region._ps_y
+    north_center = region.north - ps_y / 2
+    south_center = region.south + ps_y / 2
+    lats = np.linspace(north_center, south_center, region.height)
+    lons = np.arange(region.west, region.east, region.pixel_size)
+
+    mrms_south, mrms_north, mrms_west, mrms_east = MRMS_EXTENTS["USCOMP"]
+    mrms_extent_mask = (
+        (lats[:, None] >= mrms_south) &
+        (lats[:, None] <= mrms_north) &
+        (lons[None, :] >= mrms_west) &
+        (lons[None, :] <= mrms_east)
+    )
+
+    # Blend: start with MSC, overlay MRMS where available
+    result = msc_data.copy()
+    # Only overlay MRMS where it has actual data (non-zero) within its extent
+    mrms_has_data = (mrms_data > 0) & mrms_extent_mask
+    result[mrms_has_data] = mrms_data[mrms_has_data]
+
+    # Outside MRMS extent, keep MSC as-is (including zeros for no data)
+    # Inside MRMS extent but where MRMS has no data (value=0), also keep
+    # MSC if it has data — but only if MSC data exists.
+    mrms_extent_nodata = mrms_extent_mask & (mrms_data == 0) & (msc_data > 0)
+    result[mrms_extent_nodata] = msc_data[mrms_extent_nodata]
+
+    return result
 
 
 def _despeckle(data: np.ndarray, min_neighbors: int) -> np.ndarray:

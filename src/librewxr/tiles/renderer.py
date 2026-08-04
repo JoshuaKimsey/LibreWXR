@@ -129,6 +129,21 @@ def compute_tile_geometry(
             )
         return TileGeometry.transparent(tile_size, fast_path="no_regions_no_nwp")
 
+    # Tier 2: pre-sample global precip-mask gate (multi-mode only).  The
+    # mask ORs radar regions + all NWP source samples + nowcast regions
+    # into one coarse boolean grid per timestamp, so the gate fires for
+    # the past-radar path AND the nowcast path together — Tier 3 (the
+    # nowcast bbox) is folded in.  Single mode has no mask
+    # (``precip_mask is None``) and falls through to the existing Tier 1 /
+    # Case A paths unchanged.  Hoisted ahead of the ``_sample_region``
+    # calls so clear-sky tiles bail in O(1): the mask includes the radar
+    # contribution, so no precip in the bbox guarantees the radar sample
+    # is empty and the pre-hoist ``radar_empty`` term was always true.
+    if has_nwp and precip_mask is not None:
+        if not precip_mask.has_precip_in_bbox(frame_timestamp, tile_bounds(z, x, y)):
+            label = "tier2_mask_nowcast" if nowcast_blend is not None else "tier2_mask_past"
+            return TileGeometry.transparent(tile_size, fast_path=label)
+
     # Determine blur radius from local geometry: scale Gaussian kernel
     # to the number of tile pixels covered by a single region pixel.
     # Uses the highest-priority (finest) region's Jacobian so that mixed
@@ -164,18 +179,6 @@ def compute_tile_geometry(
         if settings.noise_floor_dbz > -32 else 0
     )
     radar_empty = not (values >= pixel_threshold).any()
-
-    # Tier 2: pre-sample global precip-mask gate (multi-mode only).  The
-    # mask ORs radar regions + all NWP source samples + nowcast regions
-    # into one coarse boolean grid per timestamp, so the gate fires for
-    # the past-radar path AND the nowcast path together — Tier 3 (the
-    # nowcast bbox) is folded in.  Single mode has no mask
-    # (``precip_mask is None``) and falls through to the existing Tier 1 /
-    # Case A paths unchanged.
-    if has_nwp and radar_empty and precip_mask is not None:
-        if not precip_mask.has_precip_in_bbox(frame_timestamp, tile_bounds(z, x, y)):
-            label = "tier2_mask_nowcast" if nowcast_blend is not None else "tier2_mask_past"
-            return TileGeometry.transparent(tile_size, fast_path=label)
 
     # Case A: no NWP at all and radar sample is empty — transparent,
     # no further work.
@@ -355,6 +358,17 @@ def present_tile(
             nwp_flow=nwp_flow,
             nwp_chain=nwp_chain,
             frame_timestamp=frame_timestamp,
+            # The geometry is still padded when blur is applied; the arrow
+            # overlay works in cropped tile coordinates, so slice the pad
+            # border off before handing it to the presence gate.
+            geom_values=(
+                geom.values
+                if geom.pad == 0
+                else geom.values[
+                    geom.pad:geom.pad + geom.tile_size,
+                    geom.pad:geom.pad + geom.tile_size,
+                ]
+            ),
         )
 
     if cell_style and cells_by_region:
@@ -461,6 +475,32 @@ def _compute_blur_radius(
     return min(raw, tile_size / 32.0)
 
 
+def _gather_clipped(
+    frame_data: np.ndarray, row_idx: np.ndarray, col_idx: np.ndarray
+) -> np.ndarray:
+    """Fancy-index ``frame_data`` with every out-of-bounds index mapped to 0.
+
+    Replaces the old ``np.pad(frame_data, ((0, 1), (0, 1)))`` trick, which
+    copied the entire (tens-of-MB) region grid per tile just to turn the
+    ``-1`` sentinels in the index arrays into the zero padding row/col.
+    A clipped gather touches only the tile-sized index arrays: indices
+    inside the grid are read normally, and any index that is negative OR
+    past the grid edge is zeroed afterwards — byte-identical output, no
+    full-frame copy.
+    """
+    valid = (
+        (row_idx >= 0)
+        & (col_idx >= 0)
+        & (row_idx < frame_data.shape[0])
+        & (col_idx < frame_data.shape[1])
+    )
+    row_c = np.clip(row_idx, 0, frame_data.shape[0] - 1)
+    col_c = np.clip(col_idx, 0, frame_data.shape[1] - 1)
+    values = frame_data[row_c, col_c]
+    values[~valid] = 0
+    return values
+
+
 def _sample_region(
     frame_data: np.ndarray,
     region: RegionDef,
@@ -482,8 +522,7 @@ def _sample_region(
             oob = (row_idx == -1) | (col_idx == -1)
             values[oob] = 0
         else:
-            padded = np.pad(frame_data, ((0, 1), (0, 1)), constant_values=0)
-            values = padded[row_idx, col_idx]
+            values = _gather_clipped(frame_data, row_idx, col_idx)
     else:
         row_idx, col_idx = region_pixel_indices(region, z, x, y, tile_size)
         if smooth:
@@ -491,8 +530,7 @@ def _sample_region(
             oob = (row_idx == -1) | (col_idx == -1)
             values[oob] = 0
         else:
-            padded = np.pad(frame_data, ((0, 1), (0, 1)), constant_values=0)
-            values = padded[row_idx, col_idx]
+            values = _gather_clipped(frame_data, row_idx, col_idx)
     return values
 
 
@@ -548,8 +586,7 @@ def _composite_regions(
             oob = (row_idx == -1) | (col_idx == -1)
             region_values[oob] = 0
         else:
-            padded = np.pad(data, ((0, 1), (0, 1)), constant_values=0)
-            region_values = padded[row_idx, col_idx]
+            region_values = _gather_clipped(data, row_idx, col_idx)
 
         # Fill: only where no higher-priority region has claimed the
         # pixel AND this region actually has data there.
@@ -586,8 +623,7 @@ def render_coverage_tile(
     for region in regions_with_data:
         data = frame_regions[region.name]
         row_idx, col_idx = region_pixel_indices(region, z, x, y, tile_size)
-        padded = np.pad(data, ((0, 1), (0, 1)), constant_values=0)
-        region_values = padded[row_idx, col_idx]
+        region_values = _gather_clipped(data, row_idx, col_idx)
         fill_mask = (values == 0) & (region_values > 0)
         values[fill_mask] = region_values[fill_mask]
 
@@ -727,8 +763,12 @@ def _bilinear_sample(
     r1 = np.minimum(r0 + 1, region.height - 1)
     c1 = np.minimum(c0 + 1, region.width - 1)
 
-    dr = row_f - r0
-    dc = col_f - c0
+    # Fractional offsets must stay float32: the four corner values are
+    # float32, and without the cast the int32 subtract would promote the
+    # whole interpolation to float64.  The final clip + 0.5 -> uint8
+    # rounding is unchanged.
+    dr = (row_f - r0).astype(np.float32)
+    dc = (col_f - c0).astype(np.float32)
 
     v00 = frame_data[r0, c0].astype(np.float32)
     v01 = frame_data[r0, c1].astype(np.float32)
@@ -761,6 +801,7 @@ def _draw_motion_arrows(
     nwp_flow: np.ndarray | None = None,
     nwp_chain=None,
     frame_timestamp: int | None = None,
+    geom_values: np.ndarray | None = None,
 ) -> Image.Image:
     """Draw precipitation motion vector arrows on the tile.
 
@@ -775,6 +816,11 @@ def _draw_motion_arrows(
 
     ``style`` selects the arrow colour: ``"light"`` for white arrows
     (best on dark maps) or ``"dark"`` for dark arrows (best on light maps).
+
+    ``geom_values`` is the tile geometry's post-fill uint8 values, already
+    cropped to the tile (pad border sliced off by the caller); it
+    replaces a full-grid ``nwp_chain.sample`` that was previously needed
+    purely to gate the composite-NWP arrow presence on precip.
     """
     # Regions that have both frame data and flow data
     if flow_regions:
@@ -802,19 +848,18 @@ def _draw_motion_arrows(
 
     # Precompute lat/lon grid for composite NWP flow fallback (only if needed)
     nwp_latlons = None
-    nwp_precip = None
     radar_coverage = None
     if has_nwp:
         from librewxr.data.nowcast import (
             NWP_FLOW_NORTH, NWP_FLOW_SOUTH, NWP_FLOW_WEST,
         )
         nwp_latlons = tile_pixel_latlons(z, x, y, tile_size)
-        # Presence gate: the chain's own precip at the point, above the
-        # noise floor.  This fixes the "HRRR precip present but IFS dry"
-        # miss where the old IFS-hardcoded path suppressed arrows.
-        nwp_precip = nwp_chain.sample(
-            nwp_latlons[0], nwp_latlons[1], frame_timestamp,
-        )
+        # Presence gate: the tile geometry's post-fill values at the
+        # point, above the noise floor.  The geometry already carries the
+        # NWP fill (see compute_tile_geometry), so we don't re-sample the
+        # chain over the full grid just to check for precip.  This keeps
+        # the "HRRR precip present but IFS dry" fix where the old
+        # IFS-hardcoded path suppressed arrows.
         # Derive raster pixel size from the loaded array's shape so a
         # resolution-knob change between cycles can't drift out of sync.
         nwp_res = (NWP_FLOW_NORTH - NWP_FLOW_SOUTH) / (nwp_flow.shape[0] - 1)
@@ -904,7 +949,7 @@ def _draw_motion_arrows(
             # this pixel (either no radar data here, or the radar frame
             # says "dry" outside coverage).
             if not found and has_nwp:
-                if nwp_precip[ty, tx] < noise_threshold:
+                if geom_values is None or geom_values[ty, tx] < noise_threshold:
                     continue  # Below noise floor — not visible on tile
 
                 lat = float(nwp_latlons[0][ty, tx])
@@ -1099,10 +1144,22 @@ def _draw_storm_cells(
     return Image.alpha_composite(img, overlay)
 
 
+# Cached fully-transparent tile bytes.  Deterministic per
+# (tile_size, fmt, webp_quality) and populated lazily on first use; the
+# worst-case race (two threads encoding the same constant once) is
+# harmless, so no lock is needed.
+_TRANSPARENT_TILE_BYTES: dict[tuple[int, str, int], bytes] = {}
+
+
 def _transparent_tile(tile_size: int, fmt: str) -> bytes:
-    """Return a fully transparent tile."""
-    img = Image.new("RGBA", (tile_size, tile_size), (0, 0, 0, 0))
-    return _encode_image(img, fmt)
+    """Return a fully transparent tile (cached constant bytes)."""
+    key = (tile_size, fmt, settings.webp_quality)
+    cached = _TRANSPARENT_TILE_BYTES.get(key)
+    if cached is None:
+        img = Image.new("RGBA", (tile_size, tile_size), (0, 0, 0, 0))
+        cached = _encode_image(img, fmt)
+        _TRANSPARENT_TILE_BYTES[key] = cached
+    return cached
 
 
 def _encode_image(img: Image.Image, fmt: str) -> bytes:
@@ -1115,5 +1172,6 @@ def _encode_image(img: Image.Image, fmt: str) -> bytes:
         else:
             img.save(buf, format="WEBP", quality=q)
     else:
-        img.save(buf, format="PNG", optimize=False)
+        # PNG is lossless at any compression level; 1 is the fastest.
+        img.save(buf, format="PNG", optimize=False, compress_level=1)
     return buf.getvalue()

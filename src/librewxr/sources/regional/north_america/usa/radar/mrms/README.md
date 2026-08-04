@@ -35,9 +35,10 @@ RegionDef carries them harmlessly.
   the connection mid-stream) raise `EOFError` on decompress and trip a
   one-shot retry inside `_fetch_and_parse`.
 - The eccodes C library (via cfgrib) writes non-actionable `dataTime`
-  truncation messages to OS-level stderr.  `_suppress_eccodes_stderr`
-  redirects fd 2 to `/dev/null` during the parse to keep server logs
-  clean.
+  truncation messages to stderr.  `librewxr.sources._helpers` redirects
+  the C library's default-context logging to `/dev/null` once at import
+  (`codes_context_set_logging`) to keep server logs clean — no fd
+  games, so GRIB decodes can safely run inside `asyncio.to_thread`.
 - No-data sentinel is `-999.0`; valid values are dBZ.  Resampling
   converts NaN → `-33.0` so the shared `_dbz_float_to_uint8` encoder
   maps it to 0.

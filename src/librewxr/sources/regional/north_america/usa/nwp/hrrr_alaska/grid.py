@@ -235,19 +235,16 @@ def decode_refc_message(grib_bytes: bytes) -> np.ndarray | None:
     """
     import xarray as xr
 
-    from librewxr.sources._helpers import _suppress_eccodes_stderr
-
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".grib2", delete=False) as tmp:
             tmp.write(grib_bytes)
             tmp_path = tmp.name
-        with _suppress_eccodes_stderr():
-            ds = xr.open_dataset(
-                tmp_path,
-                engine="cfgrib",
-                backend_kwargs={"indexpath": ""},
-            )
+        ds = xr.open_dataset(
+            tmp_path,
+            engine="cfgrib",
+            backend_kwargs={"indexpath": ""},
+        )
         ds = ds.compute()
     except Exception:
         logger.exception("Failed to decode HRRR-Alaska REFC GRIB2 message")
@@ -318,19 +315,16 @@ def decode_tmp_2m_message(grib_bytes: bytes) -> np.ndarray | None:
     """
     import xarray as xr
 
-    from librewxr.sources._helpers import _suppress_eccodes_stderr
-
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".grib2", delete=False) as tmp:
             tmp.write(grib_bytes)
             tmp_path = tmp.name
-        with _suppress_eccodes_stderr():
-            ds = xr.open_dataset(
-                tmp_path,
-                engine="cfgrib",
-                backend_kwargs={"indexpath": ""},
-            )
+        ds = xr.open_dataset(
+            tmp_path,
+            engine="cfgrib",
+            backend_kwargs={"indexpath": ""},
+        )
         ds = ds.compute()
     except Exception:
         logger.exception("Failed to decode HRRR-Alaska TMP:2m GRIB2 message")
@@ -880,7 +874,7 @@ class HRRRAlaskaGrid:
                 )
                 continue
 
-            arr = decode_refc_message(grib_bytes)
+            arr = await asyncio.to_thread(decode_refc_message, grib_bytes)
             if arr is None:
                 continue
 
@@ -916,7 +910,7 @@ class HRRRAlaskaGrid:
                 )
                 continue
 
-            t2m = decode_tmp_2m_message(grib_bytes)
+            t2m = await asyncio.to_thread(decode_tmp_2m_message, grib_bytes)
             if t2m is None:
                 continue
 

@@ -8,10 +8,6 @@ Two helpers contributors reach for when implementing a new source:
   Every radar source converts its native reflectivity (mm/h palette,
   raw float dBZ, RGB hue, etc.) into this 8-bit encoding so the
   renderer and tile pipeline see a single shape.
-- ``_suppress_eccodes_stderr`` — a context manager that muzzles the
-  eccodes C library's non-actionable ``dataTime`` truncation noise.
-  Used by every NWP source that opens GRIB2 (HRRR, HRRR-Alaska, HRDPS,
-  ICON-EU, DMI DINI, AROME Antilles) and by the MRMS radar source.
 - ``HDF5_LOCK`` — a process-wide lock guarding every call into the
   HDF5 C library (h5py, and xarray's ``engine="netcdf4"``).  HDF5 is
   not thread-safe, and each of h5py/netCDF4's wheels bundles its own
@@ -21,18 +17,55 @@ Two helpers contributors reach for when implementing a new source:
   internal state and segfaults the process. Used by OPERA (radar) and
   WRF-SMN + GMGSI (NWP/satellite) — the only sources that touch HDF5.
 
+eccodes stderr noise: the eccodes C library (via cfgrib) writes
+non-actionable ``dataTime`` truncation messages directly to stderr.
+This module instead points the C library's default-context logging at
+``/dev/null`` once at import time via the supported
+``codes_context_set_logging`` binding (``grib_context_set_logging_file``
+in the C API).  This is thread-safe: the redirect is installed before
+any decode runs, and concurrent writes to the ``/dev/null`` FILE* from
+GRIB decodes running inside ``asyncio.to_thread`` are invisible.
+(The previous approach — an ``os.dup2(devnull, 2)`` context manager —
+redirected the process-global fd 2 and would clobber another thread's
+stderr once decodes moved off the event loop.)
+
 Both intentionally live outside any one source package so a new source
 can pick them up without importing from a sibling source's internals.
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
-from contextlib import contextmanager
 
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 HDF5_LOCK = threading.Lock()
+
+# Redirect the eccodes C library's default-context logging to /dev/null
+# so its non-actionable "dataTime truncation" warnings stop hitting
+# stderr.  ``codes_context_set_logging`` hands the Python file object's
+# FILE* to the C library (cffi), so the object must stay alive for the
+# whole process — hence the module-level name.
+_ECCODES_DEVNULL = open(os.devnull, "wb")
+try:
+    import eccodes
+except Exception:
+    logger.warning(
+        "eccodes not importable; GRIB decode warnings will reach stderr",
+        exc_info=True,
+    )
+else:
+    try:
+        eccodes.codes_context_set_logging(_ECCODES_DEVNULL)
+    except Exception:
+        logger.warning(
+            "eccodes logging redirect failed; GRIB decode warnings will "
+            "reach stderr",
+            exc_info=True,
+        )
 
 
 def _dbz_float_to_uint8(arr: np.ndarray) -> np.ndarray:
@@ -45,22 +78,3 @@ def _dbz_float_to_uint8(arr: np.ndarray) -> np.ndarray:
     result = np.clip((arr + 32.0) * 2.0, 0, 255).astype(np.uint8)
     result[nodata_mask] = 0
     return result
-
-
-@contextmanager
-def _suppress_eccodes_stderr():
-    """Redirect OS-level stderr to /dev/null during the block.
-
-    The eccodes C library (used by cfgrib) writes non-actionable
-    ``dataTime`` truncation messages directly to stderr.  This silences
-    them without affecting Python logging or other error reporting.
-    """
-    devnull = os.open(os.devnull, os.O_WRONLY)
-    original = os.dup(2)
-    try:
-        os.dup2(devnull, 2)
-        yield
-    finally:
-        os.dup2(original, 2)
-        os.close(devnull)
-        os.close(original)

@@ -180,7 +180,9 @@ class JMAFetcher:
             return None
 
         try:
-            decoded = decode_jma_tile(resp.content)
+            # PIL tile decode runs in a worker thread.  The _tile_sem
+            # still bounds only the HTTP fetch above, unchanged.
+            decoded = await asyncio.to_thread(decode_jma_tile, resp.content)
         except Exception:
             logger.exception("JMA tile decode failed: %s", url)
             return None
