@@ -61,7 +61,10 @@ def encode_png(img: Image.Image) -> bytes:
         out.save(buf, format="PNG", optimize=True, compress_level=6)
         return buf.getvalue()
     # 1 color, or more than 256 unique colors: plain 32-bit RGBA (the
-    # previous PNG encoding).
+    # previous PNG encoding).  Level 6, not 1: Pillow wheels link the host
+    # libz (stock zlib on Debian, zlib-ng on Fedora) and the two diverge up
+    # to ~4x in level-1 output size; level 6 converges and the palette path
+    # already uses 6.
     buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=False, compress_level=1)
+    img.save(buf, format="PNG", optimize=False, compress_level=6)
     return buf.getvalue()

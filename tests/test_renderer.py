@@ -303,6 +303,18 @@ class TestAdaptivePalettePng:
         png = present_tile(geom, color_scheme=2, fmt="png")
         assert Image.open(io.BytesIO(png)).mode == "RGBA"
 
+    def test_transparent_tile_is_compact(self):
+        """A fully transparent 256x256 tile must stay small on any host.
+
+        The RGBA fallback encodes at compress_level=6 (like the palette
+        path) so its size does not depend on the host libz flavor: stock
+        zlib and zlib-ng diverge ~4x at level 1 but converge at level 6
+        (~250-350 B).  600 B is a safe host-independent bound.
+        """
+        geom = TileGeometry.transparent(256)
+        png = present_tile(geom, color_scheme=2, fmt="png")
+        assert len(png) < 600
+
 
 class TestBlurRadius:
     """Blur radius must scale with how many tile pixels a region pixel covers."""
