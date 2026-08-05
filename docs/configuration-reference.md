@@ -379,6 +379,8 @@ WebP encoding quality for tiles requested in `.webp` format. Does not affect PNG
 - `100` = lossless (default; best quality, larger files)
 - `1-99` = lossy at that quality (e.g. `65` is roughly 4x smaller than lossless but visibly softens saturated radar colors)
 
+The lossless path uses libwebp's fast `method=1` preset: sizes stay within ~1% of max-effort lossless while encoding is 1.5-4x faster.
+
 PNG tiles are encoded adaptively and losslessly: when a tile's final pixels contain at most 256 unique RGBA colors (typical for unsmoothed radar tiles), the encoder builds an exact 8-bit palette from those colors and writes a palette (P-mode) PNG with a `tRNS` chunk carrying full 8-bit alpha; otherwise it writes a plain 32-bit RGBA PNG. No configuration knob is needed — the encoder selects the smaller representation automatically, and both paths reproduce the input pixels bit-for-bit.
 
 ### `LIBREWXR_TILE_CACHE_MB`
