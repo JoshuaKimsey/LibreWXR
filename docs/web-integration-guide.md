@@ -1000,7 +1000,7 @@ Common combinations:
 ### Image Format
 
 - **PNG** (`.png`): Lossless, larger files, universal browser support. Best for exact color reproduction.
-- **WebP** (`.webp`): Smaller files, supported by all modern browsers. Quality is configurable server-side via `LIBREWXR_WEBP_QUALITY` (default 80; set to 100 for lossless).
+- **WebP** (`.webp`): Smaller files, supported by all modern browsers. Quality is configurable server-side via `LIBREWXR_WEBP_QUALITY` (default 100, lossless; set 1-99 for lossy if bandwidth-constrained).
 
 For most web applications, WebP is the better choice — tiles load faster and use less bandwidth with minimal visual difference.
 

@@ -9,6 +9,7 @@ from librewxr.config import settings
 from librewxr.sources.satellite.gmgsi.source import LAT_MAX as _GMGSI_LAT_MAX
 from librewxr.sources.satellite.gmgsi.source import LAT_MIN as _GMGSI_LAT_MIN
 from librewxr.tiles.coordinates import tile_pixel_latlons
+from librewxr.tiles.png_palette import encode_png
 
 # Smoothstep alpha attenuation across the last few degrees of GMGSI
 # disk coverage so the ±72.7° horizontal cutoffs fade into the basemap
@@ -151,14 +152,14 @@ def render_gmgsi_composite_tile(
 
 def _encode_image(img: Image.Image, fmt: str) -> bytes:
     """Encode a PIL image to bytes."""
-    buf = io.BytesIO()
     if fmt == "webp":
+        buf = io.BytesIO()
         q = settings.webp_quality
         if q >= 100:
             img.save(buf, format="WEBP", lossless=True)
         else:
             img.save(buf, format="WEBP", quality=q)
-    else:
-        # PNG is lossless at any compression level; 1 is the fastest.
-        img.save(buf, format="PNG", optimize=False, compress_level=1)
-    return buf.getvalue()
+        return buf.getvalue()
+    # PNG: adaptive lossless - exact 8-bit palette when the tile has few
+    # enough unique colors, otherwise plain 32-bit RGBA (see png_palette).
+    return encode_png(img)

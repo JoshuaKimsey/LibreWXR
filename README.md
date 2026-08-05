@@ -480,7 +480,7 @@ the inline comments in [`src/librewxr/config.py`](src/librewxr/config.py).
 | `LIBREWXR_SMOOTH_RADIUS` | `2.0` | Gaussian blur radius (0 = disabled) |
 | `LIBREWXR_NOISE_FLOOR_DBZ` | `10.0` | Min dBZ to display (-32 = disabled) |
 | `LIBREWXR_DESPECKLE_MIN_NEIGHBORS` | `3` | Speckle filter strength (0 = disabled) |
-| `LIBREWXR_WEBP_QUALITY` | `65` | WebP quality (100 = lossless, <100 = lossy) |
+| `LIBREWXR_WEBP_QUALITY` | `100` | WebP quality (100 = lossless default, 1-99 = lossy) |
 | `LIBREWXR_WARMER_THREADS` | *mode* | Background tile warming pool size (single: 0 = CPU count - 1; multi: 4 sizes the request-executor pool, not warming — warming is single-mode only) |
 | `LIBREWXR_WARM_COORD_ZOOM` | `6` | Pre-warm coordinate caches up to this zoom at startup (0 = disable; runs only in the pipeline parent in multi mode) |
 | `LIBREWXR_WARM_OVERVIEW_ZOOM` | `4` | Pre-render overview tiles up to this zoom after each fetch (single mode only; -1 = disable) |

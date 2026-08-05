@@ -175,7 +175,7 @@ def _load_webp_encoder():
     ``_encode_image`` is underscore-prefixed but importable directly, and
     calling it needs nothing beyond a PIL image + format string, so no
     ``present_tile`` fallback is required.  It reads
-    ``settings.webp_quality`` (default 65, lossy) from ``librewxr.config``.
+    ``settings.webp_quality`` (default 100, lossless) from ``librewxr.config``.
     """
     if not pytest.importorskip("PIL"):
         pytest.skip("PIL unavailable")
@@ -210,5 +210,28 @@ def test_webp_encoding_is_deterministic():
     second = encode(img, "webp")
     assert first == second, (
         "webp encoding must be byte-for-byte deterministic or a strong "
+        "ETag computed on the encoded bytes would flap between requests"
+    )
+
+
+def test_png_encoding_is_deterministic():
+    """PNG output (adaptive palette or RGBA) must be deterministic too."""
+    try:
+        from PIL import Image
+    except ImportError:
+        pytest.skip("PIL unavailable")
+    from librewxr.tiles.png_palette import encode_png
+
+    # Same fixture as the webp test: a few distinct RGBA pixel values.
+    arr = np.zeros((8, 8, 4), dtype=np.uint8)
+    arr[0, 0] = (255, 0, 0, 255)
+    arr[2:5, 2:5] = (0, 0, 255, 255)
+    arr[6, 6] = (0, 255, 0, 128)
+    img = Image.fromarray(arr, mode="RGBA")
+
+    first = encode_png(img)
+    second = encode_png(img)
+    assert first == second, (
+        "png encoding must be byte-for-byte deterministic or a strong "
         "ETag computed on the encoded bytes would flap between requests"
     )

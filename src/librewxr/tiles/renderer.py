@@ -23,6 +23,7 @@ from librewxr.tiles.coordinates import (
     tile_pixel_latlons,
     tile_pixel_latlons_padded,
 )
+from librewxr.tiles.png_palette import encode_png
 
 if TYPE_CHECKING:
     from librewxr.data.precip_mask import PrecipMaskStore
@@ -1196,14 +1197,14 @@ def _transparent_tile(tile_size: int, fmt: str) -> bytes:
 
 def _encode_image(img: Image.Image, fmt: str) -> bytes:
     """Encode a PIL image to bytes."""
-    buf = io.BytesIO()
     if fmt == "webp":
+        buf = io.BytesIO()
         q = settings.webp_quality
         if q >= 100:
             img.save(buf, format="WEBP", lossless=True)
         else:
             img.save(buf, format="WEBP", quality=q)
-    else:
-        # PNG is lossless at any compression level; 1 is the fastest.
-        img.save(buf, format="PNG", optimize=False, compress_level=1)
-    return buf.getvalue()
+        return buf.getvalue()
+    # PNG: adaptive lossless — exact 8-bit palette when the tile has few
+    # enough unique colors, otherwise plain 32-bit RGBA (see png_palette).
+    return encode_png(img)

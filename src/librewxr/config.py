@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     smooth_radius: float = 1.0  # Baseline Gaussian blur radius; renderer auto-scales it up at high zoom on coarse sources
     noise_floor_dbz: float = 10.0  # Minimum dBZ to display; lower values are zeroed out
     despeckle_min_neighbors: int = 3  # Min non-zero neighbors (of 8) to keep a pixel; 0 to disable
-    webp_quality: int = 65  # WebP quality: 100 = lossless, 1-99 = lossy at that quality
+    webp_quality: int = 100  # WebP quality: 100 = lossless (default), 1-99 = lossy at that quality
     workers: int = 0  # Number of uvicorn worker processes; 0 = mode default
     warmer_threads: int = 0  # Render thread pool size; 0 = mode default (auto in single, 4 in multi) (sizes the request-executor pool in multi mode; the warmer itself is single-mode only)
     warm_coord_zoom: int = 6  # Pre-warm coordinate caches up to this zoom (0 = disable) (in multi mode runs in each render worker at startup)

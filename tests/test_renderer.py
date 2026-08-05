@@ -12,6 +12,7 @@ pytestmark = pytest.mark.tiles
 from librewxr.data.regions import REGIONS
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
+from librewxr.tiles.png_palette import _PALETTE_MIN_COLORS, encode_png
 from librewxr.tiles.renderer import (
     TileGeometry,
     _compute_blur_radius,
@@ -184,6 +185,123 @@ class TestTileGeometryCache:
         cache.invalidate_timestamp(1700000000)
         assert cache.total_bytes == 0
         assert cache.get(key) is None
+
+
+class TestAdaptivePalettePng:
+    """Adaptive lossless PNG8 encoding (see tiles/png_palette.py).
+
+    Tiles with ``_PALETTE_MIN_COLORS``..256 unique RGBA colors are encoded
+    as exact-palette P-mode PNGs (lossless, full 8-bit alpha via tRNS);
+    everything else keeps the plain 32-bit RGBA encoding.  These tests
+    prove losslessness (decode -> RGBA equals the input exactly) and the
+    mode selection rules, both on ``encode_png`` directly and through the
+    ``present_tile`` integration path.
+    """
+
+    @staticmethod
+    def _banded_img(colors: int, width: int = 16) -> Image.Image:
+        """One horizontal band per color: exactly ``colors`` unique pixels.
+
+        ``(r, g)`` encodes the band index bijectively (r = i % 256, g =
+        i // 256), so the fixture holds exactly ``colors`` unique colors
+        even above 256.
+        """
+        arr = np.zeros((colors, width, 4), dtype=np.uint8)
+        for i in range(colors):
+            arr[i, :, :] = (
+                i % 256,
+                (i // 256) * 255,
+                (i * 7) % 256,
+                128 + (i * 3) % 128,
+            )
+        return Image.fromarray(arr, "RGBA")
+
+    def test_single_color_stays_rgba(self):
+        """1 unique color always takes the plain RGBA path."""
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        out = Image.open(io.BytesIO(encode_png(img)))
+        assert out.mode == "RGBA"
+        assert np.array_equal(np.asarray(out), np.asarray(img))
+
+    def test_three_colors_with_partial_alpha(self):
+        """3 colors incl. partial alpha -> palette path (threshold 2), and
+        the decode round-trips to the exact input RGBA array."""
+        arr = np.zeros((3, 16, 4), dtype=np.uint8)
+        arr[0, :, :] = (255, 0, 0, 255)
+        arr[1, :, :] = (0, 255, 0, 128)  # partial alpha
+        arr[2, :, :] = (0, 0, 255, 64)   # more partial alpha
+        img = Image.fromarray(arr, "RGBA")
+        data = encode_png(img)
+        out = Image.open(io.BytesIO(data))
+        if _PALETTE_MIN_COLORS <= 3:
+            assert out.mode == "P"
+        else:
+            assert out.mode == "RGBA"
+        assert np.array_equal(np.asarray(out.convert("RGBA")), np.asarray(img))
+
+    def test_forty_colors_round_trips(self):
+        """~40 colors -> palette path, bit-exact round trip."""
+        img = self._banded_img(40)
+        data = encode_png(img)
+        out = Image.open(io.BytesIO(data))
+        assert out.mode == "P"  # 40 is well above any plausible threshold
+        assert np.array_equal(np.asarray(out.convert("RGBA")), np.asarray(img))
+
+    def test_300_colors_stays_rgba(self):
+        """> 256 unique colors keep the plain RGBA path."""
+        img = self._banded_img(300)
+        uniq = len(np.unique(np.asarray(img).reshape(-1, 4), axis=0))
+        assert uniq > 256, "fixture must exceed the 256-color palette cap"
+        out = Image.open(io.BytesIO(encode_png(img)))
+        assert out.mode == "RGBA"
+        assert np.array_equal(np.asarray(out), np.asarray(img))
+
+    def test_no_smooth_tile_encodes_as_palette(self, sample_frame_data, monkeypatch):
+        """A no-smooth radar tile (few unique colors) must decode as mode P
+        and match the lossless-WebP render pixel-for-pixel."""
+        # Pin the shipped default (quality 100 = lossless) so this test does
+        # not depend on ambient LIBREWXR_WEBP_QUALITY / .env values.
+        from librewxr.config import settings
+        monkeypatch.setattr(settings, "webp_quality", 100)
+        regions = {"USCOMP": sample_frame_data}
+        geom = compute_tile_geometry(
+            regions, z=5, x=7, y=12, tile_size=256,
+        )
+        assert not geom.is_transparent
+        assert geom.blur_radius == 0.0  # no smoothing -> palette-friendly
+        png = present_tile(geom, color_scheme=2, fmt="png")
+        png_img = Image.open(io.BytesIO(png))
+        assert png_img.mode == "P"
+        webp = present_tile(geom, color_scheme=2, fmt="webp")
+        webp_img = Image.open(io.BytesIO(webp)).convert("RGBA")
+        assert np.array_equal(
+            np.asarray(png_img.convert("RGBA")), np.asarray(webp_img)
+        )
+
+    def test_smooth_tile_stays_rgba(self, sample_frame_data):
+        """Blurred tiles have too many colors for a palette -> plain RGBA."""
+        regions = {"USCOMP": sample_frame_data}
+        geom = compute_tile_geometry(
+            regions, z=5, x=7, y=12, tile_size=256, smooth=True,
+        )
+        png = present_tile(geom, color_scheme=2, fmt="png")
+        assert Image.open(io.BytesIO(png)).mode == "RGBA"
+
+    def test_png_present_is_deterministic(self, sample_frame_data):
+        """Same geometry + params -> identical PNG bytes."""
+        regions = {"USCOMP": sample_frame_data}
+        geom = compute_tile_geometry(
+            regions, z=5, x=7, y=12, tile_size=256,
+        )
+        first = present_tile(geom, color_scheme=2, fmt="png")
+        second = present_tile(geom, color_scheme=2, fmt="png")
+        assert first == second
+
+    def test_transparent_tile_stays_rgba(self):
+        """Fully transparent tile (1 color) stays on the RGBA path."""
+        geom = TileGeometry.transparent(256)
+        png = present_tile(geom, color_scheme=2, fmt="png")
+        assert Image.open(io.BytesIO(png)).mode == "RGBA"
 
 
 class TestBlurRadius:
