@@ -47,6 +47,46 @@ class _StubSatelliteSource:
         return np.full(lat.shape, self.value, dtype=np.uint8)
 
 
+class _StubStormCellStore:
+    """Duck-typed StormCellStore holding one cell centred on a given tile.
+
+    The centroid is derived from ``region_pixel_indices_fractional`` so it
+    is guaranteed to land inside the tile's coverage of the region, for
+    any projection — the same trick ``test_storm_cell_render.py`` uses.
+    """
+
+    def __init__(self, detected_at: int, region: str, z: int, x: int, y: int) -> None:
+        from librewxr.data.regions import REGIONS
+        from librewxr.data.storm_cells import _CELL_DTYPE
+        from librewxr.tiles.coordinates import (
+            region_pixel_indices,
+            region_pixel_indices_fractional,
+        )
+
+        region_def = REGIONS[region]
+        row_f, col_f = region_pixel_indices_fractional(region_def, z, x, y, 256)
+        row_i, _ = region_pixel_indices(region_def, z, x, y, 256)
+        valid = row_i >= 0
+        assert valid.any(), f"tile {z}/{x}/{y} does not cover {region}"
+
+        cell = np.zeros((1,), dtype=_CELL_DTYPE)
+        cell["centroid_row"][0] = float(row_f[valid].mean())
+        cell["centroid_col"][0] = float(col_f[valid].mean())
+        cell["area_km2"][0] = 500.0
+        cell["max_dbz"][0] = 55.0
+        cell["motion_speed_kmh"][0] = np.nan
+
+        self._cells = {region: cell}
+        self._counts = {region: 1}
+        self.detected_at_timestamp = detected_at
+
+    async def get_cells(self) -> dict[str, np.ndarray]:
+        return dict(self._cells)
+
+    async def get_counts(self) -> dict[str, int]:
+        return dict(self._counts)
+
+
 def _make_test_app() -> tuple[FastAPI, FrameStore, TileCache, int, int]:
     """Create a minimal FastAPI app with just the router — no lifespan."""
     store = FrameStore(max_frames=12)
@@ -212,6 +252,43 @@ class TestRadarTileEndpoint:
         assert etag.startswith('"')
         assert etag.endswith('"')
         assert len(etag) == 18
+
+    def test_cells_overlay_renders_on_warm_geometry_cache(self, client, monkeypatch):
+        """?cells= must draw even when the geometry cache already holds the tile.
+
+        Regression: ``need_frame`` only accounted for ``arrow_style``, so a
+        cells-only request that hit the geometry cache left ``frame`` unset.
+        ``present_tile`` then received ``frame_regions=None``, and
+        ``_draw_storm_cells`` fell back to an empty region list — the tile
+        came back byte-identical to the plain one, with no error.  In
+        production the cache is warm essentially always, so ?cells= looked
+        inert while ?arrows= (which forced the fetch) worked.
+        """
+        c, ts, _ = client
+        # 4/3/6 is the z=4 tile that actually covers the fixture's radar
+        # block — a transparent tile short-circuits before any overlay.
+        url = f"/v2/radar/{ts}/256/4/3/6/2/0_0.png"
+
+        # Warm the geometry cache first — that's the condition that used to
+        # silently disable the overlay.
+        plain = c.get(url)
+        assert plain.status_code == 200
+
+        monkeypatch.setattr(
+            routes, "storm_cell_store", _StubStormCellStore(ts, "USCOMP", 4, 3, 6),
+        )
+        with_cells = c.get(f"{url}?cells=1")
+        assert with_cells.status_code == 200
+        assert with_cells.content != plain.content
+
+    def test_cells_overlay_skipped_on_other_frames(self, client, monkeypatch):
+        """Cells only render on the frame detection actually ran on."""
+        c, ts, ts_prev = client
+        monkeypatch.setattr(
+            routes, "storm_cell_store", _StubStormCellStore(ts, "USCOMP", 4, 3, 6),
+        )
+        url = f"/v2/radar/{ts_prev}/256/4/3/6/2/0_0.png"
+        assert c.get(f"{url}?cells=1").content == c.get(url).content
 
 
 class TestCoverageTileEndpoint:
