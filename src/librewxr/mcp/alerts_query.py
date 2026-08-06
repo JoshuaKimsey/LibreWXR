@@ -143,8 +143,10 @@ async def alerts_within_radius(
             )
         )
 
-    # US NWS enrichment: for US-lat-lon points, fetch point-specific NWS
-    # alerts (which may have polygons not present in the global WMO feed).
+    # US NWS enrichment: the store filter requires polygon geometry, but
+    # some NWS alerts (e.g. Tornado Watches) are zone-based with no geometry
+    # anywhere. The live point endpoint resolves point-to-zone server-side,
+    # and is real-time vs the store's 5-min cadence.
     if -130.0 <= lon <= -60.0 and 20.0 <= lat <= 55.0:
         try:
             nws_features = await _fetch_nws_point_alerts(lat, lon)

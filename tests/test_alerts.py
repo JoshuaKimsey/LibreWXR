@@ -425,3 +425,46 @@ class TestAlertsStore:
         a1 = store.alerts
         a2 = store.alerts
         assert a1 is not a2  # Should be copies
+
+
+@pytest.mark.alerts
+class TestNwsPointCacheBucketing:
+    """NWS point-lookup cache buckets keys to 0.1 degrees (~11 km cells).
+
+    Two point queries whose coordinates differ but fall in the same bucket
+    must trigger only ONE upstream NWS fetch; the second is served from the
+    process-local cache.
+    """
+
+    async def test_same_bucket_single_upstream_fetch(self, monkeypatch):
+        upstream_calls: list[str] = []
+
+        class _FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"features": []}
+
+        class _FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url, headers=None):
+                upstream_calls.append(url)
+                return _FakeResponse()
+
+        monkeypatch.setattr(routes.httpx, "AsyncClient", _FakeClient)
+        routes._nws_point_cache.clear()
+        try:
+            await routes._fetch_nws_point_alerts(39.7392, -104.9903)
+            await routes._fetch_nws_point_alerts(39.74, -104.99)
+        finally:
+            routes._nws_point_cache.clear()
+
+        assert len(upstream_calls) == 1

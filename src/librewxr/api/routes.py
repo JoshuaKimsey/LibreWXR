@@ -100,7 +100,10 @@ mcp_mounted: bool = False
 mcp_path: str = "/mcp"
 mcp_tools: list[str] = []
 
-# NWS point-lookup cache: {(lat, lon): (timestamp, list[GeoJSONFeature])}
+# NWS point-lookup cache: {(lat, lon): (timestamp, list[GeoJSONFeature])}.
+# Keys are bucketed to 0.1 degrees (~11 km cells) so nearby US point queries
+# share one upstream fetch — across users and across the 16 multi-mode render
+# workers (each with its own process-local copy of this cache).
 _nws_point_cache: dict[tuple[float, float], tuple[float, list[GeoJSONFeature]]] = {}
 _NWS_CACHE_TTL = 300  # 5 minutes
 _NWS_API_URL = "https://api.weather.gov/alerts/active"
@@ -827,11 +830,17 @@ def _alert_not_expired(alert, now_utc: int) -> bool:
 async def _fetch_nws_point_alerts(lat: float, lon: float) -> list[GeoJSONFeature]:
     """Fetch NWS alerts for a specific lat/lon via the NWS point endpoint.
 
-    The NWS API returns GeoJSON with polygon geometry for all alert types,
-    including Tornado Watches which lack polygons in the global feed.
-    Results are cached for 5 minutes.
+    The store is fed directly by the NWS full feed every 5 min, but the
+    polygon-requiring store filter cannot see zone-based alerts that carry
+    no geometry anywhere (e.g. Tornado Watches, Special Weather
+    Statements).  The point endpoint resolves point-to-zone server-side,
+    so it returns those alerts for the point.  Results are cached for 5
+    minutes under a 0.1-degree-bucketed key.
     """
-    cache_key = (round(lat, 4), round(lon, 4))
+    # Deliberate precision trade: 0.1-deg bucketing (~11 km cells) means
+    # results may differ from the exact point by at most a cell edge
+    # (~8 km) — far inside the default 25 km query radius.
+    cache_key = (round(lat, 1), round(lon, 1))
     now = time.time()
     cached = _nws_point_cache.get(cache_key)
     if cached is not None:
