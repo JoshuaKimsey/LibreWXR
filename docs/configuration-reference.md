@@ -1186,9 +1186,7 @@ Number of hourly satellite frames retained per channel. GMGSI publishes one fram
 
 ## Weather Alerts (WMO CAP)
 
-Fetches global weather alerts from severeweather.wmo.int. MeteoAlarm geocodes are downloaded on first startup and cached locally. Updates are clock-aligned (:00, :05, :10, …).
-
-For US locations, point lookups also query the NWS point endpoint at api.weather.gov to surface non-polygon alerts (e.g. Tornado Watches) that lack geometry in the global feed.
+Fetches global weather alerts from severeweather.wmo.int. MeteoAlarm geocodes are downloaded on first startup and cached locally. Updates are clock-aligned (:00, :05, :10, …). US alerts come directly from the NWS API; zone-based alerts (e.g. Tornado Watches) are resolved to zone polygons at ingest, with zone geometries disk-cached for 30 days — no per-request NWS queries are needed.
 
 ### `LIBREWXR_ALERTS_ENABLED`
 

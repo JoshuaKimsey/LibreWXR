@@ -163,6 +163,10 @@ async def get_active_alerts(
     degraded-empty contract: when alerts are disabled or the store is
     unavailable, returns an empty ``FeatureCollection`` without raising.
 
+    Alerts come from the merged WMO + NWS store; US zone-based alerts
+    (e.g. Tornado Watches) are resolved to zone polygons at ingest, so
+    no query-time NWS calls are made.
+
     Parameters
     ----------
     alerts_store : AlertsStore | None

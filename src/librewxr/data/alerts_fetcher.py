@@ -13,6 +13,7 @@ from typing import Optional
 import httpx
 from lxml import etree
 from shapely.geometry import Polygon, shape
+from shapely.ops import unary_union
 
 from librewxr.config import settings
 from librewxr.data.alerts_store import AlertEntry, AlertsStore
@@ -28,6 +29,21 @@ _WMO_ALL_URL = f"{_WMO_BASE}/v2/json/wmo_all.json"
 # NWS API (direct GeoJSON, avoids WMO lag for US alerts)
 _NWS_API_URL = "https://api.weather.gov/alerts/active"
 _NWS_USER_AGENT = "(LibreWXR, librewxr@localhost)"
+
+# Zone-based NWS alerts (Tornado Watches, Special Weather Statements, ...)
+# ship with ``geometry: null`` — their polygons come from affected zones.
+# Zone boundaries are near-static (county/forecast-zone geometry changes
+# rarely), so resolved zone polygons are disk-cached for 30 days.  This
+# replaces the old per-request ``?point=`` enrichment: no query path ever
+# touches api.weather.gov at request time anymore.
+_ZONE_CACHE_TTL = 30 * 24 * 60 * 60  # 30 days
+
+# UGC codes encode the zone type in the 3rd character: Z = forecast zone,
+# C = county.  Only these two map to api.weather.gov zone URLs.
+_UGC_ZONE_URL_PREFIXES = {
+    "Z": "https://api.weather.gov/zones/forecast/",
+    "C": "https://api.weather.gov/zones/county/",
+}
 
 # Excluded sources: known bad feeds, data quality issues, or sources handled
 # directly via a separate pipeline (e.g., NWS API for US alerts).
@@ -297,6 +313,98 @@ def _parse_cap_time(value: str) -> int | None:
 
 
 # ---------------------------------------------------------------------------
+# NWS zone geometry helpers
+# ---------------------------------------------------------------------------
+
+def _nws_zone_urls(props: dict) -> list[str]:
+    """Resolve an NWS feature's zone references to api.weather.gov URLs.
+
+    Prefers ``properties.affectedZones`` (full URLs).  Falls back to
+    ``properties.geocode.UGC`` codes, mapping the 3rd character to the
+    forecast (Z) or county (C) zone endpoint; anything else is skipped.
+    """
+    affected = props.get("affectedZones")
+    if isinstance(affected, list):
+        urls = [u for u in affected if isinstance(u, str) and u.strip()]
+        if urls:
+            return urls
+
+    geocode = props.get("geocode")
+    ugc = geocode.get("UGC") if isinstance(geocode, dict) else None
+    if not isinstance(ugc, list):
+        return []
+    urls: list[str] = []
+    for code in ugc:
+        code = str(code).strip().upper()
+        prefix = _UGC_ZONE_URL_PREFIXES.get(code[2:3] if len(code) >= 3 else "")
+        if prefix:
+            urls.append(f"{prefix}{code}")
+    return urls
+
+
+def _zone_id_from_url(url: str) -> str:
+    """Zone id used for disk-cache naming: the last path segment (e.g. COZ041)."""
+    return url.rstrip("/").rsplit("/", 1)[-1]
+
+
+def _read_zone_cache(cache_path: Path) -> Optional[Polygon]:
+    """Read a cached zone polygon; None when missing, stale, or corrupt.
+
+    Corrupt/unparseable cache files are treated as a miss so a bad write
+    can never wedge the ingest — the zone is simply refetched.
+    """
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if time.time() - float(data["fetched_at"]) > _ZONE_CACHE_TTL:
+            return None
+        geom = data.get("geometry")
+        if geom is None:
+            return None
+        polygon = shape(geom)
+        if polygon.is_empty:
+            return None
+        return polygon
+    except Exception:
+        return None
+
+
+def _write_zone_cache(cache_path: Path, polygon: Polygon) -> None:
+    """Write a resolved zone polygon to the disk cache (atomic tmp + replace)."""
+    tmp_path = cache_path.with_suffix(".json.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {"fetched_at": int(time.time()), "geometry": polygon.__geo_interface__},
+            f,
+        )
+    os.replace(tmp_path, cache_path)
+
+
+def _alert_entry_from_nws(
+    feature: dict, props: dict, polygon: Optional[Polygon]
+) -> AlertEntry:
+    """Build an AlertEntry from a parsed NWS feature (shared by both paths)."""
+    # Use headline if present, otherwise event, otherwise description
+    headline = props.get("headline", "") or ""
+    event = props.get("event", "") or ""
+    description = props.get("description", "") or ""
+    event_text = headline or event or ""
+    description_text = description or headline or ""
+
+    return AlertEntry(
+        source_id="nws-api",
+        event=event_text,
+        description=description_text,
+        severity=props.get("severity", "Unknown"),
+        effective=props.get("effective", ""),
+        expires=props.get("expires", ""),
+        area_desc=props.get("areaDesc", ""),
+        url=props.get("id", "") or feature.get("id", ""),
+        polygon=polygon,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main fetcher class
 # ---------------------------------------------------------------------------
 
@@ -373,11 +481,87 @@ class WMOAlertsFetcher:
         with open(dest, "wb") as f:
             f.write(resp.content)
 
+    def _alerts_cache_base(self) -> Path:
+        """Cache base shared with ``_ensure_meteoalarm_data`` (same fallback).
+
+        Multi mode: the pipeline process owns the fetcher, so this disk
+        cache has exactly one writer.
+        """
+        if self._cache_dir is not None:
+            base = self._cache_dir / "alerts"
+        else:
+            import tempfile
+            base = Path(tempfile.gettempdir()) / "librewxr_alerts"
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+
+    async def _fetch_zone_polygons(self, zone_urls: set[str]) -> dict[str, Polygon]:
+        """Resolve NWS zone URLs to polygons, disk-cache-first.
+
+        Zone polygons are near-static, so each zone's geometry is cached
+        under ``{alerts_cache_base}/zones/{zone_id}.json`` for 30 days and
+        refetched only when missing or stale.  Fail-soft: a zone that
+        errors, non-200s, or carries null/unparseable geometry is skipped —
+        alerts keep whatever other zones resolved, or stay polygon-less
+        exactly like today.
+        """
+        zones_dir = self._alerts_cache_base() / "zones"
+        zones_dir.mkdir(parents=True, exist_ok=True)
+        sem = asyncio.Semaphore(self._concurrency)
+        polygons: dict[str, Polygon] = {}
+
+        async def load_zone(url: str) -> None:
+            zone_id = _zone_id_from_url(url)
+            cache_path = zones_dir / f"{zone_id}.json"
+            polygon = _read_zone_cache(cache_path)
+            if polygon is not None:
+                polygons[url] = polygon
+                return
+            async with sem:
+                client = await self._get_client()
+                try:
+                    resp = await client.get(
+                        url,
+                        headers={"User-Agent": _NWS_USER_AGENT},
+                        timeout=self._timeout,
+                    )
+                except Exception as exc:
+                    logger.debug("NWS zone fetch failed for %s: %s", zone_id, exc)
+                    return
+                if resp.status_code != 200:
+                    logger.warning("NWS zone %s returned %d", zone_id, resp.status_code)
+                    return
+                try:
+                    geom = resp.json().get("geometry")
+                    if geom is None:
+                        logger.warning("NWS zone %s has null geometry", zone_id)
+                        return
+                    polygon = shape(geom)
+                    if polygon.is_empty or polygon.geom_type not in ("Polygon", "MultiPolygon"):
+                        logger.warning("NWS zone %s has unusable geometry", zone_id)
+                        return
+                except Exception as exc:
+                    logger.warning("Failed to parse NWS zone %s geometry: %s", zone_id, exc)
+                    return
+                _write_zone_cache(cache_path, polygon)
+                polygons[url] = polygon
+
+        await asyncio.gather(*(load_zone(url) for url in zone_urls))
+        return polygons
+
     async def _fetch_nws_alerts(self) -> list[AlertEntry]:
         """Fetch active US alerts directly from the NWS API.
 
         The NWS API returns native GeoJSON FeatureCollection with polygons
         already in [lon, lat] order, bypassing the WMO feed lag.
+
+        Zone-based alerts (Tornado Watches, Special Weather Statements, ...)
+        ship with ``geometry: null``; their affected zones are resolved to a
+        union polygon at ingest so they behave like polygon alerts in every
+        query path.  Zone polygons are near-static, so they are disk-cached
+        for 30 days — and because this runs in the periodic fetcher, no API
+        request ever touches NWS (this replaces the old per-request
+        ``?point=`` enrichment).
         """
         client = await self._get_client()
         try:
@@ -395,6 +579,11 @@ class WMOAlertsFetcher:
             return []
 
         entries: list[AlertEntry] = []
+        # (feature, props, zone_urls) for geometry-less alerts awaiting zone
+        # resolution — collected first so zone fetches can be deduped across
+        # alerts (watches routinely share zones).
+        pending_zones: list[tuple[dict, dict, tuple[str, ...]]] = []
+
         for feature in data.get("features", []):
             props = feature.get("properties", {})
             geom = feature.get("geometry")
@@ -413,30 +602,32 @@ class WMOAlertsFetcher:
                 except Exception:
                     pass
 
-            # Use headline if present, otherwise event, otherwise description
-            headline = props.get("headline", "") or ""
-            event = props.get("event", "") or ""
-            description = props.get("description", "") or ""
-            event_text = headline or event or ""
-            description_text = description or headline or ""
+            zone_urls = _nws_zone_urls(props)
+            if polygon is None and zone_urls:
+                # Zone-based alert: resolve after the loop, once the unique
+                # zone set is known (dedup across alerts sharing zones).
+                pending_zones.append((feature, props, tuple(zone_urls)))
+                continue
 
-            # Effective/expires
-            effective = props.get("effective", "")
-            expires = props.get("expires", "")
+            entries.append(_alert_entry_from_nws(feature, props, polygon))
 
-            entries.append(
-                AlertEntry(
-                    source_id="nws-api",
-                    event=event_text,
-                    description=description_text,
-                    severity=props.get("severity", "Unknown"),
-                    effective=effective,
-                    expires=expires,
-                    area_desc=props.get("areaDesc", ""),
-                    url=props.get("id", "") or feature.get("id", ""),
-                    polygon=polygon,
-                )
-            )
+        if pending_zones:
+            # Unique zone set first — each zone is fetched (or cache-loaded)
+            # at most once per cycle even when many alerts share it.
+            unique_urls = {u for _, _, urls in pending_zones for u in urls}
+            polygons_by_url = await self._fetch_zone_polygons(unique_urls)
+            for feature, props, urls in pending_zones:
+                parts = [polygons_by_url[u] for u in urls if u in polygons_by_url]
+                polygon = None
+                if parts:
+                    union = unary_union(parts)
+                    if not union.is_valid:
+                        # Adjacent zones can share boundary points; buffer(0)
+                        # repairs the topology without moving the boundary.
+                        union = union.buffer(0)
+                    if not union.is_empty and union.geom_type in ("Polygon", "MultiPolygon"):
+                        polygon = union
+                entries.append(_alert_entry_from_nws(feature, props, polygon))
 
         logger.info("NWS API: %d active alerts", len(entries))
         return entries

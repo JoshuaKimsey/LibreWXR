@@ -2,7 +2,6 @@
 # Copyright (C) 2026 Joshua Kimsey
 import asyncio
 import functools
-import httpx
 import json
 import logging
 import time
@@ -99,14 +98,6 @@ alerts_enabled: bool = False
 mcp_mounted: bool = False
 mcp_path: str = "/mcp"
 mcp_tools: list[str] = []
-
-# NWS point-lookup cache: {(lat, lon): (timestamp, list[GeoJSONFeature])}.
-# Keys are bucketed to 0.1 degrees (~11 km cells) so nearby US point queries
-# share one upstream fetch — across users and across the 16 multi-mode render
-# workers (each with its own process-local copy of this cache).
-_nws_point_cache: dict[tuple[float, float], tuple[float, list[GeoJSONFeature]]] = {}
-_NWS_CACHE_TTL = 300  # 5 minutes
-_NWS_API_URL = "https://api.weather.gov/alerts/active"
 
 
 def _nwp_grid_health_blocks() -> dict[str, dict]:
@@ -827,80 +818,6 @@ def _alert_not_expired(alert, now_utc: int) -> bool:
     return expires is None or expires > now_utc
 
 
-async def _fetch_nws_point_alerts(lat: float, lon: float) -> list[GeoJSONFeature]:
-    """Fetch NWS alerts for a specific lat/lon via the NWS point endpoint.
-
-    The store is fed directly by the NWS full feed every 5 min, but the
-    polygon-requiring store filter cannot see zone-based alerts that carry
-    no geometry anywhere (e.g. Tornado Watches, Special Weather
-    Statements).  The point endpoint resolves point-to-zone server-side,
-    so it returns those alerts for the point.  Results are cached for 5
-    minutes under a 0.1-degree-bucketed key.
-    """
-    # Deliberate precision trade: 0.1-deg bucketing (~11 km cells) means
-    # results may differ from the exact point by at most a cell edge
-    # (~8 km) — far inside the default 25 km query radius.
-    cache_key = (round(lat, 1), round(lon, 1))
-    now = time.time()
-    cached = _nws_point_cache.get(cache_key)
-    if cached is not None:
-        ts, features = cached
-        if now - ts < _NWS_CACHE_TTL:
-            return features
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(
-                f"{_NWS_API_URL}?point={lat},{lon}",
-                headers={"User-Agent": "(LibreWXR, librewxr@localhost)"},
-            )
-        if resp.status_code != 200:
-            logger.debug("NWS point API returned %d for %s,%s", resp.status_code, lat, lon)
-            return []
-        data = resp.json()
-    except Exception as exc:
-        logger.debug("NWS point API error for %s,%s: %s", lat, lon, exc)
-        return []
-
-    features: list[GeoJSONFeature] = []
-    for feature in data.get("features", []):
-        props = feature.get("properties", {})
-        geom = feature.get("geometry")
-
-        # Skip cancelled/test
-        status = props.get("status", "").lower()
-        msg_type = props.get("messageType", "").lower()
-        if status == "cancel" or msg_type == "test":
-            continue
-
-        # Use headline > event > description for title
-        headline = props.get("headline", "") or ""
-        event = props.get("event", "") or ""
-        description = props.get("description", "") or ""
-        title = headline or event or ""
-        desc = description or headline or ""
-
-        features.append(
-            GeoJSONFeature(
-                type="Feature",
-                properties=AlertProperties(
-                    title=title,
-                    severity=props.get("severity", "Unknown"),
-                    time=_parse_cap_time(props.get("effective", "")),
-                    expires=_parse_cap_time(props.get("expires", "")),
-                    description=desc,
-                    regions=[props.get("areaDesc", "")] if props.get("areaDesc") else [],
-                    uri=props.get("id", "") or feature.get("id", ""),
-                ),
-                geometry=geom,
-            )
-        )
-
-    _nws_point_cache[cache_key] = (now, features)
-    logger.debug("NWS point API: %d alerts cached for %s,%s", len(features), lat, lon)
-    return features
-
-
 @router.get("/v2/alerts", response_model=AlertsResponse)
 async def get_alerts(
     lat: float | None = Query(None, ge=-90, le=90, description="Latitude for point lookup"),
@@ -911,25 +828,21 @@ async def get_alerts(
     """Weather alerts as GeoJSON FeatureCollection.
 
     - No params: all active alerts worldwide.
-    - lat+lon: alerts containing that point.  For US locations, also queries
-      the NWS point endpoint to include alerts (e.g. Tornado Watches) that
-      lack polygon geometry in the global feed.
+    - lat+lon: alerts containing that point.  Zone-based alerts (e.g.
+      Tornado Watches) are resolved to zone polygons at ingest, so every
+      alert is visible in point lookups without any per-request NWS query.
     - bbox: alerts intersecting the bounding box (polygon-only).
     """
     if not alerts_enabled or alerts_store is None:
         raise HTTPException(status_code=503, detail="Alerts not available")
 
     alerts = alerts_store.alerts
-    nws_point_features: list[GeoJSONFeature] = []
 
     # Filter by point
     if lat is not None and lon is not None:
         from shapely.geometry import Point
         point = Point(lon, lat)
         alerts = [a for a in alerts if a.polygon is not None and a.polygon.intersects(point)]
-        # For US points, also fetch NWS point-specific alerts (with geometry)
-        if (-130 <= lon <= -60) and (20 <= lat <= 55):
-            nws_point_features = await _fetch_nws_point_alerts(lat, lon)
     # Filter by bbox
     elif bbox is not None:
         parts = bbox.split(",")
@@ -980,12 +893,5 @@ async def get_alerts(
                 geometry=mapping(geom) if geom is not None else None,
             )
         )
-
-    # Merge NWS point features, deduplicating by URI
-    for feat in nws_point_features:
-        uri = feat.properties.uri
-        if uri and uri not in seen_uris:
-            seen_uris.add(uri)
-            features.append(feat)
 
     return AlertsResponse(type="FeatureCollection", features=features)

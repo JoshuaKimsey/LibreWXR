@@ -1,23 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 
-"""MCP tool: query active weather alerts by radius/severity, enriched with NWS point alerts for US locations.
+"""MCP tool: query active weather alerts by radius/severity from the merged
+WMO + NWS store.  US zone-based alerts (e.g. Tornado Watches) are resolved
+to zone polygons at ingest, so no query-time NWS calls exist.
 
 Uses an equirectangular cos(lat) approximation for the km-plane reprojection:
     x_km = (px - lon) * 111.0 * cos(radians(lat))
     y_km = (py - lat) * 111.0
 """
 
-import logging
 import math
 import time
 
 from shapely.geometry import Point, Polygon, MultiPolygon, mapping
 
 from librewxr.api.models import AlertsResponse, GeoJSONFeature, AlertProperties
-from librewxr.api.routes import _alert_not_expired, _fetch_nws_point_alerts, _parse_cap_time
-
-logger = logging.getLogger(__name__)
+from librewxr.api.routes import _alert_not_expired, _parse_cap_time
 
 
 def _reproject_to_km_plane(
@@ -53,7 +52,7 @@ async def alerts_within_radius(
     radius_km: float = 25.0,
     severity: str | None = None,
 ) -> AlertsResponse:
-    """Filter alerts by radius from (lat, lon), optional severity, and enrich with NWS point alerts for US locations.
+    """Filter alerts by radius from (lat, lon) and optional severity.
 
     Parameters
     ----------
@@ -72,7 +71,7 @@ async def alerts_within_radius(
     -------
     AlertsResponse
         A GeoJSON FeatureCollection. Returns an empty collection on degraded input
-        (no store, no alerts in radius, NWS API failure). Never raises.
+        (no store, no alerts in radius). Never raises.
     """
     # Degraded empty: no alerts store available
     if alerts_store is None:
@@ -142,24 +141,5 @@ async def alerts_within_radius(
                 geometry=mapping(alert.polygon) if alert.polygon is not None else None,
             )
         )
-
-    # US NWS enrichment: the store filter requires polygon geometry, but
-    # some NWS alerts (e.g. Tornado Watches) are zone-based with no geometry
-    # anywhere. The live point endpoint resolves point-to-zone server-side,
-    # and is real-time vs the store's 5-min cadence.
-    if -130.0 <= lon <= -60.0 and 20.0 <= lat <= 55.0:
-        try:
-            nws_features = await _fetch_nws_point_alerts(lat, lon)
-            for nws_feature in nws_features:
-                nws_uri = nws_feature.properties.uri
-                if nws_uri and nws_uri not in seen_uris:
-                    seen_uris.add(nws_uri)
-                    features.append(nws_feature)
-        except Exception:
-            logger.warning(
-                "NWS point alerts fetch failed for %s,%s; continuing with WMO alerts only",
-                lat,
-                lon,
-            )
 
     return AlertsResponse(type="FeatureCollection", features=features)

@@ -154,7 +154,7 @@ Returns weather alerts (WMO CAP format) active within a given radius of a point.
 
 **Behaviour:**
 
-- For US locations, the lookup also queries the US NWS point endpoint at `api.weather.gov` to surface non-polygon alerts (e.g. Tornado Watches) that lack geometry in the global WMO CAP feed. These appear in the FeatureCollection with their NWS-sourced properties.
+- US zone-based alerts (e.g. Tornado Watches) are resolved to zone polygons at ingest, so the lookup never queries NWS at request time. These appear in the FeatureCollection with their NWS-sourced properties.
 - Returns an **empty FeatureCollection** (`{"type": "FeatureCollection", "features": []}`) when alerts are disabled by configuration (`LIBREWXR_ALERTS_ENABLED=false`) or when no alerts match the query.
 - Never raises — invalid coordinates, network errors on the upstream API, or missing alert data all result in an empty FeatureCollection.
 

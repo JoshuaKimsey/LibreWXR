@@ -70,10 +70,11 @@ def _register_tools(mcp: FastMCP) -> None:
     ) -> dict:
         """Get active weather alerts within a radius of a geographic point.
 
-        Returns a GeoJSON FeatureCollection of WMO CAP alerts, enriched
-        with US NWS point alerts for US locations.  Filter by severity.
-        Returns an empty FeatureCollection when alerts are disabled or
-        no alerts match; never raises.
+        Returns a GeoJSON FeatureCollection of alerts from the merged
+        WMO + NWS store; US zone-based alerts (e.g. Tornado Watches) are
+        resolved to zone polygons at ingest.  Filter by severity.  Returns
+        an empty FeatureCollection when alerts are disabled or no alerts
+        match; never raises.
 
         Args:
             lat: Query latitude in degrees (-90 to 90).

@@ -4,6 +4,7 @@
 import json
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -11,7 +12,11 @@ from httpx import ASGITransport, AsyncClient
 from shapely.geometry import Polygon
 
 from librewxr.api import routes
-from librewxr.data.alerts_fetcher import _extract_polygons_from_cap, _parse_cap_time
+from librewxr.data.alerts_fetcher import (
+    WMOAlertsFetcher,
+    _extract_polygons_from_cap,
+    _parse_cap_time,
+)
 from librewxr.data.alerts_store import AlertEntry, AlertsStore
 from librewxr.data.store import FrameStore
 from librewxr.tiles.cache import TileCache
@@ -127,18 +132,9 @@ def test_app(alerts_store):
 
 @pytest.fixture
 async def client(test_app):
-    # Clear NWS point cache and mock the fetcher so tests don't hit real API
-    routes._nws_point_cache.clear()
-    original_fetch = routes._fetch_nws_point_alerts
-
-    async def _mock_fetch(lat, lon):
-        return []
-
-    routes._fetch_nws_point_alerts = _mock_fetch
     transport = ASGITransport(app=test_app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
-    routes._fetch_nws_point_alerts = original_fetch
 
 
 # ---------------------------------------------------------------------------
@@ -427,44 +423,194 @@ class TestAlertsStore:
         assert a1 is not a2  # Should be copies
 
 
+# ---------------------------------------------------------------------------
+# NWS zone resolution (ingest-time)
+# ---------------------------------------------------------------------------
+
+class _FakeNwsResponse:
+    def __init__(self, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _FakeNwsClient:
+    """Records requested URLs and serves canned payloads per URL."""
+
+    def __init__(self, responses):
+        self.responses = responses
+        self.calls: list[str] = []
+
+    async def get(self, url, headers=None, timeout=None):
+        self.calls.append(url)
+        resp = self.responses.get(url)
+        if resp is None:
+            return _FakeNwsResponse(404)
+        return resp
+
+
+def _zone_geojson(bounds):
+    """Axis-aligned zone polygon GeoJSON for a (minx, miny, maxx, maxy) box."""
+    minx, miny, maxx, maxy = bounds
+    return {
+        "type": "Polygon",
+        "coordinates": [[[minx, miny], [maxx, miny], [maxx, maxy], [minx, maxy], [minx, miny]]],
+    }
+
+
+def _nws_feature(zone_urls, alert_id="urn:oid:test"):
+    """Geometry-less NWS feature carrying ``affectedZones``."""
+    return {
+        "type": "Feature",
+        "id": f"https://api.weather.gov/alerts/{alert_id}",
+        "geometry": None,
+        "properties": {
+            "status": "Actual",
+            "messageType": "Alert",
+            "affectedZones": list(zone_urls),
+            "headline": "Tornado Watch issued",
+            "event": "Tornado Watch",
+            "description": "TORNADO WATCH ...",
+            "severity": "Extreme",
+            "effective": "2026-05-07T00:15:00-05:00",
+            "expires": "2099-05-07T06:00:00-05:00",
+            "areaDesc": "Test County",
+            "id": f"https://api.weather.gov/alerts/{alert_id}",
+        },
+    }
+
+
 @pytest.mark.alerts
-class TestNwsPointCacheBucketing:
-    """NWS point-lookup cache buckets keys to 0.1 degrees (~11 km cells).
+class TestNwsZoneResolution:
+    """Geometry-less NWS alerts get union polygons resolved from zones at ingest."""
 
-    Two point queries whose coordinates differ but fall in the same bucket
-    must trigger only ONE upstream NWS fetch; the second is served from the
-    process-local cache.
-    """
+    async def _fetch(self, tmp_path, client):
+        fetcher = WMOAlertsFetcher(store=AlertsStore(), cache_dir=str(tmp_path))
 
-    async def test_same_bucket_single_upstream_fetch(self, monkeypatch):
-        upstream_calls: list[str] = []
+        async def _get_client():
+            return client
 
-        class _FakeResponse:
-            status_code = 200
+        fetcher._get_client = _get_client  # type: ignore[method-assign]
+        return await fetcher._fetch_nws_alerts()
 
-            def json(self):
-                return {"features": []}
+    async def test_geometryless_alert_gets_zone_union(self, tmp_path):
+        zone_a = "https://api.weather.gov/zones/forecast/COZ041"
+        zone_b = "https://api.weather.gov/zones/forecast/COZ042"
+        alerts_url = "https://api.weather.gov/alerts/active"
+        client = _FakeNwsClient({
+            alerts_url: _FakeNwsResponse(200, {
+                "features": [_nws_feature([zone_a, zone_b])],
+            }),
+            zone_a: _FakeNwsResponse(200, {"geometry": _zone_geojson((-105.5, 39.0, -105.0, 39.5))}),
+            zone_b: _FakeNwsResponse(200, {"geometry": _zone_geojson((-104.5, 39.0, -104.0, 39.5))}),
+        })
 
-        class _FakeClient:
-            def __init__(self, *args, **kwargs):
-                pass
+        entries = await self._fetch(tmp_path, client)
 
-            async def __aenter__(self):
-                return self
+        assert len(entries) == 1
+        assert entries[0].event == "Tornado Watch issued"
+        assert entries[0].polygon is not None
+        # Union of two disjoint zone boxes -> MultiPolygon covering both
+        assert entries[0].polygon.geom_type == "MultiPolygon"
+        assert entries[0].polygon.area == pytest.approx(0.5)
+        # Zone geometries written to the disk cache
+        zones_dir = Path(tmp_path) / "alerts" / "zones"
+        assert (zones_dir / "COZ041.json").exists()
+        assert (zones_dir / "COZ042.json").exists()
 
-            async def __aexit__(self, *exc):
-                return False
+    async def test_second_cycle_reuses_zone_disk_cache(self, tmp_path):
+        zone_a = "https://api.weather.gov/zones/forecast/COZ041"
+        alerts_url = "https://api.weather.gov/alerts/active"
+        client = _FakeNwsClient({
+            alerts_url: _FakeNwsResponse(200, {
+                "features": [_nws_feature([zone_a])],
+            }),
+            zone_a: _FakeNwsResponse(200, {"geometry": _zone_geojson((-105.5, 39.0, -105.0, 39.5))}),
+        })
 
-            async def get(self, url, headers=None):
-                upstream_calls.append(url)
-                return _FakeResponse()
+        await self._fetch(tmp_path, client)
+        assert [u for u in client.calls if u != alerts_url] == [zone_a]
 
-        monkeypatch.setattr(routes.httpx, "AsyncClient", _FakeClient)
-        routes._nws_point_cache.clear()
-        try:
-            await routes._fetch_nws_point_alerts(39.7392, -104.9903)
-            await routes._fetch_nws_point_alerts(39.74, -104.99)
-        finally:
-            routes._nws_point_cache.clear()
+        client.calls.clear()
+        await self._fetch(tmp_path, client)
+        # Second cycle: alerts feed refetched, zone geometry from disk cache
+        assert client.calls == [alerts_url]
 
-        assert len(upstream_calls) == 1
+    async def test_zone_fetch_error_keeps_alert_polygon_none(self, tmp_path):
+        zone_a = "https://api.weather.gov/zones/forecast/COZ041"
+        alerts_url = "https://api.weather.gov/alerts/active"
+        client = _FakeNwsClient({
+            alerts_url: _FakeNwsResponse(200, {
+                "features": [_nws_feature([zone_a])],
+            }),
+            zone_a: _FakeNwsResponse(500),
+        })
+
+        entries = await self._fetch(tmp_path, client)
+
+        # Fail-soft: alert kept with polygon None, no raise
+        assert len(entries) == 1
+        assert entries[0].polygon is None
+
+    async def test_shared_zone_fetched_once_across_alerts(self, tmp_path):
+        zone_a = "https://api.weather.gov/zones/forecast/COZ041"
+        zone_b = "https://api.weather.gov/zones/forecast/COZ042"
+        alerts_url = "https://api.weather.gov/alerts/active"
+        client = _FakeNwsClient({
+            alerts_url: _FakeNwsResponse(200, {
+                "features": [
+                    _nws_feature([zone_a, zone_b], alert_id="urn:oid:watch1"),
+                    _nws_feature([zone_a], alert_id="urn:oid:warning1"),
+                ],
+            }),
+            zone_a: _FakeNwsResponse(200, {"geometry": _zone_geojson((-105.5, 39.0, -105.0, 39.5))}),
+            zone_b: _FakeNwsResponse(200, {"geometry": _zone_geojson((-104.5, 39.0, -104.0, 39.5))}),
+        })
+
+        entries = await self._fetch(tmp_path, client)
+
+        assert len(entries) == 2
+        zone_calls = [u for u in client.calls if u != alerts_url]
+        # Two unique zones across the alerts -> each fetched exactly once
+        assert len(zone_calls) == 2
+        assert set(zone_calls) == {zone_a, zone_b}
+        # Both alerts resolved (each references the resolved zone_a)
+        assert entries[0].polygon is not None
+        assert entries[1].polygon is not None
+
+    async def test_geocode_ugc_fallback_resolves_zones(self, tmp_path):
+        alerts_url = "https://api.weather.gov/alerts/active"
+        # No affectedZones: falls back to geocode.UGC codes (Z=forecast, C=county)
+        zone_a = "https://api.weather.gov/zones/forecast/COZ041"
+        zone_c = "https://api.weather.gov/zones/county/COC013"
+        feature = {
+            "type": "Feature",
+            "id": "https://api.weather.gov/alerts/urn:oid:ugc",
+            "geometry": None,
+            "properties": {
+                "status": "Actual",
+                "messageType": "Alert",
+                "geocode": {"SAME": ["008041"], "UGC": ["COZ041", "COC013"]},
+                "headline": "Special Weather Statement",
+                "event": "Special Weather Statement",
+                "severity": "Moderate",
+                "effective": "2026-05-07T00:15:00-05:00",
+                "expires": "2099-05-07T06:00:00-05:00",
+                "areaDesc": "COZ041;COC013",
+                "id": "https://api.weather.gov/alerts/urn:oid:ugc",
+            },
+        }
+        client = _FakeNwsClient({
+            alerts_url: _FakeNwsResponse(200, {"features": [feature]}),
+            zone_a: _FakeNwsResponse(200, {"geometry": _zone_geojson((-105.5, 39.0, -105.0, 39.5))}),
+            zone_c: _FakeNwsResponse(200, {"geometry": _zone_geojson((-104.5, 39.0, -104.0, 39.5))}),
+        })
+
+        entries = await self._fetch(tmp_path, client)
+
+        assert len(entries) == 1
+        assert entries[0].polygon is not None
+        assert entries[0].polygon.area == pytest.approx(0.5)
+        assert set(u for u in client.calls if u != alerts_url) == {zone_a, zone_c}

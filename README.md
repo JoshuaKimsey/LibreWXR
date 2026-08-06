@@ -27,7 +27,7 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Precipitation nowcasting (experimental)** — 60-minute short-range forecast by extrapolating recent radar forward using optical flow, with configurable blend mode: smooth radar-to-model blending (default), pure radar extrapolation (closest to Rain Viewer), or pure NWP forecast. The model side is taken from the active NWP chain — HRRR over CONUS, ICON-EU/DINI over Europe, WRF-SMN over the S. American Cone, JMA MSM over Japan + adjacent East Asia, IFS elsewhere. Beyond 60 minutes, always uses pure model. Quality varies by weather pattern — works best for steady, organized precipitation; less reliable for fast-developing convection
 - **Precipitation motion arrows** — optional Dark Sky-style arrows showing storm movement direction and speed, derived from optical flow. Available for both radar and ECMWF data globally. Supports light and dark styles for different map themes via `?arrows=light` or `?arrows=dark` query parameter
 - **Real satellite imagery (GMGSI composite)** — NOAA's hourly global mosaic (GOES-East + GOES-West + Meteosat-9 + Meteosat-10 + Himawari-9, composited by NESDIS) ingested as longwave IR + visible channels and rendered as a VIS-over-LW composite with a natural day/night terminator crossfade. Day side shows continents and clouds as they appear from space; night side shows cold-cloud IR on a transparent basemap. Up to 12 hours of hourly animation with persistent disk caching. Populates the Rain Viewer-compatible `satellite.infrared` endpoint
-- **Weather alerts (WMO CAP)** — global weather alerts polled every 5 minutes from severeweather.wmo.int, with MeteoAlarm geocodes for European polygon resolution. Surfaced through a Rain Viewer-extension alerts API (`/v2/alerts/...`). Configurable via `LIBREWXR_ALERTS_ENABLED`
+- **Weather alerts (WMO CAP + NWS)** — global weather alerts polled every 5 minutes from severeweather.wmo.int, with MeteoAlarm geocodes for European polygon resolution. US alerts come directly from the NWS API, with zone-based alerts (e.g. Tornado Watches) resolved to zone polygons at ingest. Surfaced through a Rain Viewer-extension alerts API (`/v2/alerts/...`). Configurable via `LIBREWXR_ALERTS_ENABLED`
 - **Snow detection** — per-pixel snow/rain classification. Regional NWP sources classify natively from their own 2-metre temperature field (HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, ICON-EU, JMA MSM); ECMWF IFS snowfall ratio fills everywhere else
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
 - **Tile cache warming (single mode)** — background pre-rendering for smooth animation playback
@@ -386,9 +386,9 @@ GET /v2/alerts?bbox=west,south,east,north
 
 Returns active weather alerts as a GeoJSON `FeatureCollection`, with
 each feature carrying the alert polygon plus CAP metadata (severity,
-urgency, certainty, event, headline, sender, expiry). Fed by WMO CAP
-(global) and the NWS point endpoint (US locations, used to surface
-non-polygon alerts like Tornado Watches).
+urgency, certainty, event, headline, sender, expiry). Fed by the WMO
+CAP feed (global) and the NWS API (US, direct); US zone-based alerts
+like Tornado Watches are resolved to zone polygons at ingest.
 
 | Query parameter | Description |
 |---|---|
@@ -412,7 +412,7 @@ Returns server status, frame count, cache usage, NWP chain state, satellite cach
 LibreWXR exposes an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) endpoint for AI agents and automation pipelines. Three tools are available:
 
 - `get_precip_nowcast(lat, lon, minutes=60)` — returns future precipitation frames (up to 60 minutes ahead) with dBZ, rain rate (mm/h), data source (`radar` | `nwp` | `none`), blend weight, and coverage (`in_range` | `out_of_range`).
-- `get_active_alerts(lat, lon, radius_km=25, severity=None)` — returns a GeoJSON FeatureCollection of WMO CAP alerts within `radius_km`, enriched with US NWS point alerts for US locations. Returns an empty collection when alerts are disabled or none match; never raises.
+- `get_active_alerts(lat, lon, radius_km=25, severity=None)` — returns a GeoJSON FeatureCollection of alerts within `radius_km` from the merged WMO + NWS store; US zone-based alerts (e.g. Tornado Watches) are resolved to zone polygons at ingest. Returns an empty collection when alerts are disabled or none match; never raises.
 - `get_storm_cells(lat, lon, radius_km=100)` — returns a list of detected storm cells within `radius_km` of the point. Each cell dict: `{lat, lon, area_km2, max_dbz, motion_speed_kmh, motion_heading_deg, region}`. Returns an empty list when detection is disabled or no cells are within range; never raises.
 
 The endpoint is mounted at `LIBREWXR_MCP_PATH` (default `/mcp/`) when the `[mcp]` extra is installed and `LIBREWXR_MCP_ENABLED=true` (the default). Failures (missing extra, build error) are silently skipped so the REST API still boots; the `/health` endpoint surfaces the actual mount state as `mcp: {enabled, mounted, path, tools}`.

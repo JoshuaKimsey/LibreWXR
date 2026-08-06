@@ -212,14 +212,14 @@ GET /v2/alerts?lat={lat}&lon={lon}
 GET /v2/alerts?bbox=west,south,east,north
 ```
 
-Returns active weather alerts as a GeoJSON `FeatureCollection`. Each feature carries the alert polygon plus CAP metadata in its `properties`. The data source is the WMO CAP feed at severeweather.wmo.int (global) plus the NWS point endpoint for US locations (which surfaces alerts like Tornado Watches that lack polygon geometry in the global feed).
+Returns active weather alerts as a GeoJSON `FeatureCollection`. Each feature carries the alert polygon plus CAP metadata in its `properties`. The data source is the WMO CAP feed at severeweather.wmo.int (global) plus the NWS API (US, direct); US zone-based alerts like Tornado Watches are resolved to zone polygons at ingest, so every alert carries a geometry.
 
 **Query parameters:**
 
 | Parameter | Description |
 |-----------|-------------|
 | *(none)* | All active alerts worldwide |
-| `lat`, `lon` | Alerts whose polygon contains the point (and, for US points, also queries the NWS point endpoint) |
+| `lat`, `lon` | Alerts whose polygon contains the point (zone-based alerts are resolved to polygons at ingest, so no per-request NWS calls) |
 | `bbox` | `west,south,east,north` — alerts whose polygon intersects the box (polygon-only) |
 | `simplify` | Polygon simplification tolerance in meters (default `1000`, set `0` for full resolution) |
 
@@ -713,7 +713,7 @@ map.on("click", async function (e) {
 });
 ```
 
-For US locations, point lookups also include alerts from the NWS point endpoint that lack polygon geometry in the global CAP feed (e.g., Tornado Watches). Outside the US the response is polygon-only from the WMO feed.
+US zone-based alerts (e.g., Tornado Watches) are resolved to zone polygons at ingest, so point lookups see them like any polygon alert. Outside the US the response is polygon-only from the WMO feed.
 
 **Layer order:** Add alerts *after* radar/satellite so the polygons sit on top. Use a low fill opacity (~0.15) so radar remains visible beneath the alert area.
 

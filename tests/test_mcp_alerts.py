@@ -2,12 +2,12 @@
 # Copyright (C) 2026 Joshua Kimsey
 
 """Tests for MCP alerts query: alerts_within_radius with radius/severity/expiry
-filtering and NWS enrichment."""
+filtering against the merged WMO + NWS store."""
 
 import pytest
 from shapely.geometry import MultiPolygon, Polygon
 
-from librewxr.api.models import AlertProperties, AlertsResponse, GeoJSONFeature
+from librewxr.api.models import AlertsResponse
 from librewxr.data.alerts_store import AlertEntry
 from librewxr.mcp.alerts_query import alerts_within_radius
 
@@ -20,11 +20,6 @@ class _MockAlertsStore:
     """Minimal object satisfying the ``alerts``-property interface."""
     def __init__(self, alerts):
         self.alerts = alerts
-
-
-# Use a non-US query point (lat=0, lon=0) to avoid real NWS API calls in
-# tests that do not explicitly test NWS enrichment.  NWS enrichment only
-# triggers when lat in [20, 55] and lon in [-130, -60].
 _NEAR_POLY = Polygon([
     (-0.1, -0.1), (0.1, -0.1), (0.1, 0.1), (-0.1, 0.1),
     (-0.1, -0.1),
@@ -133,68 +128,22 @@ async def test_alerts_within_radius_no_polygon_skipped():
 
 
 @pytest.mark.mcp
-async def test_alerts_within_radius_nws_enrichment(monkeypatch):
-    """US-point enriches WMO alerts with NWS point-alert features, deduped by URI."""
+async def test_alerts_within_radius_us_point_store_only():
+    """US-point lookups are store-only: zone-based alerts arrive with polygons
+    resolved at ingest, so no query-time NWS calls exist.  Never raises."""
     us_poly = Polygon([
         (-100.1, 39.9), (-99.9, 39.9), (-99.9, 40.1), (-100.1, 40.1),
         (-100.1, 39.9),
     ])
     wmo_alert = _make_alert(
-        "WMO Alert", "Severe", us_poly,
-        url="https://wmo.example.com/wmo",
+        "US Alert", "Severe", us_poly,
+        url="https://wmo.example.com/us",
     )
     store = _MockAlertsStore([wmo_alert])
 
-    nws_feature = GeoJSONFeature(
-        type="Feature",
-        properties=AlertProperties(
-            title="NWS Alert",
-            severity="Severe",
-            time=1_700_000_000,
-            expires=1_700_086_400,
-            description="NWS test",
-            regions=["NWS Area"],
-            uri="https://nws.example.com/nws",
-        ),
-        geometry={"type": "Polygon", "coordinates": [[[-101, 39], [-99, 39], [-99, 41], [-101, 41], [-101, 39]]]},
-    )
-
-    async def mock_nws_fetch(_lat, _lon):
-        return [nws_feature]
-
-    monkeypatch.setattr("librewxr.mcp.alerts_query._fetch_nws_point_alerts", mock_nws_fetch)
-
-    # Use a US point so the enrichment path is exercised
-    result = await alerts_within_radius(store, 40.0, -100.0, 25.0)
-    # One WMO + one NWS = 2 features
-    assert len(result.features) == 2
-    uris = {f.properties.uri for f in result.features}
-    assert "https://wmo.example.com/wmo" in uris
-    assert "https://nws.example.com/nws" in uris
-
-
-@pytest.mark.mcp
-async def test_alerts_within_radius_nws_failure_degrades(monkeypatch):
-    """When the NWS fetch raises, the function degrades gracefully (does not raise)."""
-    us_poly = Polygon([
-        (-100.1, 39.9), (-99.9, 39.9), (-99.9, 40.1), (-100.1, 40.1),
-        (-100.1, 39.9),
-    ])
-    wmo_alert = _make_alert(
-        "WMO Only", "Severe", us_poly,
-        url="https://wmo.example.com/wmo-only",
-    )
-    store = _MockAlertsStore([wmo_alert])
-
-    async def mock_nws_failure(_lat, _lon):
-        raise RuntimeError("NWS API unavailable")
-
-    monkeypatch.setattr("librewxr.mcp.alerts_query._fetch_nws_point_alerts", mock_nws_failure)
-
-    # Use a US point so the enrichment path is exercised and raises
     result = await alerts_within_radius(store, 40.0, -100.0, 25.0)
     assert len(result.features) == 1
-    assert result.features[0].properties.title == "WMO Only"
+    assert result.features[0].properties.title == "US Alert"
 
 
 @pytest.mark.mcp
