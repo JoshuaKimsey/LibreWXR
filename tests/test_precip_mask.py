@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 
 from librewxr.config import settings
-from librewxr.data.regions import REGIONS
+from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.data.precip_mask import PrecipMaskStore
 
 PIXEL = PrecipMaskStore.PIXEL_SIZE
@@ -45,8 +45,8 @@ def _cell_bbox(row: int, col: int) -> tuple:
 
 def _meshgrid_latlon(row: int, col: int) -> tuple[float, float]:
     """The meshgrid lat/lon that ``build`` samples at coarse cell (row, col)."""
-    lat = (NORTH - 0.125) - row * (2 * (NORTH - 0.125)) / (GH - 1)
-    lon = (WEST + 0.125) + col * (2 * (-WEST - 0.125)) / (GW - 1)
+    lat = NORTH - (row + 0.5) * PIXEL
+    lon = WEST + (col + 0.5) * PIXEL
     return lat, lon
 
 
@@ -143,14 +143,79 @@ class _FakeSrc:
 
 
 def _nwp_with_cell(row: int, col: int, value: int = 200):
-    """sample() returning a (360, 720) grid with ``value`` at (row, col)."""
+    """sample() returning a fine (2*GH, 2*GW) grid with ``value`` at the
+    fine cell (2*row, 2*col) inside coarse cell (row, col)."""
 
     def _fn(lat, lon, ts, bilinear=False):
-        arr = np.zeros((GH, GW), dtype=np.uint8)
-        arr[row, col] = value
+        arr = np.zeros((2 * GH, 2 * GW), dtype=np.uint8)
+        arr[2 * row, 2 * col] = value
         return arr
 
     return _fn
+
+
+def _nwp_fine_cell(fine_row: int, fine_col: int, value: int = 200):
+    """sample() returning a fine (2*GH, 2*GW) grid with ``value`` at exactly
+    one fine cell (``fine_row``, ``fine_col``)."""
+
+    def _fn(lat, lon, ts, bilinear=False):
+        arr = np.zeros((2 * GH, 2 * GW), dtype=np.uint8)
+        arr[fine_row, fine_col] = value
+        return arr
+
+    return _fn
+
+
+# ---------------------------------------------------------------------------
+# Meshgrid alignment
+# ---------------------------------------------------------------------------
+
+
+class TestMeshgrid:
+    def test_centers_align_exactly_to_half_cell_offsets(self):
+        store = PrecipMaskStore(cache_dir=None)
+        store._ensure_meshgrid()
+        lat_grid, lon_grid = store._latlon_meshgrid
+        rows = np.arange(GH)
+        cols = np.arange(GW)
+        # Center of coarse cell (r, c): lat 90-(r+0.5)*0.5, lon -180+(c+0.5)*0.5.
+        np.testing.assert_allclose(
+            lat_grid[:, 0], NORTH - (rows + 0.5) * PIXEL, rtol=0, atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            lon_grid[0, :], WEST + (cols + 0.5) * PIXEL, rtol=0, atol=1e-6,
+        )
+        # Exactly 0.5-deg spacing — the old 0.125 offset drifted up to
+        # 0.125 deg from the bucket math in ``has_precip_in_bbox``.
+        np.testing.assert_allclose(
+            np.diff(lat_grid[:, 0]), np.full(GH - 1, -PIXEL), rtol=0, atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            np.diff(lon_grid[0, :]), np.full(GW - 1, PIXEL), rtol=0, atol=1e-6,
+        )
+
+    def test_nwp_meshgrid_is_exactly_2x_fine_per_coarse_axis(self):
+        store = PrecipMaskStore(cache_dir=None)
+        store._ensure_meshgrid()
+        store._ensure_nwp_meshgrid()
+        lat_grid, lon_grid = store._latlon_meshgrid
+        fine_lat, fine_lon = store._nwp_meshgrid
+        assert fine_lat.shape == (2 * GH, 2 * GW)
+        assert fine_lon.shape == (2 * GH, 2 * GW)
+        # Fine centers flank each coarse center at +/- 0.125 deg.
+        r, c = _CELL
+        np.testing.assert_allclose(
+            fine_lat[2 * r], lat_grid[r, 0] + 0.125, rtol=0, atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            fine_lat[2 * r + 1], lat_grid[r, 0] - 0.125, rtol=0, atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            fine_lon[0, 2 * c], lon_grid[0, c] - 0.125, rtol=0, atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            fine_lon[0, 2 * c + 1], lon_grid[0, c] + 0.125, rtol=0, atol=1e-6,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +328,82 @@ class TestBasicBehavior:
 
 
 # ---------------------------------------------------------------------------
+# Area-conservative projection (regression)
+# ---------------------------------------------------------------------------
+
+
+class TestAreaConservativeProjection:
+    @pytest.fixture
+    def corner_blob_region(self, monkeypatch):
+        """Register a small synthetic latlon region; return (region, blob px).
+
+        The blob is planted on the coarse-cell corner at lat 32.0 / lon
+        -88.0 (between coarse rows 115/116 and cols 183/184).
+        """
+        region = RegionDef(
+            name="TESTCORNER",
+            west=-100.0, east=-70.0, south=20.0, north=40.0,
+            pixel_size=0.01, group="TEST",
+        )
+        monkeypatch.setitem(REGIONS, "TESTCORNER", region)
+        rp = int(np.rint((region.north - 32.0) / region._ps_y))
+        cp = int(np.rint((-88.0 - region.west) / region.pixel_size))
+        return region, (rp, cp)
+
+    async def test_blob_between_coarse_cell_centers_is_captured(
+        self, corner_blob_region,
+    ):
+        """Regression: a tiny blob straddling a coarse cell corner must trip the gate.
+
+        The old point-sampling read the region array at coarse cell
+        centers; the blob sits >= 0.25 deg (25 region pixels) from every
+        surrounding center, so all four covering cells came out False and
+        high-zoom tiles over the blob rendered transparent.  The
+        dilate-then-sample projection marks every coarse cell that
+        contains a blob pixel.
+        """
+        store = PrecipMaskStore(cache_dir=None)
+        region, (rp, cp) = corner_blob_region
+        arr = np.zeros((region.height, region.width), dtype=np.uint8)
+        arr[rp - 1:rp + 2, cp - 1:cp + 2] = 200
+        frame_store = _FakeFrameStore({_TS: {"TESTCORNER": arr}})
+        await store.build({"frame_store": frame_store}, _FakeNWPChain(), settings)
+
+        # All four coarse cells touching the corner contain blob pixels.
+        for row in (115, 116):
+            for col in (183, 184):
+                assert store.has_precip_in_bbox(_TS, _cell_bbox(row, col)) is True
+        # A small high-zoom-style bbox right over the blob trips the gate.
+        assert store.has_precip_in_bbox(_TS, (-88.05, 31.95, -87.95, 32.05)) is True
+        # Control: a cell far outside the region stays False.
+        assert store.has_precip_in_bbox(_TS, _cell_bbox(*_FAR_CELL)) is False
+
+    async def test_region_smaller_than_a_coarse_cell_falls_back_conservative(
+        self, monkeypatch,
+    ):
+        """A region narrower than one coarse cell marks every in-bounds cell."""
+        region = RegionDef(
+            name="TINY",
+            west=-94.5, east=-94.0, south=34.0, north=34.5,
+            pixel_size=0.01, group="TEST",
+        )
+        monkeypatch.setitem(REGIONS, "TINY", region)
+        # Tiny region: lat 34..34.5, lon -94.5..-94.0 straddles the corner
+        # of coarse cells (111, 171) / (111, 172) / (112, 171) / (112, 172)
+        # (corner lat 34.0 = row boundary 111/112, lon -94.0 = col 171/172).
+        arr = np.zeros((region.height, region.width), dtype=np.uint8)
+        arr[region.height // 2, region.width // 2] = 200
+        store = PrecipMaskStore(cache_dir=None)
+        frame_store = _FakeFrameStore({_TS: {"TINY": arr}})
+        await store.build({"frame_store": frame_store}, _FakeNWPChain(), settings)
+        # Conservative fallback marks the in-bounds cells (dilation spreads
+        # the hit to the full 2x2 corner neighbourhood).
+        for row in (111, 112):
+            for col in (171, 172):
+                assert store.has_precip_in_bbox(_TS, _cell_bbox(row, col)) is True
+
+
+# ---------------------------------------------------------------------------
 # NWP cache signature gate
 # ---------------------------------------------------------------------------
 
@@ -297,6 +438,77 @@ class TestNWPSignatureGate:
         assert calls_after_first == 1
         await store.build({"frame_store": frame_store}, chain, settings)
         assert chain.calls == calls_after_first
+
+
+# ---------------------------------------------------------------------------
+# NWP 0.25-deg supersample (max-pool)
+# ---------------------------------------------------------------------------
+
+
+class TestNWPSupersample:
+    async def test_single_fine_cell_pools_to_its_coarse_cell_only(self):
+        store = PrecipMaskStore(cache_dir=None)
+        frame_store = _FakeFrameStore({_TS: {"USCOMP": _empty_uscomp()}})
+        row, col = _CELL
+        # Hit in exactly one fine cell — the bottom-right fine cell of
+        # coarse cell (row, col), 0.125 deg from the coarse center.  The
+        # 2x2 max-pool must still land it in (row, col).
+        chain = _FakeNWPChain(sample_fn=_nwp_fine_cell(2 * row + 1, 2 * col + 1))
+        await store.build({"frame_store": frame_store}, chain, settings)
+        # Pre-dilation pooled NWP mask (what ``_nwp_cache`` holds) has
+        # exactly the one covering coarse cell True.
+        coarse = store._nwp_cache[_TS]
+        assert coarse.shape == (GH, GW)
+        assert coarse[row, col]
+        assert int(coarse.sum()) == 1
+        # The built (1-cell-dilated) mask still answers the gate.
+        assert store.has_precip_in_bbox(_TS, _cell_bbox(row, col)) is True
+        assert store.has_precip_in_bbox(_TS, _cell_bbox(*_FAR_CELL)) is False
+
+
+# ---------------------------------------------------------------------------
+# Incremental NWP cache
+# ---------------------------------------------------------------------------
+
+
+class TestNWPCacheIncremental:
+    async def test_unchanged_signature_samples_only_new_timestamp(self):
+        store = PrecipMaskStore(cache_dir=None)
+        chain = _FakeNWPChain(sources=[_FakeSrc(count=1, latest=1000)])
+        frame_store = _FakeFrameStore({100: {"USCOMP": _empty_uscomp()}})
+        await store.build({"frame_store": frame_store}, chain, settings)
+        assert chain.calls == 1
+
+        # Same signature, one new timestamp -> only it is sampled.
+        frame_store = _FakeFrameStore({
+            100: {"USCOMP": _empty_uscomp()},
+            200: {"USCOMP": _empty_uscomp()},
+        })
+        await store.build({"frame_store": frame_store}, chain, settings)
+        assert chain.calls == 2
+        assert set(store._nwp_cache) == {100, 200}
+
+        # A dropped timestamp is evicted from the cache without sampling.
+        frame_store = _FakeFrameStore({100: {"USCOMP": _empty_uscomp()}})
+        await store.build({"frame_store": frame_store}, chain, settings)
+        assert chain.calls == 2
+        assert set(store._nwp_cache) == {100}
+
+    async def test_changed_signature_resamples_all_timestamps(self):
+        store = PrecipMaskStore(cache_dir=None)
+        src = _FakeSrc(count=1, latest=1000)
+        chain = _FakeNWPChain(sources=[src])
+        frame_store = _FakeFrameStore({
+            100: {"USCOMP": _empty_uscomp()},
+            200: {"USCOMP": _empty_uscomp()},
+        })
+        await store.build({"frame_store": frame_store}, chain, settings)
+        assert chain.calls == 2
+
+        # Signature change -> full rebuild of every timestamp.
+        src._latest_run_ts = 2000
+        await store.build({"frame_store": frame_store}, chain, settings)
+        assert chain.calls == 4
 
 
 # ---------------------------------------------------------------------------

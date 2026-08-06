@@ -9,9 +9,11 @@ system footprint).  This module replaces that with a single coarse boolean
 grid per radar/nowcast timestamp, built by the pipeline from EVERY
 source's combined contribution:
 
-- radar region arrays forward-sampled onto the coarse grid,
-- all NWP chain sources sampled on the coarse grid (via
-  ``nwp_chain.sample``), and
+- radar region arrays projected area-conservatively (dilate-then-sample:
+  any coarse cell containing at least one above-threshold source pixel
+  is marked True), and
+- all NWP chain sources sampled on a 0.25-deg fine grid and max-pooled
+  2x2 onto the coarse grid (via ``nwp_chain.sample``), and
 - nowcast region arrays (Tier 3 folded in — one mechanism covers the
   past-radar, no-radar-overlap, AND nowcast paths).
 
@@ -33,6 +35,7 @@ import logging
 import os
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from librewxr.data.regions import REGIONS, RegionDef
@@ -78,6 +81,10 @@ class PrecipMaskStore:
         # Coarse global meshgrid (built once per ``build`` call; used by
         # the region projection + NWP sampling).
         self._latlon_meshgrid: tuple[np.ndarray, np.ndarray] | None = None
+        # Fine 0.25-deg meshgrid for the NWP half of the OR: 2x2 fine
+        # samples per coarse cell so the max-pooled contribution is
+        # area-conservative.
+        self._nwp_meshgrid: tuple[np.ndarray, np.ndarray] | None = None
         if self._memmap_dir is not None:
             self._memmap_dir.mkdir(parents=True, exist_ok=True)
 
@@ -119,31 +126,53 @@ class PrecipMaskStore:
         )
 
         # Coarse global meshgrid, cell centers at half-cell offsets so the
-        # index math ``int((x - WEST) / PIXEL_SIZE)`` buckets correctly.
+        # index math ``int((x - WEST) / PIXEL_SIZE)`` buckets correctly
+        # (used by the radar/nowcast region projection in
+        # ``_build_timestamp_mask_sync``).
         self._ensure_meshgrid()
-        lat_grid, lon_grid = self._latlon_meshgrid
+        # Fine 0.25-deg meshgrid for the NWP half of the OR: each coarse
+        # cell is covered by exactly 2x2 fine samples, so a max-pool is
+        # the area-conservative reduction and precipitation features
+        # smaller than 0.5 deg can't fall between coarse sample points.
+        self._ensure_nwp_meshgrid()
+        fine_lat, fine_lon = self._nwp_meshgrid
 
         # NWP half of the OR, gated by the chain's content signature: an
         # unchanged NWP state (same timestep counts + same runs) reuses
-        # the cached per-timestamp masks instead of re-sampling the whole
-        # coarse grid from every source.
+        # the cached per-timestamp masks instead of re-sampling every
+        # source.  The cache is incremental — with an unchanged signature
+        # only timestamps missing from the cache are sampled, and entries
+        # for timestamps that no longer exist are dropped.
         nwp_masks = self._nwp_cache
         if nwp_chain is not None and nwp_chain.has_data():
             sig = self._nwp_signature_of(nwp_chain)
-            reuse = (
-                sig == self._nwp_signature
-                and nwp_masks is not None
-                and all(ts in nwp_masks for ts in timestamps)
-            )
-            if not reuse:
-                if nwp_masks is None:
-                    nwp_masks = {}
+            if nwp_masks is not None and sig == self._nwp_signature:
+                # Incremental refresh: drop stale timestamps, then sample
+                # only the timestamps the cache is missing.
+                for ts in list(nwp_masks):
+                    if ts not in timestamps:
+                        del nwp_masks[ts]
                 for ts in timestamps:
+                    if ts in nwp_masks:
+                        continue
                     nwp_values = await asyncio.to_thread(
-                        nwp_chain.sample, lat_grid, lon_grid, ts,
+                        nwp_chain.sample, fine_lat, fine_lon, ts,
                         bilinear=False,
                     )
-                    nwp_masks[ts] = nwp_values >= pixel_threshold
+                    nwp_masks[ts] = self._pool_nwp_sample(
+                        nwp_values, pixel_threshold,
+                    )
+            else:
+                # Signature changed or no cache — full rebuild.
+                nwp_masks = {}
+                for ts in timestamps:
+                    nwp_values = await asyncio.to_thread(
+                        nwp_chain.sample, fine_lat, fine_lon, ts,
+                        bilinear=False,
+                    )
+                    nwp_masks[ts] = self._pool_nwp_sample(
+                        nwp_values, pixel_threshold,
+                    )
                 self._nwp_cache = nwp_masks
                 self._nwp_signature = sig
         elif nwp_chain is not None:
@@ -206,30 +235,75 @@ class PrecipMaskStore:
         return self._dilate(mask)
 
     def _ensure_meshgrid(self) -> None:
-        """Build (once per instance) the coarse cell-center meshgrid."""
+        """Build (once per instance) the coarse cell-center meshgrid.
+
+        Centers sit at exact half-cell offsets (``NORTH - (r + 0.5) *
+        PIXEL_SIZE`` / ``WEST + (c + 0.5) * PIXEL_SIZE``) so they line up
+        exactly with the bucket math in ``has_precip_in_bbox``, with
+        exactly 0.5-deg spacing.
+        """
         if self._latlon_meshgrid is not None:
             return
         lat = np.linspace(
-            self.NORTH - 0.125, -self.NORTH + 0.125, self.GRID_HEIGHT,
-            dtype=np.float32,
+            89.75, -89.75, self.GRID_HEIGHT, dtype=np.float32,
         )
         lon = np.linspace(
-            self.WEST + 0.125, -self.WEST - 0.125, self.GRID_WIDTH,
-            dtype=np.float32,
+            -179.75, 179.75, self.GRID_WIDTH, dtype=np.float32,
         )
         self._latlon_meshgrid = np.meshgrid(lat, lon, indexing="ij")
+
+    def _ensure_nwp_meshgrid(self) -> None:
+        """Build (once per instance) the fine 0.25-deg NWP meshgrid.
+
+        Exactly 2x2 fine cells per coarse cell, with fine centers at
+        ``coarse_center +/- 0.125``, so a 2x2 max-pool of a thresholded
+        fine sample is the area-conservative reduction onto the coarse
+        grid.
+        """
+        if self._nwp_meshgrid is not None:
+            return
+        fine_lat = np.linspace(
+            89.875, -89.875, 720, dtype=np.float32,
+        )
+        fine_lon = np.linspace(
+            -179.875, 179.875, 1440, dtype=np.float32,
+        )
+        self._nwp_meshgrid = np.meshgrid(fine_lat, fine_lon, indexing="ij")
+
+    def _pool_nwp_sample(
+        self, nwp_values: np.ndarray, pixel_threshold: int,
+    ) -> np.ndarray:
+        """Threshold a 0.25-deg NWP sample and max-pool 2x2 onto the coarse grid.
+
+        ``nwp_values`` is the (2*GRID_HEIGHT, 2*GRID_WIDTH) uint8 array
+        from ``nwp_chain.sample`` on the fine meshgrid.  Each 2x2 fine
+        block maps to exactly one coarse cell, so a max-pool marks every
+        coarse cell that contains any above-threshold fine sample.
+        """
+        fine = (np.asanyarray(nwp_values) >= pixel_threshold).astype(np.uint8)
+        return fine.reshape(
+            self.GRID_HEIGHT, 2, self.GRID_WIDTH, 2,
+        ).max(axis=(1, 3)).astype(bool)
 
     def _project_region(
         self, mask: np.ndarray, region: RegionDef, region_array: np.ndarray,
         pixel_threshold: int,
     ) -> None:
-        """Sample ``region_array`` on the coarse meshgrid and OR hits in.
+        """Area-conservatively project ``region_array`` onto the coarse grid.
 
         Uses the same lat/lon -> row/col projection math as the renderer
         (``region_pixel_indices_fractional`` family), so a radar pixel the
         renderer would draw at threshold lands in the same coarse cell
         here.  Handles latlon (rectilinear), LAEA (OPERA), and tmerc
         (DPC Italy) regions uniformly.
+
+        Point-sampling the array at coarse cell centers lets precipitation
+        features smaller than the 0.5-deg sample spacing slip between
+        centers and produce zero mask hits.  Instead the array is
+        thresholded and max-filtered with a kernel sized from the coarse
+        cell's footprint in region-pixel units, then sampled at the cell
+        centers — any coarse cell containing at least one above-threshold
+        source pixel ends up True.
         """
         lat_grid, lon_grid = self._latlon_meshgrid
         if region.proj == "laea":
@@ -251,11 +325,41 @@ class PrecipMaskStore:
         )
         if not in_bounds.any():
             return
+
+        # Coarse-cell footprint in region-pixel units, measured from the
+        # projected grid itself so the dilation is projection-agnostic.
+        # Adjacent pairs are only valid when both cells are in-bounds.
+        col_diff = np.abs(np.diff(col_grid, axis=1))
+        col_pair_ok = in_bounds[:, :-1] & in_bounds[:, 1:]
+        row_diff = np.abs(np.diff(row_grid, axis=0))
+        row_pair_ok = in_bounds[:-1, :] & in_bounds[1:, :]
+        span_cols = float(col_diff[col_pair_ok].max()) if col_pair_ok.any() else None
+        span_rows = float(row_diff[row_pair_ok].max()) if row_pair_ok.any() else None
+
+        hits = (np.asanyarray(region_array) >= pixel_threshold).astype(np.uint8)
+
+        if span_cols is None or span_rows is None:
+            # Fewer than 2 in-bounds cells along an axis — the region is
+            # smaller than one coarse cell there, so there's no centre to
+            # sample.  Conservative fallback: any hit marks every
+            # in-bounds cell.
+            if hits.any():
+                mask[in_bounds] = True
+            return
+
+        # Max-filter the threshold array with a kernel covering the coarse
+        # cell's footprint (+1 absorbs rint centre slop), then sample the
+        # dilated array at the cell centres as before.
+        hr = int(np.ceil(span_rows / 2)) + 1
+        hc = int(np.ceil(span_cols / 2)) + 1
+        kh = max(3, 2 * hr + 1)
+        kw = max(3, 2 * hc + 1)
+        dilated = cv2.dilate(hits, np.ones((kh, kw), dtype=np.uint8))
+
         row_i = np.clip(np.rint(row_grid).astype(np.int32), 0, region.height - 1)
         col_i = np.clip(np.rint(col_grid).astype(np.int32), 0, region.width - 1)
-        sampled = region_array[row_i[in_bounds], col_i[in_bounds]]
-        hits = sampled >= pixel_threshold
-        mask[in_bounds] |= hits
+        sampled = dilated[row_i[in_bounds], col_i[in_bounds]]
+        mask[in_bounds] |= sampled.astype(bool)
 
     @staticmethod
     def _dilate(mask: np.ndarray) -> np.ndarray:
@@ -412,6 +516,7 @@ class PrecipMaskStore:
         # workers never rebuild masks, so it is not serialized.
         self._nwp_cache = None
         self._nwp_signature = None
+        self._nwp_meshgrid = None
         self._masks = {}
         if "masks" not in state:
             # Pre-fix state.json (Tier 2 era) has no mask section — every
