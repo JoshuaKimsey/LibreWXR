@@ -25,6 +25,10 @@ The HTTP transport is mounted inside the main LibreWXR FastAPI app as a sub-appl
 
 The HTTP transport works in **both single and multi deployment modes** — it reads live data from the server's in-memory stores (single mode) or from the memmap snapshot (multi mode), whichever is active.
 
+### Stateless transport
+
+The HTTP transport runs in **stateless mode**: every request is self-contained, there is **no `Mcp-Session-Id`** to obtain or carry, and clients do not need to track any per-session state. Each request is served by a fresh transport with no session store — this is what allows multi-worker deployments (e.g. 16 render workers behind one load balancer or Cloudflare tunnel) to serve a client's requests from any worker. Clients can simply POST `initialize`, then `tools/list` / `tools/call` requests, with no session-id header at all.
+
 ### Connecting from an MCP client
 
 Point an MCP-capable client (n8n, Claude Code in proxy mode, custom scripts using the MCP SDK) at:

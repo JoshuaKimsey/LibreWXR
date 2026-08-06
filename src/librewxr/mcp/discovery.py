@@ -52,7 +52,7 @@ _AI_CATALOG_MEDIA_TYPE = "application/ai-catalog+json"
 _CACHE_CONTROL = "public, max-age=3600"
 
 
-def _package_version() -> str:
+def package_version() -> str:
     """Return the installed ``librewxr`` distribution version.
 
     Falls back to ``0.1.0`` (the pyproject version) when the package
@@ -117,7 +117,7 @@ def build_server_card() -> dict:
         "name": _NAME,
         "title": _TITLE,
         "description": _DESCRIPTION,
-        "version": _package_version(),
+        "version": package_version(),
         "websiteUrl": public_base,
         "repository": {"source": "github", "url": _REPOSITORY_URL},
         "remotes": [remote],

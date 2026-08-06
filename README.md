@@ -418,7 +418,7 @@ LibreWXR exposes an [MCP (Model Context Protocol)](https://modelcontextprotocol.
 The endpoint is mounted at `LIBREWXR_MCP_PATH` (default `/mcp/`) when the `[mcp]` extra is installed and `LIBREWXR_MCP_ENABLED=true` (the default). Failures (missing extra, build error) are silently skipped so the REST API still boots; the `/health` endpoint surfaces the actual mount state as `mcp: {enabled, mounted, path, tools}`.
 
 Two transport modes:
-- **HTTP (primary, default, for n8n / hosted agents):** POST a JSON-RPC `initialize` request to `<public_url>/mcp/` (note the trailing slash), then call tools via JSON-RPC `tools/call`. The session id is carried in the `Mcp-Session-Id` header.
+- **HTTP (primary, default, for n8n / hosted agents):** POST a JSON-RPC `initialize` request to `<public_url>/mcp/` (note the trailing slash), then call tools via JSON-RPC `tools/call`. The HTTP transport is stateless — each request is self-contained, no `Mcp-Session-Id` is required, and any render worker can serve any request (what makes multi-worker deployments behind a load balancer work).
 - **stdio (for local agents like Claude Desktop):** run `python -m librewxr.mcp` (or the `librewxr-mcp` console entry). Requires `LIBREWXR_CACHE_DIR` pointing at the same shared volume a running LibreWXR server (single or multi mode) writes `state.json` into.
 
 See [`docs/mcp-server.md`](docs/mcp-server.md) for full install instructions, transport configuration, example client configs (Claude Desktop, n8n), and the tool reference.

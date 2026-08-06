@@ -24,7 +24,7 @@ from librewxr.config import settings
 from librewxr.api import routes
 from librewxr.api.models import AlertsResponse
 from librewxr.mcp import tools
-from librewxr.mcp.discovery import server_card_endpoint
+from librewxr.mcp.discovery import package_version, server_card_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,14 @@ def build_mcp_http_app():
     final URL ``/mcp`` -- NOT ``/mcp/mcp``.  See the FastMCP Lifespans
     doc pattern (``mcp.http_app(path="/")`` + ``app.mount("/mcp", ...)``).
     """
-    mcp = FastMCP("librewxr-mcp")
+    # Stateless HTTP: every request is self-contained (a fresh transport
+    # per request, no in-memory session store).  Multi-mode runs N render
+    # workers behind one origin (e.g. a cloudflared tunnel); with
+    # per-process in-memory sessions the client's next request lands on a
+    # different worker and fails with ``-32600 Session not found``.
+    # LibreWXR tools are pure reads and need no per-session state, so
+    # stateless is spec-blessed and safe.
+    mcp = FastMCP("librewxr-mcp", version=package_version())
     _register_tools(mcp)
     # SEP-2127 (draft) MCP server card.  Registered on the FastMCP
     # instance (not the parent app) so it rides the ``mcp_path`` mount
@@ -145,7 +152,7 @@ def build_mcp_http_app():
         """Serve the discovery server card at ``<mcp_path>/server-card``."""
         return await server_card_endpoint(request)
 
-    return mcp.http_app(path="/")
+    return mcp.http_app(path="/", stateless_http=True)
 
 
 def main() -> None:
@@ -162,7 +169,11 @@ def main() -> None:
             "it's the shared directory the data pipeline (or single-mode "
             "server) writes state.json into."
         )
-    mcp = FastMCP("librewxr-mcp", lifespan=build_stdio_lifespan)
+    mcp = FastMCP(
+        "librewxr-mcp",
+        lifespan=build_stdio_lifespan,
+        version=package_version(),
+    )
     _register_tools(mcp)
     logger.info("Starting librewxr-mcp stdio transport")
     mcp.run(transport="stdio")

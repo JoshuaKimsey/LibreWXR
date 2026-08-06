@@ -8,9 +8,15 @@ a small FastAPI app with the FastMCP sub-app mounted at ``/mcp`` and the
 ``routes.router`` included (the catalog endpoint lives there, as in
 ``main.py``).  Uses the production ``build_mcp_http_app()`` so the tests
 exercise the real ``custom_route`` registration path through the mount.
-Neither endpoint under test touches the MCP session manager, so the
-combined lifespan is not entered (see the ``client`` fixture).
+The server-card / catalog endpoints do not touch the MCP session manager,
+so the combined lifespan is not entered for them (see the ``client``
+fixture); the initialize-based tests enter the FastMCP lifespan inside
+the test body instead.
 """
+
+import importlib
+import json
+from importlib.metadata import PackageNotFoundError
 
 import pytest
 
@@ -24,6 +30,49 @@ SERVER_CARD_SCHEMA = (
     "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json"
 )
 SERVER_CARD_NAME = "io.github.joshuakimsey/librewxr-mcp"
+MCP_TOOL_NAMES = ["get_precip_nowcast", "get_active_alerts", "get_storm_cells"]
+
+_INIT_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream",
+}
+
+
+def _initialize_payload(req_id: int = 1) -> dict:
+    """Minimal MCP ``initialize`` JSON-RPC request."""
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "mcp-discovery-test", "version": "0.1"},
+        },
+    }
+
+
+def _sse_json_rpc_result(body: str, req_id: int) -> dict:
+    """Pull the JSON-RPC ``result`` for ``req_id`` out of an SSE response body.
+
+    The production transport answers with ``text/event-stream`` (SSE);
+    each event carries ``data: <json-rpc-message>``.  Returns the ``result``
+    object of the matching response (raises on error/missing).
+    """
+    for block in body.split("\n\n"):
+        data_lines = [
+            line[len("data: "):]
+            for line in block.splitlines()
+            if line.startswith("data: ")
+        ]
+        if not data_lines:
+            continue
+        message = json.loads("".join(data_lines))
+        if message.get("id") == req_id:
+            if "error" in message:
+                raise AssertionError(f"JSON-RPC error for id {req_id}: {message['error']}")
+            return message["result"]
+    raise AssertionError(f"No JSON-RPC response with id {req_id} in SSE body: {body!r}")
 
 
 @pytest.fixture(autouse=True)
@@ -126,3 +175,80 @@ async def test_ai_catalog_404_when_mcp_unavailable(client, monkeypatch):
     monkeypatch.setattr(routes, "mcp_mounted", False)
     resp = await client.get("/.well-known/ai-catalog.json")
     assert resp.status_code == 404
+
+
+@pytest.mark.mcp
+async def test_mcp_stateless_initialize_and_tools_list():
+    """Stateless regression: initialize then tools/list with NO session id.
+
+    ``build_mcp_http_app()`` serves stateless HTTP (``stateless_http=True``):
+    every request gets a fresh transport with no ``Mcp-Session-Id`` and no
+    in-memory session to lose.  This directly exercises the multi-worker
+    bug class -- in multi mode a client's next request lands on a
+    different render worker, and with per-process sessions that used to
+    fail with ``-32600 Session not found``.  Both requests here
+    deliberately omit the ``Mcp-Session-Id`` header.
+    """
+    mcp_app = build_mcp_http_app()
+    app = FastAPI()
+    app.mount("/mcp", mcp_app)
+    transport = ASGITransport(app=app)
+    # Even stateless mode needs the session-manager task group the FastMCP
+    # lifespan starts, so enter it in-test (a fixture teardown would trip
+    # anyio's cancel-scope task check).
+    async with mcp_app.lifespan(app):
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post("/mcp/", json=_initialize_payload(1), headers=_INIT_HEADERS)
+            assert resp.status_code in (200, 202), (
+                f"initialize failed: {resp.status_code} {resp.text[:200]!r}"
+            )
+            assert "mcp-session-id" not in resp.headers, (
+                "stateless mode must not mint a session id; multi-worker "
+                "deployments cannot share one anyway"
+            )
+            resp = await ac.post(
+                "/mcp/",
+                json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                headers=_INIT_HEADERS,
+            )
+            assert resp.status_code in (200, 202), (
+                f"tools/list failed: {resp.status_code} {resp.text[:200]!r}"
+            )
+            result = _sse_json_rpc_result(resp.text, 2)
+            tool_names = [tool["name"] for tool in result["tools"]]
+            assert tool_names == MCP_TOOL_NAMES, (
+                f"Expected tools {MCP_TOOL_NAMES}, got {tool_names}"
+            )
+
+
+@pytest.mark.mcp
+async def test_mcp_initialize_server_info_matches_server_card():
+    """initialize's ``serverInfo`` must match what the server card advertises.
+
+    SEP-2127's consistency clause forbids the ``initialize`` response and
+    the server card from contradicting each other.  Previously FastMCP's
+    own library version leaked into ``serverInfo.version`` while the card
+    advertised the ``librewxr`` package version.
+    """
+    try:
+        expected_version = importlib.metadata.version("librewxr")
+    except PackageNotFoundError:
+        expected_version = "0.1.0"
+    mcp_app = build_mcp_http_app()
+    app = FastAPI()
+    app.mount("/mcp", mcp_app)
+    transport = ASGITransport(app=app)
+    async with mcp_app.lifespan(app):
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post("/mcp/", json=_initialize_payload(1), headers=_INIT_HEADERS)
+            assert resp.status_code in (200, 202), (
+                f"initialize failed: {resp.status_code} {resp.text[:200]!r}"
+            )
+            server_info = _sse_json_rpc_result(resp.text, 1)["serverInfo"]
+            assert server_info["name"] == "librewxr-mcp", (
+                f"Unexpected serverInfo.name: {server_info['name']!r}"
+            )
+            assert server_info["version"] == expected_version, (
+                f"serverInfo.version {server_info['version']!r} contradicts the "
+                f"server card version {expected_version!r}"
+            )

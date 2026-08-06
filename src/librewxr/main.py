@@ -1053,6 +1053,17 @@ def main():
         workers=settings.workers,
         log_level="info",
         access_log=False,
+        # Trust X-Forwarded-Proto/Host from any peer: LibreWXR is documented
+        # as a behind-reverse-proxy deployment (cloudflared tunnel / nginx
+        # on the Docker network, not localhost), and forwarded headers only
+        # affect generated URLs (307 redirect Location, advertised URLs) --
+        # no auth/rate-limit decisions key off the client IP, so trusting
+        # all peers is safe here.  Without this uvicorn ignores
+        # X-Forwarded-Proto unless the peer IP is a trusted proxy, and the
+        # cloudflared container's Docker-network IP is not, so redirects
+        # advertised http:// behind an https tunnel.
+        proxy_headers=True,
+        forwarded_allow_ips="*",
         **ssl_kwargs,
     )
 
