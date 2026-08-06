@@ -10,11 +10,16 @@ existing snapshot tests in ``tests/test_data_pipeline.py``.
 """
 from __future__ import annotations
 
+import json
+
+import numpy as np
 import pytest
 
+from librewxr.data.nowcast import NowcastFrame, NowcastStore
 from librewxr.main import (
     _compute_cache_invalidation,
     _drop_absent_stores,
+    _maybe_resurrect_nowcast_store,
     _maybe_resurrect_precip_mask,
 )
 
@@ -218,3 +223,70 @@ def test_maybe_resurrect_precip_mask_noop_when_snapshot_lacks_it(tmp_path):
     payload = {"stores": {}}
     assert _maybe_resurrect_precip_mask(stores, payload, tmp_path) is False
     assert stores["precip_mask"] is None
+
+
+def test_drop_absent_stores_keeps_nowcast_store_against_stale_snapshot():
+    """A legacy first snapshot lacking nowcast_store must not permanently
+    null the store - it would be unrecoverable because apply_state skips
+    None stores.  frame_store, precip_mask, and nowcast_store are exempt.
+    """
+    frame_store = object()
+    precip_mask = object()
+    nowcast_store = object()
+    icon_eu = object()
+    stores = {
+        "frame_store": frame_store,
+        "precip_mask": precip_mask,
+        "nowcast_store": nowcast_store,
+        "icon_eu_grid": icon_eu,
+    }
+    # Stale snapshot: frame_store refreshed, nowcast_store + icon_eu absent.
+    refreshed = ["frame_store"]
+    _drop_absent_stores(stores, refreshed)
+    assert stores["frame_store"] is frame_store      # exempt (always shipped)
+    assert stores["precip_mask"] is precip_mask      # exempt
+    assert stores["nowcast_store"] is nowcast_store  # exempt - THE FIX
+    assert stores["icon_eu_grid"] is None            # genuinely-absent grid dropped
+
+
+async def test_maybe_resurrect_nowcast_store_heals_nulled_store(tmp_path):
+    """A worker whose nowcast store was nulled at boot self-heals on the
+    first poll whose snapshot carries a nowcast_store entry.  Idempotent.
+    """
+    # Build a real snapshot from a persistent producer store, JSON
+    # round-tripped exactly like the pipeline's dump_state.
+    producer = NowcastStore(cache_dir=tmp_path)
+    frame = NowcastFrame(
+        timestamp=1700000600,
+        blend_weight=0.6,
+        regions={"R1": np.ones((4, 6), dtype=np.uint8)},
+    )
+    await producer.replace_all([frame])
+    await producer.replace_flows({"R1": np.zeros((4, 6, 2), dtype=np.float32)})
+    snapshot = json.loads(json.dumps(producer.__getstate__()))
+
+    stores = {"nowcast_store": None, "frame_store": object()}
+    payload = {"stores": {"nowcast_store": snapshot}}
+    assert _maybe_resurrect_nowcast_store(stores, payload, tmp_path) is True
+    assert stores["nowcast_store"] is not None
+    # __setstate__ was applied: the frames re-open from the snapshot.
+    timestamps = await stores["nowcast_store"].get_timestamps()
+    assert timestamps == [1700000600]
+    frame, weight = await stores["nowcast_store"].get_frame(1700000600)
+    assert frame is not None
+    assert weight == pytest.approx(0.6)
+    np.testing.assert_array_equal(
+        frame.regions["R1"], np.ones((4, 6), dtype=np.uint8),
+    )
+    # Idempotent: already live -> no-op.
+    assert _maybe_resurrect_nowcast_store(stores, payload, tmp_path) is False
+
+
+def test_maybe_resurrect_nowcast_store_noop_when_snapshot_lacks_it(tmp_path):
+    """While the snapshot still has no nowcast_store, the resurrection is
+    a no-op and leaves the store None (routes then serve an empty nowcast
+    list, same as a live-but-empty store)."""
+    stores = {"nowcast_store": None}
+    payload = {"stores": {}}
+    assert _maybe_resurrect_nowcast_store(stores, payload, tmp_path) is False
+    assert stores["nowcast_store"] is None

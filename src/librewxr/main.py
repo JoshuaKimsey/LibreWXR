@@ -265,14 +265,15 @@ def _drop_absent_stores(stores: dict, refreshed: list[str]) -> None:
     Drops genuinely-disabled providers (e.g. ICON-EU in a CONUS-only
     deployment) so the NWP chain and routes don't dispatch to empty grids.
     Infrastructure stores that are constructed unconditionally and are
-    always shipped once the pipeline supports them - ``frame_store`` and
-    ``precip_mask`` - are exempt: a stale/legacy first snapshot (e.g. an
-    in-place upgrade from a pre-mask build) must not permanently kill the
-    precip mask, because :func:`apply_state` skips ``None`` stores and the
-    poller could never bring it back.  The mask store repopulates in place
-    via ``__setstate__`` on the next poll once the pipeline ships masks.
+    always shipped once the pipeline supports them - ``frame_store``,
+    ``precip_mask``, and ``nowcast_store`` - are exempt: a stale/legacy
+    first snapshot (e.g. an in-place upgrade from a build that predates a
+    store) must not permanently kill the store, because
+    :func:`apply_state` skips ``None`` stores and the poller could never
+    bring it back.  The store repopulates in place via ``__setstate__``
+    on the next poll once the pipeline ships it.
     """
-    keep = {"frame_store", "precip_mask"}
+    keep = {"frame_store", "precip_mask", "nowcast_store"}
     for name in list(stores.keys()):
         if name not in refreshed and name not in keep:
             stores[name] = None
@@ -303,6 +304,36 @@ def _maybe_resurrect_precip_mask(
     store = PrecipMaskStore(cache_dir=cache_dir)
     store.__setstate__(snap)
     stores["precip_mask"] = store
+    return True
+
+
+def _maybe_resurrect_nowcast_store(
+    stores: dict, payload: dict, cache_dir,
+) -> bool:
+    """Heal a render worker whose nowcast store was nulled at boot.
+
+    Workers that started against a ``state.json`` lacking a
+    ``nowcast_store`` entry had their :class:`NowcastStore` dropped by the
+    boot-time drop loop and, because :func:`apply_state` skips ``None``
+    stores, could never recover it - so nowcast tiles stayed empty for the
+    life of the process.  This re-instantiates the store from the current
+    snapshot so it self-heals on the first poll after the pipeline ships
+    the entry, without a process restart.  ``cleanup_tmp=False`` skips the
+    constructor's ``*.tmp`` sweep so a resurrected store can't unlink a
+    ``.dat.tmp`` the pipeline is concurrently writing.
+
+    Returns ``True`` if the store was resurrected this call.  Idempotent:
+    a no-op once the store is live, or while the snapshot still lacks the
+    ``nowcast_store`` entry.
+    """
+    if stores.get("nowcast_store") is not None:
+        return False
+    snap = payload.get("stores", {}).get("nowcast_store")
+    if snap is None:
+        return False
+    store = NowcastStore(cache_dir=cache_dir, cleanup_tmp=False)
+    store.__setstate__(snap)
+    stores["nowcast_store"] = store
     return True
 
 
@@ -551,6 +582,15 @@ async def _render_only_lifespan(app: FastAPI):
                 if _maybe_resurrect_precip_mask(stores, payload, cache_dir):
                     routes.precip_mask = stores["precip_mask"]
                     logger.info("Precip mask resurrected from state snapshot")
+
+                # Heal a nowcast store that was permanently nulled at boot
+                # (e.g. the worker started against a legacy state.json
+                # that predates the nowcast entry).  The rebind below is
+                # essential - routes.nowcast_store was bound once at
+                # lifespan setup and stays None otherwise.
+                if _maybe_resurrect_nowcast_store(stores, payload, cache_dir):
+                    routes.nowcast_store = stores["nowcast_store"]
+                    logger.info("Nowcast store resurrected from state snapshot")
 
                 # Diff-based cache invalidation: preserve cached geometry
                 # for radar timestamps whose content didn't change between
