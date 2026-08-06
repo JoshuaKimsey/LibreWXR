@@ -17,11 +17,14 @@ load) so they work regardless of which lifespan set the singletons up.
 import logging
 
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import Response
 
 from librewxr.config import settings
 from librewxr.api import routes
 from librewxr.api.models import AlertsResponse
 from librewxr.mcp import tools
+from librewxr.mcp.discovery import server_card_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +135,16 @@ def build_mcp_http_app():
     """
     mcp = FastMCP("librewxr-mcp")
     _register_tools(mcp)
+    # SEP-2127 (draft) MCP server card.  Registered on the FastMCP
+    # instance (not the parent app) so it rides the ``mcp_path`` mount
+    # prefix automatically: the sub-app serves it at ``/server-card``
+    # and the parent ``app.mount(settings.mcp_path, mcp_app)`` puts the
+    # final URL at ``<mcp_path>/server-card`` (e.g. ``/mcp/server-card``).
+    @mcp.custom_route("/server-card", methods=["GET"], include_in_schema=False)
+    async def _server_card(request: Request) -> Response:
+        """Serve the discovery server card at ``<mcp_path>/server-card``."""
+        return await server_card_endpoint(request)
+
     return mcp.http_app(path="/")
 
 

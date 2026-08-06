@@ -156,6 +156,66 @@ Returns weather alerts (WMO CAP format) active within a given radius of a point.
 
 ---
 
+## Discovery
+
+LibreWXR self-describes its MCP endpoint with two draft metadata documents (neither is a ratified standard yet):
+
+### MCP Server Card (SEP-2127 draft)
+
+`GET <mcp path>/server-card` (e.g. `GET /mcp/server-card`) serves a [SEP-2127](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2127) (draft) MCP Server Card with media type `application/mcp-server-card+json`. The card tells MCP clients where the streamable-HTTP remote lives and which protocol versions it supports, without an `initialize` round-trip.
+
+Server cards intentionally do **not** enumerate tools — clients list tools at runtime via the MCP protocol's `tools/list` method.
+
+The endpoint supports conditional GET: responses carry an `ETag` (the first 16 hex chars of the SHA-256 of the body) and an `If-None-Match` request header equal to the current ETag returns a `304 Not Modified` with an empty body. All responses also carry `Cache-Control: public, max-age=3600` and CORS headers (`Access-Control-Allow-Origin: *`, `Access-Control-Allow-Methods: GET`, `Access-Control-Allow-Headers: Content-Type, If-None-Match`, `Access-Control-Expose-Headers: ETag`).
+
+Example body:
+
+```json
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json",
+  "name": "io.github.joshuakimsey/librewxr-mcp",
+  "title": "LibreWXR MCP",
+  "description": "Precipitation nowcasts, active weather alerts, and storm-cell data for any point on Earth.",
+  "version": "0.1.0",
+  "websiteUrl": "http://localhost:8080",
+  "repository": { "source": "github", "url": "https://github.com/JoshuaKimsey/LibreWRX" },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "http://localhost:8080/mcp/",
+      "supportedProtocolVersions": ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"]
+    }
+  ]
+}
+```
+
+The card URL follows `LIBREWXR_MCP_PATH` (default `/mcp`), and every advertised URL derives from `LIBREWXR_PUBLIC_URL` (default `http://localhost:8080`) — behind a reverse proxy, set `LIBREWXR_PUBLIC_URL` to the public base so the card advertises reachable URLs.
+
+### AI Catalog (proposal)
+
+`GET /.well-known/ai-catalog.json` serves the AI Catalog (proposal) entry with media type `application/ai-catalog+json`: a directory-of-directories pointer that resolves to the server card above.
+
+Example body:
+
+```json
+{
+  "specVersion": "1.0",
+  "entries": [
+    {
+      "identifier": "urn:air:localhost:mcp:librewxr-mcp",
+      "type": "application/mcp-server-card+json",
+      "url": "http://localhost:8080/mcp/server-card"
+    }
+  ]
+}
+```
+
+The catalog returns `404 Not Found` when MCP is disabled (`LIBREWXR_MCP_ENABLED=false`) or the HTTP transport failed to mount.
+
+> **Note:** both documents are draft proposals. There is **no** standardized `/.well-known/mcp.json` — LibreWXR does not serve one, so do not point clients at it.
+
+---
+
 ## Deployment Notes
 
 ### Single-mode state.json enabler

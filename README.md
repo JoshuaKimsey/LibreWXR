@@ -423,6 +423,8 @@ Two transport modes:
 
 See [`docs/mcp-server.md`](docs/mcp-server.md) for full install instructions, transport configuration, example client configs (Claude Desktop, n8n), and the tool reference.
 
+Instances self-describe via `/.well-known/ai-catalog.json` and `<mcp path>/server-card` (SEP-2127 draft) — see [docs/mcp-server.md#discovery](docs/mcp-server.md#discovery).
+
 ## Configuration
 
 All settings are configured via environment variables (or a `.env` file). Copy `.env.example` to `.env` and adjust as needed. Every setting has a sensible default.

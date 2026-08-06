@@ -3,6 +3,7 @@
 import asyncio
 import functools
 import httpx
+import json
 import logging
 import time
 import psutil
@@ -25,6 +26,7 @@ from librewxr.api.conditional import compute_etag, conditional_response
 from librewxr.colors.schemes import SCHEME_NAMES
 from librewxr.config import settings
 from librewxr.data.store import FrameStore
+from librewxr.mcp.discovery import build_ai_catalog
 from librewxr.memory import detect_memory_limit_mb
 from librewxr.tiles.cache import CachedRender, TileCache
 from librewxr.tiles.coordinates import coord_cache_bytes, coord_cache_stats
@@ -131,6 +133,25 @@ def _nwp_grid_health_blocks() -> dict[str, dict]:
                 "frames": grid.frame_count,
             }
     return blocks
+
+
+@router.get("/.well-known/ai-catalog.json")
+async def ai_catalog() -> Response:
+    """AI Catalog (proposal) entry pointing at the MCP server card.
+
+    Self-description directory entry that resolves to the SEP-2127
+    (draft) server card at ``<mcp_path>/server-card``.  Draft proposal,
+    not a ratified standard.  404s when MCP is disabled by config or the
+    HTTP transport failed to mount (``mcp_mounted`` False).  CORS is
+    handled by the parent app's CORSMiddleware.
+    """
+    if not settings.mcp_enabled or not mcp_mounted:
+        raise HTTPException(status_code=404, detail="MCP not available")
+    return Response(
+        content=json.dumps(build_ai_catalog()),
+        media_type="application/ai-catalog+json",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @router.get("/health")
