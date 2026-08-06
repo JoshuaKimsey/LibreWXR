@@ -483,13 +483,16 @@ async def radar_tile(
             tile_request_tracker.record_cache_miss()
 
     # We need the radar frame whenever geometry must be computed AND
-    # whenever arrows are requested (arrow rendering needs live frame
-    # data + flow fields).  Skip the fetch on pure cache hits without
-    # arrows — that's the hot path Merry Sky-style clients exercise.
+    # whenever an overlay is requested: arrows need live frame data +
+    # flow fields, and cells need ``frame.regions`` to decide which
+    # regions actually carry data on this tile (without it
+    # ``_draw_storm_cells`` sees an empty region list and draws
+    # nothing).  Skip the fetch on pure cache hits without overlays —
+    # that's the hot path Merry Sky-style clients exercise.
     frame = None
     nowcast_blend = None
     is_nowcast = False
-    need_frame = geom is None or bool(arrow_style)
+    need_frame = geom is None or bool(arrow_style) or bool(cell_style)
     if need_frame:
         frame = await frame_store.get_frame(timestamp)
         if frame is None and nowcast_store is not None:
