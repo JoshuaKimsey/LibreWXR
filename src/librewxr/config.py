@@ -17,12 +17,14 @@ _MODE_DEFAULTS: dict[str, dict[str, int]] = {
         "workers": 1,
         "tile_cache_mb": 200,
         "coord_cache_size": 2048,
+        "coord_store_mb": 1024,
         "warmer_threads": 0,  # 0 keeps the "auto = CPU-1" behaviour in single mode
     },
     "multi": {
         "workers": 16,
         "tile_cache_mb": 128,
         "coord_cache_size": 512,
+        "coord_store_mb": 8192,
         "warmer_threads": 4,
     },
 }
@@ -61,10 +63,17 @@ class Settings(BaseSettings):
         "single",
         validation_alias=AliasChoices("LIBREWXR_MODE", "COMPOSE_PROFILES"),
     )
-    # All four below use 0 as a "use mode default" sentinel.  Set an
+    # All five below use 0 as a "use mode default" sentinel.  Set an
     # explicit value to override the per-mode default in _MODE_DEFAULTS.
     tile_cache_mb: int = 0  # Max tile cache size in MB (byte-capped); 0 = mode default
     coord_cache_size: int = 0  # LRU entries per coordinate cache; 0 = mode default
+    # Shared on-disk coordinate-array store (see data/coord_store.py).  The
+    # six cached tile-coordinate functions in tiles/coordinates.py publish /
+    # read their computed arrays here so multi-worker deployments compute
+    # each array once globally instead of once per worker.  Best-effort: any
+    # store failure falls back to the in-process compute path.
+    coord_store_enabled: bool = True  # Kill switch; False bypasses the store entirely
+    coord_store_mb: int = 0  # Coord-store size cap in MB; 0 = mode default (single 1024, multi 8192)
     memory_limit_mb: int = 0  # Container memory limit in MB (0 = auto-detect)
     memory_pressure_check_interval: int = 30  # Seconds between memory pressure checks
     smooth_radius: float = 1.0  # Baseline Gaussian blur radius; renderer auto-scales it up at high zoom on coarse sources

@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 pytestmark = pytest.mark.api
 
 from librewxr.api import routes
+from librewxr.config import settings
 from librewxr.data.store import FrameStore, RadarFrame
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
@@ -342,3 +343,56 @@ class TestSatelliteTileEndpoint:
         assert resp.content == b""
         assert resp.headers.get("etag") == etag
         assert resp.headers.get("cache-control", "").startswith("public, max-age=")
+
+
+class TestHealthEndpoint:
+    def test_health_memory_breakdown_without_store(self, client, monkeypatch):
+        """Shared store inactive -> breakdown reports the per-worker lru
+        byte estimate under ``coord_caches_mb`` and zero store fields.
+
+        The store singleton is process-global and lazily constructed from
+        ``settings.cache_dir``, so the default case must pin cache_dir off
+        and reset the singleton (mirrors the ``coord_store_env`` fixture in
+        test_coordinates.py) instead of relying on ambient settings.
+        """
+        from librewxr.tiles.coordinates import _reset_coord_store
+
+        monkeypatch.setattr(settings, "cache_dir", "")
+        _reset_coord_store()
+        c, _, _ = client
+        resp = c.get("/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        breakdown = data["memory"]["breakdown"]
+        assert breakdown["coord_store_mb"] == 0.0
+        assert breakdown["coord_store_entries"] == 0
+        assert breakdown["coord_caches_mb"] >= 0.0
+        # The "coord_caches" block serializes the new ``store`` sub-dict
+        # automatically; it is None while the store is inactive.
+        assert data["coord_caches"]["store"] is None
+
+    def test_health_memory_breakdown_store_active(self, client, monkeypatch):
+        """Store-backed: entries are shared read-only memmap pages, not
+        private heap - ``coord_caches_mb`` drops to 0 and the on-disk
+        footprint is reported separately."""
+        c, _, _ = client
+        store_stats = {
+            "hits": 1,
+            "misses": 0,
+            "publishes": 1,
+            "entries": 3,
+            "bytes": 3 * 1024 * 1024,
+        }
+        monkeypatch.setattr(
+            routes,
+            "coord_cache_stats",
+            lambda: {"max_size": 2048, "caches": {}, "store": store_stats},
+        )
+        resp = c.get("/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        breakdown = data["memory"]["breakdown"]
+        assert breakdown["coord_store_mb"] == 3.0
+        assert breakdown["coord_store_entries"] == 3
+        assert breakdown["coord_caches_mb"] == 0.0
+        assert data["coord_caches"]["store"] == store_stats

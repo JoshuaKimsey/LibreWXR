@@ -349,7 +349,7 @@ Goal: production-quality output on the rack.
 1. **Color schemes** in `src/librewxr/colors/schemes.py`:
    - LW IR: grayscale with cold=white, warm=transparent (matches every weather app convention)
    - VIS: grayscale natural for the overlay layer
-2. **Smoothing at high zoom**: 8 km native resolution is blocky at z≥10. Add a Gaussian blur scaled by zoom level (mirrors the radar renderer's `_compute_blur_radius` pattern in `tiles/renderer.py`).
+2. **Smoothing at high zoom**: 8 km native resolution is blocky at z≥10. Add a Gaussian blur scaled by zoom level (mirrors the shared `compute_blur_radius` pattern in `tiles/coordinates.py`).
 3. **Coverage map**: update `scripts/generate_coverage_map.py` to draw the GMGSI footprint (±73° band) on the satellite coverage map. Regenerate `docs/coverage-map-satellite.png`.
 4. **Multi-worker deployment test**: run the pipeline + 32 render workers on the rack with `LIBREWXR_RADAR_ENABLED=false` and `LIBREWXR_REGIONAL_NWP_ENABLED=false` to isolate satellite-only behaviour. Confirm:
    - Pipeline fetches LW + VIS per cycle without crashes

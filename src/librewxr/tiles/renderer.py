@@ -14,6 +14,7 @@ from librewxr.config import settings
 from librewxr.data.coverage import sample_coverage, sample_feather
 from librewxr.data.regions import RegionDef
 from librewxr.tiles.coordinates import (
+    compute_blur_radius,
     overlapping_regions,
     region_pixel_indices,
     region_pixel_indices_fractional,
@@ -150,7 +151,7 @@ def compute_tile_geometry(
     # Uses the highest-priority (finest) region's Jacobian so that mixed
     # coarse + fine tiles size their blur to the resolution that's
     # actually visible at the center.
-    blur_radius = _compute_blur_radius(
+    blur_radius = compute_blur_radius(
         regions_with_data[0], z, x, y, tile_size,
     ) if smooth else 0.0
 
@@ -444,36 +445,6 @@ def render_tile(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-def _compute_blur_radius(
-    region: RegionDef, z: int, x: int, y: int, tile_size: int
-) -> float:
-    """Pick a Gaussian blur radius matched to the visible region pixel size.
-
-    Reads the local Jacobian of ``region_pixel_indices_fractional`` at the
-    tile centre to find how many tile pixels a single region pixel covers
-    (``tile_per_region``).  Blur radius scales as a quarter of that span,
-    which is the σ that rounds a single region-pixel "block" at its
-    edges without merging it with its neighbours (the visible Gaussian
-    width is ~3σ, so a quarter-block σ touches half a block on each side).
-    At low zoom the ratio is < 1 and the radius collapses to
-    ``smooth_radius`` (baseline); at high zoom on a very coarse source
-    growth is capped at ``tile_size / 32`` to keep the kernel from
-    smearing unrelated cells together.
-    """
-    base = settings.smooth_radius
-    if base <= 0:
-        return 0.0
-    row_f, col_f = region_pixel_indices_fractional(region, z, x, y, tile_size)
-    cy = cx = tile_size // 2
-    drow = abs(float(row_f[cy + 1, cx] - row_f[cy - 1, cx])) / 2.0
-    dcol = abs(float(col_f[cy, cx + 1] - col_f[cy, cx - 1])) / 2.0
-    if drow < 1e-6 or dcol < 1e-6:
-        return base
-    tile_per_region = max(1.0 / drow, 1.0 / dcol)
-    raw = base * max(1.0, tile_per_region * 0.25)
-    return min(raw, tile_size / 32.0)
 
 
 def _gather_clipped(

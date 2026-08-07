@@ -51,6 +51,8 @@ from librewxr.memory import MemoryMonitor, detect_memory_limit_mb
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import (
     ALL_CACHES,
+    coord_store_cold,
+    prune_shared_coord_store,
     warm_coordinate_caches,
 )
 from librewxr.tiles.request_tracker import TileRequestTracker
@@ -113,6 +115,8 @@ logger = logging.getLogger(__name__)
 # can't be garbage-collected mid-write (see ``_hold_mask_save_task``).  Only
 # one lifespan runs per process, so a single module-level slot suffices.
 _mask_save_task: asyncio.Task | None = None
+
+_WARM_JITTER_MAX_S = 15.0  # multi-mode warm-start de-synchronisation; patched to 0 in tests
 
 
 def _hold_mask_save_task(app: FastAPI, task: asyncio.Task) -> None:
@@ -619,6 +623,14 @@ async def _render_only_lifespan(app: FastAPI):
         # (request_executor) plays the single-mode warmer's role.  Kept inside
         # the try so a warm failure still tears down both executors.
         if settings.warm_coord_zoom > 0:
+            # De-synchronise the 16 workers' warm passes only while the shared
+            # coord store is cold: with an empty store every worker would
+            # otherwise compute + publish the same entries simultaneously
+            # (correct but wasteful; converges on the first replace).  Once
+            # the store is warm the pass is cheap mmap hits and the jitter
+            # is dead time.
+            if coord_store_cold():
+                await asyncio.sleep(random.uniform(0.0, _WARM_JITTER_MAX_S))
             start = time.time()
             loop = asyncio.get_running_loop()
             warmed = await loop.run_in_executor(
@@ -911,6 +923,9 @@ async def lifespan(app: FastAPI):
                 dump_state(state_stores, state_cache_dir)
             except Exception:
                 logger.exception("Failed to dump state snapshot (single mode)")
+            # Single mode owns coord-store maintenance (render workers never
+            # prune).  Invoked like dump_state above; the helper never raises.
+            prune_shared_coord_store()
 
     fetcher = RadarFetcher(
         store, cache,

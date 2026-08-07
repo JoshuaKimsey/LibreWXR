@@ -408,6 +408,29 @@ These caches are the largest RAM consumer after frame data. Reducing this saves 
 | **Default** | `2048` (single) / `512` (multi) — set 0 or unset to use the mode default |
 | **Type** | integer |
 
+### `LIBREWXR_COORD_STORE_ENABLED`
+
+Master switch for the shared on-disk coordinate store (`data/coord_store.py`). When enabled, the six cached tile-coordinate functions in `tiles/coordinates.py` publish their computed arrays to a shared store under `LIBREWXR_CACHE_DIR` and read them back as read-only memmaps, so multi-worker deployments compute each array once globally instead of once per render worker. When `false`, the per-worker in-process coordinate LRU caches are used exactly as before the store existed.
+
+Best-effort: any store failure (unwritable cache dir, corrupt files, version mismatch) is logged once and falls back to the in-process compute path — the store is never a single point of failure. Requires `LIBREWXR_CACHE_DIR`; the store disables itself when the cache dir is unset.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+### `LIBREWXR_COORD_STORE_MB`
+
+Size cap of the shared on-disk coordinate store, in megabytes. The cap is **soft**: the store is pruned once per fetch cycle by whichever process owns store maintenance (the pipeline in multi mode, the main process in single mode — via the ~30 s-debounced cycle hook), so it can briefly overshoot between prunes.
+
+The default tracks `LIBREWXR_MODE`: 1024 in single mode, 8192 in multi mode. In multi mode the budget is **shared by ALL render workers** — every worker reads the same on-disk store, so the 8192 MB default covers the combined warm set rather than 8192 MB per worker. Settable via `.env` like any knob; a restart applies the change. Requires `LIBREWXR_CACHE_DIR`; the store disables itself when the cache dir is unset.
+
+| | |
+|---|---|
+| **Default** | `1024` (single) / `8192` (multi) — set 0 or unset to use the mode default |
+| **Type** | integer |
+| **Unit** | megabytes |
+
 ### `LIBREWXR_WARMER_THREADS`
 
 Thread pool size for background tile cache warming, **single mode only** — in multi mode no `TileWarmer` is instantiated in render workers, and the 4-thread multi default sizes the request-executor pool used to compute tile geometry, not a warming pool. When a tile is requested, the warmer pre-computes the geometry for that same tile position at all other timestamps in the background, so animation playback is smooth without waiting for each frame to render on demand. Warming covers all color schemes and output formats automatically because the cache stores pre-presentation geometry, not encoded bytes.

@@ -139,9 +139,16 @@ async def test_render_only_lifespan_picks_up_snapshot(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "alerts_enabled", False)
     monkeypatch.setattr(settings, "state_wait_timeout", 5.0)
     monkeypatch.setattr(settings, "state_poll_interval", 0.1)
+    # Keeps the warm+jitter wiring covered without a multi-GB zoom-6 store
+    # publish in a unit test.
+    monkeypatch.setattr(settings, "warm_coord_zoom", 2)
 
     from librewxr import main as main_module
     from librewxr.api import routes
+
+    # The warm-pass jitter (uniform 0..15 s) would stall this smoke test;
+    # the constant is module-level precisely so tests can neutralize it.
+    monkeypatch.setattr(main_module, "_WARM_JITTER_MAX_S", 0.0)
 
     # FastAPI app stub — _render_only_lifespan only takes app for symmetry.
     class _StubApp:

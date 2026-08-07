@@ -55,6 +55,7 @@ from librewxr.sources import (
     satellite_source_slug,
 )
 from librewxr.tiles.cache import TileCache
+from librewxr.tiles.coordinates import prune_shared_coord_store
 
 # The pipeline writes no tiles itself, but RadarFetcher invalidates a
 # TileCache on frame eviction.  A shared one here would be useless to
@@ -264,6 +265,10 @@ async def run_pipeline() -> None:
             dump_state(stores, cache_dir)
         except Exception:
             logger.exception("Failed to dump master state snapshot")
+        # The pipeline owns coord-store maintenance in multi mode (render
+        # workers never prune).  Guard-free: _get_store()'s gate covers
+        # enabled/cache_dir and the helper never raises.
+        prune_shared_coord_store()
 
     fetcher = RadarFetcher(
         store, tile_cache,

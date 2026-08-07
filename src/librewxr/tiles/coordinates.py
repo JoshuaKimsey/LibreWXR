@@ -1,11 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
+import logging
 import math
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 
 from librewxr.config import settings
+from librewxr.data.coord_store import (
+    CoordStore,
+    KIND_FRACTIONAL,
+    KIND_FRACTIONAL_PAD,
+    KIND_INDICES,
+    KIND_INDICES_PAD,
+    KIND_LATLON,
+    KIND_LATLON_PAD,
+)
 from librewxr.data.regions import REGIONS, RegionDef
 
 # Legacy constants for USCOMP (kept for backward compatibility)
@@ -17,6 +28,145 @@ SOUTH = _USCOMP.south
 PIXEL_SIZE = _USCOMP.pixel_size
 COMPOSITE_WIDTH = _USCOMP.width
 COMPOSITE_HEIGHT = _USCOMP.height
+
+logger = logging.getLogger(__name__)
+
+
+# ── Shared on-disk coordinate store ────────────────────────────────────────
+# Best-effort shared store (see librewxr.data.coord_store).  The six cached
+# coordinate functions below publish / read their computed arrays here so
+# every render worker maps the same read-only memmap pages instead of
+# computing identical arrays per process.  ANY failure degrades to the pure
+# in-process compute path — the store is never a single point of failure.
+
+_STORE: CoordStore | None = None
+_STORE_DISABLED: bool = False
+
+
+def _get_store() -> CoordStore | None:
+    """Return the lazily-constructed shared store, or None when disabled.
+
+    Call-time gate: bypassed entirely unless ``settings.coord_store_enabled``
+    is set AND ``settings.cache_dir`` is non-empty.  A construction failure
+    is logged once and disables the store for this process (degrading to
+    in-process compute).
+    """
+    global _STORE, _STORE_DISABLED
+    if _STORE_DISABLED:
+        return None
+    if not settings.coord_store_enabled or not settings.cache_dir:
+        return None
+    if _STORE is not None:
+        return _STORE
+    try:
+        _STORE = CoordStore(
+            Path(settings.cache_dir), settings.get_enabled_regions(),
+        )
+    except Exception:
+        logger.warning(
+            "coord_store: failed to initialize; falling back to in-process compute",
+            exc_info=True,
+        )
+        _STORE_DISABLED = True
+        return None
+    return _STORE
+
+
+def _reset_coord_store() -> None:
+    """Test hook: reset the store singleton and the disabled flag."""
+    global _STORE, _STORE_DISABLED
+    _STORE = None
+    _STORE_DISABLED = False
+
+
+def prune_shared_coord_store() -> tuple[int, int] | None:
+    """Prune the shared coord store to its byte budget. Returns
+    (removed_bytes, removed_entries), or None when the store is disabled.
+    Best-effort: any failure is logged and returns None. Intended to be
+    called once per fetch cycle by the process that owns store maintenance
+    (pipeline in multi mode, main process in single mode) - never by
+    render workers."""
+    store = _get_store()
+    if store is None:
+        return None
+    try:
+        removed_bytes, removed_entries = store.prune(
+            settings.coord_store_mb * 1024 * 1024
+        )
+    except Exception:
+        logger.warning(
+            "coord_store: prune failed; skipping this cycle", exc_info=True,
+        )
+        return None
+    if removed_entries > 0:
+        logger.info(
+            "coord_store: pruned %d entries (%.1f MB)",
+            removed_entries, removed_bytes / (1024 * 1024),
+        )
+    return removed_bytes, removed_entries
+
+
+def coord_store_cold() -> bool:
+    """True when the shared coord store has no entry for a canonical
+    always-warmed key under the CURRENT signature - i.e. a warm pass would
+    compute + publish rather than mmap.  False when the store is disabled
+    (jitter buys nothing without cross-worker dedup) or the probe key is
+    present.  Best-effort: any error returns False.
+
+    The probe is the z=0 whole-earth lat/lon entry, which every
+    ``warm_coordinate_caches`` pass publishes (tile 0/0 overlaps every
+    region, and the plain latlon grid is warmed unconditionally).  Because
+    ``entry_path`` folds the current store signature into the key, a code
+    or region change (new signature) correctly reports cold even while
+    old-generation files remain on disk.
+    """
+    store = _get_store()
+    if store is None:
+        return False
+    try:
+        probe = store.entry_path(KIND_LATLON, None, 0, 0, 0, 256, 0)
+        return not probe.exists()
+    except Exception:
+        logger.debug(
+            "coord_store: cold-probe failed; assuming warm", exc_info=True,
+        )
+        return False
+
+
+def _try_open(
+    store: CoordStore, kind: str, region_name: str | None,
+    z: int, x: int, y: int, tile_size: int, pad: int,
+    expected_shape: tuple[int, ...], dtype: np.dtype,
+) -> np.ndarray | None:
+    """Store read wrapped in try/except so a store bug can't break rendering."""
+    try:
+        return store.open(
+            kind, region_name, z, x, y, tile_size, pad, expected_shape, dtype,
+        )
+    except Exception:
+        logger.warning(
+            "coord_store: open(%s, %s, %d, %d, %d, %d, %d) failed; "
+            "falling back to compute",
+            kind, region_name, z, x, y, tile_size, pad,
+            exc_info=True,
+        )
+        return None
+
+
+def _try_publish(
+    store: CoordStore, kind: str, region_name: str | None,
+    z: int, x: int, y: int, tile_size: int, pad: int,
+    data: np.ndarray,
+) -> None:
+    """Store write wrapped in try/except (best-effort, never raises)."""
+    try:
+        store.publish(kind, region_name, z, x, y, tile_size, pad, data)
+    except Exception:
+        logger.warning(
+            "coord_store: publish(%s, %s, %d, %d, %d, %d, %d) failed",
+            kind, region_name, z, x, y, tile_size, pad,
+            exc_info=True,
+        )
 
 
 # ── WGS84 ellipsoidal constants ────────────────────────────────────
@@ -172,6 +322,44 @@ def _tmerc_pixel_coords(
 # ── Region-aware coordinate functions ────────────────────────────────
 
 
+def _compute_region_pixel_indices(
+    region: RegionDef, z: int, x: int, y: int, tile_size: int = 256
+) -> tuple[np.ndarray, np.ndarray]:
+    """Uncached compute body of ``region_pixel_indices``."""
+    n = 2**z
+    cx = np.arange(tile_size, dtype=np.float64) + 0.5
+    cy = np.arange(tile_size, dtype=np.float64) + 0.5
+
+    lon = (x + cx / tile_size) / n * 360.0 - 180.0
+    lat_rad = np.arctan(np.sinh(math.pi * (1 - 2 * (y + cy / tile_size) / n)))
+    lat = np.degrees(lat_rad)
+
+    if region.proj == "laea":
+        col_grid, row_grid = _laea_pixel_coords(lon, lat, region)
+    elif region.proj == "tmerc":
+        col_grid, row_grid = _tmerc_pixel_coords(lon, lat, region)
+    else:
+        col_f = (lon - region.west) / region.pixel_size
+        row_f = (region.north - lat) / region._ps_y
+        col_grid, row_grid = np.meshgrid(col_f, row_f)
+
+    col_idx = np.rint(col_grid).astype(np.int32)
+    row_idx = np.rint(row_grid).astype(np.int32)
+
+    oob = (
+        (col_idx < 0)
+        | (col_idx >= region.width)
+        | (row_idx < 0)
+        | (row_idx >= region.height)
+    )
+    col_idx[oob] = -1
+    row_idx[oob] = -1
+
+    col_idx.flags.writeable = False
+    row_idx.flags.writeable = False
+    return row_idx, col_idx
+
+
 @lru_cache(maxsize=settings.coord_cache_size)
 def region_pixel_indices(
     region: RegionDef, z: int, x: int, y: int, tile_size: int = 256
@@ -181,9 +369,30 @@ def region_pixel_indices(
     Returns (row_indices, col_indices) arrays of shape (tile_size, tile_size).
     Values of -1 indicate pixels outside the region's coverage.
     """
+    store = _get_store()
+    if store is not None:
+        arr = _try_open(
+            store, KIND_INDICES, region.name, z, x, y, tile_size, 0,
+            expected_shape=(2, tile_size, tile_size), dtype=np.int32,
+        )
+        if arr is not None:
+            return arr[0], arr[1]  # views onto the shared memmap
+        row_idx, col_idx = _compute_region_pixel_indices(region, z, x, y, tile_size)
+        _try_publish(
+            store, KIND_INDICES, region.name, z, x, y, tile_size, 0,
+            np.stack((row_idx, col_idx)),
+        )
+        return row_idx, col_idx
+    return _compute_region_pixel_indices(region, z, x, y, tile_size)
+
+
+def _compute_region_pixel_indices_padded(
+    region: RegionDef, z: int, x: int, y: int, tile_size: int = 256, pad: int = 8
+) -> tuple[np.ndarray, np.ndarray]:
+    """Uncached compute body of ``region_pixel_indices_padded``."""
     n = 2**z
-    cx = np.arange(tile_size, dtype=np.float64) + 0.5
-    cy = np.arange(tile_size, dtype=np.float64) + 0.5
+    cx = np.arange(-pad, tile_size + pad, dtype=np.float64) + 0.5
+    cy = np.arange(-pad, tile_size + pad, dtype=np.float64) + 0.5
 
     lon = (x + cx / tile_size) / n * 360.0 - 180.0
     lat_rad = np.arctan(np.sinh(math.pi * (1 - 2 * (y + cy / tile_size) / n)))
@@ -220,9 +429,33 @@ def region_pixel_indices_padded(
     region: RegionDef, z: int, x: int, y: int, tile_size: int = 256, pad: int = 8
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute composite pixel indices for a tile with padding within a region."""
+    store = _get_store()
+    if store is not None:
+        arr = _try_open(
+            store, KIND_INDICES_PAD, region.name, z, x, y, tile_size, pad,
+            expected_shape=(2, tile_size + 2 * pad, tile_size + 2 * pad),
+            dtype=np.int32,
+        )
+        if arr is not None:
+            return arr[0], arr[1]  # views onto the shared memmap
+        row_idx, col_idx = _compute_region_pixel_indices_padded(
+            region, z, x, y, tile_size, pad,
+        )
+        _try_publish(
+            store, KIND_INDICES_PAD, region.name, z, x, y, tile_size, pad,
+            np.stack((row_idx, col_idx)),
+        )
+        return row_idx, col_idx
+    return _compute_region_pixel_indices_padded(region, z, x, y, tile_size, pad)
+
+
+def _compute_region_pixel_indices_fractional(
+    region: RegionDef, z: int, x: int, y: int, tile_size: int = 256
+) -> tuple[np.ndarray, np.ndarray]:
+    """Uncached compute body of ``region_pixel_indices_fractional``."""
     n = 2**z
-    cx = np.arange(-pad, tile_size + pad, dtype=np.float64) + 0.5
-    cy = np.arange(-pad, tile_size + pad, dtype=np.float64) + 0.5
+    cx = np.arange(tile_size, dtype=np.float64) + 0.5
+    cy = np.arange(tile_size, dtype=np.float64) + 0.5
 
     lon = (x + cx / tile_size) / n * 360.0 - 180.0
     lat_rad = np.arctan(np.sinh(math.pi * (1 - 2 * (y + cy / tile_size) / n)))
@@ -237,21 +470,12 @@ def region_pixel_indices_padded(
         row_f = (region.north - lat) / region._ps_y
         col_grid, row_grid = np.meshgrid(col_f, row_f)
 
-    col_idx = np.rint(col_grid).astype(np.int32)
-    row_idx = np.rint(row_grid).astype(np.int32)
+    row_grid = np.clip(row_grid, 0, region.height - 1).astype(np.float32)
+    col_grid = np.clip(col_grid, 0, region.width - 1).astype(np.float32)
 
-    oob = (
-        (col_idx < 0)
-        | (col_idx >= region.width)
-        | (row_idx < 0)
-        | (row_idx >= region.height)
-    )
-    col_idx[oob] = -1
-    row_idx[oob] = -1
-
-    col_idx.flags.writeable = False
-    row_idx.flags.writeable = False
-    return row_idx, col_idx
+    row_grid.flags.writeable = False
+    col_grid.flags.writeable = False
+    return row_grid, col_grid
 
 
 @lru_cache(maxsize=settings.coord_cache_size)
@@ -259,9 +483,32 @@ def region_pixel_indices_fractional(
     region: RegionDef, z: int, x: int, y: int, tile_size: int = 256
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute fractional composite pixel coordinates for bilinear interpolation."""
+    store = _get_store()
+    if store is not None:
+        arr = _try_open(
+            store, KIND_FRACTIONAL, region.name, z, x, y, tile_size, 0,
+            expected_shape=(2, tile_size, tile_size), dtype=np.float32,
+        )
+        if arr is not None:
+            return arr[0], arr[1]  # views onto the shared memmap
+        row_grid, col_grid = _compute_region_pixel_indices_fractional(
+            region, z, x, y, tile_size,
+        )
+        _try_publish(
+            store, KIND_FRACTIONAL, region.name, z, x, y, tile_size, 0,
+            np.stack((row_grid, col_grid)),
+        )
+        return row_grid, col_grid
+    return _compute_region_pixel_indices_fractional(region, z, x, y, tile_size)
+
+
+def _compute_region_pixel_indices_fractional_padded(
+    region: RegionDef, z: int, x: int, y: int, tile_size: int = 256, pad: int = 8
+) -> tuple[np.ndarray, np.ndarray]:
+    """Uncached compute body of ``region_pixel_indices_fractional_padded``."""
     n = 2**z
-    cx = np.arange(tile_size, dtype=np.float64) + 0.5
-    cy = np.arange(tile_size, dtype=np.float64) + 0.5
+    cx = np.arange(-pad, tile_size + pad, dtype=np.float64) + 0.5
+    cy = np.arange(-pad, tile_size + pad, dtype=np.float64) + 0.5
 
     lon = (x + cx / tile_size) / n * 360.0 - 180.0
     lat_rad = np.arctan(np.sinh(math.pi * (1 - 2 * (y + cy / tile_size) / n)))
@@ -289,29 +536,26 @@ def region_pixel_indices_fractional_padded(
     region: RegionDef, z: int, x: int, y: int, tile_size: int = 256, pad: int = 8
 ) -> tuple[np.ndarray, np.ndarray]:
     """Fractional pixel coords for a tile with padding (bilinear + blur path)."""
-    n = 2**z
-    cx = np.arange(-pad, tile_size + pad, dtype=np.float64) + 0.5
-    cy = np.arange(-pad, tile_size + pad, dtype=np.float64) + 0.5
-
-    lon = (x + cx / tile_size) / n * 360.0 - 180.0
-    lat_rad = np.arctan(np.sinh(math.pi * (1 - 2 * (y + cy / tile_size) / n)))
-    lat = np.degrees(lat_rad)
-
-    if region.proj == "laea":
-        col_grid, row_grid = _laea_pixel_coords(lon, lat, region)
-    elif region.proj == "tmerc":
-        col_grid, row_grid = _tmerc_pixel_coords(lon, lat, region)
-    else:
-        col_f = (lon - region.west) / region.pixel_size
-        row_f = (region.north - lat) / region._ps_y
-        col_grid, row_grid = np.meshgrid(col_f, row_f)
-
-    row_grid = np.clip(row_grid, 0, region.height - 1).astype(np.float32)
-    col_grid = np.clip(col_grid, 0, region.width - 1).astype(np.float32)
-
-    row_grid.flags.writeable = False
-    col_grid.flags.writeable = False
-    return row_grid, col_grid
+    store = _get_store()
+    if store is not None:
+        arr = _try_open(
+            store, KIND_FRACTIONAL_PAD, region.name, z, x, y, tile_size, pad,
+            expected_shape=(2, tile_size + 2 * pad, tile_size + 2 * pad),
+            dtype=np.float32,
+        )
+        if arr is not None:
+            return arr[0], arr[1]  # views onto the shared memmap
+        row_grid, col_grid = _compute_region_pixel_indices_fractional_padded(
+            region, z, x, y, tile_size, pad,
+        )
+        _try_publish(
+            store, KIND_FRACTIONAL_PAD, region.name, z, x, y, tile_size, pad,
+            np.stack((row_grid, col_grid)),
+        )
+        return row_grid, col_grid
+    return _compute_region_pixel_indices_fractional_padded(
+        region, z, x, y, tile_size, pad,
+    )
 
 
 def tile_overlaps_region(region: RegionDef, z: int, x: int, y: int) -> bool:
@@ -357,6 +601,24 @@ def _overlapping_regions_cached(
     return result
 
 
+def _compute_tile_pixel_latlons(
+    z: int, x: int, y: int, tile_size: int = 256
+) -> tuple[np.ndarray, np.ndarray]:
+    """Uncached compute body of ``tile_pixel_latlons``."""
+    n = 2**z
+    cx = np.arange(tile_size, dtype=np.float32) + 0.5
+    cy = np.arange(tile_size, dtype=np.float32) + 0.5
+
+    lon = (x + cx / tile_size) / n * 360.0 - 180.0
+    lat_rad = np.arctan(np.sinh(np.float32(math.pi) * (1 - 2 * (y + cy / tile_size) / n)))
+    lat = np.degrees(lat_rad)
+
+    lon_grid, lat_grid = np.meshgrid(lon, lat)
+    lon_grid.flags.writeable = False
+    lat_grid.flags.writeable = False
+    return lat_grid, lon_grid
+
+
 @lru_cache(maxsize=settings.coord_cache_size)
 def tile_pixel_latlons(
     z: int, x: int, y: int, tile_size: int = 256
@@ -368,9 +630,30 @@ def tile_pixel_latlons(
     float32 provides ~7 decimal digits (~0.00001° ≈ 1 m precision),
     far exceeding any radar data resolution.
     """
+    store = _get_store()
+    if store is not None:
+        arr = _try_open(
+            store, KIND_LATLON, None, z, x, y, tile_size, 0,
+            expected_shape=(2, tile_size, tile_size), dtype=np.float32,
+        )
+        if arr is not None:
+            return arr[0], arr[1]  # views onto the shared memmap
+        lat_grid, lon_grid = _compute_tile_pixel_latlons(z, x, y, tile_size)
+        _try_publish(
+            store, KIND_LATLON, None, z, x, y, tile_size, 0,
+            np.stack((lat_grid, lon_grid)),
+        )
+        return lat_grid, lon_grid
+    return _compute_tile_pixel_latlons(z, x, y, tile_size)
+
+
+def _compute_tile_pixel_latlons_padded(
+    z: int, x: int, y: int, tile_size: int = 256, pad: int = 8
+) -> tuple[np.ndarray, np.ndarray]:
+    """Uncached compute body of ``tile_pixel_latlons_padded``."""
     n = 2**z
-    cx = np.arange(tile_size, dtype=np.float32) + 0.5
-    cy = np.arange(tile_size, dtype=np.float32) + 0.5
+    cx = np.arange(-pad, tile_size + pad, dtype=np.float32) + 0.5
+    cy = np.arange(-pad, tile_size + pad, dtype=np.float32) + 0.5
 
     lon = (x + cx / tile_size) / n * 360.0 - 180.0
     lat_rad = np.arctan(np.sinh(np.float32(math.pi) * (1 - 2 * (y + cy / tile_size) / n)))
@@ -387,18 +670,24 @@ def tile_pixel_latlons_padded(
     z: int, x: int, y: int, tile_size: int = 256, pad: int = 8
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute lat/lon for a tile with padding."""
-    n = 2**z
-    cx = np.arange(-pad, tile_size + pad, dtype=np.float32) + 0.5
-    cy = np.arange(-pad, tile_size + pad, dtype=np.float32) + 0.5
-
-    lon = (x + cx / tile_size) / n * 360.0 - 180.0
-    lat_rad = np.arctan(np.sinh(np.float32(math.pi) * (1 - 2 * (y + cy / tile_size) / n)))
-    lat = np.degrees(lat_rad)
-
-    lon_grid, lat_grid = np.meshgrid(lon, lat)
-    lon_grid.flags.writeable = False
-    lat_grid.flags.writeable = False
-    return lat_grid, lon_grid
+    store = _get_store()
+    if store is not None:
+        arr = _try_open(
+            store, KIND_LATLON_PAD, None, z, x, y, tile_size, pad,
+            expected_shape=(2, tile_size + 2 * pad, tile_size + 2 * pad),
+            dtype=np.float32,
+        )
+        if arr is not None:
+            return arr[0], arr[1]  # views onto the shared memmap
+        lat_grid, lon_grid = _compute_tile_pixel_latlons_padded(
+            z, x, y, tile_size, pad,
+        )
+        _try_publish(
+            store, KIND_LATLON_PAD, None, z, x, y, tile_size, pad,
+            np.stack((lat_grid, lon_grid)),
+        )
+        return lat_grid, lon_grid
+    return _compute_tile_pixel_latlons_padded(z, x, y, tile_size, pad)
 
 
 # ── Legacy USCOMP-only functions (kept for backward compatibility) ───
@@ -448,6 +737,36 @@ def tile_overlaps_composite(z: int, x: int, y: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def compute_blur_radius(
+    region: RegionDef, z: int, x: int, y: int, tile_size: int
+) -> float:
+    """Pick a Gaussian blur radius matched to the visible region pixel size.
+
+    Reads the local Jacobian of ``region_pixel_indices_fractional`` at the
+    tile centre to find how many tile pixels a single region pixel covers
+    (``tile_per_region``).  Blur radius scales as a quarter of that span,
+    which is the σ that rounds a single region-pixel "block" at its
+    edges without merging it with its neighbours (the visible Gaussian
+    width is ~3σ, so a quarter-block σ touches half a block on each side).
+    At low zoom the ratio is < 1 and the radius collapses to
+    ``smooth_radius`` (baseline); at high zoom on a very coarse source
+    growth is capped at ``tile_size / 32`` to keep the kernel from
+    smearing unrelated cells together.
+    """
+    base = settings.smooth_radius
+    if base <= 0:
+        return 0.0
+    row_f, col_f = region_pixel_indices_fractional(region, z, x, y, tile_size)
+    cy = cx = tile_size // 2
+    drow = abs(float(row_f[cy + 1, cx] - row_f[cy - 1, cx])) / 2.0
+    dcol = abs(float(col_f[cy, cx + 1] - col_f[cy, cx - 1])) / 2.0
+    if drow < 1e-6 or dcol < 1e-6:
+        return base
+    tile_per_region = max(1.0 / drow, 1.0 / dcol)
+    raw = base * max(1.0, tile_per_region * 0.25)
+    return min(raw, tile_size / 32.0)
+
+
 def warm_coordinate_caches(
     enabled_regions: list[str] | None, max_zoom: int, tile_size: int = 256
 ) -> int:
@@ -457,6 +776,13 @@ def warm_coordinate_caches(
     computes overlapping regions, and calls each cached coordinate
     function so that real tile requests never pay the cold-start cost
     of trigonometric projections and array allocations.
+
+    Warms exactly the keys the request path uses: the plain indices /
+    fractional / latlon grids unconditionally (coverage and overlay paths),
+    and the padded variants only when the render path's derived pad
+    (``int(compute_blur_radius(...) * 3)`` when the sigma >= 0.5) is > 0.
+    Because the wrappers are store-backed, warming publishes to the shared
+    on-disk store and later workers' warm passes become store hits.
 
     Returns the number of unique (region, z, x, y, tile_size) cache
     entries warmed.
@@ -471,15 +797,22 @@ def warm_coordinate_caches(
                 regions = overlapping_regions(z, x, y, enabled_regions)
                 if not regions:
                     continue
-                # Tile-level lat/lon grids (used by ECMWF fallback, arrows)
+                # Tile-level lat/lon grids (used by ECMWF fallback, arrows).
                 tile_pixel_latlons(z, x, y, tile_size)
-                tile_pixel_latlons_padded(z, x, y, tile_size, pad=8)
                 for region in regions:
                     region_pixel_indices(region, z, x, y, tile_size)
-                    region_pixel_indices_padded(region, z, x, y, tile_size, pad=8)
                     region_pixel_indices_fractional(region, z, x, y, tile_size)
-                    region_pixel_indices_fractional_padded(region, z, x, y, tile_size, pad=8)
                     warmed += 1
+                # Derive the pad exactly like the render path (smooth=True
+                # default) from the finest overlapping region, then warm the
+                # padded variants with THAT pad so warm and request keys agree.
+                sigma = compute_blur_radius(regions[0], z, x, y, tile_size)
+                pad = int(sigma * 3) if sigma >= 0.5 else 0
+                if pad > 0:
+                    tile_pixel_latlons_padded(z, x, y, tile_size, pad)
+                    for region in regions:
+                        region_pixel_indices_padded(region, z, x, y, tile_size, pad)
+                        region_pixel_indices_fractional_padded(region, z, x, y, tile_size, pad)
     return warmed
 
 
@@ -535,7 +868,14 @@ def coord_cache_stats() -> dict:
             "misses": info.misses,
             "hit_ratio": round(info.hits / total, 3) if total else None,
         }
-    return {"max_size": max_size, "caches": caches}
+    return {
+        "max_size": max_size,
+        "caches": caches,
+        # Shared on-disk store stats (hits/misses/publishes/entries/bytes);
+        # None when the store is disabled or failed to initialize (degraded
+        # to the in-process compute path).
+        "store": _STORE.stats() if _STORE is not None else None,
+    }
 
 
 def coord_cache_bytes() -> int:

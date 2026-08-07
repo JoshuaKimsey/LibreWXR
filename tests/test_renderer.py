@@ -11,11 +11,14 @@ pytestmark = pytest.mark.tiles
 
 from librewxr.data.regions import REGIONS
 from librewxr.tiles.cache import TileCache
-from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
+from librewxr.tiles.coordinates import (
+    COMPOSITE_HEIGHT,
+    COMPOSITE_WIDTH,
+    compute_blur_radius,
+)
 from librewxr.tiles.png_palette import _PALETTE_MIN_COLORS, encode_png
 from librewxr.tiles.renderer import (
     TileGeometry,
-    _compute_blur_radius,
     _compute_nwp_only_geometry,
     compute_tile_geometry,
     present_tile,
@@ -339,7 +342,7 @@ class TestBlurRadius:
         radii = []
         for z in (5, 8, 11):
             x, y = self._lonlat_to_tile(-90.0, 35.0, z)  # Memphis-ish
-            radii.append(_compute_blur_radius(uscomp, z, x, y, 256))
+            radii.append(compute_blur_radius(uscomp, z, x, y, 256))
         assert radii[0] <= radii[1] < radii[2], (
             f"blur should grow monotonically with zoom, got {radii}"
         )
@@ -351,8 +354,8 @@ class TestBlurRadius:
         z = 10
         us_x, us_y = self._lonlat_to_tile(-90.0, 35.0, z)
         eu_x, eu_y = self._lonlat_to_tile(10.0, 50.0, z)
-        us_blur = _compute_blur_radius(uscomp, z, us_x, us_y, 256)
-        eu_blur = _compute_blur_radius(opera, z, eu_x, eu_y, 256)
+        us_blur = compute_blur_radius(uscomp, z, us_x, us_y, 256)
+        eu_blur = compute_blur_radius(opera, z, eu_x, eu_y, 256)
         assert eu_blur > us_blur, (
             f"coarser region should get more blur, USCOMP={us_blur:.2f} OPERA={eu_blur:.2f}"
         )
@@ -362,7 +365,7 @@ class TestBlurRadius:
         opera = REGIONS["OPERA"]
         z = 12
         x, y = self._lonlat_to_tile(10.0, 50.0, z)
-        r = _compute_blur_radius(opera, z, x, y, 256)
+        r = compute_blur_radius(opera, z, x, y, 256)
         assert r <= 256 / 32 + 1e-6, f"blur {r} exceeded safety cap"
 
 

@@ -188,7 +188,15 @@ async def health():
         for grid in satellite_grids.values()
         if grid is not None
     )
-    coord_bytes = coord_cache_bytes()
+    coord_stats = coord_cache_stats()
+    store_stats = coord_stats.get("store")
+    if store_stats is not None:
+        # Store-backed: entries are shared read-only memmap pages, not private
+        # heap - report the on-disk footprint separately, contribute 0 to RSS
+        # reconciliation.
+        coord_bytes = 0
+    else:
+        coord_bytes = coord_cache_bytes()
     tracked_bytes = (
         radar_bytes + tile_cache_bytes + sum(nwp_bytes_by_slug.values())
         + nowcast_bytes + satellite_bytes + coord_bytes
@@ -205,6 +213,11 @@ async def health():
         "nowcast_mb": round(nowcast_bytes / (1024 * 1024), 1),
         "satellite_mb": round(satellite_bytes / (1024 * 1024), 1),
         "coord_caches_mb": round(coord_bytes / (1024 * 1024), 1),
+        "coord_store_mb": (
+            round(store_stats["bytes"] / (1024 * 1024), 1)
+            if store_stats else 0.0
+        ),
+        "coord_store_entries": store_stats["entries"] if store_stats else 0,
         "other_mb": round(other_bytes / (1024 * 1024), 1),
     })
 

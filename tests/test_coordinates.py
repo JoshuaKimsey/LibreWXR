@@ -7,18 +7,44 @@ import pytest
 
 pytestmark = pytest.mark.tiles
 
+import librewxr.tiles.coordinates as coord
+from librewxr.config import settings
+from librewxr.data.regions import REGIONS
 from librewxr.tiles.coordinates import (
+    ALL_CACHES,
     COMPOSITE_HEIGHT,
     COMPOSITE_WIDTH,
     EAST,
     NORTH,
     SOUTH,
     WEST,
+    _reset_coord_store,
     tile_bounds,
     tile_overlaps_composite,
     tile_pixel_indices,
     warm_coordinate_caches,
 )
+
+
+@pytest.fixture
+def coord_store_env(monkeypatch, tmp_path):
+    """Enable the shared coord store under a per-test tmp cache dir.
+
+    The store singleton is process-global, so every test resets it and
+    clears all coordinate LRUs before AND after running.
+    """
+    monkeypatch.setattr(settings, "cache_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "coord_store_enabled", True)
+
+    def _clear():
+        for fn in ALL_CACHES:
+            fn.cache_clear()
+
+    _reset_coord_store()
+    _clear()
+    yield
+    _clear()
+    _reset_coord_store()
 
 
 class TestTileBounds:
@@ -118,3 +144,230 @@ class TestWarmCoordinateCaches:
         """max_zoom=0 should disable warming."""
         count = warm_coordinate_caches(["USCOMP"], max_zoom=0, tile_size=256)
         assert count == 0
+
+
+class TestCoordStoreBacked:
+    """Step 2: the six cached functions are backed by the shared coord store.
+
+    Every test uses the ``coord_store_env`` fixture, which points
+    ``settings.cache_dir`` at a tmp dir, enables the store, and resets the
+    store singleton + all coordinate LRUs before and after each test.
+    """
+
+    # Tile (3, 1, 3) is partially inside USCOMP: some pixels valid, some -1.
+    _REGION = "USCOMP"
+    _Z, _X, _Y = 3, 1, 3
+
+    def _six_calls(self, region, z, x, y, ts, pad=8):
+        """Call every public store-backed function once for the given key."""
+        row, col = coord.region_pixel_indices(region, z, x, y, ts)
+        row_p, col_p = coord.region_pixel_indices_padded(region, z, x, y, ts, pad)
+        rf, cf = coord.region_pixel_indices_fractional(region, z, x, y, ts)
+        rf_p, cf_p = coord.region_pixel_indices_fractional_padded(
+            region, z, x, y, ts, pad,
+        )
+        lat, lon = coord.tile_pixel_latlons(z, x, y, ts)
+        lat_p, lon_p = coord.tile_pixel_latlons_padded(z, x, y, ts, pad)
+        return (row, col), (row_p, col_p), (rf, cf), (rf_p, cf_p), (lat, lon), (lat_p, lon_p)
+
+    def _six_compute(self, region, z, x, y, ts, pad=8):
+        """Reference results straight from the uncached compute bodies."""
+        row, col = coord._compute_region_pixel_indices(region, z, x, y, ts)
+        row_p, col_p = coord._compute_region_pixel_indices_padded(region, z, x, y, ts, pad)
+        rf, cf = coord._compute_region_pixel_indices_fractional(region, z, x, y, ts)
+        rf_p, cf_p = coord._compute_region_pixel_indices_fractional_padded(
+            region, z, x, y, ts, pad,
+        )
+        lat, lon = coord._compute_tile_pixel_latlons(z, x, y, ts)
+        lat_p, lon_p = coord._compute_tile_pixel_latlons_padded(z, x, y, ts, pad)
+        return (row, col), (row_p, col_p), (rf, cf), (rf_p, cf_p), (lat, lon), (lat_p, lon_p)
+
+    def test_store_backed_equality(self, coord_store_env):
+        """Store-backed results match the uncached compute bodies exactly.
+
+        Values, dtypes, and the -1 out-of-region sentinel pattern must all
+        survive the store round trip (tile partially outside the region).
+        """
+        region = REGIONS[self._REGION]
+        z, x, y, ts = self._Z, self._X, self._Y, 256
+        for got, exp in zip(
+            self._six_calls(region, z, x, y, ts),
+            self._six_compute(region, z, x, y, ts),
+        ):
+            for got_arr, exp_arr in zip(got, exp):
+                np.testing.assert_array_equal(got_arr, exp_arr)
+                assert got_arr.dtype == exp_arr.dtype
+                assert not got_arr.flags.writeable
+
+        # -1 sentinel pattern preserved on a partially-outside tile.
+        row, col = coord.region_pixel_indices(region, z, x, y, ts)
+        assert np.any(row == -1) and np.any(col == -1)
+        assert np.any(row >= 0) and np.any(col >= 0)
+
+    def test_roundtrip_via_store(self, coord_store_env):
+        """First call publishes; after an LRU clear the second is a store hit."""
+        region = REGIONS[self._REGION]
+        z, x, y, ts = 4, 3, 5, 256
+        first = coord.region_pixel_indices(region, z, x, y, ts)
+        assert coord._STORE is not None
+        for fn in ALL_CACHES:
+            fn.cache_clear()
+        hits_before = coord._STORE.stats()["hits"]
+
+        second = coord.region_pixel_indices(region, z, x, y, ts)
+        np.testing.assert_array_equal(second[0], first[0])
+        np.testing.assert_array_equal(second[1], first[1])
+        assert not second[0].flags.writeable
+        assert not second[1].flags.writeable
+        assert coord._STORE.stats()["hits"] > hits_before
+
+    def test_warm_request_key_agreement(self, coord_store_env):
+        """Warming publishes exactly the keys the render path later reads."""
+        region = REGIONS[self._REGION]
+        ts = 256
+        assert warm_coordinate_caches([self._REGION], max_zoom=3, tile_size=ts) > 0
+        for fn in ALL_CACHES:
+            fn.cache_clear()
+        assert coord._STORE is not None
+        publishes_before = coord._STORE.stats()["publishes"]
+        hits_before = coord._STORE.stats()["hits"]
+
+        # A tile overlapping USCOMP within the warmed zoom range.
+        z, x, y = 2, 0, 1
+        assert coord.tile_overlaps_region(region, z, x, y)
+
+        # Derive the pad the render path would for this tile (smooth=True).
+        sigma = coord.compute_blur_radius(region, z, x, y, ts)
+        pad = int(sigma * 3) if sigma >= 0.5 else 0
+
+        # The same calls the render path makes for that pad.
+        coord.region_pixel_indices(region, z, x, y, ts)
+        coord.region_pixel_indices_fractional(region, z, x, y, ts)
+        coord.tile_pixel_latlons(z, x, y, ts)
+        if pad > 0:
+            coord.region_pixel_indices_padded(region, z, x, y, ts, pad)
+            coord.region_pixel_indices_fractional_padded(region, z, x, y, ts, pad)
+            coord.tile_pixel_latlons_padded(z, x, y, ts, pad)
+
+        stats = coord._STORE.stats()
+        assert stats["publishes"] == publishes_before, (
+            f"warm/request keys disagree: {stats}"
+        )
+        assert stats["hits"] > hits_before
+
+    def test_coord_store_cold_disabled_store(self, coord_store_env, monkeypatch):
+        """Store disabled -> coord_store_cold() is False (no dedup to jitter for)."""
+        monkeypatch.setattr(settings, "coord_store_enabled", False)
+        _reset_coord_store()
+        assert coord.coord_store_cold() is False
+
+    def test_coord_store_cold_fresh_empty_store(self, coord_store_env):
+        """Fresh empty store (nothing published yet) -> cold."""
+        assert coord.coord_store_cold() is True
+
+    def test_coord_store_cold_warm_after_probe_publish(self, coord_store_env):
+        """Publishing the probe key (z=0 whole-earth latlon) -> warm."""
+        coord.tile_pixel_latlons(0, 0, 0, 256)
+        assert coord._STORE is not None
+        assert coord.coord_store_cold() is False
+
+    def test_disabled_bypasses_store(self, coord_store_env, monkeypatch, tmp_path):
+        """coord_store_enabled=False -> correct results, no coord/ dir."""
+        monkeypatch.setattr(settings, "coord_store_enabled", False)
+        _reset_coord_store()
+        region = REGIONS[self._REGION]
+        z, x, y, ts = self._Z, self._X, self._Y, 256
+        row, col = coord.region_pixel_indices(region, z, x, y, ts)
+        exp_row, exp_col = coord._compute_region_pixel_indices(region, z, x, y, ts)
+        np.testing.assert_array_equal(row, exp_row)
+        np.testing.assert_array_equal(col, exp_col)
+        assert coord._STORE is None
+        assert not (tmp_path / "coord").exists()
+
+    def test_store_open_failure_falls_back(self, coord_store_env, monkeypatch):
+        """A throwing CoordStore.open must not break the public functions."""
+        from librewxr.data import coord_store as coord_store_mod
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("coord store exploded")
+
+        monkeypatch.setattr(coord_store_mod.CoordStore, "open", _boom)
+
+        region = REGIONS[self._REGION]
+        z, x, y, ts = self._Z, self._X, self._Y, 256
+        row, col = coord.region_pixel_indices(region, z, x, y, ts)
+        exp_row, exp_col = coord._compute_region_pixel_indices(region, z, x, y, ts)
+        np.testing.assert_array_equal(row, exp_row)
+        np.testing.assert_array_equal(col, exp_col)
+
+        lat, lon = coord.tile_pixel_latlons(z, x, y, ts)
+        exp_lat, exp_lon = coord._compute_tile_pixel_latlons(z, x, y, ts)
+        np.testing.assert_array_equal(lat, exp_lat)
+        np.testing.assert_array_equal(lon, exp_lon)
+
+    def test_no_cache_dir_store_off(self, coord_store_env, monkeypatch):
+        """Empty cache_dir -> store off; results still correct."""
+        monkeypatch.setattr(settings, "cache_dir", "")
+        _reset_coord_store()
+        region = REGIONS[self._REGION]
+        z, x, y, ts = self._Z, self._X, self._Y, 256
+        row, col = coord.region_pixel_indices(region, z, x, y, ts)
+        exp_row, exp_col = coord._compute_region_pixel_indices(region, z, x, y, ts)
+        np.testing.assert_array_equal(row, exp_row)
+        np.testing.assert_array_equal(col, exp_col)
+        assert coord._STORE is None
+
+    def test_prune_returns_counts_and_shrinks(self, coord_store_env, monkeypatch):
+        """Prune helper returns (removed_bytes, removed_entries) and brings
+        the on-disk store back under the MiB budget."""
+        monkeypatch.setattr(settings, "coord_store_mb", 1)
+        region = REGIONS[self._REGION]
+        ts = 64
+        # Each (z, x, y) key is ~250 KB at tile_size=64 with pad=8 (six
+        # arrays), so five distinct tiles comfortably exceed the 1 MiB cap.
+        for z, x, y in [(2, 0, 1), (3, 1, 3), (4, 3, 5), (4, 4, 5), (5, 9, 12)]:
+            self._six_calls(region, z, x, y, ts)
+
+        assert coord._STORE is not None
+        assert coord._STORE.stats()["bytes"] > 1024 * 1024
+
+        result = coord.prune_shared_coord_store()
+        assert result is not None
+        removed_bytes, removed_entries = result
+        assert removed_entries > 0
+        assert removed_bytes > 0
+        assert coord._STORE.stats()["bytes"] <= 1024 * 1024
+
+    def test_prune_disabled_returns_none(self, coord_store_env, monkeypatch):
+        """coord_store_enabled=False -> prune helper returns None."""
+        monkeypatch.setattr(settings, "coord_store_enabled", False)
+        _reset_coord_store()
+        assert coord.prune_shared_coord_store() is None
+
+    def test_prune_within_budget_is_noop(self, coord_store_env, monkeypatch):
+        """Store within budget: prune removes nothing and entries stay open."""
+        monkeypatch.setattr(settings, "coord_store_mb", 1)
+        region = REGIONS[self._REGION]
+        z, x, y, ts = self._Z, self._X, self._Y, 64
+        self._six_calls(region, z, x, y, ts)
+
+        assert coord._STORE is not None
+        entries_before = coord._STORE.stats()["entries"]
+
+        removed_bytes, removed_entries = coord.prune_shared_coord_store()
+        assert removed_entries == 0
+        assert removed_bytes == 0
+        assert coord._STORE.stats()["entries"] == entries_before
+
+        # All entries still open cleanly: clear the LRUs and re-read
+        # through the public wrappers (now store hits).
+        for fn in ALL_CACHES:
+            fn.cache_clear()
+        hits_before = coord._STORE.stats()["hits"]
+        for got, exp in zip(
+            self._six_calls(region, z, x, y, ts),
+            self._six_compute(region, z, x, y, ts),
+        ):
+            for got_arr, exp_arr in zip(got, exp):
+                np.testing.assert_array_equal(got_arr, exp_arr)
+        assert coord._STORE.stats()["hits"] > hits_before
