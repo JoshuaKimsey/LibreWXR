@@ -396,3 +396,182 @@ class TestHealthEndpoint:
         assert breakdown["coord_store_entries"] == 3
         assert breakdown["coord_caches_mb"] == 0.0
         assert data["coord_caches"]["store"] == store_stats
+
+
+class TestHealthCluster:
+    """The /health ``cluster`` section aggregating the worker pulses."""
+
+    def test_cluster_section_present_with_this_worker(self, client):
+        c, _, _ = client
+        resp = c.get("/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        cluster = data["cluster"]
+        # No cache_dir in the test harness -> only the live worker's own
+        # payload is aggregated; it always reports at least itself.
+        assert cluster["workers_reporting"] >= 1
+
+        memory = cluster["memory"]
+        # Container split is only meaningful inside a cgroup; when present
+        # it must carry the full key set.
+        container = memory["container"]
+        if container is not None:
+            assert set(container) == {"anon_mb", "file_mb", "shmem_mb", "limit_mb"}
+        workers_rss = memory["workers_rss_mb"]
+        assert set(workers_rss) == {"sum", "min", "max"}
+        assert workers_rss["min"] <= workers_rss["max"]
+        assert workers_rss["sum"] >= 0.0
+
+        tile_cache = cluster["tile_cache"]
+        assert set(tile_cache) == {"entries", "used_mb"}
+        assert tile_cache["entries"] >= 0
+        assert tile_cache["used_mb"] >= 0.0
+
+        coord = cluster["coord"]
+        assert isinstance(coord["caches"], dict)
+        for name, info in coord["caches"].items():
+            assert set(info) == {"entries", "hits", "misses", "hit_ratio"}
+            assert info["hits"] >= 0 and info["misses"] >= 0
+        # Shared store is off in the test harness -> None; when present it
+        # carries the summed per-process counters plus global entries/bytes.
+        if coord["store"] is not None:
+            assert set(coord["store"]) == {
+                "hits", "misses", "publishes", "entries", "bytes",
+            }
+
+        requests = cluster["requests"]
+        assert requests["total_requests"] >= 0
+        assert requests["cache_hits"] >= 0
+        assert requests["cache_misses"] >= 0
+        assert requests["fast_path_total"] >= 0
+        assert requests["hot_tiles"] >= 0
+        assert "hit_rate" in requests
+
+    def test_cluster_survives_reader_failure(self, client, monkeypatch):
+        """A failing pulse scan degrades the section to None — /health
+        itself must never raise."""
+        c, _, _ = client
+
+        def boom():
+            raise OSError("pulse scan failed")
+
+        monkeypatch.setattr(
+            "librewxr.api.routes.read_worker_pulses", boom,
+        )
+        resp = c.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["cluster"] is None
+
+    def test_cluster_sums_tile_cache_and_requests_across_pulses(self, client, monkeypatch):
+        """Aggregation folds a synthetic second worker's pulse into the
+        summed sections, with the coord-store block taking entries/bytes
+        from this worker's live stats rather than a cross-worker sum."""
+        import tempfile
+        from pathlib import Path
+
+        from librewxr.data.worker_pulse import write_worker_pulse
+
+        c, _, _ = client
+        # Live coord-store stats are global on-disk values; the fake gives
+        # this worker a 9-entry / 9 MB store so the block's entries/bytes
+        # come from here, NOT from summing the synthetic pulse (which
+        # carries only per-process counters).
+        monkeypatch.setattr(
+            routes,
+            "coord_cache_stats",
+            lambda: {
+                "max_size": 2048,
+                "caches": {},
+                "store": {
+                    "hits": 0, "misses": 0, "publishes": 0,
+                    "entries": 9, "bytes": 9 * 1024 * 1024,
+                },
+            },
+        )
+        with tempfile.TemporaryDirectory(prefix="librewxr_cluster_test_") as td:
+            cache_dir = Path(td)
+            # A synthetic "other" worker.
+            write_worker_pulse(cache_dir, {
+                "pid": 999999,
+                "written_at": int(time.time()),
+                "rss_bytes": 100 * 1024 * 1024,
+                "tile_cache": {"entries": 7, "total_bytes": 2 * 1024 * 1024,
+                               "max_bytes": 128 * 1024 * 1024},
+                "coord": {
+                    "caches": {
+                        "region_pixel_indices": {"entries": 4, "hits": 10, "misses": 2},
+                    },
+                    "store": {"hits": 5, "misses": 1, "publishes": 3},
+                },
+                "requests": {
+                    "enabled": True,
+                    "total_requests": 50,
+                    "hot_tiles": 3,
+                    "fast_path_total": 4,
+                    "cache_hits": 40,
+                    "cache_misses": 10,
+                },
+            })
+            monkeypatch.setattr(settings, "cache_dir", td)
+            resp = c.get("/health")
+            assert resp.status_code == 200
+            cluster = resp.json()["cluster"]
+            # This worker + the synthetic one.
+            assert cluster["workers_reporting"] == 2
+
+            # RSS aggregation over both workers.
+            rss = cluster["memory"]["workers_rss_mb"]
+            own_rss_mb = psutil_rss_mb()
+            assert rss["min"] == min(100.0, own_rss_mb)
+            assert rss["max"] == max(100.0, own_rss_mb)
+
+            # Tile cache: synthetic worker's 2 MB + this worker's cache.
+            assert cluster["tile_cache"]["entries"] == 7 + _cache.size
+            assert cluster["tile_cache"]["used_mb"] >= 2.0
+
+            # Per-cache sums + hit ratio recomputed from the sums.  The
+            # synthetic worker contributes 10 hits / 2 misses; this
+            # worker's live pulse has empty caches (fake above).
+            idx = cluster["coord"]["caches"]["region_pixel_indices"]
+            assert idx["hits"] == 10
+            assert idx["misses"] == 2
+            assert idx["entries"] == 4
+            assert idx["hit_ratio"] == round(10 / 12, 3)
+
+            # Store: per-process counters summed (synthetic 5/1/3 + live
+            # 0/0/0), entries/bytes from this worker's live store stats.
+            store = cluster["coord"]["store"]
+            assert store["hits"] == 5
+            assert store["misses"] == 1
+            assert store["publishes"] == 3
+            assert store["entries"] == 9
+            assert store["bytes"] == 9 * 1024 * 1024
+
+            # Requests: synthetic worker's counters summed in.
+            req = cluster["requests"]
+            assert req["total_requests"] == 50
+            assert req["cache_hits"] == 40
+            assert req["cache_misses"] == 10
+            assert req["fast_path_total"] == 4
+            assert req["hot_tiles"] == 3
+            assert req["hit_rate"] == 0.8
+
+    def test_cluster_preserves_existing_health_fields(self, client):
+        """The pre-existing /health keys are untouched by the cluster work."""
+        c, _, _ = client
+        resp = c.get("/health")
+        data = resp.json()
+        for key in (
+            "status", "uptime_seconds", "memory", "frames", "tile_cache",
+            "nwp_chain", "nowcast", "satellite", "enabled_regions", "sources",
+            "radar_cache", "coord_caches", "tile_requests", "alerts", "mcp",
+            "storm_cells", "cluster",
+        ):
+            assert key in data, f"missing pre-existing health key {key}"
+
+
+def psutil_rss_mb() -> float:
+    """This process's RSS in MB (floored like the /health rounding)."""
+    import psutil
+
+    return round(psutil.Process().memory_info().rss / (1024 * 1024), 1)

@@ -90,12 +90,21 @@ class CgroupUsage:
     cgroup usage (``memory.current`` / ``memory.usage_in_bytes``) kept
     for logging and diagnostics — it includes the clean file-backed page
     cache the kernel reclaims on its own.
+
+    ``anon_bytes`` / ``file_bytes`` / ``shmem_bytes`` are the individual
+    stat counters (v2: ``anon`` / ``file`` / ``shmem``; v1: ``rss`` /
+    ``cache`` / ``shmem``) exposed for the cluster /health aggregation.
+    They are 0 on the raw-usage fallback paths where no stat file was
+    parsed.
     """
 
     decision_bytes: int
     total_bytes: int
     label: str
     stat_based: bool
+    anon_bytes: int = 0
+    file_bytes: int = 0
+    shmem_bytes: int = 0
 
 
 def _read_int(path: Path) -> int | None:
@@ -106,12 +115,14 @@ def _read_int(path: Path) -> int | None:
         return None
 
 
-def _read_stat_sum(path: Path, fields: tuple[str, ...]) -> int | None:
-    """Sum the named counters from a cgroup ``memory.stat`` file.
+def _read_stat_fields(path: Path, fields: tuple[str, ...]) -> dict[str, int] | None:
+    """Read individual counters from a cgroup ``memory.stat`` file.
 
-    Returns ``None`` when the file is missing/unreadable or any requested
-    counter is absent or malformed, so callers can fall back to the raw
-    usage file instead of crashing the monitor.
+    Returns a dict of the requested counters, or ``None`` when the file
+    is missing/unreadable or any requested counter is absent or
+    malformed, so callers can fall back to the raw usage file instead of
+    crashing the monitor.  Unrequested lines are ignored, so a malformed
+    counter we don't care about never poisons the parse.
     """
     try:
         lines = path.read_text().splitlines()
@@ -125,7 +136,18 @@ def _read_stat_sum(path: Path, fields: tuple[str, ...]) -> int | None:
                 values[key] = int(raw)
             except ValueError:
                 return None
-    return sum(values.values()) if len(values) == len(fields) else None
+    return values if len(values) == len(fields) else None
+
+
+def _read_stat_sum(path: Path, fields: tuple[str, ...]) -> int | None:
+    """Sum the named counters from a cgroup ``memory.stat`` file.
+
+    Returns ``None`` when the file is missing/unreadable or any requested
+    counter is absent or malformed, so callers can fall back to the raw
+    usage file instead of crashing the monitor.
+    """
+    values = _read_stat_fields(path, fields)
+    return sum(values.values()) if values is not None else None
 
 
 def _read_cgroup_memory_usage() -> CgroupUsage | None:
@@ -146,15 +168,21 @@ def _read_cgroup_memory_usage() -> CgroupUsage | None:
     because they live in ``shmem``.  The bulk of the memmap page cache
     lives in ``file`` and is intentionally excluded.
     """
-    # cgroup v2 — decision metric is anon + shmem from memory.stat.
-    stat_sum = _read_stat_sum(
-        Path("/sys/fs/cgroup/memory.stat"), ("anon", "shmem")
+    # cgroup v2 — decision metric is anon + shmem from memory.stat.  The
+    # individual ``anon`` / ``file`` / ``shmem`` counters ride along for
+    # the cluster /health split.
+    v2_stat = _read_stat_fields(
+        Path("/sys/fs/cgroup/memory.stat"), ("anon", "shmem", "file")
     )
     total = _read_int(Path("/sys/fs/cgroup/memory.current"))
-    if stat_sum is not None:
+    if v2_stat is not None:
+        decision = v2_stat["anon"] + v2_stat["shmem"]
         return CgroupUsage(
-            decision_bytes=stat_sum,
-            total_bytes=total if total is not None else stat_sum,
+            decision_bytes=decision,
+            total_bytes=total if total is not None else decision,
+            anon_bytes=v2_stat["anon"],
+            file_bytes=v2_stat["file"],
+            shmem_bytes=v2_stat["shmem"],
             label="anon+shmem",
             stat_based=True,
         )
@@ -166,15 +194,20 @@ def _read_cgroup_memory_usage() -> CgroupUsage | None:
             stat_based=False,
         )
 
-    # cgroup v1 — decision metric is rss + shmem from memory.stat.
-    stat_sum = _read_stat_sum(
-        Path("/sys/fs/cgroup/memory/memory.stat"), ("rss", "shmem")
+    # cgroup v1 — decision metric is rss + shmem from memory.stat, with
+    # the individual counters mapped rss->anon / cache->file.
+    v1_stat = _read_stat_fields(
+        Path("/sys/fs/cgroup/memory/memory.stat"), ("rss", "shmem", "cache")
     )
     total = _read_int(Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"))
-    if stat_sum is not None:
+    if v1_stat is not None:
+        decision = v1_stat["rss"] + v1_stat["shmem"]
         return CgroupUsage(
-            decision_bytes=stat_sum,
-            total_bytes=total if total is not None else stat_sum,
+            decision_bytes=decision,
+            total_bytes=total if total is not None else decision,
+            anon_bytes=v1_stat["rss"],
+            file_bytes=v1_stat["cache"],
+            shmem_bytes=v1_stat["shmem"],
             label="rss+shmem",
             stat_based=True,
         )
@@ -249,11 +282,33 @@ class MemoryMonitor:
         # Raw cgroup usage (MB) from the most recent check, for
         # diagnostics; None outside containers.
         self._cgroup_total_mb: int | None = None
+        # Last full cgroup reading (decision + anon/file/shmem split) for
+        # the cluster /health aggregation; None outside containers.
+        self._last_cgroup_usage: CgroupUsage | None = None
 
     @property
     def cgroup_total_mb(self) -> int | None:
         """Raw cgroup usage in MB from the most recent check (None outside containers)."""
         return self._cgroup_total_mb
+
+    @property
+    def cgroup_memory_mb(self) -> dict | None:
+        """Most recent cgroup anon/file/shmem split + limit in MB.
+
+        Returns ``None`` outside containers (the per-process psutil
+        fallback carries no cgroup split).  ``limit_mb`` is the monitor's
+        detected container limit, matching the value the /health top-level
+        ``memory.limit_mb`` reports.
+        """
+        if self._last_cgroup_usage is None:
+            return None
+        usage = self._last_cgroup_usage
+        return {
+            "anon_mb": usage.anon_bytes // (1024 * 1024),
+            "file_mb": usage.file_bytes // (1024 * 1024),
+            "shmem_mb": usage.shmem_bytes // (1024 * 1024),
+            "limit_mb": self._limit_mb,
+        }
 
     async def start(self) -> None:
         scope = "container (cgroup)" if _read_cgroup_memory_usage() is not None else "process"
@@ -309,6 +364,9 @@ class MemoryMonitor:
         # pressure, so counting them would make every worker act on
         # pressure that is not actionable.
         usage_info = _read_cgroup_memory_usage()
+        # Keep the full reading for the cluster /health split (anon/file/
+        # shmem); None outside containers.
+        self._last_cgroup_usage = usage_info
         if usage_info is not None:
             decision_bytes = usage_info.decision_bytes
             total_bytes = usage_info.total_bytes

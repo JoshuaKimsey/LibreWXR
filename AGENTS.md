@@ -119,6 +119,7 @@ Docker Compose uses profiles: `COMPOSE_PROFILES=single` or `COMPOSE_PROFILES=mul
 - **Memory:** Heavily uses numpy memmap (temp files) for radar frames, ECMWF grids, and nowcast data. Memory monitor is cgroup-aware for multi-worker. See docker-compose.yml for RAM guidance.
 - **Tile warming (single mode):** Two separate thread pools — one for on-demand requests, one for background tile warming — so requests never queue behind warming tasks. Warmer pre-computes geometry only. This is single-mode-only; in multi mode the fetcher and renderers are separate processes and no TileWarmer is instantiated — the empty-tile fast path and per-worker LRU caches cover the cold-render case instead.
 - **Weather alerts:** WMO CAP alerts via `alerts_fetcher.py` (async HTTP) + `alerts_store.py`. In multi mode, pipeline owns fetching; render workers read via `state.json` snapshot.
+- **Worker pulses:** Every render process writes a small JSON pulse to `<cache_dir>/workers/worker_<pid>.json` every ~15s (jittered, atomic tmp+os.replace; see `src/librewxr/data/worker_pulse.py`); `/health` aggregates fresh pulses (mtime-filtered, lock-free) into an additive top-level `cluster` section - workers_reporting, container cgroup anon/file/shmem split, summed per-worker RSS / tile-cache / coord-cache / request counters with hit ratios recomputed from sums. The pulse loop runs in both lifespans (single + render-only), gated on `cache_dir`; not in the pipeline.
 
 ## Configuration
 

@@ -83,9 +83,33 @@ The `/health` endpoint surfaces storm-cell status:
     "count": 42,
     "last_updated": 1785130265,
     "per_region": {"USCOMP": 15, "CACOMP": 3, "OPERA": 24}
+  },
+  "cluster": {
+    "workers_reporting": 16,
+    "memory": {
+      "container": {"anon_mb": 1234, "file_mb": 2345, "shmem_mb": 100},
+      "workers_rss_mb": {"sum": 3200.0, "min": 180.0, "max": 240.0}
+    },
+    "tile_cache": {"entries": 512, "used_mb": 64.0},
+    "coord": {"caches": {}, "store": null},
+    "requests": {
+      "total_requests": 12345,
+      "cache_hits": 11000,
+      "cache_misses": 1345,
+      "fast_path_total": 800,
+      "hot_tiles": 42,
+      "hit_rate": 0.891
+    }
   }
 }
 ```
+
+The `cluster` section aggregates the whole render cluster from the small
+per-worker pulse files each process writes under `<cache_dir>/workers/`
+(see `src/librewxr/data/worker_pulse.py`): `workers_reporting` counts the
+live workers; `memory.container` carries the shared cgroup anon/file/shmem
+split (None outside containers); per-worker RSS, tile-cache, coord-cache,
+and request counters are summed with hit ratios recomputed from the sums.
 
 If `enabled: true` but `count: 0`, either no cells were detected in the
 latest cycle (clear weather) or the detection failed silently -- check the

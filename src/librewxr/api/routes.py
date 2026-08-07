@@ -4,7 +4,10 @@ import asyncio
 import functools
 import json
 import logging
+import os
+import pathlib
 import time
+
 import psutil
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
@@ -25,6 +28,7 @@ from librewxr.api.conditional import compute_etag, conditional_response
 from librewxr.colors.schemes import SCHEME_NAMES
 from librewxr.config import settings
 from librewxr.data.store import FrameStore
+from librewxr.data.worker_pulse import read_worker_pulses
 from librewxr.mcp.discovery import build_ai_catalog
 from librewxr.memory import detect_memory_limit_mb
 from librewxr.tiles.cache import CachedRender, TileCache
@@ -69,6 +73,9 @@ radar_fetcher = None  # RadarFetcher | None
 tile_request_tracker: TileRequestTracker | None = None
 start_time: float = 0.0
 enabled_regions: list[str] | None = None
+# Memory monitor — set by main.py in both lifespans.  Provides the cgroup
+# anon/file/shmem split for the /health ``cluster`` section.
+memory_monitor = None  # MemoryMonitor | None
 
 # Tile present pool - set by main.py.  Multi-mode render workers get a
 # dedicated executor for the cheap ``present_tile`` tail (colorize/encode)
@@ -127,6 +134,197 @@ def _nwp_grid_health_blocks() -> dict[str, dict]:
                 "frames": grid.frame_count,
             }
     return blocks
+
+
+def collect_worker_pulse() -> dict:
+    """Compact per-process payload for the cluster worker-pulse files.
+
+    Every field is derived from the module-level singletons with None
+    guards — render-only mode leaves several unset (``radar_cache``,
+    ``radar_fetcher``, ``alerts_fetcher``, ``tile_warmer``).  The payload
+    is deliberately small (< 2 KB) so a /health scan of 16 tiny JSON
+    files stays cheap.
+    """
+    payload = {
+        "pid": os.getpid(),
+        "written_at": int(time.time()),
+        "rss_bytes": psutil.Process().memory_info().rss,
+    }
+
+    if tile_cache is not None:
+        payload["tile_cache"] = {
+            "entries": tile_cache.size,
+            "total_bytes": tile_cache.total_bytes,
+            "max_bytes": tile_cache.max_bytes,
+        }
+
+    coord: dict = {"caches": {}}
+    try:
+        coord_stats = coord_cache_stats()
+    except Exception:
+        coord_stats = None
+    if coord_stats is not None:
+        for name, info in coord_stats.get("caches", {}).items():
+            coord["caches"][name] = {
+                "entries": info["entries"],
+                "hits": info["hits"],
+                "misses": info["misses"],
+            }
+        coord["store"] = None
+        store_stats = coord_stats.get("store")
+        if store_stats is not None:
+            coord["store"] = {
+                "hits": store_stats["hits"],
+                "misses": store_stats["misses"],
+                "publishes": store_stats["publishes"],
+            }
+    payload["coord"] = coord
+
+    requests = {"enabled": False}
+    if tile_request_tracker is not None:
+        try:
+            tracker_stats = tile_request_tracker.stats()
+        except Exception:
+            tracker_stats = None
+        if tracker_stats is not None:
+            requests = {
+                "enabled": True,
+                "total_requests": tracker_stats["total_requests"],
+                "hot_tiles": tracker_stats["hot_tiles"],
+                "fast_path_total": tracker_stats["fast_path"]["total"],
+                "cache_hits": tracker_stats["cache"]["hits"],
+                "cache_misses": tracker_stats["cache"]["misses"],
+            }
+    payload["requests"] = requests
+
+    return payload
+
+
+def _cluster_health_section() -> dict:
+    """Aggregate the live worker pulses into the /health ``cluster`` block.
+
+    Reads the pid-unique pulse files the worker pulse loops write under
+    ``<cache_dir>/workers/`` (mtime-filtered, no locks — see
+    ``librewxr.data.worker_pulse``), then unions in THIS process's live
+    payload by pid so a worker reports even before its first pulse write
+    lands on disk.  Per-process counters (RSS, tile-cache bytes, tracker
+    counts, coord-cache hits) are summed across workers; the coord store
+    ``entries``/``bytes`` describe the single global on-disk store and
+    come from this worker's live stats instead.
+
+    Every read here is a tiny file scan; the caller wraps this in
+    try/except so a scan failure degrades the section to None rather
+    than breaking /health.
+    """
+    cache_dir = (
+        pathlib.Path(settings.cache_dir) if settings.cache_dir else None
+    )
+    pulses = read_worker_pulses(cache_dir) if cache_dir is not None else []
+    by_pid: dict[int, dict] = {}
+    for pulse in pulses:
+        if isinstance(pulse, dict) and isinstance(pulse.get("pid"), int):
+            by_pid[pulse["pid"]] = pulse
+    # The live payload is strictly fresher than any on-disk file this
+    # process left behind, so it wins the pid-keyed union.
+    by_pid[os.getpid()] = collect_worker_pulse()
+    pulses = list(by_pid.values())
+
+    rss_values = [
+        pulse["rss_bytes"] for pulse in pulses if pulse.get("rss_bytes")
+    ]
+    workers_rss_mb = {
+        "sum": round(sum(rss_values) / (1024 * 1024), 1),
+        "min": round(min(rss_values) / (1024 * 1024), 1),
+        "max": round(max(rss_values) / (1024 * 1024), 1),
+    }
+    memory_block = {
+        # cgroup split is only meaningful inside a container; None there.
+        "container": (
+            memory_monitor.cgroup_memory_mb if memory_monitor is not None else None
+        ),
+        "workers_rss_mb": workers_rss_mb,
+    }
+
+    tile_entries = sum(
+        pulse["tile_cache"]["entries"] for pulse in pulses if pulse.get("tile_cache")
+    )
+    tile_bytes = sum(
+        pulse["tile_cache"]["total_bytes"] for pulse in pulses if pulse.get("tile_cache")
+    )
+    tile_cache_block = {
+        "entries": tile_entries,
+        "used_mb": round(tile_bytes / (1024 * 1024), 1),
+    }
+
+    # Per-cache counters sum across workers; hit_ratio is recomputed from
+    # the SUMS (a per-worker ratio averaged arithmetically would weight
+    # idle workers as strongly as busy ones).
+    cache_sums: dict[str, dict] = {}
+    for pulse in pulses:
+        for name, info in pulse.get("coord", {}).get("caches", {}).items():
+            agg = cache_sums.setdefault(
+                name, {"entries": 0, "hits": 0, "misses": 0},
+            )
+            agg["entries"] += info["entries"]
+            agg["hits"] += info["hits"]
+            agg["misses"] += info["misses"]
+    for name, agg in cache_sums.items():
+        total = agg["hits"] + agg["misses"]
+        agg["hit_ratio"] = round(agg["hits"] / total, 3) if total else None
+    coord_block = {"caches": cache_sums, "store": None}
+
+    # Shared store: hits/misses/publishes are per-process counters and sum
+    # across workers, but entries/bytes are a scan of the ONE global on-disk
+    # store — every worker sees the same values, so summing would over-count.
+    # They come from this worker's live stats instead.
+    store_sums = {"hits": 0, "misses": 0, "publishes": 0}
+    for pulse in pulses:
+        store_stats = pulse.get("coord", {}).get("store")
+        if store_stats:
+            store_sums["hits"] += store_stats["hits"]
+            store_sums["misses"] += store_stats["misses"]
+            store_sums["publishes"] += store_stats["publishes"]
+    try:
+        live_store = coord_cache_stats().get("store")
+    except Exception:
+        live_store = None
+    if live_store is not None:
+        coord_block["store"] = {
+            **store_sums,
+            "entries": live_store["entries"],
+            "bytes": live_store["bytes"],
+        }
+
+    # Tracked tile counts: hot_tiles is summed and can double-count a tile
+    # that several workers all served — it's a cross-worker activity proxy,
+    # not a distinct-tile count.  hit_rate is recomputed from the summed
+    # hits/misses (mirroring the per-worker format: 0.0 when idle).
+    requests_block = {
+        "total_requests": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "fast_path_total": 0,
+        "hot_tiles": 0,
+    }
+    for pulse in pulses:
+        req = pulse.get("requests") or {}
+        if not req.get("enabled"):
+            continue
+        for key in requests_block:
+            requests_block[key] += req.get(key, 0)
+    hits = requests_block["cache_hits"]
+    misses = requests_block["cache_misses"]
+    requests_block["hit_rate"] = (
+        hits / (hits + misses) if (hits + misses) > 0 else 0.0
+    )
+
+    return {
+        "workers_reporting": len(pulses),
+        "memory": memory_block,
+        "tile_cache": tile_cache_block,
+        "coord": coord_block,
+        "requests": requests_block,
+    }
 
 
 @router.get("/.well-known/ai-catalog.json")
@@ -243,9 +441,19 @@ async def health():
             cache_kind_present += 1
             cache_kind_present_bytes += size
 
+    # Cluster-wide aggregation: lock-free scan of the tiny per-worker pulse
+    # files under the shared cache dir, unioned with this worker's live
+    # payload.  Degrades to None on any failure — never an exception.
+    try:
+        cluster = _cluster_health_section()
+    except Exception:
+        logger.exception("Failed to assemble cluster health section")
+        cluster = None
+
     return {
         "status": "ok" if frame_count > 0 else "degraded",
         "uptime_seconds": uptime,
+        "cluster": cluster,
         "memory": {
             "resident_mb": round(rss_mb, 1),
             "limit_mb": round(mem_limit_mb, 1),

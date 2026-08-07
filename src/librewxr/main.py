@@ -37,6 +37,7 @@ from librewxr.data.storm_cells import StormCellGenerator, StormCellStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.precip_mask import PrecipMaskStore
 from librewxr.data.store import FrameStore
+from librewxr.data.worker_pulse import PULSE_INTERVAL_S, write_worker_pulse
 from librewxr.sources import (
     collect_nowcast_contributions,
     collect_nwp_contributions,
@@ -140,6 +141,34 @@ def _clear_coord_caches() -> None:
     for fn in ALL_CACHES:
         fn.cache_clear()
     logger.info("Coordinate caches cleared by memory monitor")
+
+
+async def _worker_pulse_loop(stop: asyncio.Event, cache_dir: Path) -> None:
+    """Periodically publish this process's pulse to the shared cache dir.
+
+    Every PULSE_INTERVAL_S seconds (jittered like ``_poll_state`` so the
+    16 render workers don't write in lockstep) this worker writes its
+    compact /health payload to ``<cache_dir>/workers/worker_<pid>.json``
+    via ``asyncio.to_thread`` (``write_worker_pulse`` never raises, and
+    ``collect_worker_pulse`` is guarded, so the loop survives transient
+    store/cache hiccups).  Other workers aggregate these files for the
+    ``/health`` ``cluster`` section; the files are mtime-filtered and
+    swept when stale, so a crashed worker simply stops refreshing.
+    """
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(
+                stop.wait(),
+                timeout=PULSE_INTERVAL_S * (0.5 + random.random()),
+            )
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            payload = routes.collect_worker_pulse()
+            await asyncio.to_thread(write_worker_pulse, cache_dir, payload)
+        except Exception:
+            logger.exception("Worker pulse write failed")
 
 
 async def _wait_for_state(cache_dir, timeout: float) -> None:
@@ -539,11 +568,15 @@ async def _render_only_lifespan(app: FastAPI):
     # pipeline ships masks, and _maybe_resurrect_precip_mask is a safety
     # net for any future path that nulls the store mid-run.
     routes.precip_mask = stores["precip_mask"]
+    # Cluster /health: the monitor's cgroup anon/file/shmem split backs
+    # the ``cluster.memory.container`` block.
+    routes.memory_monitor = monitor
 
     last_mtime = state_mtime(cache_dir)
     # Seed the diff from the boot payload so the first poll skips unchanged stores.
     last_payload: dict | None = payload
     poller_stop = asyncio.Event()
+    pulse_stop = asyncio.Event()
 
     async def _poll_state() -> None:
         nonlocal last_mtime, last_payload
@@ -614,6 +647,15 @@ async def _render_only_lifespan(app: FastAPI):
                 logger.exception("Failed to refresh state from %s", cache_dir)
 
     poller_task = asyncio.create_task(_poll_state())
+    # Cluster /health pulse: this worker's share of the shared cache-dir
+    # aggregation.  cache_dir is guaranteed non-empty here (render-only
+    # requires it), but keep the guard for symmetry with the single-mode
+    # lifespan.
+    pulse_task = (
+        asyncio.create_task(_worker_pulse_loop(pulse_stop, cache_dir))
+        if settings.cache_dir
+        else None
+    )
     await monitor.start()
 
     try:
@@ -652,10 +694,16 @@ async def _render_only_lifespan(app: FastAPI):
         yield
     finally:
         poller_stop.set()
+        pulse_stop.set()
         try:
             await poller_task
         except Exception:
             logger.exception("Poller shutdown error")
+        if pulse_task is not None:
+            try:
+                await pulse_task
+            except Exception:
+                logger.exception("Pulse loop shutdown error")
         await monitor.stop()
         request_executor.shutdown(wait=False)
         present_executor.shutdown(wait=False)
@@ -878,6 +926,9 @@ async def lifespan(app: FastAPI):
     routes.tile_request_tracker = tile_request_tracker
     routes.start_time = time.time()
     routes.enabled_regions = enabled
+    # Cluster /health: the monitor's cgroup anon/file/shmem split backs
+    # the ``cluster.memory.container`` block.
+    routes.memory_monitor = monitor
 
     radar_cache = None
     if settings.cache_dir:
@@ -960,6 +1011,16 @@ async def lifespan(app: FastAPI):
     await fetcher.start()
     await monitor.start()
 
+    # Cluster /health pulse: this process publishes its /health payload to
+    # the shared cache dir so any worker can aggregate the whole cluster.
+    # Gated on cache_dir (no shared volume = nothing to publish into).
+    pulse_stop = asyncio.Event()
+    pulse_task = None
+    if settings.cache_dir:
+        pulse_task = asyncio.create_task(
+            _worker_pulse_loop(pulse_stop, Path(settings.cache_dir))
+        )
+
     # Pre-warm coordinate caches so the first tile requests at each zoom
     # don't pay the cost of trigonometric projections and array allocations.
     if settings.warm_coord_zoom > 0:
@@ -978,6 +1039,12 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    pulse_stop.set()
+    if pulse_task is not None:
+        try:
+            await pulse_task
+        except Exception:
+            logger.exception("Pulse loop shutdown error")
     await monitor.stop()
     await fetcher.stop()
     if alerts_fetcher is not None:

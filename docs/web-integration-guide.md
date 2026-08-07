@@ -264,7 +264,7 @@ The `severity` / `urgency` / `certainty` fields follow the CAP 1.2 vocabulary, w
 GET /health
 ```
 
-Returns server status, frame count, cache usage, RAM stats, NWP chain state, alerts status, and satellite cache state. Useful for monitoring, not typically needed for web integration.
+Returns server status, frame count, cache usage, RAM stats, NWP chain state, alerts status, satellite cache state, and a cluster-wide worker aggregation (multi-worker deployments). Useful for monitoring, not typically needed for web integration.
 
 ---
 

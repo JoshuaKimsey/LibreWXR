@@ -9,6 +9,7 @@ from librewxr.memory import (
     MemoryMonitor,
     _jittered_thresholds,
     _read_cgroup_memory_usage,
+    _read_stat_fields,
     _read_stat_sum,
 )
 
@@ -56,21 +57,31 @@ def _fake_cgroup_usage(monkeypatch, limit_mb: int = 1000, fraction: float = 0.0)
 
 
 def _fake_cgroup_files(monkeypatch, *, v2_stat, v2_current, v1_stat, v1_usage):
-    """Route the cgroup file reads through per-path fakes."""
+    """Route the cgroup file reads through per-path fakes.
+
+    ``v2_stat`` / ``v1_stat`` are the dicts ``_read_stat_fields`` should
+    return for the v2 / v1 ``memory.stat`` paths (or ``None`` to simulate
+    an unreadable stat file).
+    """
     v2_stat_path = "/sys/fs/cgroup/memory.stat"
     v2_current_path = "/sys/fs/cgroup/memory.current"
 
-    def fake_stat_sum(path, fields):
-        if str(path) == v2_stat_path:
-            return v2_stat
-        return v1_stat
+    def fake_stat_fields(path, fields):
+        stat = v2_stat if str(path) == v2_stat_path else v1_stat
+        if stat is None:
+            return None
+        # Mirror the real helper's semantics: only the requested counters,
+        # and None when any requested counter is absent.
+        if not set(fields).issubset(stat):
+            return None
+        return {field: stat[field] for field in fields}
 
     def fake_read_int(path):
         if str(path) == v2_current_path:
             return v2_current
         return v1_usage
 
-    monkeypatch.setattr("librewxr.memory._read_stat_sum", fake_stat_sum)
+    monkeypatch.setattr("librewxr.memory._read_stat_fields", fake_stat_fields)
     monkeypatch.setattr("librewxr.memory._read_int", fake_read_int)
 
 
@@ -101,7 +112,8 @@ class TestCgroupStatParsing:
     def test_cgroup_v2_uses_anon_plus_shmem_as_decision(self, monkeypatch):
         _fake_cgroup_files(
             monkeypatch,
-            v2_stat=3_000, v2_current=9_000, v1_stat=None, v1_usage=None,
+            v2_stat={"anon": 1_000, "shmem": 2_000, "file": 4_000},
+            v2_current=9_000, v1_stat=None, v1_usage=None,
         )
         usage = _read_cgroup_memory_usage()
         assert usage is not None
@@ -109,11 +121,16 @@ class TestCgroupStatParsing:
         assert usage.total_bytes == 9_000
         assert usage.label == "anon+shmem"
         assert usage.stat_based is True
+        assert usage.anon_bytes == 1_000
+        assert usage.file_bytes == 4_000
+        assert usage.shmem_bytes == 2_000
 
     def test_cgroup_v1_uses_rss_plus_shmem_as_decision(self, monkeypatch):
         _fake_cgroup_files(
             monkeypatch,
-            v2_stat=None, v2_current=None, v1_stat=5_000, v1_usage=8_000,
+            v2_stat=None, v2_current=None,
+            v1_stat={"rss": 3_000, "cache": 4_000, "shmem": 2_000},
+            v1_usage=8_000,
         )
         usage = _read_cgroup_memory_usage()
         assert usage is not None
@@ -121,6 +138,42 @@ class TestCgroupStatParsing:
         assert usage.total_bytes == 8_000
         assert usage.label == "rss+shmem"
         assert usage.stat_based is True
+        # v1 maps rss -> anon and cache -> file.
+        assert usage.anon_bytes == 3_000
+        assert usage.file_bytes == 4_000
+        assert usage.shmem_bytes == 2_000
+
+    def test_cgroup_v2_split_fields_default_to_zero_on_raw_fallback(self, monkeypatch):
+        """Raw-usage fallback carries no stat split — the new fields stay 0."""
+        _fake_cgroup_files(
+            monkeypatch,
+            v2_stat=None, v2_current=9_000, v1_stat=None, v1_usage=None,
+        )
+        usage = _read_cgroup_memory_usage()
+        assert usage is not None
+        assert usage.stat_based is False
+        assert usage.anon_bytes == 0
+        assert usage.file_bytes == 0
+        assert usage.shmem_bytes == 0
+
+    def test_cgroup_usage_missing_file_counter_is_not_required(self, monkeypatch):
+        """The decision metric only needs anon+shmem; a missing file
+        counter in the v2 stat file degrades the whole stat parse to the
+        raw-usage fallback rather than guessing."""
+        _fake_cgroup_files(
+            monkeypatch,
+            v2_stat={"anon": 1_000, "shmem": 2_000},  # no "file"
+            v2_current=9_000, v1_stat=None, v1_usage=None,
+        )
+        usage = _read_cgroup_memory_usage()
+        assert usage is not None
+        assert usage.decision_bytes == 9_000
+        assert usage.stat_based is False
+
+    def test_stat_fields_parses_requested_counters_only(self, tmp_path):
+        stat = tmp_path / "memory.stat"
+        stat.write_text("anon 1000\nfile 999999999\nshmem 2000\nslab 300\n")
+        assert _read_stat_fields(stat, ("anon", "shmem")) == {"anon": 1000, "shmem": 2000}
 
 
 class TestCgroupFallback:
@@ -187,6 +240,31 @@ class TestCgroupFallback:
         assert tile_cache.clear_calls == 1
         assert coord_calls == [1]
         assert monitor.cgroup_total_mb is None
+        # No cgroup split outside a container either.
+        assert monitor.cgroup_memory_mb is None
+
+    def test_monitor_exposes_cgroup_anon_file_shmem_split(self, monkeypatch):
+        monitor, _, _ = _make_monitor(monkeypatch, limit_mb=1000)
+        assert monitor.cgroup_memory_mb is None  # before the first check
+        monkeypatch.setattr(
+            "librewxr.memory._read_cgroup_memory_usage",
+            lambda: CgroupUsage(
+                3 * 1024 * 1024,
+                9 * 1024 * 1024,
+                "anon+shmem",
+                True,
+                anon_bytes=1 * 1024 * 1024,
+                file_bytes=5 * 1024 * 1024,
+                shmem_bytes=2 * 1024 * 1024,
+            ),
+        )
+        monitor._check()
+        assert monitor.cgroup_memory_mb == {
+            "anon_mb": 1,
+            "file_mb": 5,
+            "shmem_mb": 2,
+            "limit_mb": 1000,
+        }
 
 
 # ---------------------------------------------------------------------------
