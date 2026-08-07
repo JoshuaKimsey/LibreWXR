@@ -382,7 +382,16 @@ def region_pixel_indices(
             store, KIND_INDICES, region.name, z, x, y, tile_size, 0,
             np.stack((row_idx, col_idx)),
         )
-        return row_idx, col_idx
+        # Re-open so the lru pins shared file-backed pages, not these heap
+        # arrays.  Identical bytes even if a racing worker won the publish
+        # (pure function), so returning the store views is always correct.
+        arr = _try_open(
+            store, KIND_INDICES, region.name, z, x, y, tile_size, 0,
+            expected_shape=(2, tile_size, tile_size), dtype=np.int32,
+        )
+        if arr is not None:
+            return arr[0], arr[1]
+        return row_idx, col_idx  # publish or re-open failed: heap fallback
     return _compute_region_pixel_indices(region, z, x, y, tile_size)
 
 
@@ -445,7 +454,17 @@ def region_pixel_indices_padded(
             store, KIND_INDICES_PAD, region.name, z, x, y, tile_size, pad,
             np.stack((row_idx, col_idx)),
         )
-        return row_idx, col_idx
+        # Re-open so the lru pins shared file-backed pages, not these heap
+        # arrays.  Identical bytes even if a racing worker won the publish
+        # (pure function), so returning the store views is always correct.
+        arr = _try_open(
+            store, KIND_INDICES_PAD, region.name, z, x, y, tile_size, pad,
+            expected_shape=(2, tile_size + 2 * pad, tile_size + 2 * pad),
+            dtype=np.int32,
+        )
+        if arr is not None:
+            return arr[0], arr[1]
+        return row_idx, col_idx  # publish or re-open failed: heap fallback
     return _compute_region_pixel_indices_padded(region, z, x, y, tile_size, pad)
 
 
@@ -498,7 +517,16 @@ def region_pixel_indices_fractional(
             store, KIND_FRACTIONAL, region.name, z, x, y, tile_size, 0,
             np.stack((row_grid, col_grid)),
         )
-        return row_grid, col_grid
+        # Re-open so the lru pins shared file-backed pages, not these heap
+        # arrays.  Identical bytes even if a racing worker won the publish
+        # (pure function), so returning the store views is always correct.
+        arr = _try_open(
+            store, KIND_FRACTIONAL, region.name, z, x, y, tile_size, 0,
+            expected_shape=(2, tile_size, tile_size), dtype=np.float32,
+        )
+        if arr is not None:
+            return arr[0], arr[1]
+        return row_grid, col_grid  # publish or re-open failed: heap fallback
     return _compute_region_pixel_indices_fractional(region, z, x, y, tile_size)
 
 
@@ -552,7 +580,17 @@ def region_pixel_indices_fractional_padded(
             store, KIND_FRACTIONAL_PAD, region.name, z, x, y, tile_size, pad,
             np.stack((row_grid, col_grid)),
         )
-        return row_grid, col_grid
+        # Re-open so the lru pins shared file-backed pages, not these heap
+        # arrays.  Identical bytes even if a racing worker won the publish
+        # (pure function), so returning the store views is always correct.
+        arr = _try_open(
+            store, KIND_FRACTIONAL_PAD, region.name, z, x, y, tile_size, pad,
+            expected_shape=(2, tile_size + 2 * pad, tile_size + 2 * pad),
+            dtype=np.float32,
+        )
+        if arr is not None:
+            return arr[0], arr[1]
+        return row_grid, col_grid  # publish or re-open failed: heap fallback
     return _compute_region_pixel_indices_fractional_padded(
         region, z, x, y, tile_size, pad,
     )
@@ -643,7 +681,16 @@ def tile_pixel_latlons(
             store, KIND_LATLON, None, z, x, y, tile_size, 0,
             np.stack((lat_grid, lon_grid)),
         )
-        return lat_grid, lon_grid
+        # Re-open so the lru pins shared file-backed pages, not these heap
+        # arrays.  Identical bytes even if a racing worker won the publish
+        # (pure function), so returning the store views is always correct.
+        arr = _try_open(
+            store, KIND_LATLON, None, z, x, y, tile_size, 0,
+            expected_shape=(2, tile_size, tile_size), dtype=np.float32,
+        )
+        if arr is not None:
+            return arr[0], arr[1]
+        return lat_grid, lon_grid  # publish or re-open failed: heap fallback
     return _compute_tile_pixel_latlons(z, x, y, tile_size)
 
 
@@ -686,7 +733,17 @@ def tile_pixel_latlons_padded(
             store, KIND_LATLON_PAD, None, z, x, y, tile_size, pad,
             np.stack((lat_grid, lon_grid)),
         )
-        return lat_grid, lon_grid
+        # Re-open so the lru pins shared file-backed pages, not these heap
+        # arrays.  Identical bytes even if a racing worker won the publish
+        # (pure function), so returning the store views is always correct.
+        arr = _try_open(
+            store, KIND_LATLON_PAD, None, z, x, y, tile_size, pad,
+            expected_shape=(2, tile_size + 2 * pad, tile_size + 2 * pad),
+            dtype=np.float32,
+        )
+        if arr is not None:
+            return arr[0], arr[1]
+        return lat_grid, lon_grid  # publish or re-open failed: heap fallback
     return _compute_tile_pixel_latlons_padded(z, x, y, tile_size, pad)
 
 

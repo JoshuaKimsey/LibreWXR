@@ -204,6 +204,35 @@ class TestCoordStoreBacked:
         assert np.any(row == -1) and np.any(col == -1)
         assert np.any(row >= 0) and np.any(col >= 0)
 
+    def test_first_call_pins_file_backed_pages(self, coord_store_env):
+        """Fresh store (guaranteed miss -> publish) -> the first call re-opens
+        the published entry and returns the shared read-only memmap views, so
+        the lru pins file-backed pages instead of the heap arrays."""
+        region = REGIONS[self._REGION]
+        z, x, y, ts = self._Z, self._X, self._Y, 256
+        for got, exp in zip(
+            self._six_calls(region, z, x, y, ts),
+            self._six_compute(region, z, x, y, ts),
+        ):
+            for got_arr, exp_arr in zip(got, exp):
+                np.testing.assert_array_equal(got_arr, exp_arr)
+                assert not got_arr.flags.writeable
+                # Views' base is the (2, R, C) read-only memmap.
+                assert isinstance(got_arr.base, np.memmap)
+
+    def test_publish_failure_falls_back_to_heap(self, coord_store_env, monkeypatch):
+        """A no-op publish (nothing lands in the store) -> the first call
+        returns the freshly computed heap arrays; no exception."""
+        monkeypatch.setattr(coord, "_try_publish", lambda *_a, **_k: None)
+        region = REGIONS[self._REGION]
+        z, x, y, ts = self._Z, self._X, self._Y, 256
+        for got, exp in zip(
+            self._six_calls(region, z, x, y, ts),
+            self._six_compute(region, z, x, y, ts),
+        ):
+            for got_arr, exp_arr in zip(got, exp):
+                np.testing.assert_array_equal(got_arr, exp_arr)
+
     def test_roundtrip_via_store(self, coord_store_env):
         """First call publishes; after an LRU clear the second is a store hit."""
         region = REGIONS[self._REGION]
