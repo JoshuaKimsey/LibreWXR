@@ -189,6 +189,9 @@ def _build_fetcher(store, tile_cache, radar_cache, region):
     fetcher._store = store
     fetcher._cache = tile_cache
     fetcher._nwp_contributions = []
+    fetcher._satellite_contributions = []
+    fetcher._satellite_tasks = {}
+    fetcher._carried_regions = {}
     fetcher._nowcast_generator = None
     fetcher._warmer = None
     fetcher._radar_cache = radar_cache
@@ -484,6 +487,173 @@ class TestCarryForward:
 
         carried = (await store.get_frame(1000 + interval)).regions["TESTREG"]
         assert carried[0, 0] == 77  # still readable, original value
+
+
+class TestCarryForwardRefetch:
+    """A carried-forward region must not permanently mask the slot.
+
+    Sources like Météo-France serve missed slots from a short archive
+    window (the DPPaquetRadar packet, ~15 min).  When a live fetch
+    fails and the slot is bridged by carry-forward, later cycles must
+    re-fetch that slot while it is still recoverable — otherwise the
+    stale duplicate frame is frozen into the timeline forever (visible
+    as a stutter/gap in the animation).
+    """
+
+    @pytest.fixture
+    def small_region(self):
+        return RegionDef(
+            name="TESTREG",
+            west=0.0, east=3.2, south=0.0, north=3.2,
+            pixel_size=0.1, group="US",
+            grid_width=32, grid_height=32,
+        )
+
+    def _clocked_fetcher(self, monkeypatch, small_region, max_frames=3):
+        from librewxr.config import settings
+        interval = settings.fetch_interval
+
+        monkeypatch.setattr(settings, "max_frames", max_frames)
+        clock = {"now": float(1000 * interval)}
+        monkeypatch.setattr(
+            "librewxr.data.fetcher.time.time", lambda: clock["now"],
+        )
+
+        store = FrameStore(max_frames=max_frames + 4)
+        tile_cache = TileCache(max_mb=1)
+        fetcher, source = _build_fetcher(
+            store, tile_cache, None, small_region,
+        )
+        return fetcher, source, store, clock, interval
+
+    @pytest.mark.asyncio
+    async def test_carried_region_is_refetched_on_next_cycle(
+        self, monkeypatch, small_region,
+    ):
+        fetcher, source, store, clock, interval = self._clocked_fetcher(
+            monkeypatch, small_region,
+        )
+        ts0 = int(clock["now"])
+
+        # Cycle 1: healthy — three timestamps land with value 77.
+        source.fill_value = 77
+        await fetcher._fetch_all_frames()
+
+        # Cycle 2: live slot drops silently -> carry-forward from ts0.
+        clock["now"] += interval
+        dropped_ts = int(clock["now"])
+        source.next_return = None
+        source.fill_value = 99
+        await fetcher._fetch_all_frames()
+        assert (await store.get_frame(dropped_ts)).regions["TESTREG"][0, 0] == 77
+
+        # Cycle 3: the source can now serve the slot.  The fetcher must
+        # re-fetch the carried slot instead of treating it as complete.
+        clock["now"] += interval
+        source.fill_value = 111
+        await fetcher._fetch_all_frames()
+        assert (await store.get_frame(dropped_ts)).regions["TESTREG"][0, 0] == 111
+
+    @pytest.mark.asyncio
+    async def test_successful_refetch_clears_the_retry(
+        self, monkeypatch, small_region,
+    ):
+        """Once real data replaces the carried copy, later cycles skip
+        the slot again — no endless re-downloads."""
+        fetcher, source, store, clock, interval = self._clocked_fetcher(
+            monkeypatch, small_region,
+        )
+
+        source.fill_value = 77
+        await fetcher._fetch_all_frames()
+
+        clock["now"] += interval
+        source.next_return = None
+        await fetcher._fetch_all_frames()
+
+        clock["now"] += interval
+        source.fill_value = 111
+        await fetcher._fetch_all_frames()
+
+        # Cycle 4: only the brand-new live slot should be fetched.
+        clock["now"] += interval
+        n_before = len(source.live_calls)
+        await fetcher._fetch_all_frames()
+        assert source.live_calls[n_before:] == [("TESTREG", 0)]
+
+    @pytest.mark.asyncio
+    async def test_refetch_stops_outside_recovery_window(
+        self, monkeypatch, small_region,
+    ):
+        """A carried slot older than the recovery window is left alone —
+        the source archive can no longer serve it, so retrying is waste."""
+        fetcher, source, store, clock, interval = self._clocked_fetcher(
+            monkeypatch, small_region, max_frames=8,
+        )
+
+        source.fill_value = 77
+        await fetcher._fetch_all_frames()
+
+        clock["now"] += interval
+        stale_ts = int(clock["now"])
+        source.next_return = None
+        await fetcher._fetch_all_frames()
+
+        # Jump past the recovery window in one leap.  The intervening
+        # slots are brand-new fetches; the carried slot must NOT be
+        # among the fetched timestamps.
+        leap = RadarFetcher._CARRY_FORWARD_REFETCH_MAX_INTERVALS + 1
+        clock["now"] += leap * interval
+        source.fill_value = 111
+        n_before = len(source.live_calls) + len(source.archive_calls)
+        await fetcher._fetch_all_frames()
+
+        new_live = source.live_calls[n_before:]
+        fetched_ts = {
+            int(clock["now"]) - m * 60 for _, m in new_live
+        }
+        assert stale_ts not in fetched_ts
+        assert (await store.get_frame(stale_ts)).regions["TESTREG"][0, 0] == 77
+
+    @pytest.mark.asyncio
+    async def test_failed_refetch_leaves_frame_untouched_and_retries(
+        self, monkeypatch, small_region,
+    ):
+        """A refetch that fails again must not rewrite the carried frame
+        (no version bump / tile-cache churn) and must stay eligible for
+        retry on the following cycle."""
+        fetcher, source, store, clock, interval = self._clocked_fetcher(
+            monkeypatch, small_region,
+        )
+
+        source.fill_value = 77
+        await fetcher._fetch_all_frames()
+
+        clock["now"] += interval
+        dropped_ts = int(clock["now"])
+        source.next_return = None
+        await fetcher._fetch_all_frames()
+        version_after_carry = store._frame_versions[dropped_ts]
+
+        # Cycle 3: everything fails (new slot AND the refetch).
+        async def always_none(region, minutes_ago):
+            source.live_calls.append((region.name, minutes_ago))
+            return None
+
+        real_fetch = source.fetch_frame
+        source.fetch_frame = always_none
+        clock["now"] += interval
+        await fetcher._fetch_all_frames()
+
+        assert (await store.get_frame(dropped_ts)).regions["TESTREG"][0, 0] == 77
+        assert store._frame_versions[dropped_ts] == version_after_carry
+
+        # Cycle 4: source recovers — the slot is still retried and healed.
+        source.fetch_frame = real_fetch
+        source.fill_value = 111
+        clock["now"] += interval
+        await fetcher._fetch_all_frames()
+        assert (await store.get_frame(dropped_ts)).regions["TESTREG"][0, 0] == 111
 
 
 class _StubSatelliteInstance:
