@@ -693,7 +693,11 @@ class TestNowcastBlendGuard:
     "no data" — so blending toward it drags real radar echoes below the
     display noise floor and the post-blend thresholding zeroes them
     (issue #24).  ``_blend_nowcast`` pins the radar weight to 1.0
-    wherever the (blurred) model is below the floor.
+    wherever the (blurred) model is below the floor.  These tests also
+    pin that the NWP fill/blend only honors regions that actually
+    delivered a frame this cycle (``regions_with_data``), so a down
+    region can't suppress the model with its feather or block the NWP
+    fill with its coverage mask.
     """
 
     # Tile (z=4, x=3, y=5) sits over empty composite space (same tile as
@@ -778,3 +782,68 @@ class TestNowcastBlendGuard:
         model = np.zeros((256, 256), dtype=np.uint8)
         result = self._blend(radar, model, 0.5, monkeypatch)
         assert (result == 0).all()
+
+    # --- Compute-level regression tests for the regions_with_data fix -------
+
+    @staticmethod
+    def _patch_two_regions(monkeypatch):
+        """Force the tile to overlap USCOMP + CACOMP; only USCOMP has a frame.
+
+        ``sample_coverage`` and ``sample_feather`` are name-based: CACOMP
+        reports full coverage / full feather (it "overlaps" this tile even
+        though it delivered no frame this cycle), USCOMP reports nothing.
+        """
+        from librewxr.tiles import renderer as renderer_mod
+
+        monkeypatch.setattr(
+            renderer_mod, "overlapping_regions",
+            lambda z, x, y, enabled=None: [
+                REGIONS["USCOMP"], REGIONS["CACOMP"],
+            ],
+        )
+        monkeypatch.setattr(
+            renderer_mod, "sample_coverage",
+            lambda name, lat, lon: (
+                np.ones(lat.shape, dtype=bool)
+                if name == "CACOMP" else np.zeros(lat.shape, dtype=bool)
+            ),
+        )
+        monkeypatch.setattr(
+            renderer_mod, "sample_feather",
+            lambda name, lat, lon: (
+                np.ones(lat.shape, dtype=np.float32)
+                if name == "CACOMP" else np.zeros(lat.shape, dtype=np.float32)
+            ),
+        )
+
+    @staticmethod
+    def _empty_uscomp_frame() -> np.ndarray:
+        return np.zeros((COMPOSITE_HEIGHT, COMPOSITE_WIDTH), dtype=np.uint8)
+
+    def test_past_fill_ignores_data_less_region_coverage(self, monkeypatch):
+        """(7) A down region's coverage must not block the NWP fallback fill."""
+        from librewxr.tiles import renderer as renderer_mod
+
+        self._patch_two_regions(monkeypatch)
+        chain = self._chain(np.full((256, 256), 200, dtype=np.uint8))
+        geom = renderer_mod.compute_tile_geometry(
+            {"USCOMP": self._empty_uscomp_frame()},
+            self._Z, self._X, self._Y, tile_size=256,
+            nwp_chain=chain, frame_timestamp=1700000000,
+        )
+        assert geom.is_transparent is False  # pre-fix: tier1_post_fill
+        assert (geom.values == 200).all()
+
+    def test_nowcast_ignores_data_less_region_feather(self, monkeypatch):
+        """(8) A down region's feather must not suppress the model blend."""
+        from librewxr.tiles import renderer as renderer_mod
+
+        self._patch_two_regions(monkeypatch)
+        chain = self._chain(np.full((256, 256), 150, dtype=np.uint8))
+        geom = renderer_mod.compute_tile_geometry(
+            {"USCOMP": self._empty_uscomp_frame()},
+            self._Z, self._X, self._Y, tile_size=256,
+            nwp_chain=chain, frame_timestamp=1700000000, nowcast_blend=0.5,
+        )
+        assert geom.is_transparent is False  # pre-fix: tier1_post_blend
+        assert (geom.values == 150).all()
