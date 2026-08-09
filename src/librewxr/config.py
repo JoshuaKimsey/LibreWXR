@@ -19,6 +19,7 @@ _MODE_DEFAULTS: dict[str, dict[str, int]] = {
         "coord_cache_size": 2048,
         "coord_store_mb": 1024,
         "warmer_threads": 0,  # 0 keeps the "auto = CPU-1" behaviour in single mode
+        "warm_coord_zoom": 6,
     },
     "multi": {
         "workers": 16,
@@ -26,6 +27,11 @@ _MODE_DEFAULTS: dict[str, dict[str, int]] = {
         "coord_cache_size": 512,
         "coord_store_mb": 8192,
         "warmer_threads": 4,
+        # No eager coordinate warm in render workers: they serve immediately
+        # from the on-disk state snapshot and coordinate entries load lazily
+        # through the shared coord store.  A negative value here is the
+        # "disabled" resolution (see warm_coord_zoom below).
+        "warm_coord_zoom": -1,
     },
 }
 
@@ -63,7 +69,7 @@ class Settings(BaseSettings):
         "single",
         validation_alias=AliasChoices("LIBREWXR_MODE", "COMPOSE_PROFILES"),
     )
-    # All five below use 0 as a "use mode default" sentinel.  Set an
+    # All six below use 0 as a "use mode default" sentinel.  Set an
     # explicit value to override the per-mode default in _MODE_DEFAULTS.
     tile_cache_mb: int = 0  # Max tile cache size in MB (byte-capped); 0 = mode default
     coord_cache_size: int = 0  # LRU entries per coordinate cache; 0 = mode default
@@ -82,7 +88,14 @@ class Settings(BaseSettings):
     webp_quality: int = 100  # WebP quality: 100 = lossless (default), 1-99 = lossy at that quality
     workers: int = 0  # Number of uvicorn worker processes; 0 = mode default
     warmer_threads: int = 0  # Render thread pool size; 0 = mode default (auto in single, 4 in multi) (sizes the request-executor pool in multi mode; the warmer itself is single-mode only)
-    warm_coord_zoom: int = 6  # Pre-warm coordinate caches up to this zoom (0 = disable) (in multi mode runs in each render worker at startup)
+    # Pre-warm coordinate caches up to this zoom as a background task at
+    # startup (0 = mode default: single warms to 6, multi does no eager
+    # warm — see _MODE_DEFAULTS).  Any negative value disables the warm
+    # entirely in either mode; any positive value forces that zoom in
+    # either mode.  The warm never blocks the server from accepting
+    # requests, and coordinate wrappers fill unwarmed entries on demand
+    # via the shared on-disk store either way.
+    warm_coord_zoom: int = 0
     warm_overview_zoom: int = 4  # Pre-render ALL tiles up to this zoom on each fetch (-1 = disable) (single mode only; no-op in multi mode — the empty-tile fast path covers it)
     warm_overview_zoom_regional: int = 6  # Pre-render tiles overlapping enabled regions up to this zoom (-1 = disable) (single mode only; no-op in multi mode — the empty-tile fast path covers it)
     enabled_regions: str = "ALL"  # Region spec: CONUS, US, ALL, or comma-separated region names

@@ -171,6 +171,66 @@ async def _worker_pulse_loop(stop: asyncio.Event, cache_dir: Path) -> None:
             logger.exception("Worker pulse write failed")
 
 
+async def _warm_coord_caches_background(
+    executor: ThreadPoolExecutor,
+    regions: list[str],
+    zoom: int,
+    *,
+    jitter: bool,
+) -> None:
+    """Background coordinate-cache warm; never lets a failure escape.
+
+    Runs the trig-heavy warm on ``executor`` (off the event loop) and
+    swallows every exception: the coordinate wrappers already handle
+    unwarmed entries by computing on demand and publishing to the shared
+    on-disk store, so a failed warm must never take the worker down.
+    The caller holds the returned task so it can be cancelled at
+    shutdown.
+
+    ``jitter`` is the multi-mode start de-synchronisation: with 16 render
+    workers booting against a cold shared store, each would otherwise
+    compute + publish the same entries simultaneously (correct but
+    wasteful; converges on the first replace).  Once the store is warm
+    the pass is cheap mmap hits and the jitter is dead time.  Single
+    mode has no sibling workers to de-synchronise against.
+    """
+    try:
+        if jitter and coord_store_cold():
+            await asyncio.sleep(random.uniform(0.0, _WARM_JITTER_MAX_S))
+        start = time.time()
+        loop = asyncio.get_running_loop()
+        warmed = await loop.run_in_executor(
+            executor,
+            warm_coordinate_caches,
+            regions,
+            zoom,
+        )
+        logger.info(
+            "Coordinate caches warmed: %d entries up to zoom %d (%.2fs)",
+            warmed, zoom, time.time() - start,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception(
+            "Coordinate cache warm failed; serving continues "
+            "(entries load lazily via the store)"
+        )
+
+
+async def _cancel_coord_warm_task(task: asyncio.Task | None) -> None:
+    """Cancel a background coordinate warm at shutdown; never raises."""
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.exception("Coordinate cache warm task error during shutdown")
+
+
 async def _wait_for_state(cache_dir, timeout: float) -> None:
     """Block until state.json exists under cache_dir, or fail loudly.
 
@@ -658,34 +718,30 @@ async def _render_only_lifespan(app: FastAPI):
     )
     await monitor.start()
 
-    try:
-        # Pre-warm coordinate caches so the first tile requests at each zoom
-        # don't pay the cost of trigonometric projections and array allocations.
-        # Mirrors the single-mode lifespan call; here the compute pool
-        # (request_executor) plays the single-mode warmer's role.  Kept inside
-        # the try so a warm failure still tears down both executors.
-        if settings.warm_coord_zoom > 0:
-            # De-synchronise the 16 workers' warm passes only while the shared
-            # coord store is cold: with an empty store every worker would
-            # otherwise compute + publish the same entries simultaneously
-            # (correct but wasteful; converges on the first replace).  Once
-            # the store is warm the pass is cheap mmap hits and the jitter
-            # is dead time.
-            if coord_store_cold():
-                await asyncio.sleep(random.uniform(0.0, _WARM_JITTER_MAX_S))
-            start = time.time()
-            loop = asyncio.get_running_loop()
-            warmed = await loop.run_in_executor(
-                request_executor,
-                warm_coordinate_caches,
-                enabled,
-                settings.warm_coord_zoom,
+    # Pre-warm coordinate caches as a BACKGROUND task so the worker starts
+    # serving immediately: on slow storage (ZFS/HDD, cold page cache) an
+    # eager warm held boot for 14-26 minutes.  Coordinate wrappers handle
+    # unwarmed entries gracefully (compute on demand + publish to the shared
+    # on-disk coord store), so readiness never depends on the warm.
+    # Mirrors the single-mode lifespan call; here the compute pool
+    # (request_executor) plays the single-mode warmer's role.  The
+    # cold-probe/jitter logic lives inside the warm task — it only dedupes
+    # the publish stampede when a warm is actually enabled.  Disabled when
+    # the effective zoom is not positive (multi-mode default; see
+    # config._MODE_DEFAULTS), which is also the shipped default here.
+    warm_task = None
+    if settings.warm_coord_zoom > 0:
+        warm_task = asyncio.create_task(
+            _warm_coord_caches_background(
+                request_executor, enabled, settings.warm_coord_zoom, jitter=True,
             )
-            logger.info(
-                "Coordinate caches warmed: %d entries up to zoom %d (%.2fs)",
-                warmed, settings.warm_coord_zoom, time.time() - start,
-            )
+        )
+        logger.info(
+            "Coordinate cache warm running in background (zoom %d)",
+            settings.warm_coord_zoom,
+        )
 
+    try:
         logger.info(
             "Render-only worker ready (cache_dir=%s, regions=%s, tile_cache=%d MB)",
             cache_dir, ", ".join(enabled), settings.tile_cache_mb,
@@ -704,6 +760,7 @@ async def _render_only_lifespan(app: FastAPI):
                 await pulse_task
             except Exception:
                 logger.exception("Pulse loop shutdown error")
+        await _cancel_coord_warm_task(warm_task)
         await monitor.stop()
         request_executor.shutdown(wait=False)
         present_executor.shutdown(wait=False)
@@ -1021,20 +1078,23 @@ async def lifespan(app: FastAPI):
             _worker_pulse_loop(pulse_stop, Path(settings.cache_dir))
         )
 
-    # Pre-warm coordinate caches so the first tile requests at each zoom
-    # don't pay the cost of trigonometric projections and array allocations.
+    # Pre-warm coordinate caches as a BACKGROUND task so boot finishes
+    # immediately and the warm proceeds alongside serving (same slow-storage
+    # rationale as the render-only lifespan; single mode has no sibling
+    # workers to de-synchronise against, so jitter=False).  A warm failure
+    # is swallowed inside the task — coordinate wrappers compute on demand
+    # via the store either way.  Disabled when the effective zoom is not
+    # positive (set a negative LIBREWXR_WARM_COORD_ZOOM to turn it off).
+    warm_task = None
     if settings.warm_coord_zoom > 0:
-        start = time.time()
-        loop = asyncio.get_running_loop()
-        warmed = await loop.run_in_executor(
-            warmer_executor,
-            warm_coordinate_caches,
-            enabled,
-            settings.warm_coord_zoom,
+        warm_task = asyncio.create_task(
+            _warm_coord_caches_background(
+                warmer_executor, enabled, settings.warm_coord_zoom, jitter=False,
+            )
         )
         logger.info(
-            "Coordinate caches warmed: %d entries up to zoom %d (%.2fs)",
-            warmed, settings.warm_coord_zoom, time.time() - start,
+            "Coordinate cache warm running in background (zoom %d)",
+            settings.warm_coord_zoom,
         )
 
     yield
@@ -1045,6 +1105,7 @@ async def lifespan(app: FastAPI):
             await pulse_task
         except Exception:
             logger.exception("Pulse loop shutdown error")
+    await _cancel_coord_warm_task(warm_task)
     await monitor.stop()
     await fetcher.stop()
     if alerts_fetcher is not None:

@@ -18,6 +18,7 @@ import asyncio
 import importlib
 import os
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -166,6 +167,84 @@ async def test_render_only_lifespan_picks_up_snapshot(tmp_path, monkeypatch):
         assert routes.ecmwf_grid is None
 
     # cleanup happens inside the lifespan __aexit__; nothing to assert.
+
+
+@pytest.mark.asyncio
+async def test_render_only_lifespan_yields_before_coord_warm(tmp_path, monkeypatch):
+    """The coordinate warm must never block a render worker's readiness.
+
+    Regression for the slow-storage boot incident: with a cold shared
+    coord store the eager warm held the lifespan before ``yield`` for
+    14-26 minutes, so the worker served no tiles.  The warm now runs as
+    a background task after the lifespan yields; this test stubs
+    ``warm_coordinate_caches`` with a blocker and asserts the lifespan
+    enters (yields) while the warm is still blocked.
+    """
+    from librewxr.config import settings
+    from librewxr.data.master_state import dump_state
+    from librewxr.data.store import FrameStore, RadarFrame
+    from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
+    from librewxr import main as main_module
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+
+    producer = FrameStore(max_frames=4, cache_dir=cache_dir)
+    arr = np.zeros((COMPOSITE_HEIGHT, COMPOSITE_WIDTH), dtype=np.uint8)
+    await producer.add_frame(RadarFrame(timestamp=42, regions={"USCOMP": arr}))
+    dump_state({"frame_store": producer}, cache_dir)
+
+    monkeypatch.setattr(settings, "render_only", True)
+    monkeypatch.setattr(settings, "cache_dir", str(cache_dir))
+    # Disable optional stores that don't appear in the snapshot — same
+    # rationale as test_render_only_lifespan_picks_up_snapshot.
+    monkeypatch.setattr(settings, "satellite_enabled", False)
+    monkeypatch.setattr(settings, "nowcast_enabled", False)
+    monkeypatch.setattr(settings, "arrow_flow_enabled", False)
+    monkeypatch.setattr(settings, "alerts_enabled", False)
+    monkeypatch.setattr(settings, "state_wait_timeout", 5.0)
+    monkeypatch.setattr(settings, "state_poll_interval", 0.1)
+    # Force the warm ON so this test proves it no longer blocks entry.
+    monkeypatch.setattr(settings, "warm_coord_zoom", 2)
+    monkeypatch.setattr(main_module, "_WARM_JITTER_MAX_S", 0.0)
+
+    warm_started = threading.Event()
+    release_warm = threading.Event()
+
+    def _blocking_warm(regions, max_zoom, tile_size=256):
+        warm_started.set()
+        release_warm.wait(30)
+        return 0
+
+    # Patch the module-level reference main.py resolves at call time.
+    monkeypatch.setattr(main_module, "warm_coordinate_caches", _blocking_warm)
+
+    class _StubApp:
+        pass
+
+    entered = asyncio.Event()
+
+    async def _hold():
+        async with main_module._render_only_lifespan(_StubApp()):
+            entered.set()
+            await asyncio.sleep(0.5)
+
+    task = asyncio.create_task(_hold())
+    try:
+        # Wait for the warm to be *running* (blocked in the stub), then
+        # assert the lifespan already yielded.  If the warm were still
+        # eager/synchronous, entered would never be set while the warm is
+        # blocked and this assertion fails.
+        assert await asyncio.to_thread(warm_started.wait, 5), (
+            "coordinate warm never started"
+        )
+        assert entered.is_set(), (
+            "render-only lifespan did not yield while the coord warm was "
+            "still running"
+        )
+    finally:
+        release_warm.set()
+        await task
 
 
 @pytest.mark.asyncio

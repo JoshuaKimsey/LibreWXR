@@ -444,14 +444,22 @@ The empty-tile fast path (see `tile_requests.fast_path` in `/health`) and per-wo
 
 ### `LIBREWXR_WARM_COORD_ZOOM`
 
-Pre-warm coordinate caches up to this zoom level at startup. Coordinate caches store tile-to-region pixel index mappings; warming them eliminates cold-start latency from trigonometric projections. In multi mode, this runs only in the pipeline parent process; serving workers build their coordinate caches lazily on first request.
+Pre-warm coordinate caches up to this zoom level at startup, as a **background task**: the server starts accepting requests immediately and the warm proceeds alongside serving, so a slow warm on cold storage (ZFS/HDD) never blocks boot. Coordinate caches store tile-to-region pixel index mappings; warming them eliminates cold-start latency from trigonometric projections. Coordinate wrappers handle unwarmed entries gracefully — they compute on demand and publish to the shared on-disk coord store — so lazy loading is always safe.
 
 | | |
 |---|---|
-| **Default** | `6` |
+| **Default** | `0` (mode default: `6` in single / no eager warm in multi) |
 | **Type** | integer |
 
-Each zoom level adds ~4x the tiles of the previous (zoom 6 = ~5,500 tiles). Set to `0` to disable.
+Resolution:
+
+- `0` (or unset) — use the per-mode default: **single** warms up to zoom 6 in the background; **multi** render workers do no eager warm at all, building their coordinate caches lazily on first request.
+- Negative (e.g. `-1`) — disable the warm entirely in either mode.
+- Positive — force that zoom in either mode (e.g. `4` in multi re-enables a background warm; `-1` in single turns the warm off).
+
+Each zoom level adds ~4x the tiles of the previous (zoom 6 = ~5,500 tiles).
+
+> **Note:** this changes the meaning of `0` relative to earlier releases — `0` previously meant "disabled"; it now means "use the mode default". Use a negative value to disable.
 
 ### `LIBREWXR_WARM_OVERVIEW_ZOOM`
 

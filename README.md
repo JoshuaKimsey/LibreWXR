@@ -484,7 +484,7 @@ the inline comments in [`src/librewxr/config.py`](src/librewxr/config.py).
 | `LIBREWXR_DESPECKLE_MIN_NEIGHBORS` | `3` | Speckle filter strength (0 = disabled) |
 | `LIBREWXR_WEBP_QUALITY` | `100` | WebP quality (100 = lossless default, 1-99 = lossy) |
 | `LIBREWXR_WARMER_THREADS` | *mode* | Background tile warming pool size (single: 0 = CPU count - 1; multi: 4 sizes the request-executor pool, not warming — warming is single-mode only) |
-| `LIBREWXR_WARM_COORD_ZOOM` | `6` | Pre-warm coordinate caches up to this zoom at startup (0 = disable; runs only in the pipeline parent in multi mode) |
+| `LIBREWXR_WARM_COORD_ZOOM` | *mode* | Background pre-warm of coordinate caches up to this zoom at startup (single: 6; multi: no eager warm; 0 = mode default, negative = disabled, positive = force that zoom) |
 | `LIBREWXR_WARM_OVERVIEW_ZOOM` | `4` | Pre-render overview tiles up to this zoom after each fetch (single mode only; -1 = disable) |
 | **Deployment mode + workers** | | |
 | `COMPOSE_PROFILES` | `single` | `single` or `multi` — picks compose services AND app-side per-mode defaults |
