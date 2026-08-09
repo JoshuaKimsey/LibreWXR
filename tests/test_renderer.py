@@ -692,8 +692,9 @@ class TestNowcastBlendGuard:
     Model pixel value 0 encodes -32 dBZ, the bottom of the encoding, NOT
     "no data" — so blending toward it drags real radar echoes below the
     display noise floor and the post-blend thresholding zeroes them
-    (issue #24).  ``_blend_nowcast`` pins the radar weight to 1.0
-    wherever the (blurred) model is below the floor.  These tests also
+    (issue #24).  ``_blend_nowcast`` raises dry-model pixels to the
+    noise floor, so echoes fade toward the faintest visible shade
+    instead of being erased or rendered full-strength.  These tests also
     pin that the NWP fill/blend only honors regions that actually
     delivered a frame this cycle (``regions_with_data``), so a down
     region can't suppress the model with its feather or block the NWP
@@ -735,11 +736,13 @@ class TestNowcastBlendGuard:
     # --- Unit tests: _blend_nowcast directly --------------------------------
 
     def test_model_empty_preserves_radar(self, monkeypatch):
-        """(1) Dry model (all 0) must not halve the radar value."""
+        """(1) Dry model (all 0) dims radar to the floor instead of erasing."""
         radar = np.full((256, 256), 104, dtype=np.uint8)
         model = np.zeros((256, 256), dtype=np.uint8)
         result = self._blend(radar, model, 0.5, monkeypatch)
-        assert (result == 104).all()  # pre-fix: 52
+        # Pre-guard: 52 (erased below the 84 floor).  Pin: 104 (full
+        # strength).  Asymptote: clip(0.5*104 + 0.5*84 + 0.5) = 94.
+        assert (result == 94).all()
 
     def test_model_above_floor_blends_normally(self, monkeypatch):
         """(2) Model with real precip still blends exactly as before."""
@@ -755,9 +758,11 @@ class TestNowcastBlendGuard:
         model[128, 128] = 255
         result = self._blend(radar, model, 0.5, monkeypatch)
         # The 3x3 Gaussian leaves a ~32 fringe on the orthogonal
-        # neighbours — below the 84 floor, so they must stay pure radar.
+        # neighbours — below the 84 floor, so it is raised to 84 and the
+        # blend dims radar to clip(0.5*104 + 0.5*84 + 0.5) = 94 rather
+        # than keeping full-strength radar or erasing it.
         for r, c in ((128, 127), (128, 129), (127, 128), (129, 128)):
-            assert result[r, c] == 104  # pre-fix: 68
+            assert result[r, c] == 94  # pre-fix: 68
 
     def test_floor_disabled_keeps_old_behavior(self, monkeypatch):
         """(4) Noise floor disabled (-33) -> the guard is a no-op."""
@@ -782,6 +787,35 @@ class TestNowcastBlendGuard:
         model = np.zeros((256, 256), dtype=np.uint8)
         result = self._blend(radar, model, 0.5, monkeypatch)
         assert (result == 0).all()
+
+    def test_dry_model_fades_but_never_erases(self, monkeypatch):
+        """(7) Over dry model, radar fades with lead time but stays alive.
+
+        Floor pinned at 10.0 -> threshold 84; radar echo 104.  Across the
+        blend curve the output is uint8(clip(w*104 + (1-w)*84 + 0.5)):
+        0.82 -> 100, 0.5 -> 94, 0.32 -> 90, 0.2 -> 88.  Every result is
+        >= 84 (survives the post-blend noise-floor cut, so the painted
+        area is never erased) and strictly < 104 (always dimmer than pure
+        radar, so the T+60 warping fades instead of rendering at full
+        strength).
+        """
+        radar = np.full((256, 256), 104, dtype=np.uint8)
+        model = np.zeros((256, 256), dtype=np.uint8)
+        for weight, expected in ((0.82, 100), (0.5, 94), (0.32, 90), (0.2, 88)):
+            result = self._blend(radar, model, weight, monkeypatch)
+            assert (result == expected).all()
+            assert (result >= 84).all()
+            assert (result < 104).all()
+
+    def test_subfloor_radar_is_not_promoted(self, monkeypatch):
+        """(8) Sub-floor radar blends toward 84 without crossing the floor."""
+        radar = np.full((256, 256), 60, dtype=np.uint8)
+        model = np.zeros((256, 256), dtype=np.uint8)
+        result = self._blend(radar, model, 0.5, monkeypatch)
+        # clip(0.5*60 + 0.5*84 + 0.5) = 72 — the asymptote must not lift
+        # sub-noise-floor radar above the floor (no hallucinated echoes).
+        assert (result == 72).all()
+        assert (result < 84).all()
 
     # --- Compute-level regression tests for the regions_with_data fix -------
 
@@ -821,7 +855,7 @@ class TestNowcastBlendGuard:
         return np.zeros((COMPOSITE_HEIGHT, COMPOSITE_WIDTH), dtype=np.uint8)
 
     def test_past_fill_ignores_data_less_region_coverage(self, monkeypatch):
-        """(7) A down region's coverage must not block the NWP fallback fill."""
+        """(9) A down region's coverage must not block the NWP fallback fill."""
         from librewxr.tiles import renderer as renderer_mod
 
         self._patch_two_regions(monkeypatch)
@@ -835,7 +869,7 @@ class TestNowcastBlendGuard:
         assert (geom.values == 200).all()
 
     def test_nowcast_ignores_data_less_region_feather(self, monkeypatch):
-        """(8) A down region's feather must not suppress the model blend."""
+        """(10) A down region's feather must not suppress the model blend."""
         from librewxr.tiles import renderer as renderer_mod
 
         self._patch_two_regions(monkeypatch)
