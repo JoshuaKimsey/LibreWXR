@@ -684,3 +684,97 @@ class TestEmptyTileFastPath:
             assert present_tile(geom_b, color_scheme=2, fmt=fmt) == present_tile(
                 ref, color_scheme=2, fmt=fmt
             )
+
+
+class TestNowcastBlendGuard:
+    """The nowcast blend must not let a dry model pixel erase real radar.
+
+    Model pixel value 0 encodes -32 dBZ, the bottom of the encoding, NOT
+    "no data" — so blending toward it drags real radar echoes below the
+    display noise floor and the post-blend thresholding zeroes them
+    (issue #24).  ``_blend_nowcast`` pins the radar weight to 1.0
+    wherever the (blurred) model is below the floor.
+    """
+
+    # Tile (z=4, x=3, y=5) sits over empty composite space (same tile as
+    # TestEmptyTileFastPath).  The exact location doesn't drive results
+    # here — sample_feather / overlapping_regions are patched — but
+    # keeping it consistent makes the fixtures deterministic.
+    _Z, _X, _Y, _TILE = 4, 3, 5, 256
+
+    @staticmethod
+    def _chain(model_arr: np.ndarray) -> MagicMock:
+        chain = MagicMock()
+        chain.has_data.return_value = True
+        chain.sample.return_value = model_arr
+        return chain
+
+    @pytest.fixture(autouse=True)
+    def _pin_noise_floor(self, monkeypatch):
+        from librewxr.config import settings
+        monkeypatch.setattr(settings, "noise_floor_dbz", 10.0)  # threshold 84
+
+    @staticmethod
+    def _feather_all_ones() -> callable:
+        return lambda name, lat, lon: np.ones(lat.shape, dtype=np.float32)
+
+    def _blend(self, radar, model, blend_weight, monkeypatch):
+        """Call _blend_nowcast with feather=1 everywhere, floor=10.0."""
+        from librewxr.tiles import renderer as renderer_mod
+
+        monkeypatch.setattr(renderer_mod, "sample_feather", self._feather_all_ones())
+        return renderer_mod._blend_nowcast(
+            radar, [REGIONS["USCOMP"]], self._Z, self._X, self._Y,
+            self._TILE, 0, self._chain(model), blend_weight=blend_weight,
+        )
+
+    # --- Unit tests: _blend_nowcast directly --------------------------------
+
+    def test_model_empty_preserves_radar(self, monkeypatch):
+        """(1) Dry model (all 0) must not halve the radar value."""
+        radar = np.full((256, 256), 104, dtype=np.uint8)
+        model = np.zeros((256, 256), dtype=np.uint8)
+        result = self._blend(radar, model, 0.5, monkeypatch)
+        assert (result == 104).all()  # pre-fix: 52
+
+    def test_model_above_floor_blends_normally(self, monkeypatch):
+        """(2) Model with real precip still blends exactly as before."""
+        radar = np.full((256, 256), 104, dtype=np.uint8)
+        model = np.full((256, 256), 200, dtype=np.uint8)
+        result = self._blend(radar, model, 0.5, monkeypatch)
+        assert (result == 152).all()  # clip(0.5*104 + 0.5*200 + 0.5)
+
+    def test_blur_fringe_does_not_erase_radar(self, monkeypatch):
+        """(3) Gaussian fringe around a model echo must not eat radar."""
+        radar = np.full((256, 256), 104, dtype=np.uint8)
+        model = np.zeros((256, 256), dtype=np.uint8)
+        model[128, 128] = 255
+        result = self._blend(radar, model, 0.5, monkeypatch)
+        # The 3x3 Gaussian leaves a ~32 fringe on the orthogonal
+        # neighbours — below the 84 floor, so they must stay pure radar.
+        for r, c in ((128, 127), (128, 129), (127, 128), (129, 128)):
+            assert result[r, c] == 104  # pre-fix: 68
+
+    def test_floor_disabled_keeps_old_behavior(self, monkeypatch):
+        """(4) Noise floor disabled (-33) -> the guard is a no-op."""
+        from librewxr.config import settings
+
+        monkeypatch.setattr(settings, "noise_floor_dbz", -33.0)
+        radar = np.full((256, 256), 104, dtype=np.uint8)
+        model = np.zeros((256, 256), dtype=np.uint8)
+        result = self._blend(radar, model, 0.5, monkeypatch)
+        assert (result == 52).all()
+
+    def test_model_mode_does_not_leak_radar(self, monkeypatch):
+        """(5) blend_weight 0 ("model" mode) must stay pure model."""
+        radar = np.full((256, 256), 104, dtype=np.uint8)
+        model = np.zeros((256, 256), dtype=np.uint8)
+        result = self._blend(radar, model, 0.0, monkeypatch)
+        assert (result == 0).all()
+
+    def test_both_zero_still_zero(self, monkeypatch):
+        """(6) Radar and model both dry -> both_zero keeps the tile 0."""
+        radar = np.zeros((256, 256), dtype=np.uint8)
+        model = np.zeros((256, 256), dtype=np.uint8)
+        result = self._blend(radar, model, 0.5, monkeypatch)
+        assert (result == 0).all()

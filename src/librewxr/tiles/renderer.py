@@ -674,6 +674,9 @@ def _blend_nowcast(
 
     The effective per-pixel radar weight is ``blend_weight × feather``.
     Outside radar coverage, NWP is used directly (same as past frames).
+    Where the model is below the display noise floor it is treated as
+    "no opinion": the radar weight is pinned to 1.0 there, so an empty
+    model pixel can't dilute real radar echoes (issue #24).
     """
     if pad > 0:
         lat_grid, lon_grid = tile_pixel_latlons_padded(z, x, y, tile_size, pad)
@@ -704,6 +707,26 @@ def _blend_nowcast(
 
     # Per-pixel effective radar weight
     effective_w = blend_weight * feather
+
+    # Pixels where the model has no opinion must not drag real radar
+    # echoes below the display noise floor.  Model pixel value 0 encodes
+    # -32 dBZ — the bottom of the scale, NOT "no data" — so blending
+    # toward an empty model pixel pulls ``w * radar`` under the floor
+    # and the post-blend thresholding zeroes the echo entirely
+    # (issue #24).  Where the model is dry we therefore pin the radar
+    # weight to 1.0 for that pixel.  The gate tests the BLURRED field
+    # actually being blended (not the raw model, and not ``== 0``): the
+    # Gaussian blur leaves faint non-zero fringes around real model
+    # echoes, and a zero test would fire for those and leak radar
+    # extrapolation into model areas.  Skipped when ``blend_weight == 0``
+    # — "model" blend mode (or steps past the blend window) intends pure
+    # model output, so forcing w=1 there would leak radar into
+    # model-only frames — and when the noise floor is disabled there is
+    # nothing to guard against.
+    if blend_weight > 0 and settings.noise_floor_dbz > -32:
+        pixel_threshold = int((settings.noise_floor_dbz + 32) * 2)
+        model_valid = model_f >= pixel_threshold
+        effective_w = np.where(model_valid, effective_w, 1.0)
 
     # Blend: extrapolated radar × weight + model × (1 − weight)
     radar_f = radar_values.astype(np.float32)
