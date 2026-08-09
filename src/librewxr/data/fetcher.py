@@ -53,16 +53,6 @@ class RadarFetcher:
     # masking a genuine multi-cycle outage.
     _CARRY_FORWARD_MAX_INTERVALS = 2
 
-    # A carried-forward region is a stale copy standing in for a product
-    # the source failed to serve.  Several sources can still serve the
-    # missed slot from a short archive window afterwards (Météo-France's
-    # DPPaquetRadar packet holds ~15 min), so carried slots stay eligible
-    # for re-fetch this many intervals back before being written off.
-    # Without the re-fetch, the stale copy permanently masks the slot:
-    # the store reports the region present, every later cycle skips it,
-    # and the animation keeps a frozen duplicate frame.
-    _CARRY_FORWARD_REFETCH_MAX_INTERVALS = 3
-
     # Debounce window for on_cycle_complete triggers (initial backfill,
     # end of cycle, frame merges, satellite background fetches).  Multiple
     # triggers within the window collapse into a single trailing-edge
@@ -115,9 +105,6 @@ class RadarFetcher:
         self._closed = False
         self._task: asyncio.Task | None = None
         self._satellite_tasks: dict[str, asyncio.Task] = {}
-        # Provenance of carry-forward fills: ts -> region names whose
-        # store entry is a stale copy, still awaiting the real product.
-        self._carried_regions: dict[int, set[str]] = {}
         self._enabled_regions = [
             REGIONS[name] for name in settings.get_enabled_regions()
         ]
@@ -599,31 +586,13 @@ class RadarFetcher:
         existing_frames = await self._store.get_region_keys()
         enabled_names = {r.name for r in self._enabled_regions}
 
-        # Prune carry-forward provenance for slots the source archive can
-        # no longer serve (or that left the store) — past that point the
-        # stale copy is final and retrying is wasted bandwidth.
-        refetch_cutoff = (
-            now_rounded - self._CARRY_FORWARD_REFETCH_MAX_INTERVALS * interval
-        )
-        for carried_ts in list(self._carried_regions):
-            if carried_ts < refetch_cutoff or carried_ts not in existing_frames:
-                del self._carried_regions[carried_ts]
-
         ts_and_sources: list[tuple[int, str, int | datetime]] = []
 
         for i in range(settings.max_frames):
             minutes_ago = i * interval_min
             ts = now_rounded - i * interval
 
-            # Carried-forward regions are stale copies; while their slot
-            # is inside the recovery window they count as missing so the
-            # real product can replace the copy (store merge + tile-cache
-            # invalidation handle the swap).
-            carried = self._carried_regions.get(ts, set())
-            if (
-                ts in existing_frames
-                and enabled_names <= existing_frames[ts] - carried
-            ):
+            if ts in existing_frames and enabled_names <= existing_frames[ts]:
                 continue
 
             # IEM live endpoint covers 0-55 min ago
@@ -649,10 +618,7 @@ class RadarFetcher:
         Args:
             skip_regions: Optional mapping of timestamp -> region names to
                 skip (already present in the store).  Only missing regions
-                are fetched, saving bandwidth on retries for incomplete
-                frames.  Regions recorded in ``_carried_regions`` are
-                fetched despite being present — their store entry is a
-                carry-forward copy awaiting the real product.
+                are fetched, saving bandwidth on retries for incomplete frames.
         """
         # For each timestamp, fetch regions in parallel (skipping any
         # already present from a previous partial fetch).
@@ -661,9 +627,8 @@ class RadarFetcher:
 
         for ts, source_type, source_arg in ts_and_sources:
             have = skip_regions.get(ts, set()) if skip_regions else set()
-            carried = self._carried_regions.get(ts, set())
             for region in self._enabled_regions:
-                if region.name in have and region.name not in carried:
+                if region.name in have:
                     continue
                 source = self._sources[region.name]
                 if source_type == "live":
@@ -725,14 +690,6 @@ class RadarFetcher:
 
             frames_by_ts[ts][region.name] = result
 
-            # Real data landed — retire any carry-forward provenance so
-            # later cycles stop re-fetching this slot.
-            carried_here = self._carried_regions.get(ts)
-            if carried_here is not None:
-                carried_here.discard(region.name)
-                if not carried_here:
-                    del self._carried_regions[ts]
-
         # Store frames in chronological order so carry-forward lookback
         # sees the freshest data (a backfill cycle that fetches several
         # timestamps at once needs the older frames stored before the
@@ -770,9 +727,6 @@ class RadarFetcher:
                             "%s: carry-forward into ts=%d from %d (%d min stale)",
                             name, ts, prev_ts, stale_min,
                         )
-                        # Record provenance so later cycles re-fetch this
-                        # slot while the source archive can still serve it.
-                        self._carried_regions.setdefault(ts, set()).add(name)
                         missing.discard(name)
 
             if not regions_data:
