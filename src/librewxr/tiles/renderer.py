@@ -189,20 +189,16 @@ def compute_tile_geometry(
 
     # Fill uncovered pixels from NWP precipitation data.  For nowcast
     # frames, blend extrapolated radar with NWP using temporal weight +
-    # spatial feathering at coverage boundaries.  Only regions that
-    # actually delivered a frame this cycle take part: a region that is
-    # down or empty would otherwise still contribute its coverage mask
-    # (blocking NWP fill, leaving a hole) and its feather (suppressing
-    # the model over its footprint) (issue #24).
+    # spatial feathering at coverage boundaries.
     if has_nwp:
         if nowcast_blend is not None:
             values = _blend_nowcast(
-                values, regions_with_data, z, x, y, tile_size, pad, nwp_chain,
+                values, regions, z, x, y, tile_size, pad, nwp_chain,
                 frame_timestamp, smooth, nowcast_blend,
             )
         else:
             values = _fill_ecmwf_fallback(
-                values, regions_with_data, z, x, y, tile_size, pad, nwp_chain,
+                values, regions, z, x, y, tile_size, pad, nwp_chain,
                 frame_timestamp, smooth,
             )
 
@@ -614,7 +610,7 @@ def render_coverage_tile(
 
 def _fill_ecmwf_fallback(
     values: np.ndarray,
-    regions_with_data: list[RegionDef],
+    regions: list[RegionDef],
     z: int, x: int, y: int,
     tile_size: int, pad: int,
     nwp_chain,
@@ -637,12 +633,11 @@ def _fill_ecmwf_fallback(
     else:
         lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
 
-    # Union coverage from every region that delivered a frame this
-    # cycle.  Regions without a frame are excluded by the caller so a
-    # down or empty region's coverage mask can't block the NWP fill
-    # and leave a hole (issue #24).
+    # Union coverage from every region that overlaps this tile — even
+    # regions we don't have a frame for yet, because if a station reaches
+    # this tile we still don't want NWP overlapping with radar.
     covered = np.zeros(lat_grid.shape, dtype=bool)
-    for region in regions_with_data:
+    for region in regions:
         covered |= sample_coverage(region.name, lat_grid, lon_grid)
 
     uncovered = (values == 0) & ~covered
@@ -660,7 +655,7 @@ def _fill_ecmwf_fallback(
 
 def _blend_nowcast(
     radar_values: np.ndarray,
-    regions_with_data: list[RegionDef],
+    regions: list[RegionDef],
     z: int, x: int, y: int,
     tile_size: int, pad: int,
     nwp_chain,
@@ -679,9 +674,6 @@ def _blend_nowcast(
 
     The effective per-pixel radar weight is ``blend_weight × feather``.
     Outside radar coverage, NWP is used directly (same as past frames).
-    Where the model is below the display noise floor the blend target is
-    raised to the floor: dry-model areas keep their radar echoes at a
-    lead-time-dimmed intensity instead of erasing them (issue #24).
     """
     if pad > 0:
         lat_grid, lon_grid = tile_pixel_latlons_padded(z, x, y, tile_size, pad)
@@ -707,37 +699,11 @@ def _blend_nowcast(
 
     # Build the spatial feather weight: union across all overlapping regions
     feather = np.zeros(lat_grid.shape, dtype=np.float32)
-    for region in regions_with_data:
+    for region in regions:
         feather = np.maximum(feather, sample_feather(region.name, lat_grid, lon_grid))
 
     # Per-pixel effective radar weight
     effective_w = blend_weight * feather
-
-    # Pixels where the model is dry must not drag real radar echoes
-    # below the display noise floor.  Model pixel value 0 encodes
-    # -32 dBZ — the bottom of the scale, NOT "no data" — so blending
-    # toward an empty model pixel pulls ``w * radar`` under the floor
-    # and the post-blend thresholding zeroes the echo entirely
-    # (issue #24).  An earlier fix pinned the radar weight to 1.0 on
-    # those pixels; that cured the erasure but rendered the fully-warped
-    # T+60 optical-flow extrapolation at full strength over dry-model
-    # areas.  Raising the dry-model pixels to the floor instead makes the
-    # blend asymptote toward the faintest visible shade: the painted area
-    # is preserved at every lead time while ``blend_weight > 0``, but the
-    # intensity fades with the radar weight, encoding extrapolation
-    # uncertainty and hiding the warping.  The gate tests/raises the
-    # BLURRED field actually being blended (not the raw model, and not
-    # ``== 0``): the Gaussian blur leaves faint non-zero fringes around
-    # real model echoes, and a zero test would fire for those and leak
-    # radar extrapolation into model areas.  Skipped when
-    # ``blend_weight == 0`` — "model" blend mode (or steps past the blend
-    # window) intends pure model output, where raising dry pixels to the
-    # floor would paint a faint floor-level echo everywhere the model is
-    # dry — and when the noise floor is disabled there is nothing to
-    # guard against.
-    if blend_weight > 0 and settings.noise_floor_dbz > -32:
-        pixel_threshold = int((settings.noise_floor_dbz + 32) * 2)
-        model_f = np.maximum(model_f, pixel_threshold)
 
     # Blend: extrapolated radar × weight + model × (1 − weight)
     radar_f = radar_values.astype(np.float32)
