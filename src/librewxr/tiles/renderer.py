@@ -189,16 +189,20 @@ def compute_tile_geometry(
 
     # Fill uncovered pixels from NWP precipitation data.  For nowcast
     # frames, blend extrapolated radar with NWP using temporal weight +
-    # spatial feathering at coverage boundaries.
+    # spatial feathering at coverage boundaries.  Only regions that
+    # actually delivered a frame this cycle take part: a region that is
+    # down or empty would otherwise still contribute its coverage mask
+    # (blocking NWP fill, leaving a hole) and its feather (suppressing
+    # the model over its footprint) (issue #24).
     if has_nwp:
         if nowcast_blend is not None:
             values = _blend_nowcast(
-                values, regions, z, x, y, tile_size, pad, nwp_chain,
+                values, regions_with_data, z, x, y, tile_size, pad, nwp_chain,
                 frame_timestamp, smooth, nowcast_blend,
             )
         else:
             values = _fill_ecmwf_fallback(
-                values, regions, z, x, y, tile_size, pad, nwp_chain,
+                values, regions_with_data, z, x, y, tile_size, pad, nwp_chain,
                 frame_timestamp, smooth,
             )
 
@@ -610,7 +614,7 @@ def render_coverage_tile(
 
 def _fill_ecmwf_fallback(
     values: np.ndarray,
-    regions: list[RegionDef],
+    regions_with_data: list[RegionDef],
     z: int, x: int, y: int,
     tile_size: int, pad: int,
     nwp_chain,
@@ -633,11 +637,12 @@ def _fill_ecmwf_fallback(
     else:
         lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
 
-    # Union coverage from every region that overlaps this tile — even
-    # regions we don't have a frame for yet, because if a station reaches
-    # this tile we still don't want NWP overlapping with radar.
+    # Union coverage from every region that delivered a frame this
+    # cycle.  Regions without a frame are excluded by the caller so a
+    # down or empty region's coverage mask can't block the NWP fill
+    # and leave a hole (issue #24).
     covered = np.zeros(lat_grid.shape, dtype=bool)
-    for region in regions:
+    for region in regions_with_data:
         covered |= sample_coverage(region.name, lat_grid, lon_grid)
 
     uncovered = (values == 0) & ~covered
@@ -655,7 +660,7 @@ def _fill_ecmwf_fallback(
 
 def _blend_nowcast(
     radar_values: np.ndarray,
-    regions: list[RegionDef],
+    regions_with_data: list[RegionDef],
     z: int, x: int, y: int,
     tile_size: int, pad: int,
     nwp_chain,
@@ -699,7 +704,7 @@ def _blend_nowcast(
 
     # Build the spatial feather weight: union across all overlapping regions
     feather = np.zeros(lat_grid.shape, dtype=np.float32)
-    for region in regions:
+    for region in regions_with_data:
         feather = np.maximum(feather, sample_feather(region.name, lat_grid, lon_grid))
 
     # Per-pixel effective radar weight

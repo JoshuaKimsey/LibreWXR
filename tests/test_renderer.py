@@ -684,3 +684,100 @@ class TestEmptyTileFastPath:
             assert present_tile(geom_b, color_scheme=2, fmt=fmt) == present_tile(
                 ref, color_scheme=2, fmt=fmt
             )
+
+
+class TestRegionsWithDataGating:
+    """A region that overlaps the tile but delivered no frame this cycle
+    must not contribute coverage or feather (issue #24).
+
+    ``compute_tile_geometry`` builds ``regions_with_data`` (only regions
+    that actually delivered a frame this cycle) and passes it to both
+    ``_fill_ecmwf_fallback`` and ``_blend_nowcast``.  Before the fix the
+    plain all-overlapping ``regions`` list was passed, so a down or empty
+    region still contributed its coverage mask - blocking the NWP
+    fallback fill and leaving a hole in past frames - and its feather -
+    suppressing the model over its footprint in nowcast frames even
+    though no radar data existed there to protect.
+    """
+
+    # Tile (z=4, x=3, y=5) sits over empty composite space (same tile as
+    # TestEmptyTileFastPath).  The exact location doesn't drive results
+    # here - overlapping_regions / sample_coverage / sample_feather are
+    # patched - but keeping it consistent makes the fixtures
+    # deterministic.
+    _Z, _X, _Y, _TILE = 4, 3, 5, 256
+
+    @staticmethod
+    def _chain(model_arr: np.ndarray) -> MagicMock:
+        chain = MagicMock()
+        chain.has_data.return_value = True
+        chain.sample.return_value = model_arr
+        return chain
+
+    @pytest.fixture(autouse=True)
+    def _pin_noise_floor(self, monkeypatch):
+        from librewxr.config import settings
+        monkeypatch.setattr(settings, "noise_floor_dbz", 10.0)  # threshold 84
+
+    @staticmethod
+    def _patch_two_regions(monkeypatch):
+        """Force the tile to overlap USCOMP + CACOMP; only USCOMP has a frame.
+
+        ``sample_coverage`` and ``sample_feather`` are name-based: CACOMP
+        reports full coverage / full feather (it "overlaps" this tile even
+        though it delivered no frame this cycle), USCOMP reports nothing.
+        """
+        from librewxr.tiles import renderer as renderer_mod
+
+        monkeypatch.setattr(
+            renderer_mod, "overlapping_regions",
+            lambda z, x, y, enabled=None: [
+                REGIONS["USCOMP"], REGIONS["CACOMP"],
+            ],
+        )
+        monkeypatch.setattr(
+            renderer_mod, "sample_coverage",
+            lambda name, lat, lon: (
+                np.ones(lat.shape, dtype=bool)
+                if name == "CACOMP" else np.zeros(lat.shape, dtype=bool)
+            ),
+        )
+        monkeypatch.setattr(
+            renderer_mod, "sample_feather",
+            lambda name, lat, lon: (
+                np.ones(lat.shape, dtype=np.float32)
+                if name == "CACOMP" else np.zeros(lat.shape, dtype=np.float32)
+            ),
+        )
+
+    @staticmethod
+    def _empty_uscomp_frame() -> np.ndarray:
+        return np.zeros((COMPOSITE_HEIGHT, COMPOSITE_WIDTH), dtype=np.uint8)
+
+    def test_past_fill_ignores_data_less_region_coverage(self, monkeypatch):
+        """(1) A down region's coverage must not block the NWP fallback fill."""
+        from librewxr.tiles import renderer as renderer_mod
+
+        self._patch_two_regions(monkeypatch)
+        chain = self._chain(np.full((256, 256), 200, dtype=np.uint8))
+        geom = renderer_mod.compute_tile_geometry(
+            {"USCOMP": self._empty_uscomp_frame()},
+            self._Z, self._X, self._Y, tile_size=256,
+            nwp_chain=chain, frame_timestamp=1700000000,
+        )
+        assert geom.is_transparent is False  # pre-fix: tier1_post_fill
+        assert (geom.values == 200).all()
+
+    def test_nowcast_ignores_data_less_region_feather(self, monkeypatch):
+        """(2) A down region's feather must not suppress the model blend."""
+        from librewxr.tiles import renderer as renderer_mod
+
+        self._patch_two_regions(monkeypatch)
+        chain = self._chain(np.full((256, 256), 150, dtype=np.uint8))
+        geom = renderer_mod.compute_tile_geometry(
+            {"USCOMP": self._empty_uscomp_frame()},
+            self._Z, self._X, self._Y, tile_size=256,
+            nwp_chain=chain, frame_timestamp=1700000000, nowcast_blend=0.5,
+        )
+        assert geom.is_transparent is False  # pre-fix: tier1_post_blend
+        assert (geom.values == 150).all()
