@@ -10,6 +10,7 @@ import math
 import os
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +66,9 @@ class StormCellStore:
     files via state.json.
     """
 
-    def __init__(self, cache_dir: Path | None = None):
+    def __init__(
+        self, cache_dir: Path | None = None, *, cleanup_tmp: bool = True,
+    ):
         self._cells: dict[str, np.ndarray] = {}
         self._counts: dict[str, int] = {}  # actual cell count per region (vs MAX cap)
         self._last_updated: float = 0.0
@@ -78,8 +81,14 @@ class StormCellStore:
             self._memmap_dir = Path(tempfile.mkdtemp(prefix="librewxr_stormcells_"))
             self._persistent = False
         self._memmap_dir.mkdir(parents=True, exist_ok=True)
-        for path in self._memmap_dir.glob("*.tmp"):
-            path.unlink(missing_ok=True)
+        # The ``*.tmp`` unlink is a stale-leftover sweep for the store's
+        # OWN dir.  A render worker booting against the shared (multi-mode)
+        # storm-cells dir must skip it - the pipeline process may be
+        # concurrently writing ``.tmp`` files it is about to rename (the
+        # stale-tmp sweep stays the pipeline's job at its own boot).
+        if cleanup_tmp:
+            for path in self._memmap_dir.glob("*.tmp"):
+                path.unlink(missing_ok=True)
         logger.info(
             "Storm-cell memmap directory: %s (persistent=%s)",
             self._memmap_dir, self._persistent,
@@ -88,7 +97,18 @@ class StormCellStore:
     def _to_memmap(self, name: str, data: np.ndarray) -> np.ndarray:
         """Write array to disk atomically and return a read-only memmap view."""
         final = self._memmap_dir / f"{name}.dat"
-        tmp = final.with_suffix(".dat.tmp")
+        # The storm-cells dir is shared across processes in multi mode
+        # (the pipeline writes it, render workers read it via state.json).
+        # A deterministic tmp name lets a concurrent writer's rename steal
+        # the file out from under this writer's os.replace - the same
+        # hazard NowcastStore hit in production when two pipeline
+        # processes overlapped during a deploy.  pid+uuid makes writers
+        # independent: both succeed, and the last replace wins the final
+        # name atomically.  The constructor's stale-``*.tmp`` sweep still
+        # matches these names.
+        tmp = final.with_name(
+            f"{final.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        )
         mm = np.memmap(tmp, dtype=data.dtype, mode="w+", shape=data.shape)
         mm[:] = data
         mm.flush()

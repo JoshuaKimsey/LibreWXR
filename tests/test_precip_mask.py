@@ -10,6 +10,8 @@ round-trip, and stale-file cleanup.
 
 import asyncio
 import json
+import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -604,6 +606,56 @@ class TestStaleCleanup:
         assert (mask_dir / "100.dat").exists()
         assert (mask_dir / "300.dat").exists()
         assert (mask_dir / "400.dat").exists()
+
+
+# ---------------------------------------------------------------------------
+# Cross-process tmp-file isolation on the shared mask dir
+# ---------------------------------------------------------------------------
+
+
+class TestSaveMaskTmpIsolation:
+    """Unique (pid+uuid) tmp names in ``_save_mask``.
+
+    The pipeline is the only writer of ``mask/*.dat`` files, but two
+    overlapping pipeline processes during a deploy both build the same
+    timestamps - the deterministic-tmp race NowcastStore hit in
+    production.  pid+uuid keeps writers independent; the last rename
+    wins the final name atomically.
+    """
+
+    def test_save_mask_tmp_names_are_unique(self, tmp_path, monkeypatch):
+        """Two writes to the same final name must never share a tmp file.
+
+        The tmp name embeds pid + uuid (mirroring ``coord_store.publish``),
+        so concurrent writers can't collide on the same ``.tmp`` path and
+        steal each other's in-flight file.  The pre-fix deterministic
+        ``<ts>.dat.tmp`` produced identical paths; this test must fail
+        against that code.
+        """
+        store = PrecipMaskStore(cache_dir=tmp_path / "cache")
+        replaced_srcs: list[str] = []
+
+        real_replace = os.replace
+
+        def _capture_replace(src, dst):
+            replaced_srcs.append(str(src))
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(
+            "librewxr.data.precip_mask.os.replace", _capture_replace,
+        )
+        mask = np.zeros((GH, GW), dtype=bool)
+        mask[_CELL] = True
+        store._save_mask({}, _TS, mask)
+        store._save_mask({}, _TS, mask)
+
+        assert len(replaced_srcs) == 2
+        # pid + uuid naming (mirrors coord_store.publish), distinct per
+        # write.  The old ``1700000000.dat.tmp`` fails the regex AND
+        # produces two identical paths.
+        pattern = re.compile(rf"^{_TS}\.dat\.\d+\.[0-9a-f]{{32}}\.tmp$")
+        assert all(pattern.match(Path(name).name) for name in replaced_srcs)
+        assert replaced_srcs[0] != replaced_srcs[1]
 
 
 # ---------------------------------------------------------------------------

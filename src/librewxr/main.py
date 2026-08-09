@@ -474,7 +474,11 @@ async def _render_only_lifespan(app: FastAPI):
         else None
     )
     storm_cell_store = (
-        StormCellStore(cache_dir=cache_dir)
+        # The pipeline owns the shared storm-cells dir and may be
+        # mid-write; a worker boot must never delete its in-flight tmp
+        # files (the stale-tmp sweep stays the pipeline's job at its own
+        # boot).
+        StormCellStore(cache_dir=cache_dir, cleanup_tmp=False)
         if settings.storm_cells_enabled
         else None
     )

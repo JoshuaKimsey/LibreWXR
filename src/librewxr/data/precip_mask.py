@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from pathlib import Path
 
 import cv2
@@ -393,7 +394,18 @@ class PrecipMaskStore:
         """Persist ``mask`` (memmap + atomic replace) or keep on the heap."""
         if self._persistent:
             final = self._memmap_dir / f"{ts}.dat"
-            tmp = final.with_suffix(".dat.tmp")
+            # The mask dir is shared in multi mode.  The pipeline is the
+            # only writer, but two overlapping pipeline processes during
+            # a deploy both build the same timestamps - a deterministic
+            # tmp name lets one writer's rename steal the other's
+            # in-flight file (same hazard as NowcastStore).  pid+uuid
+            # makes writers independent: both succeed, and the last
+            # replace wins the final name atomically.  Render workers
+            # never write masks, so there is no reader-side sweep to
+            # worry about here.
+            tmp = final.with_name(
+                f"{final.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            )
             mm = np.memmap(tmp, dtype=mask.dtype, mode="w+", shape=mask.shape)
             mm[:] = mask
             mm.flush()

@@ -5,6 +5,7 @@ StormCellGenerator orchestration."""
 
 import asyncio
 import os
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -343,6 +344,125 @@ class TestStormCellStore:
             assert counts["TRUNC"] == MAX_CELLS_PER_REGION
         finally:
             store.cleanup()
+
+
+class TestStormCellStoreTmpIsolation:
+    """Cross-process tmp-file isolation on the shared (multi-mode) storm-cells dir.
+
+    In multi mode the pipeline writes ``storm_cells/cells_*.dat`` files
+    that render workers memmap read-only via state.json.  Two writers
+    (overlapping pipeline processes during a deploy) can race on the same
+    final name, and a render-worker boot must never sweep the pipeline's
+    in-flight tmp files.  These tests pin both halves of the fix: unique
+    (pid+uuid) tmp names in ``_to_memmap``, and ``cleanup_tmp=False`` for
+    readers.
+    """
+
+    def test_to_memmap_tmp_names_are_unique(self, tmp_path, monkeypatch):
+        """Two writes to the same final name must never share a tmp file.
+
+        The tmp name embeds pid + uuid (mirroring ``coord_store.publish``),
+        so concurrent writers can't collide on the same ``.tmp`` path and
+        steal each other's in-flight file.  The pre-fix deterministic
+        ``cells_<region>.dat.tmp`` produced identical paths; this test
+        must fail against that code.
+        """
+        store = StormCellStore(cache_dir=tmp_path)
+        replaced_srcs: list[str] = []
+
+        real_replace = os.replace
+
+        def _capture_replace(src, dst):
+            replaced_srcs.append(str(src))
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(
+            "librewxr.data.storm_cells.os.replace", _capture_replace,
+        )
+        arr = np.array([
+            (10.0, 20.0, 50.0, 61.6, 45.0,
+             0.0, 0.0, 30.0, 45.0),
+        ], dtype=_CELL_DTYPE)
+        store._to_memmap("cells_USCOMP", arr)
+        store._to_memmap("cells_USCOMP", arr)
+
+        assert len(replaced_srcs) == 2
+        # pid + uuid naming (mirrors coord_store.publish), distinct per
+        # write.  The old ``cells_USCOMP.dat.tmp`` fails the regex AND
+        # produces two identical paths.
+        pattern = re.compile(r"^cells_USCOMP\.dat\.\d+\.[0-9a-f]{32}\.tmp$")
+        assert all(pattern.match(Path(name).name) for name in replaced_srcs)
+        assert replaced_srcs[0] != replaced_srcs[1]
+
+    def test_concurrent_writer_does_not_steal_tmp(self, tmp_path, monkeypatch):
+        """Deterministic cross-process race: store B completes its full
+        write for the same name while store A's ``_to_memmap`` is in flight.
+
+        With unique tmp names A's ``os.replace`` still succeeds (B never
+        touched A's tmp path) and the final ``.dat`` holds valid content.
+        Under the pre-fix deterministic ``cells_<region>.dat.tmp``, B's
+        rename removes the file A is about to rename and A raises
+        ``FileNotFoundError``.
+        """
+        name = "cells_USCOMP"
+        data_a = np.array([
+            (7.0, 20.0, 50.0, 61.6, 45.0,
+             0.0, 0.0, 30.0, 45.0),
+        ], dtype=_CELL_DTYPE)
+        data_b = np.array([
+            (9.0, 20.0, 50.0, 61.6, 45.0,
+             0.0, 0.0, 30.0, 45.0),
+        ], dtype=_CELL_DTYPE)
+
+        store_a = StormCellStore(cache_dir=tmp_path)
+        store_b = StormCellStore(cache_dir=tmp_path)
+
+        real_replace = os.replace
+        b_completed = False
+
+        def _coordinated_replace(src, dst):
+            nonlocal b_completed
+            if not b_completed:
+                # B runs its whole write (tmp -> final) before A's rename.
+                b_completed = True
+                store_b._to_memmap(name, data_b)
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(
+            "librewxr.data.storm_cells.os.replace", _coordinated_replace,
+        )
+
+        result = store_a._to_memmap(name, data_a)  # must not raise
+
+        final = tmp_path / "storm_cells" / f"{name}.dat"
+        assert final.exists()
+        np.testing.assert_array_equal(result, data_a)
+        np.testing.assert_array_equal(
+            np.memmap(final, dtype=data_a.dtype, mode="r", shape=data_a.shape),
+            data_a,
+        )
+
+    def test_reader_store_boot_preserves_inflight_tmp(self, tmp_path):
+        """A reader (render-worker) boot must not delete the pipeline's
+        in-flight ``*.tmp`` file in the shared storm-cells dir.
+
+        ``cleanup_tmp=False`` (the render-only lifespan) leaves it alone;
+        the default ``True`` (the pipeline's own boot) still sweeps stale
+        leftovers.  Pins both sides of the contract.
+        """
+        cells_dir = tmp_path / "storm_cells"
+        cells_dir.mkdir(parents=True, exist_ok=True)
+        inflight = cells_dir / "something.dat.tmp"
+        inflight.write_bytes(b"\x00" * 16)
+
+        # Reader boot: sweep must NOT run.
+        StormCellStore(cache_dir=tmp_path, cleanup_tmp=False)
+        assert inflight.exists()
+
+        # Writer (pipeline) boot: default sweep removes stale tmp files.
+        inflight.write_bytes(b"\x00" * 16)
+        StormCellStore(cache_dir=tmp_path)
+        assert not inflight.exists()
 
 
 # ---------------------------------------------------------------------------
