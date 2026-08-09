@@ -33,6 +33,7 @@ import os
 import shutil
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -227,7 +228,16 @@ class NowcastStore:
     def _to_memmap(self, name: str, data: np.ndarray) -> np.ndarray:
         """Write array to disk atomically and return a read-only memory-mapped view."""
         final = self._memmap_dir / f"{name}.dat"
-        tmp = final.with_suffix(".dat.tmp")
+        # The nowcast dir is shared across processes in multi mode (the
+        # pipeline writes it, render workers read it via state.json).  A
+        # deterministic tmp name lets a concurrent writer's rename steal
+        # the file out from under this writer's os.replace (production
+        # incident); pid+uuid makes writers independent — both succeed,
+        # and the last replace wins the final name atomically.  The
+        # constructor's stale-``*.tmp`` sweep still matches these names.
+        tmp = final.with_name(
+            f"{final.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        )
         mm = np.memmap(tmp, dtype=data.dtype, mode="w+", shape=data.shape)
         mm[:] = data
         mm.flush()
