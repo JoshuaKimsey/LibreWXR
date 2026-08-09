@@ -173,6 +173,54 @@ class TestApplyStateRobustness:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# dump_state with an empty vs populated NowcastStore
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestDumpStateNowcastStore:
+    def test_dump_state_omits_empty_nowcast_store(self, tmp_path: Path) -> None:
+        """An all-empty NowcastStore serializes to ``None`` — the entry
+        must be omitted from the snapshot so serving render workers keep
+        their current frames until the first real generation lands."""
+        from librewxr.data.nowcast import NowcastStore
+
+        cache = tmp_path / "cache"
+        store = NowcastStore(cache_dir=cache)
+        try:
+            dump_state({"nowcast_store": store}, cache)
+        finally:
+            store.cleanup()
+        payload = load_state(cache)
+        assert payload is not None
+        assert "nowcast_store" not in payload["stores"]
+
+    @pytest.mark.asyncio
+    async def test_dump_state_includes_populated_nowcast_store(
+        self, tmp_path: Path,
+    ) -> None:
+        from librewxr.data.nowcast import NowcastFrame, NowcastStore
+
+        cache = tmp_path / "cache"
+        store = NowcastStore(cache_dir=cache)
+        try:
+            await store.replace_all([
+                NowcastFrame(
+                    timestamp=1700000600,
+                    blend_weight=0.6,
+                    regions={"R1": np.zeros((4, 6), dtype=np.uint8)},
+                ),
+            ])
+            dump_state({"nowcast_store": store}, cache)
+        finally:
+            store.cleanup()
+        payload = load_state(cache)
+        assert payload is not None
+        snapshot = payload["stores"].get("nowcast_store")
+        assert snapshot is not None
+        assert [int(f["timestamp"]) for f in snapshot["frames"]] == [1700000600]
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Mtime polling helper
 # ──────────────────────────────────────────────────────────────────────────
 

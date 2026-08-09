@@ -357,8 +357,21 @@ class NowcastStore:
         self._flows.clear()
         self._nwp_flow = None
 
-    def __getstate__(self) -> dict:
-        """Serialize state for cross-process reload (multi-worker mode)."""
+    def __getstate__(self) -> dict | None:
+        """Serialize state for cross-process reload (multi-worker mode).
+
+        Returns ``None`` while the store holds no content — an all-empty
+        store means the first generation is still in flight after a
+        pipeline boot, and dumping it would null populated nowcast stores
+        on serving render workers (production incident).  ``dump_state``
+        skips stores whose ``__getstate__`` returns ``None``, so the
+        worker keeps its current frames until the first real generation
+        lands.  The all-three-empty condition keeps arrow-flow-only
+        configurations correct: a store with flows but no frames is a
+        valid, dumpable state.
+        """
+        if not self._frames and not self._flows and self._nwp_flow is None:
+            return None
         frames_state: list[dict] = []
         for ts, frame in self._frames.items():
             regions: dict[str, list] = {}
@@ -407,6 +420,25 @@ class NowcastStore:
         Genuine corruption (other exceptions) still propagates so
         ``apply_state`` can log it.
         """
+        # Belt-and-suspenders apply-side guard: an all-empty payload
+        # carries no information and historically meant "first generation
+        # in flight" — keep serving the current frames/flows.  With
+        # ``__getstate__`` returning ``None`` for empty stores, current
+        # pipelines never emit such payloads; this only defends against
+        # snapshots from older builds or hand-crafted payloads.  A store
+        # that is itself empty applies the payload normally (a no-op),
+        # and a payload with frames=[] but non-empty flows (arrow-only
+        # path) still applies — it is a valid, information-bearing state.
+        incoming_empty = (
+            not state.get("frames")
+            and not state.get("flows")
+            and state.get("nwp_flow") is None
+        )
+        holding_content = (
+            bool(self._frames) or bool(self._flows) or self._nwp_flow is not None
+        )
+        if incoming_empty and holding_content:
+            return
         memmap_dir = Path(state["memmap_dir"])
         new_frames: dict[int, NowcastFrame] = {}
         for f_info in state["frames"]:

@@ -1099,8 +1099,17 @@ class TestNowcastStoreNWPFlow:
     @pytest.mark.asyncio
     async def test_nwp_flow_absent_in_old_snapshot(self, tmp_path):
         """Old snapshots written before the hybrid arrow path omit
-        ``nwp_flow``; ``__setstate__`` must treat absence as ``None``."""
+        ``nwp_flow``; ``__setstate__`` must treat absence as ``None``.
+        The producer holds a frame so ``__getstate__`` returns a dict
+        (an all-empty store now serializes to ``None``)."""
         producer = NowcastStore(cache_dir=tmp_path)
+        await producer.replace_all([
+            NowcastFrame(
+                timestamp=1000,
+                blend_weight=0.8,
+                regions={"A": np.ones((4, 4), dtype=np.uint8)},
+            ),
+        ])
         state = producer.__getstate__()
         # Simulate an old snapshot by removing the key entirely.
         del state["nwp_flow"]
@@ -1108,6 +1117,133 @@ class TestNowcastStoreNWPFlow:
         consumer = NowcastStore()
         consumer.__setstate__(state)
         assert await consumer.get_nwp_flow() is None
+
+
+class TestNowcastStoreEmptyState:
+    """Empty-store dump/apply semantics.
+
+    The pipeline boots with an empty NowcastStore, and the first
+    ``state.json`` dump can fire before the first generation completes.
+    An all-empty dump must never wholesale-replace a populated store on
+    a serving render worker — ``__getstate__`` returns ``None`` for an
+    all-empty store (``dump_state`` then skips the entry) and
+    ``__setstate__`` refuses an all-empty payload while holding content.
+    """
+
+    @pytest.mark.asyncio
+    async def test_getstate_none_while_empty(self, tmp_path):
+        """A fresh, all-empty store serializes to ``None`` so the first
+        boot dump can't null render workers; once one frame lands the
+        store serializes normally."""
+        store = NowcastStore(cache_dir=tmp_path)
+        assert store.__getstate__() is None
+
+        await store.replace_all([
+            NowcastFrame(
+                timestamp=1000,
+                blend_weight=0.8,
+                regions={"A": np.ones((4, 4), dtype=np.uint8)},
+            ),
+        ])
+        state = store.__getstate__()
+        assert state is not None
+        assert [int(f["timestamp"]) for f in state["frames"]] == [1000]
+
+    @pytest.mark.asyncio
+    async def test_getstate_present_with_flows_only(self, tmp_path):
+        """A store with flows but no frames is a valid, dumpable state
+        (arrow-flow-only configuration) — ``__getstate__`` must not
+        collapse it to ``None``."""
+        store = NowcastStore(cache_dir=tmp_path)
+        await store.replace_flows({"R1": np.zeros((4, 6, 2), dtype=np.float32)})
+        state = store.__getstate__()
+        assert state is not None
+        assert state["frames"] == []
+        assert "R1" in state["flows"]
+
+    @pytest.mark.asyncio
+    async def test_setstate_empty_payload_keeps_existing_frames(self, tmp_path):
+        """An all-empty payload carries no information (historically
+        "first generation in flight") — it must not null a store that is
+        currently serving frames and flows."""
+        store = NowcastStore(cache_dir=tmp_path)
+        frame = NowcastFrame(
+            timestamp=1000,
+            blend_weight=0.7,
+            regions={"A": np.zeros((4, 4), dtype=np.uint8)},
+        )
+        await store.replace_all([frame])
+        flow = np.zeros((4, 4, 2), dtype=np.float32)
+        await store.replace_flows({"A": flow})
+
+        store.__setstate__({
+            "memmap_dir": str(store._memmap_dir),
+            "frames": [],
+            "flows": {},
+            "nwp_flow": None,
+        })
+
+        assert await store.get_timestamps() == [1000]
+        nc_frame, weight = await store.get_frame(1000)
+        assert nc_frame is not None
+        assert weight == pytest.approx(0.7)
+        np.testing.assert_array_equal(
+            nc_frame.regions["A"], np.zeros((4, 4), dtype=np.uint8),
+        )
+        flows = await store.get_flows()
+        assert "A" in flows
+        np.testing.assert_array_equal(flows["A"], flow)
+
+    @pytest.mark.asyncio
+    async def test_setstate_empty_payload_on_empty_store_is_noop(self, tmp_path):
+        """An all-empty payload applied to an already-empty store is a
+        no-op — it applies without error and the store stays empty."""
+        store = NowcastStore(cache_dir=tmp_path)
+        store.__setstate__({
+            "memmap_dir": str(store._memmap_dir),
+            "frames": [],
+            "flows": {},
+            "nwp_flow": None,
+        })
+        assert await store.get_timestamps() == []
+        assert await store.get_flows() == {}
+        assert await store.get_nwp_flow() is None
+
+    @pytest.mark.asyncio
+    async def test_setstate_frames_empty_but_flows_present_applies(self, tmp_path):
+        """A payload with frames=[] but a non-empty flows dict is the
+        arrow-only path — it must apply normally (replace flows, leave
+        frames empty), not be treated as an all-empty dump."""
+        store = NowcastStore(cache_dir=tmp_path)
+        # Give the store existing content so the apply-side guard is live.
+        await store.replace_all([
+            NowcastFrame(
+                timestamp=1000,
+                blend_weight=0.7,
+                regions={"A": np.zeros((4, 4), dtype=np.uint8)},
+            ),
+        ])
+        flow = np.full((4, 4, 2), 2.5, dtype=np.float32)
+        await store.replace_flows({"A": flow})
+        arr = store._flows["A"]
+
+        store.__setstate__({
+            "memmap_dir": str(store._memmap_dir),
+            "frames": [],
+            "flows": {
+                "A": [
+                    os.path.basename(str(arr.filename)),
+                    arr.dtype.str,
+                    list(arr.shape),
+                ],
+            },
+            "nwp_flow": None,
+        })
+
+        assert await store.get_timestamps() == []
+        flows = await store.get_flows()
+        assert list(flows) == ["A"]
+        np.testing.assert_array_equal(flows["A"], flow)
 
 
 class TestNowcastStoreSetstateStaleFiles:
