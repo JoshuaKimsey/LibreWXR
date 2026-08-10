@@ -38,7 +38,7 @@ async def retry_get(
         except httpx.TransportError:
             if attempt < retries:
                 name = log_name or url.split("/")[-1]
-                logger.info(
+                logger.debug(
                     "%s: transport error, retrying (%d/%d)",
                     name, attempt + 1, retries,
                 )
@@ -52,7 +52,7 @@ async def retry_get(
         except httpx.DecodeError:
             if attempt < retries:
                 name = log_name or url.split("/")[-1]
-                logger.info(
+                logger.debug(
                     "%s: decode error, retrying (%d/%d)",
                     name, attempt + 1, retries,
                 )
@@ -100,7 +100,7 @@ def retry_sync(
         except Exception:
             if attempt < retries:
                 name = log_name or getattr(fn, "__name__", "function")
-                logger.info(
+                logger.debug(
                     "%s: error, retrying (%d/%d)",
                     name, attempt + 1, retries,
                     exc_info=True,

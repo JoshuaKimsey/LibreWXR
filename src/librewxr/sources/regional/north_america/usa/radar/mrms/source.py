@@ -309,7 +309,7 @@ class MRMSSource:
             entries.sort(key=lambda e: e[0])
             self._dir_cache = entries
             self._dir_cache_time = time.time()
-            logger.info(
+            logger.debug(
                 "MRMS directory cache refreshed: %d files, %s to %s",
                 len(entries),
                 entries[0][0].strftime("%Y%m%d-%H%M%S"),

@@ -452,7 +452,7 @@ class HRRRAlaskaGrid:
             )
             self._persistent = False
         self._memmap_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(
+        logger.debug(
             "HRRR-Alaska memmap directory: %s (persistent=%s)",
             self._memmap_dir, self._persistent,
         )
@@ -820,7 +820,7 @@ class HRRRAlaskaGrid:
             self._evict_outside_window(window_start, window_end)
 
             if total_fetched:
-                logger.info(
+                logger.debug(
                     "HRRR-Alaska: %d frame(s) ingested across %d run(s); "
                     "store now holds %d frame(s)",
                     total_fetched,
@@ -955,7 +955,7 @@ class HRRRAlaskaGrid:
             except OSError:
                 pass
         if stale:
-            logger.info(
+            logger.debug(
                 "HRRR-Alaska: evicted %d out-of-window frame(s)",
                 len(stale),
             )
@@ -970,7 +970,7 @@ class HRRRAlaskaGrid:
         self._client = None
         if not self._persistent:
             shutil.rmtree(self._memmap_dir, ignore_errors=True)
-            logger.info("HRRR-Alaska memmap directory cleaned up")
+            logger.debug("HRRR-Alaska memmap directory cleaned up")
         else:
             logger.info(
                 "HRRR-Alaska cache retained at %s for warm restart",

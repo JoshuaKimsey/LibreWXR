@@ -461,7 +461,7 @@ class WRFSMNGrid:
             )
             self._persistent = False
         self._memmap_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(
+        logger.debug(
             "WRF-SMN memmap directory: %s (persistent=%s)",
             self._memmap_dir, self._persistent,
         )
@@ -852,7 +852,7 @@ class WRFSMNGrid:
             self._evict_outside_window(window_start, window_end)
 
             if total_fetched:
-                logger.info(
+                logger.debug(
                     "WRF-SMN: %d hourly frame(s) ingested + %d interpolated "
                     "across %d run(s); store now holds %d frame(s)",
                     total_fetched, total_interpolated,
@@ -1098,7 +1098,7 @@ class WRFSMNGrid:
         self._client = None
         if not self._persistent:
             shutil.rmtree(self._memmap_dir, ignore_errors=True)
-            logger.info("WRF-SMN memmap directory cleaned up")
+            logger.debug("WRF-SMN memmap directory cleaned up")
         else:
             logger.info(
                 "WRF-SMN cache retained at %s for warm restart",

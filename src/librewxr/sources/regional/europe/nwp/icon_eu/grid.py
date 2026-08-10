@@ -388,7 +388,7 @@ class ICONEUGrid:
             self._memmap_dir = Path(tempfile.mkdtemp(prefix="librewxr_icon_eu_"))
             self._persistent = False
         self._memmap_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(
+        logger.debug(
             "ICON-EU memmap directory: %s (persistent=%s)",
             self._memmap_dir, self._persistent,
         )
@@ -725,7 +725,7 @@ class ICONEUGrid:
             self._evict_outside_window(window_start, window_end)
 
             if total_fetched:
-                logger.info(
+                logger.debug(
                     "ICON-EU: %d hourly frame(s) ingested + %d interpolated "
                     "across %d run(s); store now holds %d frame(s)",
                     total_fetched, total_interpolated,
@@ -970,7 +970,7 @@ class ICONEUGrid:
         self._client = None
         if not self._persistent:
             shutil.rmtree(self._memmap_dir, ignore_errors=True)
-            logger.info("ICON-EU memmap directory cleaned up")
+            logger.debug("ICON-EU memmap directory cleaned up")
         else:
             logger.info(
                 "ICON-EU cache retained at %s for warm restart", self._memmap_dir,

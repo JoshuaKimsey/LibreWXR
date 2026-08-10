@@ -582,7 +582,7 @@ class HRRRGrid:
             self._memmap_dir = Path(tempfile.mkdtemp(prefix="librewxr_hrrr_"))
             self._persistent = False
         self._memmap_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(
+        logger.debug(
             "HRRR memmap directory: %s (persistent=%s)",
             self._memmap_dir,
             self._persistent,
@@ -971,7 +971,7 @@ class HRRRGrid:
             self._evict_outside_window(window_start, window_end)
 
             if total_fetched:
-                logger.info(
+                logger.debug(
                     "HRRR: %d subh frame(s) ingested across %d run(s); "
                     "store now holds %d frame(s)",
                     total_fetched, len(runs_to_consider), len(self._frames),
@@ -1099,7 +1099,7 @@ class HRRRGrid:
             except OSError:
                 pass
         if stale:
-            logger.info("HRRR: evicted %d out-of-window subh frame(s)", len(stale))
+            logger.debug("HRRR: evicted %d out-of-window subh frame(s)", len(stale))
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
@@ -1111,7 +1111,7 @@ class HRRRGrid:
         self._client = None
         if not self._persistent:
             shutil.rmtree(self._memmap_dir, ignore_errors=True)
-            logger.info("HRRR memmap directory cleaned up")
+            logger.debug("HRRR memmap directory cleaned up")
         else:
             logger.info("HRRR cache retained at %s for warm restart", self._memmap_dir)
 

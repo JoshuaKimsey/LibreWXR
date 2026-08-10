@@ -89,7 +89,7 @@ class StormCellStore:
         if cleanup_tmp:
             for path in self._memmap_dir.glob("*.tmp"):
                 path.unlink(missing_ok=True)
-        logger.info(
+        logger.debug(
             "Storm-cell memmap directory: %s (persistent=%s)",
             self._memmap_dir, self._persistent,
         )
@@ -468,7 +468,7 @@ class StormCellGenerator:
                 detected_at_timestamp=latest.timestamp,
             )
             total = sum(len(arr) for arr in cells_by_region.values())
-            logger.info(
+            logger.debug(
                 "Storm-cell detection: %d cells across %d region(s)",
                 total, len(cells_by_region),
             )

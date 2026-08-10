@@ -74,7 +74,7 @@ class ECMWFGrid:
         # Drop stale .tmp files from a crash mid-write.
         for path in self._memmap_dir.glob("*.tmp"):
             path.unlink(missing_ok=True)
-        logger.info(
+        logger.debug(
             "ECMWF memmap directory: %s (persistent=%s)",
             self._memmap_dir, self._persistent,
         )
@@ -644,4 +644,4 @@ class ECMWFGrid:
             logger.info("ECMWF memmaps retained on disk at %s", self._memmap_dir)
         else:
             shutil.rmtree(self._memmap_dir, ignore_errors=True)
-            logger.info("ECMWF memmap directory cleaned up")
+            logger.debug("ECMWF memmap directory cleaned up")

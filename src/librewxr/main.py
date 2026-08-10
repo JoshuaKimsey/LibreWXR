@@ -13,7 +13,6 @@ import cv2
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from rich.logging import RichHandler
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from librewxr.api import routes
@@ -49,6 +48,7 @@ from librewxr.sources import (
 from librewxr.data.alerts_store import AlertsStore
 from librewxr.data.alerts_fetcher import WMOAlertsFetcher
 from librewxr.memory import MemoryMonitor, detect_memory_limit_mb
+from librewxr.logging_setup import setup_logging
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import (
     ALL_CACHES,
@@ -59,57 +59,10 @@ from librewxr.tiles.coordinates import (
 from librewxr.tiles.request_tracker import TileRequestTracker
 from librewxr.tiles.warmer import TileWarmer
 
-# Map dotted logger names to short subsystem tags so concurrent startup
-# (radar / IFS / NWP / GMGSI all firing in parallel) reads cleanly in the log.
-# Anything not in the map falls back to the last segment of the module
-# path (e.g. an unmapped third-party logger keeps its own short name).
-_LOG_TAGS = {
-    "librewxr.main": "main",
-    "librewxr.config": "config",
-    "librewxr.memory": "memory",
-    "librewxr.api.routes": "api",
-    "librewxr.data.sources": "radar",
-    "librewxr.data.fetcher": "fetcher",
-    "librewxr.data.store": "store",
-    "librewxr.data.regions": "regions",
-    "librewxr.data.coverage": "coverage",
-    "librewxr.sources.world.ifs.grid": "ifs",
-    "librewxr.sources.world.ifs.interpolation": "ifs",
-    "librewxr.sources.regional.north_america.usa.nwp.hrrr.grid": "hrrr",
-    "librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska.grid": "hrrr-ak",
-    "librewxr.sources.regional.europe.nwp.icon_eu.grid": "icon-eu",
-    "librewxr.sources.regional.europe.nwp.dmi_dini.grid": "dmi-dini",
-    "librewxr.sources.regional.north_america.canada.nwp.hrdps.grid": "hrdps",
-    "librewxr.sources.regional.caribbean.nwp.arome_antilles.grid": "arome-ant",
-    "librewxr.sources.regional.south_america.nwp.wrf_smn.grid": "wrf-smn",
-    "librewxr.data.nowcast": "nowcast",
-    "librewxr.tiles.warmer": "warmer",
-    "librewxr.tiles.cache": "tiles",
-    "librewxr.tiles.renderer": "tiles",
-    "librewxr.tiles.satellite_renderer": "tiles",
-    "librewxr.tiles.coordinates": "tiles",
-    "librewxr.data.alerts_fetcher": "alerts",
-    "librewxr.data.alerts_store": "alerts",
-}
-
-
-class _TagFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        record.tag = _LOG_TAGS.get(record.name, record.name.rsplit(".", 1)[-1])
-        return super().format(record)
-
-
-_handler = RichHandler(rich_tracebacks=True, show_path=False)
-_handler.setFormatter(_TagFormatter("[%(tag)s] %(message)s"))
-logging.basicConfig(
-    level=logging.INFO,
-    handlers=[_handler],
-    force=True,
-)
-# Suppress noisy per-request INFO logs from httpx/httpcore — we already log
-# fetch results ourselves in sources.py / fetcher.py.
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
+# Centralized logging: Rich-tagged handler at LIBREWXR_LOG_LEVEL (default
+# INFO).  Called at module scope so import-time logging is configured,
+# exactly as the old inline setup was.
+setup_logging()
 logger = logging.getLogger(__name__)
 
 # The background mask-persistence task, held for the process lifetime so it
@@ -1203,6 +1156,9 @@ def main():
         workers=settings.workers,
         log_level="info",
         access_log=False,
+        # Don't let uvicorn install its own handlers/format — its loggers
+        # propagate to our shared Rich-tagged root handler instead.
+        log_config=None,
         # Trust X-Forwarded-Proto/Host from any peer: LibreWXR is documented
         # as a behind-reverse-proxy deployment (cloudflared tunnel / nginx
         # on the Docker network, not localhost), and forwarded headers only

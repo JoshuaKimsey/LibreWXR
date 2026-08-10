@@ -26,7 +26,6 @@ import signal
 import sys
 from pathlib import Path
 
-from rich.logging import RichHandler
 import cv2
 
 from librewxr.config import settings
@@ -46,6 +45,7 @@ from librewxr.data.precip_mask import PrecipMaskStore
 from librewxr.data.radar_cache import RadarFrameCache
 from librewxr.data.regions import REGIONS
 from librewxr.data.store import FrameStore
+from librewxr.logging_setup import setup_logging
 from librewxr.sources import (
     collect_nowcast_contributions,
     collect_nwp_contributions,
@@ -62,45 +62,6 @@ from librewxr.tiles.coordinates import prune_shared_coord_store
 # the render workers (different process, no cross-process invalidation),
 # so we hand it a tiny no-op-effect cache and rely on the render workers
 # to invalidate their own caches when they pick up a new state.json.
-
-_LOG_TAGS = {
-    "librewxr.data_pipeline": "pipeline",
-    "librewxr.config": "config",
-    "librewxr.data.sources": "radar",
-    "librewxr.data.fetcher": "fetcher",
-    "librewxr.data.store": "store",
-    "librewxr.data.regions": "regions",
-    "librewxr.data.coverage": "coverage",
-    "librewxr.sources.world.ifs.grid": "ifs",
-    "librewxr.sources.world.ifs.interpolation": "ifs",
-    "librewxr.sources.regional.north_america.usa.nwp.hrrr.grid": "hrrr",
-    "librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska.grid": "hrrr-ak",
-    "librewxr.sources.regional.europe.nwp.icon_eu.grid": "icon-eu",
-    "librewxr.sources.regional.europe.nwp.dmi_dini.grid": "dmi-dini",
-    "librewxr.sources.regional.north_america.canada.nwp.hrdps.grid": "hrdps",
-    "librewxr.sources.regional.caribbean.nwp.arome_antilles.grid": "arome-ant",
-    "librewxr.sources.regional.south_america.nwp.wrf_smn.grid": "wrf-smn",
-    "librewxr.sources.satellite.gmgsi.source": "gmgsi",
-    "librewxr.data.nowcast": "nowcast",
-    "librewxr.data.master_state": "state",
-    "librewxr.data.alerts_fetcher": "alerts",
-    "librewxr.data.alerts_store": "alerts",
-}
-
-
-class _TagFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        record.tag = _LOG_TAGS.get(record.name, record.name.rsplit(".", 1)[-1])
-        return super().format(record)
-
-
-def _setup_logging() -> None:
-    handler = RichHandler(rich_tracebacks=True, show_path=False)
-    handler.setFormatter(_TagFormatter("[%(tag)s] %(message)s"))
-    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-
 
 logger = logging.getLogger(__name__)
 
@@ -332,7 +293,7 @@ async def run_pipeline() -> None:
 
 
 def main() -> None:
-    _setup_logging()
+    setup_logging()
     # The pipeline's heavy cv2 work (Farneback nowcast flow) runs once per fetch cycle; 8 threads is ample for the <=1000px flow grids and stays well inside the pipeline container's CPU cap.
     cv2.setNumThreads(8)
     try:

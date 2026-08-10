@@ -150,7 +150,7 @@ class TileWarmer:
                 pct = processed * 100 // total_tiles
                 if pct >= next_pct or processed == total_tiles:
                     elapsed = time.monotonic() - start
-                    logger.info(
+                    logger.debug(
                         "Warm latest: %d/%d (%d%%), %d submitted, %.1fs",
                         processed, total_tiles, pct, submitted, elapsed,
                     )
@@ -338,7 +338,7 @@ class TileWarmer:
                     pct = processed * 100 // total_tiles
                     if pct >= next_pct or processed == total_tiles:
                         elapsed = time.monotonic() - start
-                        logger.info(
+                        logger.debug(
                             "Warm overview: %d/%d (%d%%), %d submitted, %.1fs",
                             processed, total_tiles, pct, submitted, elapsed,
                         )

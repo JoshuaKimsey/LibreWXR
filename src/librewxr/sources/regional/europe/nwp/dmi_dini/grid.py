@@ -628,7 +628,7 @@ class DMIDiniGrid:
             self._memmap_dir = Path(tempfile.mkdtemp(prefix="librewxr_dmi_dini_"))
             self._persistent = False
         self._memmap_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(
+        logger.debug(
             "DMI DINI memmap directory: %s (persistent=%s)",
             self._memmap_dir, self._persistent,
         )
@@ -962,7 +962,7 @@ class DMIDiniGrid:
             self._evict_outside_window(window_start, window_end)
 
             if total_fetched:
-                logger.info(
+                logger.debug(
                     "DMI DINI: %d hourly frame(s) ingested + %d interpolated "
                     "across %d run(s); store now holds %d frame(s)",
                     total_fetched, total_interpolated,
@@ -1260,7 +1260,7 @@ class DMIDiniGrid:
         self._client = None
         if not self._persistent:
             shutil.rmtree(self._memmap_dir, ignore_errors=True)
-            logger.info("DMI DINI memmap directory cleaned up")
+            logger.debug("DMI DINI memmap directory cleaned up")
         else:
             logger.info(
                 "DMI DINI cache retained at %s for warm restart", self._memmap_dir,

@@ -230,7 +230,7 @@ class GMGSISource:
                 cache_path.unlink(missing_ok=True)
 
         if new_count:
-            logger.info(
+            logger.debug(
                 "%s: ingested %d new frame(s); store now holds %d (%s)",
                 self.friendly_name, new_count, len(self._sorted_timestamps),
                 ", ".join(

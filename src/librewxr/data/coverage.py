@@ -77,7 +77,7 @@ def _build_region_mask(
         mask |= d2 <= range_km_sq
 
     _COVERAGE_MASKS[region.name] = (mask, west, south, dx, dy)
-    logger.info(
+    logger.debug(
         "coverage mask %s: %dx%d @ %.2f° (%d stations, %.1f%% covered)",
         region.name, ny, nx, MASK_RESOLUTION_DEG, len(stations),
         100.0 * mask.mean(),
@@ -138,7 +138,7 @@ def _build_region_polygon_mask(
 
     _COVERAGE_MASKS[region.name] = (mask, west, south, dx, dy)
     total_verts = sum(len(r) for r in rings)
-    logger.info(
+    logger.debug(
         "coverage mask %s: %dx%d @ %.2f° (polygon, %d ring(s), "
         "%d vertices, %.1f%% covered)",
         region.name, ny, nx, MASK_RESOLUTION_DEG, len(rings),
@@ -270,7 +270,7 @@ def build_feather_masks() -> None:
         dist = cv2.distanceTransform(mask_uint8, cv2.DIST_L2, 5)
         feather = np.clip(dist / FEATHER_DISTANCE_PX, 0.0, 1.0).astype(np.float32)
         _FEATHER_MASKS[region_name] = (feather, west, south, dx, dy)
-        logger.info(
+        logger.debug(
             "feather mask %s: %dx%d, feather_px=%d",
             region_name, feather.shape[0], feather.shape[1], FEATHER_DISTANCE_PX,
         )
@@ -512,7 +512,7 @@ def save_masks(
     tmp_manifest = manifest_path.with_name(f"masks.json.tmp.{os.getpid()}")
     tmp_manifest.write_text(json.dumps(manifest, sort_keys=True))
     os.replace(tmp_manifest, manifest_path)
-    logger.info(
+    logger.debug(
         "Persisted %d coverage/feather mask pair(s) under %s",
         len(regions), mask_dir,
     )
@@ -604,7 +604,7 @@ def load_masks(
     _COVERAGE_MASKS.update(coverage_out)
     _FEATHER_MASKS.clear()
     _FEATHER_MASKS.update(feather_out)
-    logger.info(
+    logger.debug(
         "Loaded %d persisted coverage/feather mask pair(s) from %s",
         len(coverage_out), mask_dir,
     )

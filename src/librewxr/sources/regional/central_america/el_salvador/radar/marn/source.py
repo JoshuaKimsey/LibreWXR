@@ -167,7 +167,7 @@ class MARNSource:
             entries.sort(key=lambda e: e[0])
             self._dir_cache = entries
             self._dir_cache_time = time.time()
-            logger.info(
+            logger.debug(
                 "MARN bucket cache refreshed: %d files, %s..%s",
                 len(entries),
                 entries[0][0].strftime("%Y-%m-%dT%H:%MZ"),

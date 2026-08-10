@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     fetch_interval: int = 600  # seconds between fetches (10 min = radar frame cadence)
     max_frames: int = 12
     max_zoom: int = 12
+    # Root log level: DEBUG / INFO / WARNING / ERROR / CRITICAL
+    # (case-insensitive; normalized to uppercase by the validator).
+    log_level: str = "INFO"
     # Deployment shape.  Drives sensible defaults for workers, tile cache,
     # coord cache, and warmer threads via ``_apply_mode_defaults``.
     #   single  - one container, fetcher + renderer in the same process
@@ -485,6 +488,13 @@ class Settings(BaseSettings):
         if "single" in tokens:
             return "single"
         return "single"
+
+    @field_validator("log_level")
+    @classmethod
+    def _normalize_log_level(cls, v: str) -> str:
+        """Validate + canonicalize LIBREWXR_LOG_LEVEL via the shared helper."""
+        from librewxr.logging_setup import normalize_level
+        return normalize_level(v)
 
     @model_validator(mode="after")
     def _apply_mode_defaults(self):

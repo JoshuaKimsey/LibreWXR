@@ -54,7 +54,7 @@ class FrameStore:
         # atomic writes don't trip on existing files.
         for path in self._memmap_dir.glob("*.tmp"):
             path.unlink(missing_ok=True)
-        logger.info(
+        logger.debug(
             "Frame memmap directory: %s (persistent=%s)",
             self._memmap_dir, self._persistent,
         )
@@ -249,4 +249,4 @@ class FrameStore:
             logger.info("Frame memmaps retained on disk at %s", self._memmap_dir)
         else:
             shutil.rmtree(self._memmap_dir, ignore_errors=True)
-            logger.info("Frame memmap directory cleaned up")
+            logger.debug("Frame memmap directory cleaned up")

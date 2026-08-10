@@ -321,7 +321,7 @@ class MemoryMonitor:
             self._warn_threshold * 100, self._evict_tiles_threshold * 100,
             self._evict_all_threshold * 100,
         )
-        logger.info(
+        logger.debug(
             "Memory monitor started (scope=%s, limit=%d MB, check every %ds, "
             "warn=%.0f%%, evict_tiles=%.0f%%, evict_all=%.0f%%)",
             scope, self._limit_mb, self._check_interval,

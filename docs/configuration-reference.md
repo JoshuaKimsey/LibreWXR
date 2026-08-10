@@ -91,6 +91,20 @@ Allowed CORS origins for cross-origin requests from web browsers.
 
 If you restrict this, make sure your web app's origin is included or tile requests from browsers will fail silently.
 
+### `LIBREWXR_LOG_LEVEL`
+
+Root log level for the Rich-tagged console output (the `[tag] message` format shared with uvicorn's own loggers).  One of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` — case-insensitive, normalized to uppercase.  At the default `INFO`, boot status, fetch-cycle timing, and per-source fetch durations are visible while per-cycle noise (memmap-directory lines, per-source ingest summaries, fetch-cycle-start banners, retry attempts) stays at `DEBUG`.
+
+| | |
+|---|---|
+| **Default** | `INFO` |
+| **Type** | string |
+
+**Example:**
+```bash
+LIBREWXR_LOG_LEVEL=DEBUG
+```
+
 ---
 
 ## Radar Data

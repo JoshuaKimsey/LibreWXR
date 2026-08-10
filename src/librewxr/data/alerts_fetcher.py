@@ -629,7 +629,7 @@ class WMOAlertsFetcher:
                         polygon = union
                 entries.append(_alert_entry_from_nws(feature, props, polygon))
 
-        logger.info("NWS API: %d active alerts", len(entries))
+        logger.debug("NWS API: %d active alerts", len(entries))
         return entries
 
     async def _fetch_once(self) -> None:
@@ -681,7 +681,7 @@ class WMOAlertsFetcher:
             if sid in current_agencies:
                 source_ids.append(sid)
 
-        logger.info("Fetching alerts from %d WMO sources", len(source_ids))
+        logger.debug("Fetching alerts from %d WMO sources", len(source_ids))
 
         # 3. Fetch RSS feeds and CAP XMLs
         sem = asyncio.Semaphore(self._concurrency)

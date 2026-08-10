@@ -283,4 +283,4 @@ class RadarFrameCache:
             path.unlink(missing_ok=True)
 
         if removed:
-            logger.info("Radar cache cleanup: removed %d old files", removed)
+            logger.debug("Radar cache cleanup: removed %d old files", removed)

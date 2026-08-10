@@ -220,7 +220,7 @@ class NowcastStore:
         if cleanup_tmp:
             for path in self._memmap_dir.glob("*.tmp"):
                 path.unlink(missing_ok=True)
-        logger.info(
+        logger.debug(
             "Nowcast memmap directory: %s (persistent=%s)",
             self._memmap_dir, self._persistent,
         )
@@ -507,7 +507,7 @@ class NowcastStore:
             logger.info("Nowcast memmaps retained on disk at %s", self._memmap_dir)
         else:
             shutil.rmtree(self._memmap_dir, ignore_errors=True)
-            logger.info("Nowcast memmap directory cleaned up")
+            logger.debug("Nowcast memmap directory cleaned up")
 
 
 # ---------------------------------------------------------------------------
@@ -669,14 +669,14 @@ class NowcastGenerator:
             if self._cache is not None:
                 for ts in old_timestamps:
                     self._cache.invalidate_timestamp(ts)
-            logger.info(
+            logger.debug(
                 "Nowcast updated: %d frames (T+%d to T+%d min)",
                 len(nowcast_frames),
                 interval // 60,
                 n_steps * interval // 60,
             )
         elif flows:
-            logger.info(
+            logger.debug(
                 "Arrow flow updated: %d region%s (nowcast disabled)",
                 len(flows), "s" if len(flows) != 1 else "",
             )

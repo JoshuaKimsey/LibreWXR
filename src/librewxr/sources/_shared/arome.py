@@ -183,7 +183,7 @@ class AROMEOverseasGrid:
             )
             self._persistent = False
         self._memmap_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(
+        logger.debug(
             "%s memmap directory: %s (persistent=%s)",
             self.friendly_name, self._memmap_dir, self._persistent,
         )
@@ -231,7 +231,7 @@ class AROMEOverseasGrid:
                 self._latest_run_ts = run_ts
             loaded += 1
         if loaded:
-            logger.info(
+            logger.debug(
                 "%s: loaded %d cached frame(s) from disk",
                 self.friendly_name, loaded,
             )
@@ -606,7 +606,7 @@ class AROMEOverseasGrid:
             self._evict_outside_window(window_start, window_end)
 
             if total_fetched:
-                logger.info(
+                logger.debug(
                     "%s: %d frame(s) ingested across %d run(s); "
                     "store now holds %d frame(s)",
                     self.friendly_name, total_fetched, len(runs_to_consider),
@@ -702,7 +702,7 @@ class AROMEOverseasGrid:
         for k in stale_accums:
             self._accum.pop(k, None)
         if stale_frames:
-            logger.info(
+            logger.debug(
                 "%s: evicted %d out-of-window frame(s)",
                 self.friendly_name, len(stale_frames),
             )
@@ -717,7 +717,7 @@ class AROMEOverseasGrid:
         self._client = None
         if not self._persistent:
             shutil.rmtree(self._memmap_dir, ignore_errors=True)
-            logger.info("%s memmap directory cleaned up", self.friendly_name)
+            logger.debug("%s memmap directory cleaned up", self.friendly_name)
         else:
             logger.info(
                 "%s cache retained at %s for warm restart",

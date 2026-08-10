@@ -257,7 +257,7 @@ class RadarFetcher:
         always on clean multiples regardless of when the server started.
         """
         cycle_start = time.time()
-        logger.info("─── fetch cycle start (initial backfill) ───")
+        logger.debug("─── fetch cycle start (initial backfill) ───")
         try:
             await self._fetch_all_frames()
             await self._run_nowcast()
@@ -287,7 +287,7 @@ class RadarFetcher:
             boundary_iso = datetime.fromtimestamp(
                 next_boundary, tz=timezone.utc,
             ).strftime("%Y-%m-%d %H:%M UTC")
-            logger.info("─── fetch cycle start (boundary %s) ───", boundary_iso)
+            logger.debug("─── fetch cycle start (boundary %s) ───", boundary_iso)
             try:
                 await self._fetch_all_frames()
                 await self._run_nowcast()
@@ -506,7 +506,7 @@ class RadarFetcher:
                     started = time.time()
                     try:
                         await grid.fetch(**kwargs)
-                        logger.debug(
+                        logger.info(
                             "%s fetch finished in %.1fs", label, time.time() - started,
                         )
                     except Exception:
