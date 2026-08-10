@@ -475,7 +475,7 @@ class HRDPSGrid:
             "HRDPS memmap directory: %s (persistent=%s)",
             self._memmap_dir, self._persistent,
         )
-        logger.info(
+        logger.debug(
             "HRDPS rotated origin: rlon0=%.4f rlat0_north=%.4f "
             "(from documented La1=%.3f Lo1=%.3f)",
             HRDPS_GRID_RLON_ORIGIN, HRDPS_GRID_RLAT_ORIGIN_NORTH,
@@ -531,7 +531,7 @@ class HRDPSGrid:
                 self._latest_run_ts = run_ts
             loaded += 1
         if loaded:
-            logger.info("HRDPS: loaded %d cached frame(s) from disk", loaded)
+            logger.debug("HRDPS: loaded %d cached frame(s) from disk", loaded)
 
     def __getstate__(self) -> dict:
         """Serialize state for cross-process reload (multi-worker mode).

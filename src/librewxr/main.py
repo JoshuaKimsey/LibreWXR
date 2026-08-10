@@ -459,7 +459,7 @@ async def _render_only_lifespan(app: FastAPI):
             f"is something else writing to {cache_dir}?"
         )
     refreshed = apply_state(payload, stores)
-    logger.info(
+    logger.debug(
         "Render-only worker loaded snapshot: %s",
         ", ".join(refreshed) if refreshed else "(empty)",
     )
@@ -522,7 +522,7 @@ async def _render_only_lifespan(app: FastAPI):
         if nwp_grid_slug(c) in nwp_grids_by_slug
     ]
     nwp_chain = NWPChain(chain_sources)
-    logger.info(
+    logger.debug(
         "Render-only NWP chain: [%s]",
         ", ".join(s.name for s in nwp_chain.sources),
     )
@@ -1101,7 +1101,7 @@ if settings.mcp_enabled:
 
         mcp_app = build_mcp_http_app()
         combined_lifespan = combine_lifespans(lifespan, mcp_app.lifespan)
-        logger.info("MCP HTTP transport built; will mount at %s", settings.mcp_path)
+        logger.debug("MCP HTTP transport built; will mount at %s", settings.mcp_path)
     except Exception:
         logger.exception(
             "MCP HTTP app build failed; MCP transport disabled. "
@@ -1126,7 +1126,7 @@ if mcp_app is not None:
     # Matches the tool names registered by _register_tools in
     # librewxr/mcp/server.py.  Update this list when a new tool is added.
     routes.mcp_tools = ["get_precip_nowcast", "get_active_alerts", "get_storm_cells"]
-    logger.info("MCP HTTP transport mounted at %s", settings.mcp_path)
+    logger.debug("MCP HTTP transport mounted at %s", settings.mcp_path)
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):

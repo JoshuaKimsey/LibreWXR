@@ -682,7 +682,7 @@ class DMIDiniGrid:
                 self._latest_run_ts = run_ts
             loaded += 1
         if loaded:
-            logger.info("DMI DINI: loaded %d cached frame(s) from disk", loaded)
+            logger.debug("DMI DINI: loaded %d cached frame(s) from disk", loaded)
 
         # Second pass: snow masks.  Orphans (no matching precip frame)
         # are removed so they don't accumulate across restarts.
@@ -711,7 +711,7 @@ class DMIDiniGrid:
             self._snow_masks[(run_ts, lead_s)] = mm
             snow_loaded += 1
         if snow_loaded:
-            logger.info(
+            logger.debug(
                 "DMI DINI: loaded %d cached snow mask(s) from disk",
                 snow_loaded,
             )

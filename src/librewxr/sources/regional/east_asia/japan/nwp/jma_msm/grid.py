@@ -332,7 +332,7 @@ class JMAMSMGrid:
                 self._latest_run_ts = run_ts
             loaded += 1
         if loaded:
-            logger.info("JMA MSM: loaded %d cached frame(s) from disk", loaded)
+            logger.debug("JMA MSM: loaded %d cached frame(s) from disk", loaded)
 
         snow_pat = re.compile(r"^r(\d+)_l(\d+)_snow$")
         snow_loaded = 0
@@ -359,7 +359,7 @@ class JMAMSMGrid:
             self._snow_masks[(run_ts, lead_s)] = mm
             snow_loaded += 1
         if snow_loaded:
-            logger.info(
+            logger.debug(
                 "JMA MSM: loaded %d cached snow mask(s) from disk",
                 snow_loaded,
             )

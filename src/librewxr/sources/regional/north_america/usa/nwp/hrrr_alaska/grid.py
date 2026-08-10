@@ -510,7 +510,7 @@ class HRRRAlaskaGrid:
                 self._latest_run_ts = run_ts
             loaded += 1
         if loaded:
-            logger.info(
+            logger.debug(
                 "HRRR-Alaska: loaded %d cached frame(s) from disk", loaded,
             )
 
@@ -545,7 +545,7 @@ class HRRRAlaskaGrid:
             self._snow_masks[(run_ts, lead_s)] = mm
             snow_loaded += 1
         if snow_loaded:
-            logger.info(
+            logger.debug(
                 "HRRR-Alaska: loaded %d cached snow mask(s) from disk",
                 snow_loaded,
             )

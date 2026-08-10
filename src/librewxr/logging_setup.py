@@ -88,3 +88,7 @@ def setup_logging(level: str | None = None) -> None:
     # already log fetch results themselves in fetcher.py / the sources.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    # Quiet the third-party MCP SDK namespace (e.g. the
+    # mcp.server.streamable_http_manager "StreamableHTTP session manager
+    # started" INFO line).  Our own librewxr.mcp.* loggers are unaffected.
+    logging.getLogger("mcp").setLevel(logging.WARNING)
