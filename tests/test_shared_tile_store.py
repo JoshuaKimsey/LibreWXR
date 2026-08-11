@@ -5,9 +5,11 @@
 Covers publish/get round-trips (identical bytes, miss → None), timestamp
 sharding + per-timestamp invalidation (both across shards and within one
 shared shard, e.g. ts and ts+64), clear (empty store, publish works after),
+sweep_final_files (published files gone, live tmp kept, counters reset),
 budget pruning (oldest-mtime-first with deterministic mtimes, counters
 resynced from the scan), the unshardable-key fallback shard, and the
-stale-``*.tmp`` sweep in the constructor.
+age-based stale-``*.tmp`` sweep in the constructor (old tmps removed,
+fresh tmps left alone).
 """
 from __future__ import annotations
 
@@ -173,7 +175,8 @@ def test_prune_noop_when_within_budget(tmp_path):
 
 
 def test_constructor_sweeps_stale_tmp(tmp_path):
-    """Tmp files left by a crash mid-publish are removed at construction."""
+    """Old tmps (crash leftovers) are removed at construction; a fresh tmp
+    from a live publisher survives the sweep."""
     root = tmp_path / "tiles_shared"
     shard_a = root / "00"
     shard_a.mkdir(parents=True)
@@ -183,11 +186,47 @@ def test_constructor_sweeps_stale_tmp(tmp_path):
     shard_b.mkdir(parents=True)
     stale_b = shard_b / ".1712345607-v1-7-70-63.tile.tmp"
     stale_b.write_bytes(b"partial2")
+    # Fresh tmp — a live publisher mid-publish, seconds old.
+    fresh = shard_b / ".1712345608-v1-7-70-63.tile.tmp"
+    fresh.write_bytes(b"in-flight")
+
+    # Age the crash leftovers well past the 60 s threshold; leave the
+    # fresh tmp at "now" (mtime survives the sweep intact).
+    past = time.time() - 120
+    os.utime(stale_a, (past, past))
+    os.utime(stale_b, (past, past))
 
     store = _store(tmp_path)
 
     assert not stale_a.exists()
     assert not stale_b.exists()
-    assert not list(root.rglob("*.tmp"))
+    assert fresh.exists()
+    assert list(root.rglob("*.tmp")) == [fresh]
     assert store.size == 0
     assert store.total_bytes == 0
+
+
+def test_sweep_final_files_removes_tiles_keeps_tmps(tmp_path):
+    """sweep_final_files drops every published .tile, keeps a live in-flight
+    tmp, resets the counters, and the store stays usable."""
+    store = _store(tmp_path)
+    store.publish("1712345600-v1-7-70-63", b"x" * 10)
+    store.publish("1712345601-v1-7-70-63", b"y" * 20)
+    shard_dir = tmp_path / "tiles_shared" / _shard_of(1_712_000_000)
+    in_flight = shard_dir / ".1712345600-v1-7-70-63.tile.tmp"
+    in_flight.write_bytes(b"partial")
+    assert list(shard_dir.iterdir())
+
+    store.sweep_final_files()
+
+    assert store.get("1712345600-v1-7-70-63") is None
+    assert store.get("1712345601-v1-7-70-63") is None
+    assert in_flight.exists()
+    assert not list((tmp_path / "tiles_shared").rglob("*.tile"))
+    assert store.size == 0
+    assert store.total_bytes == 0
+
+    store.publish("1712345602-v1-7-70-63", b"z")
+    assert store.get("1712345602-v1-7-70-63") == b"z"
+    assert store.size == 1
+    assert store.total_bytes == 1

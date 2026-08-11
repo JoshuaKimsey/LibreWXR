@@ -310,15 +310,20 @@ def _maintain_shared_tiles(store, full_clear: bool, ts_set: set[int] | None) -> 
     """Shared-store maintenance after a state refresh (runs off the loop).
 
     Mirrors the in-memory tile-cache invalidation: a signature change
-    (full clear) drops every cached encode because cached geometry may
+    (full clear) sweeps every published file because cached geometry may
     have sampled stale NWP content; otherwise only the invalidated
     timestamps' entries are removed (versioned keys already make stale
-    content unreachable - this just reclaims the space).  ``prune`` runs
-    every pass so cross-worker publishes never grow the store past its
-    budget; it full-scans, hence off the event loop.
+    content unreachable - this just reclaims the space).  The full clear
+    sweeps final files only (``sweep_final_files``), keeping the tree and
+    any in-flight publishes: a concurrent publisher's ``.tmp`` survives
+    and its os.replace lands a current-version entry, while every
+    published file is removed so stale-NWP content is still fully
+    reclaimed.  ``prune`` runs every pass so cross-worker publishes never
+    grow the store past its budget; it full-scans, hence off the event
+    loop.
     """
     if full_clear:
-        store.clear()
+        store.sweep_final_files()
     else:
         for ts in ts_set:
             store.invalidate_timestamp(ts)

@@ -23,11 +23,15 @@ prefix, so invalidating one timestamp touches exactly one directory.
 Publishes are atomic (``.<name>.tmp`` + ``os.replace`` inside the shard),
 so any number of workers may publish concurrently — readers only ever see
 a complete file, and concurrent identical publishes converge on the last
-``os.replace`` (same content, last write wins).  All file mutations are
-best-effort and never raise; transient OSErrors surface as a debug log on
-read and a warning on write, matching the project's no-fsync, tolerate-
-and-continue convention.  ``prune`` is a full on-disk scan and must only
-be called off the event loop.
+``os.replace`` (same content, last write wins).  Cleanup is age-aware:
+construction-time sweeping unlinks only ``*.tmp`` files older than
+``_STALE_TMP_AGE_S`` and a full-cache clear reclaims published files only
+(``sweep_final_files``), so neither path can delete a live publisher's
+in-flight tmp.  All file mutations are best-effort and never raise;
+transient OSErrors surface as a debug log on read and a warning on write,
+matching the project's no-fsync, tolerate-and-continue convention.
+``prune`` is a full on-disk scan and must only be called off the event
+loop.
 
 This module is a pure storage class: no ``librewxr.config`` settings are
 imported.  Callers pass ``cache_dir`` and ``max_mb``.
@@ -37,6 +41,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -54,6 +59,10 @@ _FALLBACK_SHARD = "00"
 # Suffix appended to every published file; a store for one key is always
 # exactly one ``<key>.tile`` file.
 _TILE_SUFFIX = ".tile"
+# Constructor-time ``*.tmp`` sweep age threshold (seconds).  Booting
+# workers in a 16-worker fleet sweep the same directory seconds apart, so
+# only age can distinguish a crash leftover from an in-flight publish.
+_STALE_TMP_AGE_S = 60
 
 
 class SharedTileStore:
@@ -75,11 +84,16 @@ class SharedTileStore:
         self._root.mkdir(parents=True, exist_ok=True)
         # Sweep stale ``*.tmp`` files left by a crash mid-publish so
         # subsequent atomic writes don't accumulate garbage (FrameStore
-        # convention).  A live tmp from a concurrent writer is the writer's
-        # problem — os.replace on a vanished tmp is handled by publish().
+        # convention).  Only files older than ``_STALE_TMP_AGE_S`` are
+        # unlinked: booting workers in a 16-worker fleet sweep the same
+        # directory seconds apart, so only age can distinguish a crash
+        # leftover from an in-flight publish — a fresh tmp belongs to a
+        # live writer whose os.replace will finish momentarily.
+        now = time.time()
         for path in self._root.rglob("*.tmp"):
             try:
-                path.unlink(missing_ok=True)
+                if now - path.stat().st_mtime > _STALE_TMP_AGE_S:
+                    path.unlink(missing_ok=True)
             except OSError:
                 logger.debug("shared_tile_store: could not sweep %s", path)
 
@@ -153,6 +167,14 @@ class SharedTileStore:
         NOT recounted on overwrite — they are approximate by design and
         resynced by ``prune``.  Best-effort: failures log a warning and
         leave the previous entry (if any) untouched.
+
+        One benign race is expected and handled: a concurrent full-cache
+        clear (``sweep_final_files``) or another booting worker's age-based
+        tmp sweep can unlink this publish's tmp between the write and the
+        ``os.replace``, so the replace raises FileNotFoundError.  That is
+        logged at DEBUG and skipped — the tile is simply re-encoded on the
+        next request.  Disk/perm failures (the actionable kind) still log
+        a warning.
         """
         path = self._path_for(key)
         tmp: Path | None = None
@@ -161,6 +183,18 @@ class SharedTileStore:
             tmp = path.with_name(f".{path.name}.tmp")
             tmp.write_bytes(data)
             os.replace(tmp, path)
+        except FileNotFoundError:
+            logger.debug(
+                "shared_tile_store: tmp vanished mid-publish for %s"
+                " (concurrent maintenance) - skipping",
+                key,
+            )
+            if tmp is not None:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return
         except OSError:
             logger.warning(
                 "shared_tile_store: publish failed for %s", key, exc_info=True,
@@ -212,13 +246,41 @@ class SharedTileStore:
     def clear(self) -> None:
         """Remove the whole store tree and recreate the root.
 
-        Used on startup/fetch reset to drop every cached encode in one
-        shot; cheaper than timestamp-by-timestamp invalidation.  Counters
-        reset to zero (a concurrent writer could repopulate the tree
-        after the rmtree — the next prune resyncs).
+        The destructive variant — tests and explicit admin use only, NOT
+        the render-worker poller (which must use ``sweep_final_files``):
+        the rmtree can delete a concurrent publisher's shard dir or
+        in-flight tmp, and 16 workers clearing simultaneously all hit
+        that race.  Used on startup/fetch reset to drop every cached
+        encode in one shot; cheaper than timestamp-by-timestamp
+        invalidation.  Counters reset to zero (a concurrent writer could
+        repopulate the tree after the rmtree — the next prune resyncs).
         """
         shutil.rmtree(self._root, ignore_errors=True)
         self._root.mkdir(parents=True, exist_ok=True)
+        self._size = 0
+        self._total_bytes = 0
+
+    def sweep_final_files(self) -> None:
+        """Remove every published ``.tile`` file, keeping the tree and live tmps.
+
+        Used by the render-worker poller on a full cache clear (NWP content
+        signature change): cached tiles may have sampled stale NWP content,
+        so every entry must go — but an rmtree would delete a concurrent
+        publisher's shard dir or in-flight tmp.  Unlinking only final files
+        (anything not ending in ``.tmp``) keeps a live publish safe: its
+        tmp survives and its os.replace lands a current-version entry.
+        Counters are resynced by the next ``prune``; reset them to 0 here
+        (approximate-by-design).
+        """
+        for path in self._root.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.name.endswith(".tmp"):
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
         self._size = 0
         self._total_bytes = 0
 
