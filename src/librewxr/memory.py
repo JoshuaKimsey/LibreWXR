@@ -339,10 +339,25 @@ class MemoryMonitor:
                 pass
 
     async def _loop(self) -> None:
+        # The check runs in a worker thread via asyncio.to_thread so the
+        # blocking cgroup file reads, tile-cache clear/evict_half calls,
+        # and the gc.collect() + malloc_trim() stop-the-world stalls never
+        # block the event loop.  With 16-24 render workers each running a
+        # monitor, a pressure event would otherwise be N simultaneous
+        # event-loop stalls.
+        #
+        # Thread safety (verified): this task is the sole caller of
+        # _check, and awaiting to_thread serializes consecutive checks;
+        # the streak/counter/last-usage attributes it mutates are only
+        # touched by _check itself; tile_cache clear/evict_half take the
+        # cache's own lock; the coord-cache clear function is already
+        # called concurrently with render worker threads today; and
+        # /health reads the monitor's attributes under the GIL (single
+        # reference swaps are atomic).
         while True:
             await asyncio.sleep(self._check_interval)
             try:
-                self._check()
+                await asyncio.to_thread(self._check)
             except Exception:
                 logger.exception("Memory monitor check failed")
 

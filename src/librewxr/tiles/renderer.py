@@ -897,44 +897,105 @@ def _draw_motion_arrows(
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    for ty in range(spacing // 2, tile_size, spacing):
-        for tx in range(spacing // 2, tile_size, spacing):
+    # --- Precomputed arrow-grid arrays (R7) ------------------------------
+    # Hoist every per-point scalar numpy index read out of the double loop
+    # into 2D grids over the arrow grid points.  The inner loop reads these
+    # precomputed arrays; the values are identical to the old scalar reads.
+    gys = np.arange(spacing // 2, tile_size, spacing)
+    gxs = np.arange(spacing // 2, tile_size, spacing)
+    ty_grid, tx_grid = np.meshgrid(gys, gxs, indexing="ij")
+    tx1_arr = np.minimum(tx_grid + 1, tile_size - 1)
+    ty1_arr = np.minimum(ty_grid + 1, tile_size - 1)
+    tx0_arr = np.maximum(tx_grid - 1, 0)
+    ty0_arr = np.maximum(ty_grid - 1, 0)
+
+    # Per-region grids: region indices at every arrow grid point plus the
+    # finite-difference Jacobian terms (region pixels per tile pixel).
+    # The parallel list keeps the exact priority order of ``region_info``
+    # so the per-point short-circuit fallthrough is unchanged.
+    region_grid_info = []
+    for r, row_f, col_f, row_i, col_i in region_info:
+        frame = frame_regions[r.name]
+        flow = flow_regions[r.name]
+        ri_grid = row_i[ty_grid, tx_grid]
+        ci_grid = col_i[ty_grid, tx_grid]
+        rowf_grid = row_f[ty_grid, tx_grid]
+        colf_grid = col_f[ty_grid, tx_grid]
+        # Cast back to float32: the original float32-scalar / int division
+        # path yields float32, while the vectorised float32/int64 division
+        # would promote to float64.
+        dcol_grid = (
+            (col_f[ty_grid, tx1_arr] - col_f[ty_grid, tx0_arr])
+            / (tx1_arr - tx0_arr)
+        ).astype(np.float32)
+        drow_grid = (
+            (row_f[ty1_arr, tx_grid] - row_f[ty0_arr, tx_grid])
+            / (ty1_arr - ty0_arr)
+        ).astype(np.float32)
+        region_grid_info.append(
+            (r, frame, flow, rowf_grid, colf_grid, ri_grid, ci_grid,
+             dcol_grid, drow_grid)
+        )
+
+    # Composite-NWP grids: lat/lon at every arrow grid point, the Jacobian
+    # neighbour lat/lon differences, the radar-coverage mask and the
+    # geometry noise-floor gate, all sampled once per grid point.
+    if has_nwp:
+        lat_g = nwp_latlons[0][ty_grid, tx_grid]
+        lon_g = nwp_latlons[1][ty_grid, tx_grid]
+        dlat_dy_g = (
+            (nwp_latlons[0][ty1_arr, tx_grid]
+             - nwp_latlons[0][ty0_arr, tx_grid])
+            / (ty1_arr - ty0_arr)
+        ).astype(np.float32)
+        dlon_dx_g = (
+            (nwp_latlons[1][ty_grid, tx1_arr]
+             - nwp_latlons[1][ty_grid, tx0_arr])
+            / (tx1_arr - tx0_arr)
+        ).astype(np.float32)
+    else:
+        lat_g = lon_g = dlat_dy_g = dlon_dx_g = None
+    coverage_g = (
+        radar_coverage[ty_grid, tx_grid]
+        if radar_coverage is not None else None
+    )
+    geom_g = geom_values[ty_grid, tx_grid] if geom_values is not None else None
+
+    # tolist() yields plain Python ints so tx/ty arithmetic matches the
+    # original range() loop bit for bit.
+    for gy, ty in enumerate(gys.tolist()):
+        for gx, tx in enumerate(gxs.tolist()):
             arrow_dx = arrow_dy = 0.0
             found = False
 
             # Try radar regions in priority order (finest resolution first)
-            for r, row_f, col_f, row_i, col_i in region_info:
-                ri, ci = int(row_i[ty, tx]), int(col_i[ty, tx])
+            for r, frame, flow, rowf_grid, colf_grid, ri_grid, ci_grid, \
+                    dcol_grid, drow_grid in region_grid_info:
+                ri, ci = int(ri_grid[gy, gx]), int(ci_grid[gy, gx])
                 if ri < 0 or ci < 0:
                     continue  # Outside this region, try next
 
-                frame = frame_regions[r.name]
                 if frame[ri, ci] < noise_threshold:
                     # Only claim the pixel if it's within actual radar
                     # coverage (clear sky).  Pixels inside the region's
                     # bounding box but outside station coverage should
                     # fall through to the composite NWP arrows.
-                    if radar_coverage is None or radar_coverage[ty, tx]:
+                    if coverage_g is None or coverage_g[gy, gx]:
                         found = True
                         break
                     continue
 
-                flow = flow_regions[r.name]
-                # Flow is stored at reduced resolution (≤ 1000 px target
+                # Flow is stored at reduced resolution (<= 1000 px target
                 # dim); sample it at the tile pixel's full-res region
                 # coordinates via the resize center mapping.
                 fx, fy = _sample_flow_at(
-                    flow, row_f[ty, tx], col_f[ty, tx],
+                    flow, rowf_grid[gy, gx], colf_grid[gy, gx],
                     r.height, r.width,
                 )
 
                 # Local scale: region pixels per tile pixel (finite diff)
-                tx1 = min(tx + 1, tile_size - 1)
-                ty1 = min(ty + 1, tile_size - 1)
-                tx0 = max(tx - 1, 0)
-                ty0 = max(ty - 1, 0)
-                dcol = (col_f[ty, tx1] - col_f[ty, tx0]) / (tx1 - tx0)
-                drow = (row_f[ty1, tx] - row_f[ty0, tx]) / (ty1 - ty0)
+                dcol = dcol_grid[gy, gx]
+                drow = drow_grid[gy, gx]
 
                 if abs(dcol) < 1e-8 or abs(drow) < 1e-8:
                     found = True
@@ -958,11 +1019,11 @@ def _draw_motion_arrows(
             # this pixel (either no radar data here, or the radar frame
             # says "dry" outside coverage).
             if not found and has_nwp:
-                if geom_values is None or geom_values[ty, tx] < noise_threshold:
-                    continue  # Below noise floor — not visible on tile
+                if geom_g is None or geom_g[gy, gx] < noise_threshold:
+                    continue  # Below noise floor - not visible on tile
 
-                lat = float(nwp_latlons[0][ty, tx])
-                lon = float(nwp_latlons[1][ty, tx])
+                lat = float(lat_g[gy, gx])
+                lon = float(lon_g[gy, gx])
 
                 # Convert lat/lon to composite raster indices
                 nr = (NWP_FLOW_NORTH - lat) / nwp_res
@@ -975,13 +1036,8 @@ def _draw_motion_arrows(
 
                 # Local scale: composite raster pixels per tile pixel.
                 # Use lat/lon difference to compute the Jacobian.
-                tx1 = min(tx + 1, tile_size - 1)
-                ty1 = min(ty + 1, tile_size - 1)
-                tx0 = max(tx - 1, 0)
-                ty0 = max(ty - 1, 0)
-
-                dlat_dy = (nwp_latlons[0][ty1, tx] - nwp_latlons[0][ty0, tx]) / (ty1 - ty0)
-                dlon_dx = (nwp_latlons[1][ty, tx1] - nwp_latlons[1][ty, tx0]) / (tx1 - tx0)
+                dlat_dy = dlat_dy_g[gy, gx]
+                dlon_dx = dlon_dx_g[gy, gx]
 
                 # Convert degrees to composite raster pixels
                 drow_dy = -dlat_dy / nwp_res  # negative: lat decreases as row increases

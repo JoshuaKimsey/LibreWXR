@@ -34,6 +34,7 @@ from librewxr.memory import detect_memory_limit_mb
 from librewxr.tiles.cache import CachedRender, TileCache
 from librewxr.tiles.coordinates import coord_cache_bytes, coord_cache_stats
 from librewxr.tiles.renderer import (
+    _transparent_tile,
     compute_tile_geometry,
     present_tile,
     render_coverage_tile,
@@ -101,6 +102,14 @@ shared_tile_store = None  # SharedTileStore | None
 # Holds fire-and-forget shared-store publish tasks so they can't be GC'd
 # mid-flight; each task discards itself on completion.
 _pending_shared_publishes: set = set()
+
+# Memoized encoded bytes + ETag for fully transparent (ocean/clear-sky)
+# tiles: (tile_size, ext) -> (tile_bytes, etag).  These are the dominant
+# global request class; their bytes are process constants per
+# (tile_size, ext).  settings.webp_quality is process-static so it is
+# deliberately not part of the key (a quality change requires a restart
+# anyway).
+_TRANSPARENT_RENDER_MEMO: dict[tuple[int, str], tuple[bytes, str]] = {}
 
 # Latest-timestamp TTL cache for the radar tile hot path:
 # (monotonic time, timestamp list).  ``radar_tile`` only needs the latest
@@ -949,56 +958,77 @@ async def radar_tile(
                 # An overlay request with no flow/cell data available also lands
                 # here - it falls through to the exact plain present path (same
                 # present_key, same cache entry) rather than creating a duplicate.
-                cached = tile_cache.get(present_key)
-                if isinstance(cached, CachedRender):
-                    tile_bytes = cached.data
-                    etag = cached.etag
-                else:
-                    present_start = time.perf_counter_ns()
-                    tile_bytes, etag = await _present_tile_async(
-                        geom,
-                        color_scheme=color,
-                        fmt=ext,
-                        arrow_style=eff_arrow,
-                        flow_regions=flow_regions,
-                        frame_regions=frame.regions if frame is not None else None,
-                        enabled_regions=enabled_regions,
-                        nwp_flow=nwp_flow,
-                        nwp_chain=nwp_chain,
-                        frame_timestamp=timestamp,
-                        z=z, x=x, y=y,
-                        cell_style=eff_cells,
-                        cells_by_region=cells_by_region,
-                        cell_counts=cell_counts,
-                    )
-                    present_ns = time.perf_counter_ns() - present_start
+                if geom.fast_path is not None:
+                    # Inline serve: a fully transparent tile's encoded bytes are
+                    # a process constant per (tile_size, ext), so skip the
+                    # present-pool thread hop and the per-request SHA-256 (the
+                    # dominant global request class).  The entry is primed into
+                    # the present cache so repeats hit the early-serve path
+                    # above.  present_ns stays None - no present stage ran - and
+                    # the shared-store publish is skipped too: a transparent
+                    # constant costs nothing for any worker to regenerate
+                    # locally, so publishing it would only churn the shared
+                    # volume.
+                    memo_key = (tile_size, ext)
+                    memoized = _TRANSPARENT_RENDER_MEMO.get(memo_key)
+                    if memoized is None:
+                        tile_bytes = _transparent_tile(tile_size, ext)
+                        etag = compute_etag(tile_bytes)
+                        _TRANSPARENT_RENDER_MEMO[memo_key] = (tile_bytes, etag)
+                    else:
+                        tile_bytes, etag = memoized
                     tile_cache.put(present_key, CachedRender(data=tile_bytes, etag=etag))
-                    # Publish the fresh encode to the shared store for the other
-                    # workers, fire-and-forget so the response never waits on the
-                    # shared-volume write; the set holds references so tasks
-                    # can't be GC'd mid-flight.  Never fires for nowcast tiles
-                    # (their timestamp has no frame version).  A version bump
-                    # between lookup and publish writes a stale entry, but the
-                    # render worker's poller detects the bump within one poll
-                    # interval (~1 s) and ``invalidate_timestamp`` sweeps every
-                    # key for that timestamp, so the stale window is bounded by
-                    # the poll cadence (pruning covers orphaned entries after
-                    # eviction).
-                    if shared_tile_store is not None and frame_store is not None:
-                        version = frame_store.frame_version(timestamp)
-                        if version is not None:
-                            key = _shared_tile_key(timestamp, version, z, x, y, tile_size, smooth, snow, color, ext)
-                            if io_executor is not None:
-                                loop = asyncio.get_running_loop()
-                                task = asyncio.ensure_future(
-                                    loop.run_in_executor(io_executor, shared_tile_store.publish, key, tile_bytes)
-                                )
-                            else:
-                                task = asyncio.ensure_future(
-                                    asyncio.to_thread(shared_tile_store.publish, key, tile_bytes)
-                                )
-                            _pending_shared_publishes.add(task)
-                            task.add_done_callback(_pending_shared_publishes.discard)
+                else:
+                    cached = tile_cache.get(present_key)
+                    if isinstance(cached, CachedRender):
+                        tile_bytes = cached.data
+                        etag = cached.etag
+                    else:
+                        present_start = time.perf_counter_ns()
+                        tile_bytes, etag = await _present_tile_async(
+                            geom,
+                            color_scheme=color,
+                            fmt=ext,
+                            arrow_style=eff_arrow,
+                            flow_regions=flow_regions,
+                            frame_regions=frame.regions if frame is not None else None,
+                            enabled_regions=enabled_regions,
+                            nwp_flow=nwp_flow,
+                            nwp_chain=nwp_chain,
+                            frame_timestamp=timestamp,
+                            z=z, x=x, y=y,
+                            cell_style=eff_cells,
+                            cells_by_region=cells_by_region,
+                            cell_counts=cell_counts,
+                        )
+                        present_ns = time.perf_counter_ns() - present_start
+                        tile_cache.put(present_key, CachedRender(data=tile_bytes, etag=etag))
+                        # Publish the fresh encode to the shared store for the other
+                        # workers, fire-and-forget so the response never waits on the
+                        # shared-volume write; the set holds references so tasks
+                        # can't be GC'd mid-flight.  Never fires for nowcast tiles
+                        # (their timestamp has no frame version).  A version bump
+                        # between lookup and publish writes a stale entry, but the
+                        # render worker's poller detects the bump within one poll
+                        # interval (~1 s) and ``invalidate_timestamp`` sweeps every
+                        # key for that timestamp, so the stale window is bounded by
+                        # the poll cadence (pruning covers orphaned entries after
+                        # eviction).
+                        if shared_tile_store is not None and frame_store is not None:
+                            version = frame_store.frame_version(timestamp)
+                            if version is not None:
+                                key = _shared_tile_key(timestamp, version, z, x, y, tile_size, smooth, snow, color, ext)
+                                if io_executor is not None:
+                                    loop = asyncio.get_running_loop()
+                                    task = asyncio.ensure_future(
+                                        loop.run_in_executor(io_executor, shared_tile_store.publish, key, tile_bytes)
+                                    )
+                                else:
+                                    task = asyncio.ensure_future(
+                                        asyncio.to_thread(shared_tile_store.publish, key, tile_bytes)
+                                    )
+                                _pending_shared_publishes.add(task)
+                                task.add_done_callback(_pending_shared_publishes.discard)
             else:
                 # Overlay present cache (nowcast frames only): the render worker's
                 # state poller invalidates every nowcast timestamp each cycle, so

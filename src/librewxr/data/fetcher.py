@@ -456,18 +456,39 @@ class RadarFetcher:
 
     async def _fetch_initial(self) -> None:
         """Quick startup: fetch auxiliary grids and latest radar frame only."""
-        # Time the NWP-grid phase the same way ``_fetch_all_frames`` does;
-        # the per-cycle phase breakdown is logged here (see below), so the
+        # Time the NWP-grid phase.  The NWP gather overlaps the radar fetch
+        # the same way ``_fetch_all_frames`` does: the auxiliary grids are
+        # independent of the radar path, so the task runs concurrently and
+        # the finally block below reaps it before either return path exits.
+        # The per-cycle phase breakdown is logged here (see below), so the
         # timing lives in this caller rather than in ``_fetch_timestamps``.
         _nwp_start = time.monotonic()
-        await self._fetch_auxiliary_grids()
-        self._last_nwp_phase_s = time.monotonic() - _nwp_start
-
-        interval = settings.fetch_interval
-        now_rounded = int(time.time() // interval) * interval
-        radar_s, post_s, write_s = await self._fetch_timestamps(
-            [(now_rounded, "live", 0)]
-        )
+        nwp_task = asyncio.create_task(self._fetch_auxiliary_grids())
+        try:
+            interval = settings.fetch_interval
+            now_rounded = int(time.time() // interval) * interval
+            radar_s, post_s, write_s = await self._fetch_timestamps(
+                [(now_rounded, "live", 0)]
+            )
+        finally:
+            # Capture any in-flight radar exception BEFORE the await: if
+            # the NWP task also raised, re-raising here would silently
+            # REPLACE the radar exception (finally semantics).  The radar
+            # path is the primary data source, so the NWP failure is
+            # logged and the radar exception wins; when the radar path
+            # succeeded, the NWP exception re-raises exactly as the old
+            # sequential await did.
+            radar_exc = sys.exc_info()[0]
+            try:
+                await nwp_task
+            except Exception:
+                if radar_exc is not None:
+                    logger.exception(
+                        "NWP auxiliary fetch failed (radar path also failed)"
+                    )
+                else:
+                    raise
+            self._last_nwp_phase_s = time.monotonic() - _nwp_start
         logger.info(
             "Fetch phases: nwp=%.1fs radar=%.1fs post=%.1fs write=%.1fs",
             self._last_nwp_phase_s, radar_s, post_s, write_s,
@@ -626,8 +647,8 @@ class RadarFetcher:
         # fetch: the auxiliary grids are independent of the radar path, so
         # the task runs concurrently and the finally block below reaps it
         # before either return path exits.  The quick-start
-        # ``_fetch_initial`` path times its own auxiliary-grid fetch (the
-        # attribute defaults to 0.0 before the first cycle).
+        # ``_fetch_initial`` path overlaps the same way (the attribute
+        # defaults to 0.0 before the first cycle).
         _nwp_start = time.monotonic()
         nwp_task = asyncio.create_task(self._fetch_auxiliary_grids())
         try:
