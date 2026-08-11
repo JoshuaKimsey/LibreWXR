@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import uuid
 from pathlib import Path
 
@@ -101,12 +102,17 @@ class PrecipMaskStore:
         NWP half of the OR; ``settings`` supplies the noise floor used by
         the renderer (must match so the gate never masks a visible pixel).
         """
+        started = time.monotonic()
         frame_store = stores.get("frame_store")
         if frame_store is None:
             # Nothing to build from — empty the mask table so stale
             # masks can't produce false "has precip" hits.
             self._masks = {}
             self._cleanup_stale_files()
+            logger.debug(
+                "Precip mask build: %.1fs (%d masks)",
+                time.monotonic() - started, len(self._masks),
+            )
             return
 
         nowcast_store = stores.get("nowcast_store")
@@ -119,6 +125,10 @@ class PrecipMaskStore:
         if not timestamps:
             self._masks = {}
             self._cleanup_stale_files()
+            logger.debug(
+                "Precip mask build: %.1fs (%d masks)",
+                time.monotonic() - started, len(self._masks),
+            )
             return
 
         pixel_threshold = (
@@ -143,7 +153,11 @@ class PrecipMaskStore:
         # the cached per-timestamp masks instead of re-sampling every
         # source.  The cache is incremental — with an unchanged signature
         # only timestamps missing from the cache are sampled, and entries
-        # for timestamps that no longer exist are dropped.
+        # for timestamps that no longer exist are dropped.  Either way
+        # the per-timestamp chain samples run in their own worker threads
+        # and overlap under one gather (the chain and every source sample
+        # purely read their loaded state, so concurrent calls are safe);
+        # results are pooled back in timestamp order.
         nwp_masks = self._nwp_cache
         if nwp_chain is not None and nwp_chain.has_data():
             sig = self._nwp_signature_of(nwp_chain)
@@ -153,24 +167,29 @@ class PrecipMaskStore:
                 for ts in list(nwp_masks):
                     if ts not in timestamps:
                         del nwp_masks[ts]
-                for ts in timestamps:
-                    if ts in nwp_masks:
-                        continue
-                    nwp_values = await asyncio.to_thread(
+                missing_ts = [ts for ts in timestamps if ts not in nwp_masks]
+                sampled = await asyncio.gather(*[
+                    asyncio.to_thread(
                         nwp_chain.sample, fine_lat, fine_lon, ts,
                         bilinear=False,
                     )
+                    for ts in missing_ts
+                ])
+                for ts, nwp_values in zip(missing_ts, sampled):
                     nwp_masks[ts] = self._pool_nwp_sample(
                         nwp_values, pixel_threshold,
                     )
             else:
                 # Signature changed or no cache — full rebuild.
                 nwp_masks = {}
-                for ts in timestamps:
-                    nwp_values = await asyncio.to_thread(
+                sampled = await asyncio.gather(*[
+                    asyncio.to_thread(
                         nwp_chain.sample, fine_lat, fine_lon, ts,
                         bilinear=False,
                     )
+                    for ts in timestamps
+                ])
+                for ts, nwp_values in zip(timestamps, sampled):
                     nwp_masks[ts] = self._pool_nwp_sample(
                         nwp_values, pixel_threshold,
                     )
@@ -186,25 +205,62 @@ class PrecipMaskStore:
             nwp_masks = None
 
         new_masks: dict[int, np.ndarray] = {}
-        for ts in timestamps:
-            frame = await frame_store.get_frame(ts)
-            region_arrays: dict[str, np.ndarray] = {}
+
+        # Gather phase 1: every timestamp's radar frame fetch in
+        # parallel.  The nowcast store only owns timestamps the radar
+        # store doesn't (past vs future slots), so a second, smaller
+        # gather covers those before the mask-build phase.
+        radar_frames = await asyncio.gather(*[
+            frame_store.get_frame(ts) for ts in timestamps
+        ])
+        region_arrays_by_ts: dict[int, dict[str, np.ndarray]] = {}
+        nowcast_missing: list[int] = []
+        for ts, frame in zip(timestamps, radar_frames):
             if frame is not None:
-                region_arrays = dict(frame.regions)
+                region_arrays_by_ts[ts] = dict(frame.regions)
             elif nowcast_store is not None:
-                nc_frame, _blend = await nowcast_store.get_frame(ts)
+                nowcast_missing.append(ts)
+            else:
+                region_arrays_by_ts[ts] = {}
+        if nowcast_missing:
+            nowcast_frames = await asyncio.gather(*[
+                nowcast_store.get_frame(ts) for ts in nowcast_missing
+            ])
+            for ts, (nc_frame, _blend) in zip(nowcast_missing, nowcast_frames):
                 if nc_frame is not None:
-                    region_arrays = dict(nc_frame.regions)
-            nwp_mask = nwp_masks.get(ts) if nwp_masks is not None else None
-            mask = await asyncio.to_thread(
+                    region_arrays_by_ts[ts] = dict(nc_frame.regions)
+                else:
+                    region_arrays_by_ts[ts] = {}
+
+        # Gather phase 2: each timestamp's mask build (region projection
+        # + OR + dilation) is independent full-array numpy work, so the
+        # to_thread units fan out; results stay ordered by timestamp and
+        # are persisted in that same order afterwards.
+        mask_inputs = [
+            (
+                ts,
+                region_arrays_by_ts[ts],
+                nwp_masks.get(ts) if nwp_masks is not None else None,
+            )
+            for ts in timestamps
+        ]
+        masks = await asyncio.gather(*[
+            asyncio.to_thread(
                 self._build_timestamp_mask_sync,
                 ts, region_arrays, nwp_mask, pixel_threshold,
             )
+            for ts, region_arrays, nwp_mask in mask_inputs
+        ])
+        for (ts, _region_arrays, _nwp_mask), mask in zip(mask_inputs, masks):
             self._save_mask(new_masks, ts, mask)
 
         self._masks = new_masks
         self._version += 1
         self._cleanup_stale_files()
+        logger.debug(
+            "Precip mask build: %.1fs (%d masks)",
+            time.monotonic() - started, len(self._masks),
+        )
 
     def _build_timestamp_mask_sync(
         self,

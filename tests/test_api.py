@@ -570,6 +570,59 @@ class TestHealthCluster:
             assert key in data, f"missing pre-existing health key {key}"
 
 
+class TestSharedTileStoreIntegration:
+    """End-to-end shared encoded-tile store path through the radar route.
+
+    Exercises the exact multi-mode wiring: a plain past-frame tile renders,
+    its fresh encode is published to the shared store, and a subsequent
+    request serves the same bytes from the store with geometry computation
+    completely bypassed.
+    """
+
+    def test_shared_store_serves_without_recompute(self, client, tmp_path, monkeypatch):
+        """First request publishes; second request is served from the store.
+
+        The compute monkeypatch hard-fails, so the only way the second
+        request can return 200 with byte-identical content is a shared-store
+        hit — proving the encode (not a recompute) was reused.
+        """
+        from librewxr.tiles.shared_tile_store import SharedTileStore
+
+        c, ts, _ = client
+        # 4/3/6 is the z=4 tile that actually covers the fixture's radar
+        # block (see test_cells_overlay_renders_on_warm_geometry_cache), so
+        # the encode is real content, not a transparent fast-path tile.
+        url = f"/v2/radar/{ts}/256/4/3/6/2/0_0.png"
+
+        store = SharedTileStore(tmp_path, max_mb=64)
+        monkeypatch.setattr(routes, "shared_tile_store", store)
+
+        # Cold in-memory caches force a full compute + present, which
+        # publishes the fresh encode to the shared store (fire-and-forget
+        # background task in the handler).
+        routes.tile_cache.clear()
+        first = c.get(url)
+        assert first.status_code == 200
+
+        # Wait for the background publish to land (it runs on the
+        # TestClient's event loop, not this thread).
+        deadline = time.monotonic() + 5.0
+        while store.size < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert store.size == 1, "plain past-frame tile was not published"
+
+        # "Second worker": in-memory caches cleared and geometry compute
+        # hard-failing — success can only come from the shared store.
+        def _compute_must_not_run(*_args, **_kwargs):
+            raise AssertionError("compute_tile_geometry ran on a shared-store hit")
+
+        monkeypatch.setattr(routes, "compute_tile_geometry", _compute_must_not_run)
+        routes.tile_cache.clear()
+        second = c.get(url)
+        assert second.status_code == 200
+        assert second.content == first.content
+
+
 def psutil_rss_mb() -> float:
     """This process's RSS in MB (floored like the /health rounding)."""
     import psutil

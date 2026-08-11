@@ -413,6 +413,18 @@ def bracket_lead_seconds(lead_seconds: int) -> tuple[int, int, float]:
     return l0, l1, alpha
 
 
+# --- Concurrent fetch caps ----------------------------------------------
+#
+# The per-file wrfsfcf fetch loop fans out over an asyncio.gather bounded
+# by an instance-level semaphore.  4 concurrent wrfsfcf files keeps peak
+# decode RAM and HTTP fan-out modest while overlapping the per-file idx +
+# byte-range latency.  The same cap bounds the per-record byte-range units
+# inside a single file (REFC and TMP:2m passes).
+
+HRRR_AK_WRFSFCF_FILE_FETCH_CONCURRENCY = 4  # concurrent files per fetch cycle
+HRRR_AK_RECORD_FETCH_CONCURRENCY = 4        # concurrent records within one file
+
+
 # ── HRRRAlaskaGrid: the public NWPSource implementation ───────────────
 
 
@@ -442,6 +454,10 @@ class HRRRAlaskaGrid:
         self._client: httpx.AsyncClient | None = None
         self._latest_run_ts: int | None = None
         self._fetch_lock = asyncio.Lock()
+        self._wrfsfcf_file_sem = asyncio.Semaphore(
+            HRRR_AK_WRFSFCF_FILE_FETCH_CONCURRENCY
+        )
+        self._record_sem = asyncio.Semaphore(HRRR_AK_RECORD_FETCH_CONCURRENCY)
 
         if cache_dir is not None:
             self._memmap_dir = Path(cache_dir) / "hrrr_alaska"
@@ -569,6 +585,10 @@ class HRRRAlaskaGrid:
         self._persistent = True
         self._client = None
         self._fetch_lock = asyncio.Lock()
+        self._wrfsfcf_file_sem = asyncio.Semaphore(
+            HRRR_AK_WRFSFCF_FILE_FETCH_CONCURRENCY
+        )
+        self._record_sem = asyncio.Semaphore(HRRR_AK_RECORD_FETCH_CONCURRENCY)
         self._frames = {}
         self._snow_masks = {}
         self._latest_run_ts = None
@@ -782,6 +802,12 @@ class HRRRAlaskaGrid:
 
             total_fetched = 0
             total_failed = 0
+            # Collect every (run, fh) wrfsfcf file unit across all runs,
+            # then fetch them concurrently under one bounded gather --
+            # per-source latency drops from sum(file fetches) to max(...)
+            # while the semaphore keeps peak decode RAM and HTTP fan-out
+            # modest.
+            units: list[tuple[datetime, int]] = []
             for run_ts in runs_to_consider:
                 run_dt = datetime.fromtimestamp(run_ts, tz=timezone.utc)
                 # Forecast hours of this run that overlap the active window.
@@ -803,19 +829,32 @@ class HRRRAlaskaGrid:
                 max_hour = min(MAX_FORECAST_HOURS, -(-max_lead // 3600))
 
                 for fh in range(int(min_hour), int(max_hour) + 1):
-                    added = await self._fetch_one_wrfsfcf_file(
+                    units.append((run_dt, fh))
+
+            async def _bounded_wrfsfcf_fetch(
+                run_dt: datetime, fh: int,
+            ) -> int:
+                """Fetch one wrfsfcf file under the shared file-concurrency cap."""
+                async with self._wrfsfcf_file_sem:
+                    return await self._fetch_one_wrfsfcf_file(
                         run_dt, fh, client
                     )
-                    if added > 0:
-                        total_fetched += added
-                        logger.debug(
-                            "HRRR-Alaska: +%d frame(s) from run %sZ fh=%d",
-                            added,
-                            run_dt.strftime("%Y%m%d%H"),
-                            fh,
-                        )
-                    elif added < 0:
-                        total_failed += 1
+
+            fetch_results = await asyncio.gather(
+                *(_bounded_wrfsfcf_fetch(run_dt, fh) for run_dt, fh in units),
+                return_exceptions=False,
+            )
+            for (run_dt, fh), added in zip(units, fetch_results):
+                if added > 0:
+                    total_fetched += added
+                    logger.debug(
+                        "HRRR-Alaska: +%d frame(s) from run %sZ fh=%d",
+                        added,
+                        run_dt.strftime("%Y%m%d%H"),
+                        fh,
+                    )
+                elif added < 0:
+                    total_failed += 1
 
             self._evict_outside_window(window_start, window_end)
 
@@ -856,69 +895,93 @@ class HRRRAlaskaGrid:
             return -1
 
         added = 0
-        for rec, end in find_refc_records(records):
-            lead_seconds = lead_seconds_for_step(rec.step)
-            if lead_seconds is None:
-                continue
-            key = (run_ts, lead_seconds)
-            if key in self._frames:
-                continue
 
-            try:
-                grib_bytes = await fetch_byte_range(
-                    url, rec.byte_offset, end, client
-                )
-            except httpx.HTTPError as e:
-                logger.warning(
-                    "HRRR-Alaska REFC byte-range fetch failed for "
-                    "%s lead=%ds: %s",
-                    url, lead_seconds, e,
-                )
-                continue
+        # Per-record REFC units of this file, gathered concurrently under
+        # the shared record-concurrency cap.  Each unit runs the exact
+        # byte-range fetch -> decode thread -> encode -> memmap -> store
+        # sequence; keys are distinct so the shared dict writes never
+        # collide.  The REFC gather completes before the TMP pass starts
+        # (a file's TMP units key off this file's REFC dict entries).
+        async def _fetch_refc_unit(rec: IdxRecord, end: int) -> int:
+            """Fetch, decode, and store one REFC record. Returns 1 on success."""
+            async with self._record_sem:
+                lead_seconds = lead_seconds_for_step(rec.step)
+                if lead_seconds is None:
+                    return 0
+                key = (run_ts, lead_seconds)
+                if key in self._frames:
+                    return 0
 
-            arr = await asyncio.to_thread(decode_refc_message, grib_bytes)
-            if arr is None:
-                continue
+                try:
+                    grib_bytes = await fetch_byte_range(
+                        url, rec.byte_offset, end, client
+                    )
+                except httpx.HTTPError as e:
+                    logger.warning(
+                        "HRRR-Alaska REFC byte-range fetch failed for "
+                        "%s lead=%ds: %s",
+                        url, lead_seconds, e,
+                    )
+                    return 0
 
-            encoded = encode_dbz(arr)
-            mm = self._to_memmap(f"r{run_ts}_l{lead_seconds}", encoded)
-            self._frames[key] = mm
-            added += 1
+                arr = await asyncio.to_thread(decode_refc_message, grib_bytes)
+                if arr is None:
+                    return 0
+
+                encoded = encode_dbz(arr)
+                mm = self._to_memmap(f"r{run_ts}_l{lead_seconds}", encoded)
+                self._frames[key] = mm
+                return 1
+
+        refc_results = await asyncio.gather(
+            *(_fetch_refc_unit(rec, end) for rec, end in find_refc_records(records))
+        )
+        added = sum(refc_results)
 
         # Parallel pass for 2-m TMP → snow mask.  Same idx, separate
         # byte-range per step.  Skip keys whose snow mask is already
         # loaded (warm restart) or whose REFC didn't land (no point
         # carrying an orphan snow mask).
         threshold = settings.regional_snow_temp_threshold
-        for rec, end in find_tmp_2m_records(records):
-            lead_seconds = lead_seconds_for_step(rec.step)
-            if lead_seconds is None:
-                continue
-            key = (run_ts, lead_seconds)
-            if key in self._snow_masks:
-                continue
-            if key not in self._frames:
-                continue
 
-            try:
-                grib_bytes = await fetch_byte_range(
-                    url, rec.byte_offset, end, client
-                )
-            except httpx.HTTPError as e:
-                logger.warning(
-                    "HRRR-Alaska TMP:2m byte-range fetch failed for "
-                    "%s lead=%ds: %s",
-                    url, lead_seconds, e,
-                )
-                continue
+        # Per-record TMP:2m units, gathered the same way after this file's
+        # REFC pass has fully landed so the `key not in self._frames` skip
+        # observes the final frame set.
+        async def _fetch_tmp_unit(rec: IdxRecord, end: int) -> None:
+            """Fetch, decode, and store one TMP:2m snow mask. Non-fatal."""
+            async with self._record_sem:
+                lead_seconds = lead_seconds_for_step(rec.step)
+                if lead_seconds is None:
+                    return
+                key = (run_ts, lead_seconds)
+                if key in self._snow_masks:
+                    return
+                if key not in self._frames:
+                    return
 
-            t2m = await asyncio.to_thread(decode_tmp_2m_message, grib_bytes)
-            if t2m is None:
-                continue
+                try:
+                    grib_bytes = await fetch_byte_range(
+                        url, rec.byte_offset, end, client
+                    )
+                except httpx.HTTPError as e:
+                    logger.warning(
+                        "HRRR-Alaska TMP:2m byte-range fetch failed for "
+                        "%s lead=%ds: %s",
+                        url, lead_seconds, e,
+                    )
+                    return
 
-            snow = compute_snow_mask(t2m, threshold)
-            mm = self._to_memmap(f"r{run_ts}_l{lead_seconds}_snow", snow)
-            self._snow_masks[key] = mm
+                t2m = await asyncio.to_thread(decode_tmp_2m_message, grib_bytes)
+                if t2m is None:
+                    return
+
+                snow = compute_snow_mask(t2m, threshold)
+                mm = self._to_memmap(f"r{run_ts}_l{lead_seconds}_snow", snow)
+                self._snow_masks[key] = mm
+
+        await asyncio.gather(
+            *(_fetch_tmp_unit(rec, end) for rec, end in find_tmp_2m_records(records))
+        )
 
         return added
 

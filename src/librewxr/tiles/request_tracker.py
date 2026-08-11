@@ -15,6 +15,13 @@ from collections import Counter
 from threading import Lock
 
 
+def _avg_ms(total_ns: int, count: int) -> float:
+    """Mean latency in milliseconds from ns totals; 0.0 when empty."""
+    if count == 0:
+        return 0.0
+    return round(total_ns / count / 1e6, 2)
+
+
 class TileRequestTracker:
     """Bounded per-tile request counter, tracking only z >= ``min_zoom``."""
 
@@ -25,6 +32,16 @@ class TileRequestTracker:
         self._fast_path_counts: dict[str, int] = {}  # reason -> count
         self._cache_hits: int = 0
         self._cache_misses: int = 0
+        # Latency accumulators (ns totals + counts per stage).  Computes
+        # and presents are only counted when the stage actually ran
+        # (cache hits contribute to the request totals but not the stage
+        # totals).
+        self._lat_request_ns_total = 0
+        self._lat_request_count = 0
+        self._lat_compute_ns_total = 0
+        self._lat_compute_count = 0
+        self._lat_present_ns_total = 0
+        self._lat_present_count = 0
         self._lock = Lock()
 
     def record(self, z: int, x: int, y: int) -> None:
@@ -39,6 +56,26 @@ class TileRequestTracker:
             self._counts[(z, x, y)] += 1
             if len(self._counts) > self._max_entries:
                 self._evict_cold()
+
+    def record_request(self, z: int, x: int, y: int, cache_hit: bool) -> None:
+        """Batched request bookkeeping in a single lock acquisition.
+
+        Combines ``record`` (per-tile counter, gated on ``min_zoom``)
+        with the geometry-cache hit/miss tally.  The hit/miss tally is
+        NOT gated on ``min_zoom`` — below ``min_zoom`` the (z, x, y)
+        counter part is skipped but the cache outcome still counts,
+        matching the existing semantics of ``record`` vs
+        ``record_cache_hit``/``record_cache_miss``.
+        """
+        with self._lock:
+            if z >= self._min_zoom:
+                self._counts[(z, x, y)] += 1
+                if len(self._counts) > self._max_entries:
+                    self._evict_cold()
+            if cache_hit:
+                self._cache_hits += 1
+            else:
+                self._cache_misses += 1
 
     def _evict_cold(self) -> None:
         """Drop the bottom half of entries by count.
@@ -65,6 +102,40 @@ class TileRequestTracker:
         with self._lock:
             self._cache_misses += 1
 
+    def record_latency(
+        self,
+        request_ns: int,
+        compute_ns: int | None,
+        present_ns: int | None,
+    ) -> None:
+        """Accumulate request/compute/present latency in nanoseconds.
+
+        The request duration is always counted; compute and present are
+        counted only when not ``None`` (they are ``None`` for cache hits
+        where the stage didn't run).
+        """
+        with self._lock:
+            self._lat_request_ns_total += request_ns
+            self._lat_request_count += 1
+            if compute_ns is not None:
+                self._lat_compute_ns_total += compute_ns
+                self._lat_compute_count += 1
+            if present_ns is not None:
+                self._lat_present_ns_total += present_ns
+                self._lat_present_count += 1
+
+    def latency_snapshot(self) -> dict:
+        """Read-only snapshot of the latency accumulators (under lock)."""
+        with self._lock:
+            return {
+                "request_ns_total": self._lat_request_ns_total,
+                "request_count": self._lat_request_count,
+                "compute_ns_total": self._lat_compute_ns_total,
+                "compute_count": self._lat_compute_count,
+                "present_ns_total": self._lat_present_ns_total,
+                "present_count": self._lat_present_count,
+            }
+
     def stats(self, top_n: int = 10, hot_threshold: int = 5) -> dict:
         """Snapshot for the /health endpoint.
 
@@ -88,6 +159,20 @@ class TileRequestTracker:
             fast_path_by_reason = dict(self._fast_path_counts)
             cache_hits = self._cache_hits
             cache_misses = self._cache_misses
+            latency = {
+                "requests": self._lat_request_count,
+                "avg_request_ms": _avg_ms(
+                    self._lat_request_ns_total, self._lat_request_count,
+                ),
+                "computes": self._lat_compute_count,
+                "avg_compute_ms": _avg_ms(
+                    self._lat_compute_ns_total, self._lat_compute_count,
+                ),
+                "presents": self._lat_present_count,
+                "avg_present_ms": _avg_ms(
+                    self._lat_present_ns_total, self._lat_present_count,
+                ),
+            }
         return {
             "min_zoom": self._min_zoom,
             "max_entries": self._max_entries,
@@ -113,4 +198,5 @@ class TileRequestTracker:
                     else 0.0
                 ),
             },
+            "latency": latency,
         }

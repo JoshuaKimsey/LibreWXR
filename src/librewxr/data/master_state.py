@@ -41,23 +41,20 @@ STATE_FILENAME = "state.json"
 STATE_VERSION = 1
 
 
-def dump_state(stores: dict[str, Any], cache_dir: Path) -> Path:
-    """Atomically write a snapshot of every store's ``__getstate__`` to disk.
+def snapshot_state(stores: dict[str, Any]) -> dict:
+    """Build the ``state.json`` payload dict from a mapping of stores.
 
-    The write goes to ``<cache_dir>/.state.json.tmp`` first and is then
-    atomically renamed to ``state.json``.  Concurrent readers either see
-    the old file (if they read before the rename) or the new file
-    (after) — never a partial write.
+    Extracted from ``dump_state`` so the (fast) in-memory dict building
+    half can run on the event loop while the (slower) JSON serialisation
+    + atomic rename runs in a worker thread.
 
     Args:
         stores: mapping of store name → store object.  Values that are
             ``None`` are skipped.  Each non-None value must implement
             ``__getstate__()`` returning a JSON-serialisable dict.
-        cache_dir: directory shared with the tile-server workers.
-            ``state.json`` is written at the top level of this directory.
 
     Returns:
-        The path to the newly-written ``state.json``.
+        The payload dict, ready for :func:`write_state_snapshot`.
     """
     payload: dict[str, Any] = {
         "version": STATE_VERSION,
@@ -83,17 +80,64 @@ def dump_state(stores: dict[str, Any], cache_dir: Path) -> Path:
             )
             continue
         payload["stores"][name] = store_state
+    return payload
 
+
+def write_state_snapshot(payload: dict, cache_dir: Path) -> Path:
+    """Write a snapshot payload to ``<cache_dir>/state.json`` atomically.
+
+    The write goes to ``<cache_dir>/.state.json.tmp`` first and is then
+    atomically renamed to ``state.json``.  Concurrent readers either see
+    the old file (if they read before the rename) or the new file
+    (after) — never a partial write.  Runs in a worker thread from the
+    data pipeline so the JSON encode + rename never block the event loop.
+
+    Args:
+        payload: dict built by :func:`snapshot_state`.
+        cache_dir: directory shared with the tile-server workers.
+            ``state.json`` is written at the top level of this directory.
+
+    Returns:
+        The path to the newly-written ``state.json``.
+    """
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     final = cache_dir / STATE_FILENAME
     tmp = cache_dir / f".{STATE_FILENAME}.tmp"
+    started = time.monotonic()
     tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
     os.replace(tmp, final)
     logger.debug(
-        "Wrote state.json: %d store(s) → %s", len(payload["stores"]), final,
+        "Wrote state.json: %d store(s) → %s (%.2fs)",
+        len(payload["stores"]), final, time.monotonic() - started,
     )
     return final
+
+
+def dump_state(stores: dict[str, Any], cache_dir: Path) -> Path:
+    """Atomically write a snapshot of every store's ``__getstate__`` to disk.
+
+    Composes the two halves of the pipeline's snapshot path —
+    :func:`snapshot_state` builds the payload from the live stores and
+    :func:`write_state_snapshot` writes it atomically — so callers that
+    need the write off the event loop can invoke the halves separately.
+
+    The write goes to ``<cache_dir>/.state.json.tmp`` first and is then
+    atomically renamed to ``state.json``.  Concurrent readers either see
+    the old file (if they read before the rename) or the new file
+    (after) — never a partial write.
+
+    Args:
+        stores: mapping of store name → store object.  Values that are
+            ``None`` are skipped.  Each non-None value must implement
+            ``__getstate__()`` returning a JSON-serialisable dict.
+        cache_dir: directory shared with the tile-server workers.
+            ``state.json`` is written at the top level of this directory.
+
+    Returns:
+        The path to the newly-written ``state.json``.
+    """
+    return write_state_snapshot(snapshot_state(stores), cache_dir)
 
 
 def load_state(cache_dir: Path) -> dict[str, Any] | None:

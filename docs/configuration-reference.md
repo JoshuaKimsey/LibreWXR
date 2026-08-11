@@ -551,6 +551,18 @@ Seconds between memory pressure checks.
 | **Type** | integer |
 | **Unit** | seconds |
 
+### `LIBREWXR_SHARED_TILE_STORE_MB`
+
+Budget, in megabytes, of the shared on-disk store of **encoded** tile bytes under `LIBREWXR_CACHE_DIR` (`tiles_shared/`). Multi-mode render workers publish their freshly-encoded plain past-frame tiles here and read back bytes published by any other worker — one encode serves the whole fleet — instead of each worker redundantly colorizing and encoding the same viewport. The store is disabled in single mode (one process — the in-memory cache is enough).
+
+Semantics: unset (`None`) = auto, which resolves to **2048 MB for render-only workers** and **disabled in single mode**; `0` or any negative value disables the store entirely; a positive value sets the MB budget explicitly. Content-versioned keys (the frame's content version is folded into each key) make stale entries unreachable between fetch cycles, and the render workers' state poller invalidates + prunes the store with the same cadence as the in-memory tile cache. Requires `LIBREWXR_CACHE_DIR` (a shared volume) — render-only mode already requires it.
+
+| | |
+|---|---|
+| **Default** | unset (auto: `2048` in multi / disabled in single) |
+| **Type** | integer (or unset) |
+| **Unit** | megabytes |
+
 ### Docker memory limits
 
 The compose file caps each container using these env vars (not LIBREWXR_* settings — they're consumed by `deploy.resources.limits` in the YAML directly). Which one applies depends on which profile is active.

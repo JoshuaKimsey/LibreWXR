@@ -83,6 +83,18 @@ class Settings(BaseSettings):
     # store failure falls back to the in-process compute path.
     coord_store_enabled: bool = True  # Kill switch; False bypasses the store entirely
     coord_store_mb: int = 0  # Coord-store size cap in MB; 0 = mode default (single 1024, multi 8192)
+    # Shared on-disk encoded-tile store (see tiles/shared_tile_store.py).
+    # Multi-mode only: render workers publish / read encoded tile bytes on
+    # the shared cache volume so one worker's encode serves all workers.
+    # Content-versioned keys (built by the wiring) make stale entries
+    # unreachable between fetch cycles.  Semantics:
+    #   None          - auto: render-only workers default to a 2048 MB
+    #                   budget; single-mode deployments leave the store
+    #                   disabled (the wiring decides).
+    #   0 or negative - disabled.
+    #   positive      - explicit MB budget for the shared encoded-tile
+    #                   store (multi-mode only).
+    shared_tile_store_mb: int | None = None
     memory_limit_mb: int = 0  # Container memory limit in MB (0 = auto-detect)
     memory_pressure_check_interval: int = 30  # Seconds between memory pressure checks
     smooth_radius: float = 1.0  # Baseline Gaussian blur radius; renderer auto-scales it up at high zoom on coarse sources

@@ -57,6 +57,7 @@ from librewxr.tiles.coordinates import (
     warm_coordinate_caches,
 )
 from librewxr.tiles.request_tracker import TileRequestTracker
+from librewxr.tiles.shared_tile_store import SharedTileStore
 from librewxr.tiles.warmer import TileWarmer
 
 # Centralized logging: Rich-tagged handler at LIBREWXR_LOG_LEVEL (default
@@ -305,6 +306,25 @@ def _compute_cache_invalidation(
     return invalidate, False
 
 
+def _maintain_shared_tiles(store, full_clear: bool, ts_set: set[int] | None) -> None:
+    """Shared-store maintenance after a state refresh (runs off the loop).
+
+    Mirrors the in-memory tile-cache invalidation: a signature change
+    (full clear) drops every cached encode because cached geometry may
+    have sampled stale NWP content; otherwise only the invalidated
+    timestamps' entries are removed (versioned keys already make stale
+    content unreachable - this just reclaims the space).  ``prune`` runs
+    every pass so cross-worker publishes never grow the store past its
+    budget; it full-scans, hence off the event loop.
+    """
+    if full_clear:
+        store.clear()
+    else:
+        for ts in ts_set:
+            store.invalidate_timestamp(ts)
+    store.prune()
+
+
 def _drop_absent_stores(stores: dict, refreshed: list[str]) -> None:
     """Null stores absent from the first state snapshot.
 
@@ -410,6 +430,17 @@ async def _render_only_lifespan(app: FastAPI):
     # them — keep settings in sync between pipeline and render workers.
     store = FrameStore(max_frames=settings.max_frames, cache_dir=cache_dir)
     cache = TileCache(max_mb=settings.tile_cache_mb)
+    # Shared on-disk encoded-tile store: one worker's encode serves all
+    # workers (plain past-frame tiles only; see routes.radar_tile).  The
+    # content-versioned keys make stale entries unreachable between fetch
+    # cycles, so the poller only reclaims space (see _maintain_shared_tiles).
+    # Auto = 2048 MB for render workers; 0 or negative disables.
+    shared_tiles = None
+    mb = settings.shared_tile_store_mb
+    mb = 2048 if mb is None else mb
+    if mb > 0:
+        shared_tiles = SharedTileStore(cache_dir, max_mb=mb)
+        logger.info("Shared tile store: %d MB budget under %s", mb, cache_dir)
     nwp_contribs = collect_nwp_contributions(settings, cache_dir)
     nwp_grids_by_slug: dict[str, object] = {
         nwp_grid_slug(c): c.instance for c in nwp_contribs
@@ -559,6 +590,10 @@ async def _render_only_lifespan(app: FastAPI):
 
     routes.frame_store = store
     routes.tile_cache = cache
+    # Shared encoded-tile store for the multi-worker fleet; None when
+    # disabled (0/negative budget) — the route's shared-store paths are
+    # then a complete no-op.
+    routes.shared_tile_store = shared_tiles
     routes.nwp_grids = nwp_grids_by_slug
     routes.ecmwf_grid = ecmwf_grid
     routes.nwp_chain = nwp_chain
@@ -662,6 +697,15 @@ async def _render_only_lifespan(app: FastAPI):
                 else:
                     for ts in ts_to_invalidate:
                         cache.invalidate_timestamp(ts)
+                if shared_tiles is not None:
+                    # Same invalidation semantics for the shared on-disk
+                    # encoded-tile store.  prune is a full on-disk scan
+                    # (and the store ops are file I/O), so the whole
+                    # maintenance pass runs off the event loop.
+                    await asyncio.to_thread(
+                        _maintain_shared_tiles,
+                        shared_tiles, full_clear, ts_to_invalidate,
+                    )
                 last_payload = payload
             except Exception:
                 logger.exception("Failed to refresh state from %s", cache_dir)
@@ -933,6 +977,10 @@ async def lifespan(app: FastAPI):
     # Wire up the shared state
     routes.frame_store = store
     routes.tile_cache = cache
+    # Single mode has one process — the per-worker in-memory cache is
+    # enough, so the shared store stays off.  The explicit None also
+    # guards module reuse across test runs (no leaked multi-mode store).
+    routes.shared_tile_store = None
     routes.nwp_grids = nwp_grids_by_slug
     routes.ecmwf_grid = ecmwf_grid
     routes.nwp_chain = nwp_chain

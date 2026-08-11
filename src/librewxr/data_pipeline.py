@@ -37,7 +37,7 @@ from librewxr.data.coverage import (
     persist_masks_in_background,
 )
 from librewxr.data.fetcher import RadarFetcher
-from librewxr.data.master_state import dump_state
+from librewxr.data.master_state import snapshot_state, write_state_snapshot
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.storm_cells import StormCellGenerator, StormCellStore
 from librewxr.data.nwp_source import NWPChain
@@ -206,7 +206,7 @@ async def run_pipeline() -> None:
     precip_mask_store = PrecipMaskStore(cache_dir=cache_dir)
 
     # Stores keyed by slug — render-only workers consume the same keys
-    # via ``apply_state``.  None entries are skipped by dump_state.
+    # via ``apply_state``.  None entries are skipped by snapshot_state.
     stores = {
         "frame_store": store,
         **nwp_grids_by_slug,
@@ -222,14 +222,20 @@ async def run_pipeline() -> None:
             await precip_mask_store.build(stores, nwp_chain, settings)
         except Exception:
             logger.exception("Failed to build precip mask")
+        # snapshot_state is pure in-memory dict building (fast) — take the
+        # consistent snapshot on the loop, then hand the JSON encode +
+        # atomic rename to a worker thread so the serialisation never
+        # blocks the event loop.
+        payload = snapshot_state(stores)
         try:
-            dump_state(stores, cache_dir)
+            await asyncio.to_thread(write_state_snapshot, payload, cache_dir)
         except Exception:
             logger.exception("Failed to dump master state snapshot")
         # The pipeline owns coord-store maintenance in multi mode (render
         # workers never prune).  Guard-free: _get_store()'s gate covers
-        # enabled/cache_dir and the helper never raises.
-        prune_shared_coord_store()
+        # enabled/cache_dir and the helper never raises.  The directory
+        # scans run in a worker thread so they never block the loop.
+        await asyncio.to_thread(prune_shared_coord_store)
 
     fetcher = RadarFetcher(
         store, tile_cache,

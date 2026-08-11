@@ -214,6 +214,13 @@ MAX_FORECAST_HOURS = 60                  # all runs reach +60 h
 # full horizon.
 RUN_LOOKBACK_CYCLES = 2
 
+# Maximum concurrent per-step fetches inside a run's gather.  Bounds peak
+# decode RAM + HTTP fan-out (stays within the client's
+# max_keepalive_connections=4 / max_connections=8 limits) while
+# overlapping per-step download + decode latency — per-run latency drops
+# from sum(step fetches) to max(...).
+_STEP_FETCH_CONCURRENCY = 4
+
 
 def floor_cycle(ts: int) -> int:
     """Floor a Unix timestamp to the nearest 3-hour cycle boundary."""
@@ -620,6 +627,10 @@ class DMIDiniGrid:
         self._client: httpx.AsyncClient | None = None
         self._latest_run_ts: int | None = None
         self._fetch_lock = asyncio.Lock()
+        # (run_ts, step_hour) → in-flight fetch task.  Concurrent gather
+        # units and the recursive prev-step lookups share one task per
+        # (run, step) so the same file is never downloaded twice.
+        self._in_flight: dict[tuple[int, int], asyncio.Task[int]] = {}
 
         if cache_dir is not None:
             self._memmap_dir = Path(cache_dir) / "dmi_dini"
@@ -735,6 +746,7 @@ class DMIDiniGrid:
         self._persistent = True
         self._client = None
         self._fetch_lock = asyncio.Lock()
+        self._in_flight = {}
         self._frames = {}
         self._accum = {}
         self._snow_masks = {}
@@ -942,8 +954,28 @@ class DMIDiniGrid:
                     MAX_FORECAST_HOURS,
                     -(-max_lead // BRACKET_INTERVAL_SECONDS),
                 )
-                for step in range(int(min_step), int(max_step) + 1):
-                    added = await self._fetch_one_step(run_dt, step, client)
+                # Fan out this run's per-step units under one bounded
+                # gather — per-run latency drops from sum(step fetches)
+                # to max(...) while the semaphore caps concurrent
+                # download + decode at 4.
+                step_sem = asyncio.Semaphore(_STEP_FETCH_CONCURRENCY)
+
+                async def _bounded_step_fetch(step: int) -> int:
+                    async with step_sem:
+                        return await self._fetch_one_step(run_dt, step, client)
+
+                steps = range(int(min_step), int(max_step) + 1)
+                added_all = await asyncio.gather(
+                    *(_bounded_step_fetch(step) for step in steps),
+                    # Per-step failures are converted to -1 return codes
+                    # inside _fetch_one_step; a genuine exception still
+                    # propagates and aborts the fetch exactly as the
+                    # sequential loop did.
+                    return_exceptions=False,
+                )
+                # gather preserves input order — identical accounting
+                # to the sequential loop.
+                for added in added_all:
                     if added > 0:
                         total_fetched += added
                     elif added < 0:
@@ -1040,6 +1072,36 @@ class DMIDiniGrid:
         """Fetch one step's tp, difference against the previous step,
         encode, and store.  Returns 1 on success, 0 if already loaded,
         -1 on fetch error.
+
+        Concurrent-safe entry: the bounded gather runs one unit per
+        step and the prev-step fallback below re-enters this method, so
+        any two concurrent attempts on the same (run, step) share one
+        in-flight task via ``_in_flight`` rather than re-downloading
+        the file.  A finished attempt is deregistered immediately, so a
+        prev-step retry after a failed download still performs a fresh
+        fetch exactly as the sequential loop did.
+        """
+        run_ts = int(run.timestamp())
+        key = (run_ts, step_hour)
+        in_flight = self._in_flight.get(key)
+        if in_flight is not None:
+            return await in_flight
+        task = asyncio.create_task(
+            self._fetch_one_step_impl(run, step_hour, client),
+        )
+        self._in_flight[key] = task
+        try:
+            return await task
+        finally:
+            if self._in_flight.get(key) is task:
+                self._in_flight.pop(key, None)
+
+    async def _fetch_one_step_impl(
+        self, run: datetime, step_hour: int, client: httpx.AsyncClient,
+    ) -> int:
+        """Original sequential fetch/decode/store body behind
+        ``_fetch_one_step`` — the recursion below re-enters the
+        concurrent-safe wrapper, so it dedups against in-flight units.
         """
         run_ts = int(run.timestamp())
         lead_seconds = step_hour * BRACKET_INTERVAL_SECONDS
@@ -1252,6 +1314,10 @@ class DMIDiniGrid:
     async def close(self) -> None:
         self._frames.clear()
         self._accum.clear()
+        # Cancel in-flight tasks first so a late prev-step call can't spawn a duplicate download.
+        for t in self._in_flight.values():
+            t.cancel()
+        self._in_flight.clear()
         self._snow_masks.clear()
         self._tp_offsets.clear()
         self._t2_offsets.clear()

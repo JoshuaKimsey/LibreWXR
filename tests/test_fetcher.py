@@ -97,6 +97,9 @@ class TestTileCache:
         cache._cache = __import__("collections").OrderedDict()
         cache._total_bytes = 0
         cache._lock = __import__("threading").Lock()
+        # The timestamp index is initialized in __init__; a __new__
+        # instance must wire it by hand (see tiles/cache.py).
+        cache._by_ts = {}
 
         k1 = (1,)
         k2 = (2,)

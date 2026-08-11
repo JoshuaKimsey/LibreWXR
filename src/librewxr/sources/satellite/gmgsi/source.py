@@ -100,6 +100,18 @@ S3_BUCKET = "noaa-gmgsi-pds"
 # filename token does not.
 _FILENAME_PREFIX = "GLOBCOMP"
 
+# Concurrent-fetch caps for the S3 pass (internal plumbing - no
+# settings; mirrors the HRRR / WRF-SMN bounded-gather pattern).  A
+# GMGSI channel lists up to ``max_frames`` hour directories and then
+# downloads + decodes one ~7.5 MB NetCDF per hour; both phases fan out
+# over a semaphore-bounded ``asyncio.gather`` so per-hour S3 latency
+# overlaps instead of serializing (the sequential pass paid ~12x one-
+# hour RTT per phase).  Caps of 4 bound S3 request fan-out and peak
+# decode RAM (each plane is ~15 MB uint8 after width coercion) while
+# still overlapping per-hour latency.
+_S3_LIST_CONCURRENCY = 4      # concurrent hour-directory LIST units
+_S3_DOWNLOAD_CONCURRENCY = 4  # concurrent download+decode+store units
+
 
 class GMGSISource:
     """Base class for one GMGSI channel.
@@ -196,29 +208,71 @@ class GMGSISource:
             return False
 
     def _fetch_sync(self) -> bool:
+        """Run one full fetch pass (called in a worker thread).
+
+        Owns a private event loop for the duration of the pass so the
+        two bounded gathers (hour listing, then download+decode units)
+        share one loop and one thread-pool executor - the outer asyncio
+        loop only ever sees the thread, never the blocking S3/HDF5
+        calls.
+        """
         fs = self._get_fs()
         now = datetime.now(timezone.utc)
-        # Walk every hour bucket in the retention window backwards.
-        # Earliest first when we ingest so the sorted_timestamps list
-        # builds monotonically — listing is cheap (LIST on one hour
-        # directory returns one file).
+        # Walk every hour bucket in the retention window, then ingest
+        # concurrently; the store is re-sorted by timestamp afterwards
+        # so the assembled list still builds monotonically - listing is
+        # cheap (LIST on one hour directory returns one file).
         window_start = now - timedelta(hours=self._max_frames)
-        keys = self._list_recent_keys(fs, window_start, now)
+        return asyncio.run(self._fetch_pass(fs, window_start, now))
+
+    async def _fetch_pass(
+        self,
+        fs: fsspec.AbstractFileSystem,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> bool:
+        """Concurrent fetch pass: list hour keys, then ingest each new key.
+
+        Both phases fan out over a semaphore-bounded ``asyncio.gather``
+        (``_S3_LIST_CONCURRENCY`` / ``_S3_DOWNLOAD_CONCURRENCY``) so
+        per-hour S3 latency overlaps instead of serializing.  Per-key
+        failures stay caught-and-logged inside each unit with the same
+        messages as the sequential pass; gather results keep key order.
+        """
+        keys = await self._list_recent_keys_async(fs, window_start, window_end)
         if not keys:
             logger.warning("%s: no S3 keys in retention window", self.friendly_name)
             return False
 
-        new_count = 0
-        for unix_ts, s3_key in keys:
+        sem = asyncio.Semaphore(_S3_DOWNLOAD_CONCURRENCY)
+
+        async def _ingest_unit(unix_ts: int, s3_key: str) -> bool:
+            """One per-key unit - the exact body of the old sequential
+            loop: memoization skip, download+decode, store update, disk
+            cache write."""
             if unix_ts in self._frames:
-                continue
-            arr = self._download_and_decode(fs, s3_key)
-            if arr is None:
-                continue
-            self._frames[unix_ts] = arr
-            new_count += 1
-            if self._channel_cache_dir is not None:
-                self._write_cache(unix_ts, arr)
+                return False
+            async with sem:
+                arr = await asyncio.to_thread(
+                    self._download_and_decode, fs, s3_key,
+                )
+                if arr is None:
+                    return False
+                self._frames[unix_ts] = arr
+                if self._channel_cache_dir is not None:
+                    await asyncio.to_thread(self._write_cache, unix_ts, arr)
+                return True
+
+        results = await asyncio.gather(
+            *(_ingest_unit(unix_ts, s3_key) for unix_ts, s3_key in keys),
+        )
+        # asyncio.gather returns results in argument order, so zipping
+        # back over ``keys`` reproduces the original ascending order -
+        # the assembled timestamp list / frames match the sequential pass.
+        new_count = 0
+        for _, ingested in zip(keys, results):
+            if ingested:
+                new_count += 1
 
         # Trim retention.
         self._sorted_timestamps = sorted(self._frames)
@@ -246,30 +300,60 @@ class GMGSISource:
         window_start: datetime,
         window_end: datetime,
     ) -> list[tuple[int, str]]:
+        """List one S3 key per hour in the window (synchronous form).
+
+        Thin wrapper over ``_list_recent_keys_async`` kept for the
+        fetch pass and standalone callers/tests; it owns a private
+        event loop because this source's fetch pass is thread-bridged.
+        """
+        return asyncio.run(
+            self._list_recent_keys_async(fs, window_start, window_end),
+        )
+
+    async def _list_recent_keys_async(
+        self,
+        fs: fsspec.AbstractFileSystem,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> list[tuple[int, str]]:
         """List one S3 key per hour in the window.
 
         GMGSI layout puts exactly one file under each
         ``{product}/{YYYY}/{MM}/{DD}/{HH}/`` directory.  We walk
-        hour-by-hour to keep each LIST call narrow.  Returns
-        ``[(unix_ts, key), …]`` sorted ascending by timestamp.
+        hour-by-hour to keep each LIST call narrow; the hour listings
+        are independent, so they fan out under ``_S3_LIST_CONCURRENCY``
+        and the entries zip back into ascending hour order.  Returns
+        ``[(unix_ts, key), ...]`` sorted ascending by timestamp.
         """
-        results: list[tuple[int, str]] = []
+        sem = asyncio.Semaphore(_S3_LIST_CONCURRENCY)
         cursor = window_start.replace(minute=0, second=0, microsecond=0)
+        prefixes: list[str] = []
         while cursor <= window_end:
-            prefix = (
+            prefixes.append(
                 f"{S3_BUCKET}/{self.s3_product_path}/"
                 f"{cursor.year:04d}/{cursor.month:02d}/{cursor.day:02d}/"
                 f"{cursor.hour:02d}/"
             )
-            try:
-                entries = fs.ls(prefix, detail=False)
-            except FileNotFoundError:
-                entries = []
-            except Exception:
-                logger.exception(
-                    "%s: failed to list %s", self.friendly_name, prefix,
-                )
-                entries = []
+            cursor += timedelta(hours=1)
+
+        async def _list_one_hour(prefix: str) -> list[str]:
+            async with sem:
+                try:
+                    return await asyncio.to_thread(fs.ls, prefix, False)
+                except FileNotFoundError:
+                    return []
+                except Exception:
+                    logger.exception(
+                        "%s: failed to list %s", self.friendly_name, prefix,
+                    )
+                    return []
+
+        entries_by_hour = await asyncio.gather(
+            *(_list_one_hour(prefix) for prefix in prefixes),
+        )
+
+        results: list[tuple[int, str]] = []
+        for prefix, entries in zip(prefixes, entries_by_hour):
             for entry in entries:
                 name = entry.rsplit("/", 1)[-1]
                 if not name.startswith(self.s3_filename_prefix):
@@ -278,8 +362,7 @@ class GMGSISource:
                 if unix_ts is None:
                     continue
                 results.append((unix_ts, entry))
-                break  # one file per hour — stop after the first match
-            cursor += timedelta(hours=1)
+                break  # one file per hour - stop after the first match
         return sorted(set(results))
 
     @staticmethod

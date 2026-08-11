@@ -47,6 +47,11 @@ class TileCache:
         self._max_bytes = max_mb * 1024 * 1024
         self._cache: OrderedDict[tuple, Any] = OrderedDict()
         self._total_bytes = 0
+        # Timestamp index: leading int timestamp -> set of cache keys, so
+        # ``invalidate_timestamp`` is O(1) per timestamp instead of an
+        # O(n) scan.  Only int-leading keys are indexed; namespaced keys
+        # (``"sat"`` / ``"cov"`` prefixes) are deliberately absent.
+        self._by_ts: dict[int, set[tuple]] = {}
         self._lock = Lock()
 
     def get(self, key: tuple) -> Any | None:
@@ -64,6 +69,12 @@ class TileCache:
                 self._cache.move_to_end(key)
             self._cache[key] = value
             self._total_bytes += new_size
+            # Register int-leading keys under their leading timestamp so
+            # timestamp invalidation stays O(1).  Non-int-leading keys
+            # (e.g. the ``"sat"``/``"cov"`` namespaced keys) are simply
+            # not indexed.
+            if isinstance(key[0], int):
+                self._by_ts.setdefault(key[0], set()).add(key)
             self._evict_to_budget()
 
     def evict_half(self) -> int:
@@ -74,22 +85,26 @@ class TileCache:
             for _ in range(target):
                 if not self._cache:
                     break
-                _, v = self._cache.popitem(last=False)
+                k, v = self._cache.popitem(last=False)
+                self._unindex_ts(k)
                 freed += _size_of(v)
             self._total_bytes -= freed
             return freed
 
     def invalidate_timestamp(self, timestamp: int) -> None:
-        """Remove all entries for a given timestamp."""
+        """Remove all entries for a given timestamp (O(1) via the index)."""
         with self._lock:
-            keys_to_remove = [k for k in self._cache if k[0] == timestamp]
-            for k in keys_to_remove:
+            keys = self._by_ts.pop(timestamp, None)
+            if keys is None:
+                return
+            for k in keys:
                 self._total_bytes -= _size_of(self._cache[k])
                 del self._cache[k]
 
     def clear(self) -> None:
         with self._lock:
             self._cache.clear()
+            self._by_ts.clear()
             self._total_bytes = 0
 
     def entries(self) -> list[tuple[tuple, int]]:
@@ -100,8 +115,17 @@ class TileCache:
     def _evict_to_budget(self) -> None:
         """Evict oldest entries until total bytes is within budget."""
         while self._total_bytes > self._max_bytes and self._cache:
-            _, v = self._cache.popitem(last=False)
+            k, v = self._cache.popitem(last=False)
+            self._unindex_ts(k)
             self._total_bytes -= _size_of(v)
+
+    def _unindex_ts(self, key: tuple) -> None:
+        """Drop ``key`` from the timestamp index; remove empty buckets."""
+        bucket = self._by_ts.get(key[0]) if key else None
+        if bucket is not None:
+            bucket.discard(key)
+            if not bucket:
+                del self._by_ts[key[0]]
 
     @property
     def size(self) -> int:
