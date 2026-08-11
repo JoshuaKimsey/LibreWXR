@@ -1119,6 +1119,63 @@ class TestNowcastStoreNWPFlow:
         assert await consumer.get_nwp_flow() is None
 
 
+class TestNowcastStoreFlowVersion:
+    """Monotonic content version for the flow fields (radar + NWP).
+
+    ``flow_version`` bumps on every ``replace_flows`` /
+    ``replace_nwp_flow`` swap and ships through state.json so render
+    workers can key shared-store overlay tiles by flow identity.
+    """
+
+    @pytest.mark.asyncio
+    async def test_replace_flows_bumps_version_by_one(self, tmp_path):
+        store = NowcastStore(cache_dir=tmp_path)
+        assert store.flow_version == 0
+        await store.replace_flows({"R1": np.zeros((4, 6, 2), dtype=np.float32)})
+        assert store.flow_version == 1
+        await store.replace_flows({"R1": np.zeros((4, 6, 2), dtype=np.float32)})
+        assert store.flow_version == 2
+
+    @pytest.mark.asyncio
+    async def test_replace_nwp_flow_bumps_version_by_one(self, tmp_path):
+        store = NowcastStore(cache_dir=tmp_path)
+        assert store.flow_version == 0
+        await store.replace_nwp_flow(np.zeros((4, 6, 2), dtype=np.float32))
+        assert store.flow_version == 1
+        await store.replace_nwp_flow(np.zeros((4, 6, 2), dtype=np.float32))
+        assert store.flow_version == 2
+
+    @pytest.mark.asyncio
+    async def test_roundtrip_preserves_flow_version(self, tmp_path):
+        """``__getstate__`` -> JSON -> ``__setstate__`` preserves the version."""
+        producer = NowcastStore(cache_dir=tmp_path)
+        await producer.replace_flows({"R1": np.zeros((4, 6, 2), dtype=np.float32)})
+        await producer.replace_nwp_flow(np.zeros((4, 6, 2), dtype=np.float32))
+        # Two swaps (one per bump path) -> version 2 in the snapshot.
+        assert producer.flow_version == 2
+
+        import json
+        snapshot = json.loads(json.dumps(producer.__getstate__()))
+
+        consumer = NowcastStore()
+        consumer.__setstate__(snapshot)
+        assert consumer.flow_version == 2
+
+    @pytest.mark.asyncio
+    async def test_setstate_missing_flow_version_bumps_local(self, tmp_path):
+        """A legacy snapshot without ``flow_version`` bumps the local
+        version by 1 (conservative fallback) instead of resetting it."""
+        producer = NowcastStore(cache_dir=tmp_path)
+        await producer.replace_flows({"R1": np.zeros((4, 6, 2), dtype=np.float32)})
+        state = producer.__getstate__()
+        del state["flow_version"]  # simulate an older pipeline snapshot
+
+        consumer = NowcastStore()
+        assert consumer.flow_version == 0
+        consumer.__setstate__(state)
+        assert consumer.flow_version == 1
+
+
 class TestNowcastStoreEmptyState:
     """Empty-store dump/apply semantics.
 

@@ -323,6 +323,66 @@ class TestStormCellStore:
             store.cleanup()
 
     @pytest.mark.storm_cells
+    async def test_replace_cells_bumps_version(self):
+        """Each replace_cells swap bumps cells_version by exactly 1."""
+        store = StormCellStore()
+        try:
+            assert store.cells_version == 0
+            arr = np.array([
+                (10.0, 20.0, 50.0, 61.6, 45.0,
+                 0.0, 0.0, float("nan"), float("nan")),
+            ], dtype=_CELL_DTYPE)
+            await store.replace_cells({"TEST": arr})
+            assert store.cells_version == 1
+            await store.replace_cells({"TEST": arr})
+            assert store.cells_version == 2
+        finally:
+            store.cleanup()
+
+    @pytest.mark.storm_cells
+    async def test_state_round_trip_preserves_version(self, tmp_path):
+        """__getstate__/__setstate__ round-trips cells_version."""
+        store = StormCellStore(cache_dir=tmp_path)
+        try:
+            arr = np.array([
+                (10.0, 20.0, 50.0, 61.6, 45.0,
+                 0.0, 0.0, float("nan"), float("nan")),
+            ], dtype=_CELL_DTYPE)
+            await store.replace_cells({"TEST": arr})
+            await store.replace_cells({"TEST": arr})
+            assert store.cells_version == 2
+
+            state = store.__getstate__()
+            new_store = StormCellStore()
+            new_store.__setstate__(state)
+            assert new_store.cells_version == 2
+            new_store.cleanup()
+        finally:
+            store.cleanup()
+
+    @pytest.mark.storm_cells
+    async def test_setstate_missing_version_bumps_local(self, tmp_path):
+        """A legacy snapshot without ``cells_version`` bumps the local
+        version by 1 (conservative fallback) instead of resetting it."""
+        store = StormCellStore(cache_dir=tmp_path)
+        try:
+            arr = np.array([
+                (10.0, 20.0, 50.0, 61.6, 45.0,
+                 0.0, 0.0, float("nan"), float("nan")),
+            ], dtype=_CELL_DTYPE)
+            await store.replace_cells({"TEST": arr})
+            state = store.__getstate__()
+            del state["cells_version"]  # simulate an older pipeline snapshot
+
+            new_store = StormCellStore()
+            assert new_store.cells_version == 0
+            new_store.__setstate__(state)
+            assert new_store.cells_version == 1
+            new_store.cleanup()
+        finally:
+            store.cleanup()
+
+    @pytest.mark.storm_cells
     async def test_max_cap_truncation(self):
         """More than MAX_CELLS_PER_REGION cells are truncated to MAX."""
         store = StormCellStore()

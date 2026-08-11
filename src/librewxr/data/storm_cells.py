@@ -73,6 +73,10 @@ class StormCellStore:
         self._counts: dict[str, int] = {}  # actual cell count per region (vs MAX cap)
         self._last_updated: float = 0.0
         self._detected_at_timestamp: int = 0
+        # Monotonic content version for the detected cells.  Bumped on
+        # every replace_cells swap and shipped via state.json so render
+        # workers can key shared-store overlay tiles by cell identity.
+        self._cells_version: int = 0
         self._lock = asyncio.Lock()
         if cache_dir is not None:
             self._memmap_dir = Path(cache_dir) / "storm_cells"
@@ -159,6 +163,7 @@ class StormCellStore:
             self._counts = new_counts
             self._last_updated = time.time()
             self._detected_at_timestamp = detected_at_timestamp
+            self._cells_version += 1
 
     async def get_cells(self) -> dict[str, np.ndarray]:
         """Return the latest per-region cell arrays (fixed-size, NaN-padded).
@@ -187,6 +192,18 @@ class StormCellStore:
         return self._detected_at_timestamp
 
     @property
+    def cells_version(self) -> int:
+        """Content version for the detected cells.
+
+        Bumped on every ``replace_cells`` swap.  Synchronous and
+        lock-free on purpose: the version is a plain attribute read that
+        only the pipeline mutates (under the async lock), so a read under
+        the GIL always sees a consistent value; render workers receive it
+        via the state.json snapshot.
+        """
+        return self._cells_version
+
+    @property
     def total_count(self) -> int:
         """Total detected cells across all regions (sum of per-region counts)."""
         return sum(self._counts.values())
@@ -208,6 +225,7 @@ class StormCellStore:
             "counts": dict(self._counts),
             "last_updated": self._last_updated,
             "detected_at_timestamp": self._detected_at_timestamp,
+            "cells_version": self._cells_version,
         }
 
     def __setstate__(self, state: dict) -> None:
@@ -232,6 +250,14 @@ class StormCellStore:
         self._counts = dict(state.get("counts", {}))
         self._last_updated = float(state.get("last_updated", 0.0))
         self._detected_at_timestamp = int(state.get("detected_at_timestamp", 0))
+        if "cells_version" in state:
+            self._cells_version = int(state["cells_version"])
+        else:
+            # Legacy snapshot from an older pipeline (pre ``cells_version``).
+            # Conservative fallback: this store's payload embeds
+            # ``last_updated``, so it reloads every cycle, and bumping on
+            # every apply matches the cell regeneration cadence.
+            self._cells_version = self._cells_version + 1
         self._persistent = True
         if not hasattr(self, "_lock"):
             self._lock = asyncio.Lock()

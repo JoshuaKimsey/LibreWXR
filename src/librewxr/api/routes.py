@@ -740,6 +740,22 @@ def _shared_tile_key(timestamp, version, z, x, y, tile_size, smooth, snow, color
     )
 
 
+def _shared_overlay_key(timestamp, frame_version, flow_version, cells_version, z, x, y, tile_size, smooth, snow, color, ext, arrow_style, cell_style) -> str:
+    """Shared-store key for an encoded overlay tile.
+
+    Same content-versioning principle as ``_shared_tile_key`` extended
+    with flow/cells versions so a pipeline regeneration re-keys overlay
+    tiles instead of serving stale bytes; the leading timestamp keeps
+    ``_ts_of`` sharding and ``invalidate_timestamp`` prefix sweeps
+    working.
+    """
+    return (
+        f"{timestamp}-v{frame_version}-f{flow_version}-c{cells_version}-"
+        f"{z}-{x}-{y}-{tile_size}-{int(smooth)}{int(snow)}-{color}-{ext}-"
+        f"q{settings.webp_quality}-a{arrow_style}-k{cell_style}"
+    )
+
+
 def _shared_get_and_hash(store, key: str):
     """Read a shared tile and hash it off the event loop; None on miss."""
     data = store.get(key)
@@ -949,6 +965,13 @@ async def radar_tile(
                     if tile_request_tracker is not None and geom.fast_path is not None:
                         tile_request_tracker.record_fast_path(geom.fast_path)
 
+            # Versions are read before the flow/cell fetches so a mid-flight
+            # pipeline swap keys the rendered tile conservatively; lookups
+            # always use the current version, so stale entries become
+            # unreachable on the next request.
+            flow_v = nowcast_store.flow_version if nowcast_store is not None else 0
+            cells_v = storm_cell_store.cells_version if storm_cell_store is not None else 0
+
             flow_regions = None
             nwp_flow = None
             if arrow_style:
@@ -1049,40 +1072,92 @@ async def radar_tile(
                                 _pending_shared_publishes.add(task)
                                 task.add_done_callback(_pending_shared_publishes.discard)
             else:
-                # Overlay present cache (nowcast frames only): the render worker's
-                # state poller invalidates every nowcast timestamp each cycle, so
-                # a cached overlay entry is never served with flows older than one
-                # fetch cycle.  Past frames are deliberately NOT cached here -
-                # their timestamp survives for 2 hours while flows regenerate
-                # every cycle, which would pin arrows/cells to stale flow fields;
-                # those requests re-render the cheap present tail per request (the
-                # pre-change behaviour).
-                overlay_key = present_key + (eff_arrow, eff_cells)
-                cached = tile_cache.get(overlay_key) if is_nowcast else None
+                # Overlay tiles are cached and shared under flow/cells-
+                # versioned keys, so staleness is bounded by the state poll
+                # interval (~1 s) plus publish lag - the same guarantee the
+                # nowcast overlay cache already had.  The flow/cells
+                # versions re-key the entry when the pipeline regenerates
+                # flows/detections (the poller still sweeps nowcast
+                # timestamps per cycle as before), and past-frame overlay
+                # tiles are now cached too - previously re-rendered per
+                # request.
+                overlay_key = present_key + (eff_arrow, eff_cells, flow_v, cells_v)
+                cached = tile_cache.get(overlay_key)
                 if isinstance(cached, CachedRender):
                     tile_bytes = cached.data
                     etag = cached.etag
                 else:
-                    present_start = time.perf_counter_ns()
-                    tile_bytes, etag = await _present_tile_async(
-                        geom,
-                        color_scheme=color,
-                        fmt=ext,
-                        arrow_style=eff_arrow,
-                        flow_regions=flow_regions,
-                        frame_regions=frame.regions if frame is not None else None,
-                        enabled_regions=enabled_regions,
-                        nwp_flow=nwp_flow,
-                        nwp_chain=nwp_chain,
-                        frame_timestamp=timestamp,
-                        z=z, x=x, y=y,
-                        cell_style=eff_cells,
-                        cells_by_region=cells_by_region,
-                        cell_counts=cell_counts,
-                    )
-                    present_ns = time.perf_counter_ns() - present_start
-                    if is_nowcast:
+                    # Shared-store lookup: past-frame overlays only (a
+                    # nowcast timestamp has no frame version and keeps the
+                    # in-worker-only cache).  Same executor pattern as the
+                    # plain path.
+                    ov_hit = None
+                    if shared_tile_store is not None and frame_store is not None:
+                        version = frame_store.frame_version(timestamp)
+                        if version is not None:
+                            ov_key = _shared_overlay_key(
+                                timestamp, version, flow_v, cells_v, z, x, y,
+                                tile_size, smooth, snow, color, ext,
+                                eff_arrow, eff_cells,
+                            )
+                            if io_executor is not None:
+                                loop = asyncio.get_running_loop()
+                                ov_hit = await loop.run_in_executor(
+                                    io_executor, _shared_get_and_hash, shared_tile_store, ov_key,
+                                )
+                            else:
+                                ov_hit = await asyncio.to_thread(_shared_get_and_hash, shared_tile_store, ov_key)
+                    if ov_hit is not None:
+                        tile_bytes, etag = ov_hit
                         tile_cache.put(overlay_key, CachedRender(data=tile_bytes, etag=etag))
+                    else:
+                        present_start = time.perf_counter_ns()
+                        tile_bytes, etag = await _present_tile_async(
+                            geom,
+                            color_scheme=color,
+                            fmt=ext,
+                            arrow_style=eff_arrow,
+                            flow_regions=flow_regions,
+                            frame_regions=frame.regions if frame is not None else None,
+                            enabled_regions=enabled_regions,
+                            nwp_flow=nwp_flow,
+                            nwp_chain=nwp_chain,
+                            frame_timestamp=timestamp,
+                            z=z, x=x, y=y,
+                            cell_style=eff_cells,
+                            cells_by_region=cells_by_region,
+                            cell_counts=cell_counts,
+                        )
+                        present_ns = time.perf_counter_ns() - present_start
+                        tile_cache.put(overlay_key, CachedRender(data=tile_bytes, etag=etag))
+                        # Publish the fresh encode to the shared store for the
+                        # other workers, fire-and-forget so the response never
+                        # waits on the shared-volume write; the set holds
+                        # references so tasks can't be GC'd mid-flight.  Past
+                        # frames only (a nowcast timestamp has no frame
+                        # version).  A version bump between lookup and publish
+                        # writes a stale entry, but the flow/cells versions in
+                        # the key make it unreachable as soon as the next
+                        # request reads the current versions.
+                        if shared_tile_store is not None and frame_store is not None:
+                            version = frame_store.frame_version(timestamp)
+                            if version is not None:
+                                ov_key = _shared_overlay_key(
+                                    timestamp, version, flow_v, cells_v, z, x, y,
+                                    tile_size, smooth, snow, color, ext,
+                                    eff_arrow, eff_cells,
+                                )
+                                if io_executor is not None:
+                                    loop = asyncio.get_running_loop()
+                                    task = asyncio.ensure_future(
+                                        loop.run_in_executor(io_executor, shared_tile_store.publish, ov_key, tile_bytes)
+                                    )
+                                else:
+                                    task = asyncio.ensure_future(
+                                        asyncio.to_thread(shared_tile_store.publish, ov_key, tile_bytes)
+                                    )
+                                _pending_shared_publishes.add(task)
+                                task.add_done_callback(_pending_shared_publishes.discard)
 
     if tile_warmer is not None:
         # When the cache hit short-circuited the frame fetch, we still

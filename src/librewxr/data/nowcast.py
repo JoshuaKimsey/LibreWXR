@@ -224,6 +224,11 @@ class NowcastStore:
         # prefix (``nwp_flow.dat``) keeps it clear of the radar-flow
         # ``flow_*.dat`` cleanup glob and its own replace path below.
         self._nwp_flow: np.ndarray | None = None
+        # Monotonic content version for the flow fields (per-region radar
+        # flows + composite NWP raster).  Bumped on every replace swap and
+        # shipped via state.json so render workers can key shared-store
+        # overlay tiles by flow content identity.
+        self._flow_version: int = 0
         self._lock = asyncio.Lock()
         if cache_dir is not None:
             self._memmap_dir = Path(cache_dir) / "nowcast"
@@ -326,6 +331,7 @@ class NowcastStore:
             for name, data in list(flows.items()):
                 flows[name] = self._to_memmap(f"flow_{name}", data)
             self._flows = flows
+            self._flow_version += 1
 
     async def get_flows(self) -> dict[str, np.ndarray]:
         """Return the latest per-region optical flow vectors."""
@@ -352,11 +358,24 @@ class NowcastStore:
             if flow is None:
                 return
             self._nwp_flow = self._to_memmap("nwp_flow", flow)
+            self._flow_version += 1
 
     async def get_nwp_flow(self) -> np.ndarray | None:
         """Return the composite NWP optical-flow raster, or ``None``."""
         async with self._lock:
             return self._nwp_flow
+
+    @property
+    def flow_version(self) -> int:
+        """Content version for the flow fields (radar + NWP composite).
+
+        Bumped on every ``replace_flows`` / ``replace_nwp_flow`` swap.
+        Synchronous and lock-free on purpose: the version is a plain
+        attribute read that only the pipeline mutates (under the async
+        lock), so a read under the GIL always sees a consistent value;
+        render workers receive it via the state.json snapshot.
+        """
+        return self._flow_version
 
     @property
     def data_bytes(self) -> int:
@@ -424,6 +443,7 @@ class NowcastStore:
             "frames": frames_state,
             "flows": flows_state,
             "nwp_flow": nwp_flow_state,
+            "flow_version": self._flow_version,
         }
 
     def __setstate__(self, state: dict) -> None:
@@ -515,6 +535,14 @@ class NowcastStore:
         self._frames = new_frames
         self._flows = new_flows
         self._nwp_flow = new_nwp_flow
+        if "flow_version" in state:
+            self._flow_version = int(state["flow_version"])
+        else:
+            # Legacy snapshot from an older pipeline (pre ``flow_version``).
+            # Conservative fallback: this store's payload always differs
+            # per cycle, so ``apply_state`` reloads it every cycle, and
+            # bumping on every apply matches the flow regeneration cadence.
+            self._flow_version = self._flow_version + 1
         self._persistent = True
         if not hasattr(self, "_lock"):
             self._lock = asyncio.Lock()
