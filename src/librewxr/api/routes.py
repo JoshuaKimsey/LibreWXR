@@ -38,6 +38,8 @@ from librewxr.tiles.renderer import (
     compute_tile_geometry,
     present_tile,
     render_coverage_tile,
+    TileGeometry,
+    transparent_fast_path_label,
 )
 from librewxr.tiles.request_tracker import TileRequestTracker
 from librewxr.tiles.satellite_renderer import (
@@ -907,28 +909,45 @@ async def radar_tile(
                     raise HTTPException(status_code=404, detail="Frame not found")
 
             if geom is None:
-                compute_start = time.perf_counter_ns()
-                geom = await asyncio.to_thread(
-                    compute_tile_geometry,
-                    frame_regions=frame.regions,
-                    z=z, x=x, y=y,
-                    tile_size=tile_size,
-                    smooth=smooth,
-                    snow=snow,
-                    nwp_chain=nwp_chain,
-                    enabled_regions=enabled_regions,
-                    frame_timestamp=timestamp,
-                    nowcast_blend=nowcast_blend,
-                    precip_mask=precip_mask,
+                # Transparent fast-path gate: microsecond-scale pure reads
+                # (region-overlap math, dict membership, a memmap slice +
+                # any()), safe on the event loop, and keeps the compute
+                # pool clear of no-op ocean tiles.
+                label = transparent_fast_path_label(
+                    frame.regions, z, x, y, enabled_regions, nwp_chain,
+                    precip_mask, timestamp, nowcast_blend,
                 )
-                compute_ns = time.perf_counter_ns() - compute_start
-                tile_cache.put(geom_key, geom)
-                # Only fire on the cold-compute path: a fast-path label here means
-                # this request actually paid for the empty-tile work (cache hits
-                # of a previously-computed transparent geometry are already counted
-                # by ``record_request`` above, not a fast-path firing now).
-                if tile_request_tracker is not None and geom.fast_path is not None:
-                    tile_request_tracker.record_fast_path(geom.fast_path)
+                if label is not None:
+                    # Cold-compute-equivalent: the request paid for the
+                    # empty-tile decision here (no pool compute ran, so
+                    # compute_ns stays None).
+                    geom = TileGeometry.transparent(tile_size, fast_path=label)
+                    tile_cache.put(geom_key, geom)
+                    if tile_request_tracker is not None and geom.fast_path is not None:
+                        tile_request_tracker.record_fast_path(geom.fast_path)
+                else:
+                    compute_start = time.perf_counter_ns()
+                    geom = await asyncio.to_thread(
+                        compute_tile_geometry,
+                        frame_regions=frame.regions,
+                        z=z, x=x, y=y,
+                        tile_size=tile_size,
+                        smooth=smooth,
+                        snow=snow,
+                        nwp_chain=nwp_chain,
+                        enabled_regions=enabled_regions,
+                        frame_timestamp=timestamp,
+                        nowcast_blend=nowcast_blend,
+                        precip_mask=precip_mask,
+                    )
+                    compute_ns = time.perf_counter_ns() - compute_start
+                    tile_cache.put(geom_key, geom)
+                    # Only fire on the cold-compute path: a fast-path label here means
+                    # this request actually paid for the empty-tile work (cache hits
+                    # of a previously-computed transparent geometry are already counted
+                    # by ``record_request`` above, not a fast-path firing now).
+                    if tile_request_tracker is not None and geom.fast_path is not None:
+                        tile_request_tracker.record_fast_path(geom.fast_path)
 
             flow_regions = None
             nwp_flow = None

@@ -845,27 +845,36 @@ class RadarFetcher:
             # later can't invalidate the carried data.
             already_have = (skip_regions or {}).get(ts, set())
             missing = enabled_names - set(regions_data.keys()) - already_have
-            for lookback in range(1, self._CARRY_FORWARD_MAX_INTERVALS + 1):
-                if not missing:
-                    break
-                prev_ts = ts - lookback * interval
-                prev_frame = await self._store.get_frame(prev_ts)
-                if prev_frame is None:
-                    continue
-                for name in list(missing):
-                    if name in prev_frame.regions:
-                        regions_data[name] = np.asarray(
-                            prev_frame.regions[name]
-                        ).copy()
-                        stale_min = (lookback * interval) // 60
-                        logger.info(
-                            "%s: carry-forward into ts=%d from %d (%d min stale)",
-                            name, ts, prev_ts, stale_min,
-                        )
-                        # Record provenance so later cycles re-fetch this
-                        # slot while the source archive can still serve it.
-                        self._carried_regions.setdefault(ts, set()).add(name)
-                        missing.discard(name)
+            if missing:
+                # Batch the store lookups for every carry-forward level
+                # into one gather (each get_frame still takes the store's
+                # async lock, but the awaits collapse into a single round
+                # trip instead of one await per lookback level), then walk
+                # the in-memory results in the same level order below.
+                levels = range(1, self._CARRY_FORWARD_MAX_INTERVALS + 1)
+                prev_frames = await asyncio.gather(
+                    *(self._store.get_frame(ts - lb * interval) for lb in levels)
+                )
+                for lookback, prev_frame in zip(levels, prev_frames):
+                    if not missing:
+                        break
+                    prev_ts = ts - lookback * interval
+                    if prev_frame is None:
+                        continue
+                    for name in list(missing):
+                        if name in prev_frame.regions:
+                            regions_data[name] = np.asarray(
+                                prev_frame.regions[name]
+                            ).copy()
+                            stale_min = (lookback * interval) // 60
+                            logger.info(
+                                "%s: carry-forward into ts=%d from %d (%d min stale)",
+                                name, ts, prev_ts, stale_min,
+                            )
+                            # Record provenance so later cycles re-fetch this
+                            # slot while the source archive can still serve it.
+                            self._carried_regions.setdefault(ts, set()).add(name)
+                            missing.discard(name)
 
             if not regions_data:
                 # Nothing to add — every enabled region was either
@@ -1134,19 +1143,23 @@ def _blend_cacomp_arrays(
 def _despeckle(data: np.ndarray, min_neighbors: int) -> np.ndarray:
     """Remove isolated pixels (ground clutter / AP artifacts).
 
-    Uses padded slicing instead of np.roll for ~2.4x speedup on large
-    arrays.  Slicing also avoids the wrap-around artifact that np.roll
+    Builds the 8-neighbor count with strided view additions into a single
+    pre-sized buffer — no (h+2) x (w+2) padded copy, so each call
+    allocates just the boolean mask, the count buffer, and the result
+    copy.  Slicing also avoids the wrap-around artifact that np.roll
     produces at array edges.
     """
     mask = data > 0
     h, w = mask.shape
-    padded = np.pad(mask, 1, constant_values=False)
     count = np.zeros((h, w), dtype=np.int8)
-    for dr in range(3):
-        for dc in range(3):
-            if dr == 1 and dc == 1:
-                continue
-            count += padded[dr:dr + h, dc:dc + w]
+    count[1:, :] += mask[:-1, :]
+    count[:-1, :] += mask[1:, :]
+    count[:, 1:] += mask[:, :-1]
+    count[:, :-1] += mask[:, 1:]
+    count[1:, 1:] += mask[:-1, :-1]
+    count[1:, :-1] += mask[:-1, 1:]
+    count[:-1, 1:] += mask[1:, :-1]
+    count[:-1, :-1] += mask[1:, 1:]
 
     result = data.copy()
     result[mask & (count < min_neighbors)] = 0

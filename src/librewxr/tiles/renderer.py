@@ -96,6 +96,50 @@ class TileGeometry:
 # ---------------------------------------------------------------------------
 
 
+def transparent_fast_path_label(
+    frame_regions: dict[str, np.ndarray],
+    z: int,
+    x: int,
+    y: int,
+    enabled_regions: list[str] | None,
+    nwp_chain,
+    precip_mask,  # PrecipMaskStore | None - multi-mode only
+    frame_timestamp: int | None,
+    nowcast_blend: float | None,
+) -> str | None:
+    """Cheap event-loop-safe pre-check; single source of truth for the
+    transparent fast-path decision shared by ``compute_tile_geometry`` and
+    the radar-tile route.
+    """
+    regions = overlapping_regions(z, x, y, enabled_regions)
+    regions_with_data = [r for r in regions if r.name in frame_regions]
+
+    has_nwp = nwp_chain is not None and nwp_chain.has_data()
+
+    if not regions_with_data:
+        # The NWP-only path may still produce content - NOT a fast path.
+        if has_nwp:
+            return None
+        return "no_regions_no_nwp"
+
+    # Tier 2: pre-sample global precip-mask gate (multi-mode only).  The
+    # mask ORs radar regions + all NWP source samples + nowcast regions
+    # into one coarse boolean grid per timestamp, so the gate fires for
+    # the past-radar path AND the nowcast path together - Tier 3 (the
+    # nowcast bbox) is folded in.  Single mode has no mask
+    # (``precip_mask is None``) and falls through to the existing Tier 1 /
+    # Case A paths unchanged.  Hoisted ahead of the ``_sample_region``
+    # calls so clear-sky tiles bail in O(1): the mask includes the radar
+    # contribution, so no precip in the bbox guarantees the radar sample
+    # is empty and the pre-hoist ``radar_empty`` term was always true.
+    if has_nwp and precip_mask is not None:
+        if not precip_mask.has_precip_in_bbox(frame_timestamp, tile_bounds(z, x, y)):
+            label = "tier2_mask_nowcast" if nowcast_blend is not None else "tier2_mask_past"
+            return label
+
+    return None
+
+
 def compute_tile_geometry(
     frame_regions: dict[str, np.ndarray],
     z: int,
@@ -123,28 +167,18 @@ def compute_tile_geometry(
 
     has_nwp = nwp_chain is not None and nwp_chain.has_data()
 
-    if not regions_with_data:
-        if has_nwp:
-            return _compute_nwp_only_geometry(
-                nwp_chain, z, x, y, tile_size, smooth, snow, frame_timestamp,
-                precip_mask,
-            )
-        return TileGeometry.transparent(tile_size, fast_path="no_regions_no_nwp")
+    label = transparent_fast_path_label(
+        frame_regions, z, x, y, enabled_regions, nwp_chain, precip_mask,
+        frame_timestamp, nowcast_blend,
+    )
+    if label is not None:
+        return TileGeometry.transparent(tile_size, fast_path=label)
 
-    # Tier 2: pre-sample global precip-mask gate (multi-mode only).  The
-    # mask ORs radar regions + all NWP source samples + nowcast regions
-    # into one coarse boolean grid per timestamp, so the gate fires for
-    # the past-radar path AND the nowcast path together — Tier 3 (the
-    # nowcast bbox) is folded in.  Single mode has no mask
-    # (``precip_mask is None``) and falls through to the existing Tier 1 /
-    # Case A paths unchanged.  Hoisted ahead of the ``_sample_region``
-    # calls so clear-sky tiles bail in O(1): the mask includes the radar
-    # contribution, so no precip in the bbox guarantees the radar sample
-    # is empty and the pre-hoist ``radar_empty`` term was always true.
-    if has_nwp and precip_mask is not None:
-        if not precip_mask.has_precip_in_bbox(frame_timestamp, tile_bounds(z, x, y)):
-            label = "tier2_mask_nowcast" if nowcast_blend is not None else "tier2_mask_past"
-            return TileGeometry.transparent(tile_size, fast_path=label)
+    if not regions_with_data:
+        return _compute_nwp_only_geometry(
+            nwp_chain, z, x, y, tile_size, smooth, snow, frame_timestamp,
+            precip_mask,
+        )
 
     # Determine blur radius from local geometry: scale Gaussian kernel
     # to the number of tile pixels covered by a single region pixel.
@@ -208,8 +242,13 @@ def compute_tile_geometry(
 
     if settings.noise_floor_dbz > -32:
         pixel_threshold = int((settings.noise_floor_dbz + 32) * 2)
-        values = values.copy()
-        values[values < pixel_threshold] = 0
+        if has_nwp:
+            # The fill/blend path returned a freshly allocated array,
+            # so no defensive copy is needed.
+            values[values < pixel_threshold] = 0
+        else:
+            values = values.copy()
+            values[values < pixel_threshold] = 0
 
     # Tier 1: post-NWP-fill empty check.  If after fill/blend + noise
     # floor the tile is all-zero (NWP also sampled empty, or nowcast
@@ -266,7 +305,8 @@ def _compute_nwp_only_geometry(
 
     if settings.noise_floor_dbz > -32:
         pixel_threshold = int((settings.noise_floor_dbz + 32) * 2)
-        values = values.copy()
+        # sample() returns a freshly allocated array, so no defensive
+        # copy is needed.
         values[values < pixel_threshold] = 0
 
     # Tier 1: post-sample empty check — all-zero after the noise floor
@@ -1145,6 +1185,12 @@ def _draw_storm_cells(
         row_min, row_max = float(valid_rows.min()), float(valid_rows.max())
         col_min, col_max = float(valid_cols.min()), float(valid_cols.max())
 
+        # First pass over the cells: apply the +-2 bounds check exactly as
+        # the old per-cell path did, collecting the surviving cell indices
+        # (ascending) with their centroid coords.
+        keep = []
+        keep_cr = []
+        keep_cc = []
         for i in range(count):
             cell = cells[i]
             cr = float(cell["centroid_row"])
@@ -1154,13 +1200,46 @@ def _draw_storm_cells(
             # The +-2 padding accounts for sub-pixel rounding at the tile edges.
             if not (row_min - 2 <= cr <= row_max + 2 and col_min - 2 <= cc <= col_max + 2):
                 continue
+            keep.append(i)
+            keep_cr.append(cr)
+            keep_cc.append(cc)
 
-            # Nearest-neighbor: find the tile pixel whose region-pixel coords
-            # are closest to the cell's centroid.  This is projection-agnostic
-            # because row_f/col_f already encode the forward projection.
-            d2 = np.where(valid_mask, (row_f - cr) ** 2 + (col_f - cc) ** 2, np.inf)
-            flat_idx = int(d2.argmin())
-            ty, tx = divmod(flat_idx, tile_size)
+        if not keep:
+            continue
+
+        # Chunked vectorized nearest-centroid assignment.  The old per-cell
+        # search built a full-tile float64 distance array per cell (up to
+        # ~1 GB transient at 512px with ~500 cells).  Computing d2 as
+        # (chunk, n_valid) float32 matrices over 16 cells at a time gives
+        # the identical pixel: every pixel of a cell lives in that cell's
+        # row (chunking is over cells, never pixels), so argmin(axis=1)
+        # picks the same first-minimum-in-row-major-order result as the
+        # old full-tile argmin.  The float32 dtype matches the old per-cell
+        # arithmetic exactly: the old path subtracted a Python-float scalar
+        # from a float32 array, which stays float32 under NumPy's weak
+        # scalar promotion, and a float32 chunk array holds the same
+        # rounded values, so the elementwise d2 results are identical.
+        # Argmin ordering is preserved because the old float64 was only an
+        # exact, order-preserving upcast of these same float32 values.
+        valid_flat = np.flatnonzero(valid_mask.ravel())
+        keep_ty = np.empty(len(keep), dtype=np.int64)
+        keep_tx = np.empty(len(keep), dtype=np.int64)
+        for start in range(0, len(keep), 16):
+            cr_chunk = np.asarray(keep_cr[start:start + 16], dtype=np.float32)
+            cc_chunk = np.asarray(keep_cc[start:start + 16], dtype=np.float32)
+            d2 = (
+                (valid_rows[None, :] - cr_chunk[:, None]) ** 2
+                + (valid_cols[None, :] - cc_chunk[:, None]) ** 2
+            )
+            flat_idx = valid_flat[d2.argmin(axis=1)]
+            keep_ty[start:start + 16], keep_tx[start:start + 16] = divmod(
+                flat_idx, tile_size
+            )
+
+        for j, i in enumerate(keep):
+            cell = cells[i]
+            ty = int(keep_ty[j])
+            tx = int(keep_tx[j])
 
             # Circle radius scaled by area (log scale -- area spans orders of
             # magnitude from ~25 km^2 single cells to ~10000 km^2 MCSs).

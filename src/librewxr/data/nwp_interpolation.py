@@ -50,6 +50,25 @@ _FARNEBACK = dict(
 )
 
 
+# Coordinate grids are pure functions of their shape, yet the pair/forward
+# helpers rebuild them via np.mgrid on every call.  Cache the built grids
+# keyed by shape — at most a handful of distinct grid shapes exist per
+# process.  Thread-safety: the dict is read-mostly and mutation only adds
+# whole entries (GIL-atomic); the worst-case race is two threads building
+# the same constant twice — harmless, so no lock.
+_GRID_CACHE: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
+
+
+def _coordinate_grid(h: int, w: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return cached float32 (ys, xs) coordinate grids for shape (h, w)."""
+    grids = _GRID_CACHE.get((h, w))
+    if grids is None:
+        mgrid = np.mgrid[0:h, 0:w].astype(np.float32)
+        grids = (mgrid[0], mgrid[1])
+        _GRID_CACHE[(h, w)] = grids
+    return grids
+
+
 def interpolate_run(
     frames_by_ts: dict[int, np.ndarray],
     snow_masks_by_ts: dict[int, np.ndarray] | None = None,
@@ -201,7 +220,7 @@ def interpolate_pair_at_fraction(
         flow = _compute_flow(frame0, frame1, downscale)
 
     h, w = frame0.shape
-    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    ys, xs = _coordinate_grid(h, w)
     interp = _interpolate_precip(frame0, frame1, flow, t, xs, ys)
     return interp, flow
 
@@ -251,7 +270,7 @@ def extrapolate_forward(
         flow = _compute_flow(frame0, frame1, downscale)
 
     h, w = frame1.shape
-    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    ys, xs = _coordinate_grid(h, w)
     map_x = xs - t_forward * flow[..., 0]
     map_y = ys - t_forward * flow[..., 1]
     extrapolated = cv2.remap(

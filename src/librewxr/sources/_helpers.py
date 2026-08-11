@@ -73,8 +73,14 @@ def _dbz_float_to_uint8(arr: np.ndarray) -> np.ndarray:
 
     Formula: pixel = clamp((dBZ + 32) * 2, 0, 255)
     NODATA (anything <= -32) maps to 0 (transparent in all color schemes).
+
+    In-place formulation: one pre-sized float32 working buffer reused via
+    ``out=`` across the add/multiply/clip chain, then a single uint8 cast.
     """
-    nodata_mask = arr <= -32.0
-    result = np.clip((arr + 32.0) * 2.0, 0, 255).astype(np.uint8)
-    result[nodata_mask] = 0
-    return result
+    result = np.empty(arr.shape, dtype=np.float32)
+    np.add(arr, 32.0, out=result)
+    result *= 2.0
+    np.clip(result, 0, 255, out=result)
+    out = result.astype(np.uint8)
+    out[arr <= -32.0] = 0
+    return out
