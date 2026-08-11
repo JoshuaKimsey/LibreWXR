@@ -736,6 +736,7 @@ class RadarFetcher:
         """
         # For each timestamp, fetch regions in parallel (skipping any
         # already present from a previous partial fetch).
+        sem = asyncio.Semaphore(settings.radar_fetch_concurrency)
         tasks = []
         task_meta: list[tuple[int, RegionDef, str, int | datetime]] = []
 
@@ -747,9 +748,9 @@ class RadarFetcher:
                     continue
                 source = self._sources[region.name]
                 if source_type == "live":
-                    tasks.append(source.fetch_frame(region, source_arg))
+                    tasks.append(_bounded_fetch(sem, source.fetch_frame(region, source_arg)))
                 else:
-                    tasks.append(source.fetch_archive_frame(region, source_arg))
+                    tasks.append(_bounded_fetch(sem, source.fetch_archive_frame(region, source_arg)))
                 task_meta.append((ts, region, source_type, source_arg))
 
         radar_start = time.monotonic()
@@ -1053,6 +1054,17 @@ class RadarFetcher:
         return await asyncio.to_thread(
             _blend_cacomp_arrays, mrms_data, msc_data, region,
         )
+
+
+async def _bounded_fetch(sem: asyncio.Semaphore, coro: Awaitable) -> object:
+    """Run a single fetch coroutine under the radar fetch-concurrency semaphore.
+
+    Wraps an already-created (but not yet scheduled) coroutine object so
+    the gather in ``_fetch_timestamps`` can hand each task a semaphore
+    slot without starting any fetch ahead of the gather.
+    """
+    async with sem:
+        return await coro
 
 
 def _blend_cacomp_arrays(

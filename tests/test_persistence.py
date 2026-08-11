@@ -115,6 +115,73 @@ class TestFrameStorePersistence:
         consumer.__setstate__(snapshot)
         assert consumer._frame_versions == {}
 
+    @pytest.mark.asyncio
+    async def test_setstate_reuses_identical_memmaps(self, tmp_path: Path) -> None:
+        """Applying the same snapshot twice reuses the identical memmap objects."""
+        cache = tmp_path / "cache"
+        producer = FrameStore(max_frames=4, cache_dir=cache)
+        arr = np.zeros((4, 4), dtype=np.uint8)
+        await producer.add_frame(RadarFrame(timestamp=1700000000, regions={"A": arr}))
+        await producer.add_frame(RadarFrame(timestamp=1700000600, regions={"B": arr}))
+        snapshot = _roundtrip(producer.__getstate__())
+
+        consumer = FrameStore(max_frames=4)
+        consumer.__setstate__(snapshot)
+        first_arrays = {f.timestamp: dict(f.regions) for f in consumer._frames}
+
+        consumer.__setstate__(snapshot)
+        for frame in consumer._frames:
+            for name, arr in frame.regions.items():
+                assert arr is first_arrays[frame.timestamp][name]
+
+    @pytest.mark.asyncio
+    async def test_setstate_version_bump_reopens_only_that_timestamp(
+        self, tmp_path: Path,
+    ) -> None:
+        """Bumping one timestamp's version re-opens its regions; others are reused."""
+        cache = tmp_path / "cache"
+        producer = FrameStore(max_frames=4, cache_dir=cache)
+        arr = np.zeros((4, 4), dtype=np.uint8)
+        await producer.add_frame(RadarFrame(timestamp=1700000000, regions={"A": arr}))
+        await producer.add_frame(RadarFrame(timestamp=1700000600, regions={"B": arr}))
+        snapshot = _roundtrip(producer.__getstate__())
+
+        consumer = FrameStore(max_frames=4)
+        consumer.__setstate__(snapshot)
+        first_arrays = {f.timestamp: dict(f.regions) for f in consumer._frames}
+
+        # Simulate a merge on the first timestamp: bump its version only.
+        bumped = json.loads(json.dumps(snapshot))
+        bumped["frame_versions"]["1700000000"] += 1
+        consumer.__setstate__(bumped)
+
+        frames = {f.timestamp: f for f in consumer._frames}
+        # Bumped timestamp must be re-opened, not the same object.
+        assert frames[1700000000].regions["A"] is not first_arrays[1700000000]["A"]
+        # Untouched timestamp is still the identical memmap object.
+        assert frames[1700000600].regions["B"] is first_arrays[1700000600]["B"]
+
+    @pytest.mark.asyncio
+    async def test_setstate_without_frame_versions_reopens_everything(
+        self, tmp_path: Path,
+    ) -> None:
+        """Snapshots missing frame_versions re-open all regions instead of crashing."""
+        cache = tmp_path / "cache"
+        producer = FrameStore(max_frames=4, cache_dir=cache)
+        arr = np.zeros((4, 4), dtype=np.uint8)
+        await producer.add_frame(RadarFrame(timestamp=1700000000, regions={"A": arr}))
+        snapshot = producer.__getstate__()
+        del snapshot["frame_versions"]
+
+        consumer = FrameStore(max_frames=4)
+        consumer.__setstate__(_roundtrip(snapshot))
+        first = consumer._frames[0].regions["A"]
+        consumer.__setstate__(_roundtrip(snapshot))
+        second = consumer._frames[0].regions["A"]
+        # No version match -> every region is re-opened, never the same object.
+        assert second is not first
+        np.testing.assert_array_equal(second, arr)
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # NowcastStore — populated round-trip

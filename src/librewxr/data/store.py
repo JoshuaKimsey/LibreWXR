@@ -229,18 +229,58 @@ class FrameStore:
         in place so existing references to ``FrameStore`` stay valid for
         ongoing renders (Linux holds the old memmap inodes alive until
         all readers release them).
+
+        Region arrays are reused in place instead of re-opened whenever
+        the timestamp's content version is unchanged between the previous
+        state and this one.  The reuse is version-guarded because merges
+        rewrite the same basename via ``os.replace`` (see ``add_frame``
+        and ``_to_memmap``): an unchanged filename does not imply
+        unchanged content, so the per-timestamp version is bumped on every
+        merge and an unchanged version is the only safe signal that the
+        live memmap still matches the payload.  The payload descriptor
+        (basename, dtype, shape) is also verified against the live array
+        before reuse; anything that fails the check is re-opened fresh.
         """
         max_frames = state["max_frames"]
         memmap_dir = Path(state["memmap_dir"])
+        # JSON coerces int keys to strings; convert back.  The .get(..., {})
+        # default handles snapshots written before this field existed.
+        new_versions = {
+            int(k): v for k, v in state.get("frame_versions", {}).items()
+        }
+        old_versions = getattr(self, "_frame_versions", {}) or {}
+        old_by_ts = getattr(self, "_by_ts", {}) or {}
         new_frames: list[RadarFrame] = []
+        reused = 0
+        reopened = 0
         for f_info in state["frames"]:
-            frame = RadarFrame(timestamp=f_info["timestamp"])
+            ts = f_info["timestamp"]
+            frame = RadarFrame(timestamp=ts)
+            old_frame = old_by_ts.get(ts)
+            version_ok = (
+                old_frame is not None
+                and old_versions.get(ts) is not None
+                and new_versions.get(ts) is not None
+                and old_versions.get(ts) == new_versions.get(ts)
+            )
             for name, (basename, dtype_str, shape) in f_info["regions"].items():
-                frame.regions[name] = np.memmap(
-                    memmap_dir / basename,
-                    dtype=np.dtype(dtype_str), mode="r",
-                    shape=tuple(shape),
-                )
+                old_arr = old_frame.regions.get(name) if old_frame is not None else None
+                if (
+                    version_ok
+                    and old_arr is not None
+                    and os.path.basename(str(old_arr.filename)) == basename
+                    and old_arr.dtype.str == dtype_str
+                    and list(old_arr.shape) == list(shape)
+                ):
+                    frame.regions[name] = old_arr
+                    reused += 1
+                else:
+                    frame.regions[name] = np.memmap(
+                        memmap_dir / basename,
+                        dtype=np.dtype(dtype_str), mode="r",
+                        shape=tuple(shape),
+                    )
+                    reopened += 1
             new_frames.append(frame)
         new_frames.sort(key=lambda f: f.timestamp)
 
@@ -252,14 +292,14 @@ class FrameStore:
         # Rebuild the O(1) timestamp index alongside the frame list so
         # the two never drift apart across snapshot refreshes.
         self._by_ts = {f.timestamp: f for f in new_frames}
-        # JSON coerces int keys to strings; convert back.  The .get(..., {})
-        # default handles snapshots written before this field existed.
-        self._frame_versions = {
-            int(k): v for k, v in state.get("frame_versions", {}).items()
-        }
+        self._frame_versions = new_versions
         self._persistent = True
         if not hasattr(self, "_lock"):
             self._lock = asyncio.Lock()
+        logger.debug(
+            'FrameStore refresh: %d regions reused, %d reopened across %d frames',
+            reused, reopened, len(new_frames),
+        )
 
     def cleanup(self) -> None:
         """Release in-memory frame references; remove temp dir if non-persistent.

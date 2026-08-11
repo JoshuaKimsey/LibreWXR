@@ -27,6 +27,7 @@ in ``config.py`` for the tunables.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import math
 import os
@@ -113,6 +114,24 @@ _MAX_FLOW_KM_PER_HOUR = 200.0
 NWP_FLOW_NORTH = 90.0
 NWP_FLOW_SOUTH = -90.0
 NWP_FLOW_WEST = -180.0
+
+# Process-lifetime nowcast worker pool.  Phase A (per-region Farneback
+# optical flow) and Phase B (per-step × per-region cv2.remap warp) are
+# embarrassingly parallel and cv2 releases the GIL, so a 4-thread pool
+# scales real speedup.  Lazily created on first use so deployments that
+# never run nowcast (or the arrow-flow path) don't pay for the pool;
+# never shut down — it lives for the process lifetime.
+_NOWCAST_POOL: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def _nowcast_pool() -> concurrent.futures.ThreadPoolExecutor:
+    """Return the process-lifetime nowcast thread pool (lazily created)."""
+    global _NOWCAST_POOL
+    if _NOWCAST_POOL is None:
+        _NOWCAST_POOL = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="nowcast",
+        )
+    return _NOWCAST_POOL
 
 
 def _coverage_degraded(prev: np.ndarray, latest: np.ndarray) -> tuple[bool, int, int]:
@@ -737,82 +756,32 @@ class NowcastGenerator:
         # external contribution still get a flow computed because the
         # extrapolation path may be needed for any step where the
         # external source returned no frame (transient miss).
-        from librewxr.data.regions import REGIONS as _ALL_REGIONS  # local import: avoid circular at module load
         flows: dict[str, np.ndarray] = {}
         # Unclamped low-res flows for the extrapolation phase (bit-exact
-        # warp path — see the clamp comment in the loop) plus the
+        # warp path — see the clamp comment in the helper) plus the
         # per-region clamp bound.  Both are tiny (≤ target-dim arrays).
         warp_flows: dict[str, np.ndarray] = {}
         flow_clamps: dict[str, float] = {}
-        for region_name in latest_regions:
-            data0 = prev_regions.get(region_name)
-            data1 = latest_regions.get(region_name)
-            if data0 is None or data1 is None:
-                continue
-            degraded, prev_nz, latest_nz = _coverage_degraded(data0, data1)
-            if degraded:
-                logger.warning(
-                    "Nowcast: %s coverage degraded (%d → %d non-zero px) — "
-                    "skipping optical-flow extrapolation to avoid streak "
-                    "artifacts from partial-frame motion estimation",
-                    region_name, prev_nz, latest_nz,
-                )
-                continue
-            flow_small, scale = _compute_flow_low(
-                data0, data1, target_dim=flow_target_dim,
-            )
-            # Store the flow at the resolution it was computed at, with
-            # vectors pre-multiplied by 1/scale so they stay in
-            # full-resolution pixel units.  Consumers upscale with
-            # ``_upscale_flow`` at the point of use (warp time / arrow
-            # sampling); because cv2.resize is linear this is bitwise
-            # identical to the legacy store-full-res pipeline.  USCOMP
-            # flow storage drops from ~527 MB to ~3.5 MB.
-            flow_unclamped = (
-                flow_small * (1.0 / scale)
-                if scale < 1.0 else flow_small
-            )
-            # Cap unphysical motion vectors before extrapolation.  Without
-            # this, Farneback's polynomial fit at data/no-data boundaries
-            # reports 50-200+ px/step magnitudes, which the inverse-warp
-            # then renders as vertical streaks of fake precipitation.
-            #
-            # Clamp placement (see also ``_extrapolate_forward``):
-            #  * The STORED field (arrows, storm-cell detection) is
-            #    clamped at low resolution.  Upscaling is a linear
-            #    convex-combination operation, so every upscaled vector
-            #    has magnitude ≤ the cap whenever the low-res source is
-            #    capped — the max-displacement guarantee for consumers
-            #    holds exactly as before, and when no vector exceeds the
-            #    cap the clamp is a no-op identical to the old order.
-            #  * The WARP path stays bit-identical to the old pipeline
-            #    by clamping the UPSCALED field at warp time (the old
-            #    code clamped the full-res field once after upscaling).
-            #    Clamping before upscaling would NOT reproduce it: an
-            #    over-cap vector spreads over a ~1/scale² full-res
-            #    neighbourhood, and capping it before the spread changes
-            #    the interpolated directions/magnitudes in that band.
-            #    ``warp_flows`` therefore carries the unclamped field and
-            #    ``flow_clamps`` the per-region cap; when the low-res
-            #    clamp below is a no-op (no over-cap vector anywhere),
-            #    the upscaled field is provably ≤ the cap too, so the
-            #    warp-time clamp is skipped and both paths share one
-            #    array.  The stored clamped field is what the arrow
-            #    overlay / storm cells sample, keeping them bounded.
-            region_def = _ALL_REGIONS.get(region_name)
-            if region_def is not None:
-                ps_y = (
-                    region_def.pixel_size_y
-                    if region_def.pixel_size_y > 0
-                    else region_def.pixel_size
-                )
-                max_px = _max_flow_pixels(ps_y, interval)
-                clamped = _clamp_flow(flow_unclamped, max_px)
-                if clamped is not flow_unclamped:
-                    flow_clamps[region_name] = max_px
-                flows[region_name] = clamped
-            else:
-                flows[region_name] = flow_unclamped
+        # Phase A runs one optical-flow task per region over the nowcast
+        # pool — cv2 releases the GIL, so Farneback work scales across
+        # threads.  ``executor.map`` preserves input order, so results
+        # come back in the same order as the ``latest_regions``
+        # iteration; assembly happens here in the driving thread only
+        # (task bodies never mutate shared dicts).
+        region_results = list(_nowcast_pool().map(
+            lambda r: _compute_region_flow(
+                r, prev_regions.get(r), latest_regions.get(r),
+                flow_target_dim, interval,
+            ),
+            latest_regions,
+        ))
+        for result in region_results:
+            if result is None:
+                continue  # missing prev/latest frame or coverage-degraded skip
+            region_name, clamped, flow_unclamped, clamp_bound = result
+            flows[region_name] = clamped
+            if clamp_bound is not None:
+                flow_clamps[region_name] = clamp_bound
             warp_flows[region_name] = flow_unclamped
 
         # Arrow-flow-only path: Phase A is the whole job.  Return an
@@ -840,13 +809,26 @@ class NowcastGenerator:
 
         # Precompute the float32 mgrid coordinate grids ONCE per region
         # instead of rebuilding them for every forecast step — xs/ys are
-        # identical across all 6 steps (only map_x/map_y, which are
-        # steps·flow away from them, vary per step).  Built lazily on
-        # first use so regions fully served by an external contribution
-        # never allocate them.
+        # identical across all steps (only map_x/map_y, which are
+        # steps·flow away from them, vary per step).  Built up-front for
+        # every region that has both a warp flow and data so the
+        # parallel Phase B tasks below only read them (the old lazy
+        # per-step build mutated a shared dict, which the pool forbids).
         coord_grids: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for region_name in forecast_regions:
+            flow = warp_flows.get(region_name)
+            data = latest_regions.get(region_name)
+            if flow is not None and data is not None:
+                h, w = data.shape
+                ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+                coord_grids[region_name] = (ys, xs)
 
-        # Generate extrapolated frames for each step
+        # Generate extrapolated frames for each step.  Phase B submits
+        # one task per (step, region) pair over the nowcast pool and
+        # assembles the final frames strictly in step order 1..n_steps
+        # here in the driving thread; within each step, regions are
+        # inserted in ``sorted(forecast_regions)`` order for
+        # determinism.  Task bodies read shared dicts only.
         frames: list[NowcastFrame] = []
         for step in range(1, n_steps + 1):
             nowcast_ts = latest_ts + step * interval
@@ -871,38 +853,24 @@ class NowcastGenerator:
                 t = step / max_blend_steps
                 blend_weight = 0.20 + 0.80 * (1.0 - t) ** 1.4
 
+            results = list(_nowcast_pool().map(
+                lambda r: _extrapolate_region_step(
+                    r, nowcast_ts, step,
+                    external_by_region.get(r),
+                    warp_flows, latest_regions, coord_grids, flow_clamps,
+                ),
+                sorted(forecast_regions),
+            ))
             regions: dict[str, np.ndarray] = {}
-            for region_name in forecast_regions:
-                external = external_by_region.get(region_name)
-                external_frame = external.get(nowcast_ts) if external else None
-                # No per-pixel boundary feathering: the internal
-                # extrapolation seeds from the same upstream analysis
-                # as the external contribution (e.g. JMA HRPN N1 →
-                # FrameStore → both nowcast paths), so both produce
-                # zeros wherever the upstream has no coverage.  Per-
-                # step replacement is sufficient; mixing them per
-                # pixel would add noise rather than fill a real gap.
-                if external_frame is not None:
-                    regions[region_name] = external_frame
+            for result in results:
+                if result is None:
+                    # No external frame for this step and no internal
+                    # flow — skip this region for this step.  Renderer
+                    # falls back to NWP fill which is the correct
+                    # behaviour for an uncovered region.
                     continue
-                flow = warp_flows.get(region_name)
-                data = latest_regions.get(region_name)
-                if flow is not None and data is not None:
-                    grids = coord_grids.get(region_name)
-                    if grids is None:
-                        h, w = data.shape
-                        ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
-                        grids = (ys, xs)
-                        coord_grids[region_name] = grids
-                    ys, xs = grids
-                    regions[region_name] = _extrapolate_forward(
-                        data, flow, step, xs=xs, ys=ys,
-                        max_px=flow_clamps.get(region_name),
-                    )
-                # else: no external for this step, no internal flow —
-                # skip this region for this step.  Renderer falls back
-                # to NWP fill which is the correct behaviour for an
-                # uncovered region.
+                region_name, frame_data = result
+                regions[region_name] = frame_data
 
             frames.append(NowcastFrame(
                 timestamp=nowcast_ts,
@@ -1069,6 +1037,96 @@ def _compute_flow(
     return flow_small
 
 
+def _compute_region_flow(
+    region_name: str,
+    data0: np.ndarray | None,
+    data1: np.ndarray | None,
+    flow_target_dim: int,
+    interval: int,
+) -> tuple[str, np.ndarray, np.ndarray, float | None] | None:
+    """Phase A per-region optical-flow task (runs on the nowcast pool).
+
+    Returns ``None`` when the region must be skipped this cycle —
+    either a prev/latest frame is missing (silent skip, as before) or
+    the coverage-degradation guard tripped (the warning is logged here;
+    logging from worker threads is fine).  Otherwise returns
+    ``(region_name, clamped_flow, unclamped_flow, clamp_bound)`` where
+    ``clamped_flow`` is the stored field (identical to the unclamped
+    field when nothing needed clamping or the region has no ``REGIONS``
+    entry), ``unclamped_flow`` feeds the bit-exact warp path, and
+    ``clamp_bound`` is the per-region km/h-derived pixel cap, set only
+    when the low-res clamp actually fired (``None`` otherwise).
+    """
+    if data0 is None or data1 is None:
+        return None
+    degraded, prev_nz, latest_nz = _coverage_degraded(data0, data1)
+    if degraded:
+        logger.warning(
+            "Nowcast: %s coverage degraded (%d → %d non-zero px) — "
+            "skipping optical-flow extrapolation to avoid streak "
+            "artifacts from partial-frame motion estimation",
+            region_name, prev_nz, latest_nz,
+        )
+        return None
+    flow_small, scale = _compute_flow_low(
+        data0, data1, target_dim=flow_target_dim,
+    )
+    # Store the flow at the resolution it was computed at, with
+    # vectors pre-multiplied by 1/scale so they stay in
+    # full-resolution pixel units.  Consumers upscale with
+    # ``_upscale_flow`` at the point of use (warp time / arrow
+    # sampling); because cv2.resize is linear this is bitwise
+    # identical to the legacy store-full-res pipeline.  USCOMP
+    # flow storage drops from ~527 MB to ~3.5 MB.
+    flow_unclamped = (
+        flow_small * (1.0 / scale)
+        if scale < 1.0 else flow_small
+    )
+    # Cap unphysical motion vectors before extrapolation.  Without
+    # this, Farneback's polynomial fit at data/no-data boundaries
+    # reports 50-200+ px/step magnitudes, which the inverse-warp
+    # then renders as vertical streaks of fake precipitation.
+    #
+    # Clamp placement (see also ``_extrapolate_forward``):
+    #  * The STORED field (arrows, storm-cell detection) is
+    #    clamped at low resolution.  Upscaling is a linear
+    #    convex-combination operation, so every upscaled vector
+    #    has magnitude ≤ the cap whenever the low-res source is
+    #    capped — the max-displacement guarantee for consumers
+    #    holds exactly as before, and when no vector exceeds the
+    #    cap the clamp is a no-op identical to the old order.
+    #  * The WARP path stays bit-identical to the old pipeline
+    #    by clamping the UPSCALED field at warp time (the old
+    #    code clamped the full-res field once after upscaling).
+    #    Clamping before upscaling would NOT reproduce it: an
+    #    over-cap vector spreads over a ~1/scale² full-res
+    #    neighbourhood, and capping it before the spread changes
+    #    the interpolated directions/magnitudes in that band.
+    #    ``warp_flows`` therefore carries the unclamped field and
+    #    ``flow_clamps`` the per-region cap; when the low-res
+    #    clamp below is a no-op (no over-cap vector anywhere),
+    #    the upscaled field is provably ≤ the cap too, so the
+    #    warp-time clamp is skipped and both paths share one
+    #    array.  The stored clamped field is what the arrow
+    #    overlay / storm cells sample, keeping them bounded.
+    from librewxr.data.regions import REGIONS as _ALL_REGIONS  # local import: avoid circular at module load
+    region_def = _ALL_REGIONS.get(region_name)
+    clamp_bound = None
+    if region_def is not None:
+        ps_y = (
+            region_def.pixel_size_y
+            if region_def.pixel_size_y > 0
+            else region_def.pixel_size
+        )
+        max_px = _max_flow_pixels(ps_y, interval)
+        clamped = _clamp_flow(flow_unclamped, max_px)
+        if clamped is not flow_unclamped:
+            clamp_bound = max_px
+    else:
+        clamped = flow_unclamped
+    return region_name, clamped, flow_unclamped, clamp_bound
+
+
 def _extrapolate_forward(
     frame: np.ndarray, flow: np.ndarray, steps: int,
     xs: np.ndarray | None = None,
@@ -1126,3 +1184,47 @@ def _extrapolate_forward(
     # intensity jump on the first forecast frame.
 
     return warped
+
+
+def _extrapolate_region_step(
+    region_name: str,
+    nowcast_ts: int,
+    step: int,
+    external: dict[int, np.ndarray] | None,
+    warp_flows: dict[str, np.ndarray],
+    latest_regions: dict[str, np.ndarray],
+    coord_grids: dict[str, tuple[np.ndarray, np.ndarray]],
+    flow_clamps: dict[str, float],
+) -> tuple[str, np.ndarray] | None:
+    """Phase B per-(step, region) extrapolation task (runs on the pool).
+
+    External ``NowcastContribution`` frames take precedence for the
+    validtime and are returned as-is; otherwise the latest radar is
+    inverse-warped forward along the precomputed flow using the
+    prebuilt coordinate grids.  Returns ``None`` when neither applies —
+    the no-region marker; the renderer falls back to NWP fill, which is
+    the correct behaviour for an uncovered region.  Reads shared dicts
+    only — never mutates them.
+    """
+    external_frame = external.get(nowcast_ts) if external else None
+    # No per-pixel boundary feathering: the internal
+    # extrapolation seeds from the same upstream analysis
+    # as the external contribution (e.g. JMA HRPN N1 →
+    # FrameStore → both nowcast paths), so both produce
+    # zeros wherever the upstream has no coverage.  Per-
+    # step replacement is sufficient; mixing them per
+    # pixel would add noise rather than fill a real gap.
+    if external_frame is not None:
+        return region_name, external_frame
+    flow = warp_flows.get(region_name)
+    data = latest_regions.get(region_name)
+    if flow is not None and data is not None:
+        ys, xs = coord_grids[region_name]
+        return region_name, _extrapolate_forward(
+            data, flow, step, xs=xs, ys=ys,
+            max_px=flow_clamps.get(region_name),
+        )
+    # No external for this step, no internal flow — skip this region
+    # for this step.  Renderer falls back to NWP fill which is the
+    # correct behaviour for an uncovered region.
+    return None

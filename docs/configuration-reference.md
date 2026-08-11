@@ -1063,6 +1063,17 @@ Maximum number of NWP grid fetches running in parallel inside one fetch cycle. E
 
 4 fits comfortably in 8 GB; bump to 6-8 on bigger rigs (multi mode has a separate pipeline container with its own memory budget, so it can usually go higher) to bring cycle wall time closer to the slowest single source.
 
+### `LIBREWXR_RADAR_FETCH_CONCURRENCY`
+
+Maximum number of radar region-frame fetches (live or archive) running in parallel inside one fetch cycle. Each in-flight fetch can hold 100-200 MB during decode (MRMS), so this caps peak transient RAM at ~N x per-frame working set.
+
+| | |
+|---|---|
+| **Default** | `8` |
+| **Type** | integer |
+
+8 caps transient decode RAM around 1.6 GB; raise on fatter rigs to shorten backfill wall time.
+
 ---
 
 ## Nowcasting

@@ -85,6 +85,13 @@ memory_monitor = None  # MemoryMonitor | None
 # default executor), byte-identical to the pre-split behaviour.
 present_executor = None  # ThreadPoolExecutor | None
 
+# Shared-store I/O pool - set by main.py in multi mode only.  Dedicated
+# executor for shared-tile-store reads/publishes so they never queue
+# behind geometry computes on the default executor.  Single mode leaves
+# this None and the shared-store call sites fall back to
+# ``asyncio.to_thread`` (the loop default executor).
+io_executor = None  # ThreadPoolExecutor | None
+
 # Shared on-disk encoded-tile store - set by main.py in multi mode only.
 # A ``radar_tile`` hit skips frame fetch + geometry compute + present
 # entirely; plain present misses publish their fresh encode for the other
@@ -803,22 +810,36 @@ async def radar_tile(
     geom_key = (timestamp, z, x, y, tile_size, smooth, snow)
     geom = tile_cache.get(geom_key)
 
+    # Present-stage cache key: one entry per visual variant of the same
+    # geometry.  Stores the encoded bytes plus the ETag so a present
+    # cache hit skips both ``present_tile`` and the ETag hash.  Hoisted
+    # here (before the shared-store lookup) so the early-serve fast path
+    # below can use it without recomputing the tuple.
+    present_key = (
+        timestamp, z, x, y, tile_size, smooth, snow,
+        color, ext, settings.webp_quality,
+    )
+
     # Geometry-stage cache outcome: this is the meaningful hit/miss for
     # "is the fast path helping".  Batched with the (z, x, y) counter so
     # one lock acquisition covers both.
     if tile_request_tracker is not None:
         tile_request_tracker.record_request(z, x, y, cache_hit=geom is not None)
 
-    # Shared-store lookup: plain past-frame tiles only.  A hit here still
-    # counts as a geometry miss in ``record_request`` above (accepted -
-    # it avoided the compute, not the lookup).  The key folds the frame's
-    # content version so a merge/eviction re-keys the tile.
-    shared_hit = None
-    if shared_tile_store is not None and is_plain and frame_store is not None:
-        version = frame_store.frame_version(timestamp)
-        if version is not None:  # past frames only; nowcast ts has no version
-            shared_key = _shared_tile_key(timestamp, version, z, x, y, tile_size, smooth, snow, color, ext)
-            shared_hit = await asyncio.to_thread(_shared_get_and_hash, shared_tile_store, shared_key)
+    # Early-serve fast path: a plain request whose geometry is already in
+    # memory and whose encoded bytes are present-cached skips the shared-
+    # store lookup, frame fetch, geometry compute, and present entirely.
+    # The ``geom is not None`` gate is required: it keeps the nowcast-
+    # timestamp edge case on the existing path (with a geom hit,
+    # ``need_frame`` is False and the warmer hook below resolves
+    # ``frame_type`` via ``_latest_timestamps_cached``).
+    present_cache_hit = False
+    if is_plain and geom is not None:
+        cached = tile_cache.get(present_key)
+        if isinstance(cached, CachedRender):
+            tile_bytes = cached.data
+            etag = cached.etag
+            present_cache_hit = True
 
     # ``need_frame``/``is_nowcast`` live above the branch because the
     # warmer hook below runs on every path; on a shared hit (past frames
@@ -828,179 +849,191 @@ async def radar_tile(
     need_frame = geom is None or bool(arrow_style) or bool(cell_style)
     compute_ns = None
     present_ns = None
-    if shared_hit is not None:
-        # Shared hit: the published bytes (and ETag) are byte-identical to
-        # a fresh render, so skip frame fetch, geometry compute, overlays,
-        # and present entirely.  Prime the in-memory present cache so
-        # same-worker repeats hit RAM instead of the shared volume.  The
-        # warmer hook below stays reachable from every path; in practice it
-        # never fires here because the shared store is only wired in multi
-        # mode, where ``tile_warmer`` is None.
-        tile_bytes, etag = shared_hit
-        present_key = (
-            timestamp, z, x, y, tile_size, smooth, snow,
-            color, ext, settings.webp_quality,
-        )
-        tile_cache.put(present_key, CachedRender(data=tile_bytes, etag=etag))
-    else:
-        # We need the radar frame whenever geometry must be computed AND
-        # whenever an overlay is requested: arrows need live frame data +
-        # flow fields, and cells need ``frame.regions`` to decide which
-        # regions actually carry data on this tile (without it
-        # ``_draw_storm_cells`` sees an empty region list and draws
-        # nothing).  Skip the fetch on pure cache hits without overlays -
-        # that's the hot path Merry Sky-style clients exercise.
-        frame = None
-        nowcast_blend = None
-        if need_frame:
-            frame = await frame_store.get_frame(timestamp)
-            if frame is None and nowcast_store is not None:
-                nc_frame, nowcast_blend = await nowcast_store.get_frame(timestamp)
-                if nc_frame is not None:
-                    frame = nc_frame
-                    is_nowcast = True
-            if frame is None:
-                raise HTTPException(status_code=404, detail="Frame not found")
+    if not present_cache_hit:
+        # Shared-store lookup: plain past-frame tiles only.  A hit here still
+        # counts as a geometry miss in ``record_request`` above (accepted -
+        # it avoided the compute, not the lookup).  The key folds the frame's
+        # content version so a merge/eviction re-keys the tile.
+        shared_hit = None
+        if shared_tile_store is not None and is_plain and frame_store is not None:
+            version = frame_store.frame_version(timestamp)
+            if version is not None:  # past frames only; nowcast ts has no version
+                shared_key = _shared_tile_key(timestamp, version, z, x, y, tile_size, smooth, snow, color, ext)
+                if io_executor is not None:
+                    loop = asyncio.get_running_loop()
+                    shared_hit = await loop.run_in_executor(
+                        io_executor, _shared_get_and_hash, shared_tile_store, shared_key,
+                    )
+                else:
+                    shared_hit = await asyncio.to_thread(_shared_get_and_hash, shared_tile_store, shared_key)
 
-        if geom is None:
-            compute_start = time.perf_counter_ns()
-            geom = await asyncio.to_thread(
-                compute_tile_geometry,
-                frame_regions=frame.regions,
-                z=z, x=x, y=y,
-                tile_size=tile_size,
-                smooth=smooth,
-                snow=snow,
-                nwp_chain=nwp_chain,
-                enabled_regions=enabled_regions,
-                frame_timestamp=timestamp,
-                nowcast_blend=nowcast_blend,
-                precip_mask=precip_mask,
-            )
-            compute_ns = time.perf_counter_ns() - compute_start
-            tile_cache.put(geom_key, geom)
-            # Only fire on the cold-compute path: a fast-path label here means
-            # this request actually paid for the empty-tile work (cache hits
-            # of a previously-computed transparent geometry are already counted
-            # by ``record_request`` above, not a fast-path firing now).
-            if tile_request_tracker is not None and geom.fast_path is not None:
-                tile_request_tracker.record_fast_path(geom.fast_path)
-
-        flow_regions = None
-        nwp_flow = None
-        if arrow_style:
-            if nowcast_store is not None:
-                flow_regions = await nowcast_store.get_flows() or None
-                nwp_flow = await nowcast_store.get_nwp_flow()
-
-        cells_by_region = None
-        cell_counts = None
-        if cell_style and storm_cell_store is not None:
-            # Only show cells on the frame the detection actually ran on --
-            # showing current-detected cells on past or nowcast frames is
-            # misleading (the cells represent "what storms are detected RIGHT
-            # NOW", not historical positions).
-            if timestamp == storm_cell_store.detected_at_timestamp:
-                cells_by_region = await storm_cell_store.get_cells() or None
-                cell_counts = await storm_cell_store.get_counts() or None
-
-        # Effective overlay styles as actually passed to ``present_tile``:
-        # an arrows/cells request degrades to plain when no flow or cell
-        # data is available for this request.
-        eff_arrow = arrow_style if (flow_regions or nwp_flow is not None) else ""
-        eff_cells = cell_style if cells_by_region else ""
-
-        # Present-stage cache: one entry per visual variant of the same
-        # geometry.  Stores the encoded bytes plus the ETag so a present
-        # cache hit skips both ``present_tile`` and the ETag hash.
-        present_key = (
-            timestamp, z, x, y, tile_size, smooth, snow,
-            color, ext, settings.webp_quality,
-        )
-
-        if is_plain or not (eff_arrow or eff_cells):
-            # An overlay request with no flow/cell data available also lands
-            # here - it falls through to the exact plain present path (same
-            # present_key, same cache entry) rather than creating a duplicate.
-            cached = tile_cache.get(present_key)
-            if isinstance(cached, CachedRender):
-                tile_bytes = cached.data
-                etag = cached.etag
-            else:
-                present_start = time.perf_counter_ns()
-                tile_bytes, etag = await _present_tile_async(
-                    geom,
-                    color_scheme=color,
-                    fmt=ext,
-                    arrow_style=eff_arrow,
-                    flow_regions=flow_regions,
-                    frame_regions=frame.regions if frame is not None else None,
-                    enabled_regions=enabled_regions,
-                    nwp_flow=nwp_flow,
-                    nwp_chain=nwp_chain,
-                    frame_timestamp=timestamp,
-                    z=z, x=x, y=y,
-                    cell_style=eff_cells,
-                    cells_by_region=cells_by_region,
-                    cell_counts=cell_counts,
-                )
-                present_ns = time.perf_counter_ns() - present_start
-                tile_cache.put(present_key, CachedRender(data=tile_bytes, etag=etag))
-                # Publish the fresh encode to the shared store for the other
-                # workers, fire-and-forget so the response never waits on the
-                # shared-volume write; the set holds references so tasks
-                # can't be GC'd mid-flight.  Never fires for nowcast tiles
-                # (their timestamp has no frame version).  A version bump
-                # between lookup and publish writes a stale entry, but the
-                # render worker's poller detects the bump within one poll
-                # interval (~1 s) and ``invalidate_timestamp`` sweeps every
-                # key for that timestamp, so the stale window is bounded by
-                # the poll cadence (pruning covers orphaned entries after
-                # eviction).
-                if shared_tile_store is not None and frame_store is not None:
-                    version = frame_store.frame_version(timestamp)
-                    if version is not None:
-                        key = _shared_tile_key(timestamp, version, z, x, y, tile_size, smooth, snow, color, ext)
-                        task = asyncio.ensure_future(
-                            asyncio.to_thread(shared_tile_store.publish, key, tile_bytes)
-                        )
-                        _pending_shared_publishes.add(task)
-                        task.add_done_callback(_pending_shared_publishes.discard)
+        if shared_hit is not None:
+            # Shared hit: the published bytes (and ETag) are byte-identical to
+            # a fresh render, so skip frame fetch, geometry compute, overlays,
+            # and present entirely.  Prime the in-memory present cache so
+            # same-worker repeats hit RAM instead of the shared volume.  The
+            # warmer hook below stays reachable from every path; in practice it
+            # never fires here because the shared store is only wired in multi
+            # mode, where ``tile_warmer`` is None.
+            tile_bytes, etag = shared_hit
+            tile_cache.put(present_key, CachedRender(data=tile_bytes, etag=etag))
         else:
-            # Overlay present cache (nowcast frames only): the render worker's
-            # state poller invalidates every nowcast timestamp each cycle, so
-            # a cached overlay entry is never served with flows older than one
-            # fetch cycle.  Past frames are deliberately NOT cached here -
-            # their timestamp survives for 2 hours while flows regenerate
-            # every cycle, which would pin arrows/cells to stale flow fields;
-            # those requests re-render the cheap present tail per request (the
-            # pre-change behaviour).
-            overlay_key = present_key + (eff_arrow, eff_cells)
-            cached = tile_cache.get(overlay_key) if is_nowcast else None
-            if isinstance(cached, CachedRender):
-                tile_bytes = cached.data
-                etag = cached.etag
-            else:
-                present_start = time.perf_counter_ns()
-                tile_bytes, etag = await _present_tile_async(
-                    geom,
-                    color_scheme=color,
-                    fmt=ext,
-                    arrow_style=eff_arrow,
-                    flow_regions=flow_regions,
-                    frame_regions=frame.regions if frame is not None else None,
-                    enabled_regions=enabled_regions,
-                    nwp_flow=nwp_flow,
-                    nwp_chain=nwp_chain,
-                    frame_timestamp=timestamp,
+            # We need the radar frame whenever geometry must be computed AND
+            # whenever an overlay is requested: arrows need live frame data +
+            # flow fields, and cells need ``frame.regions`` to decide which
+            # regions actually carry data on this tile (without it
+            # ``_draw_storm_cells`` sees an empty region list and draws
+            # nothing).  Skip the fetch on pure cache hits without overlays -
+            # that's the hot path Merry Sky-style clients exercise.
+            frame = None
+            nowcast_blend = None
+            if need_frame:
+                frame = await frame_store.get_frame(timestamp)
+                if frame is None and nowcast_store is not None:
+                    nc_frame, nowcast_blend = await nowcast_store.get_frame(timestamp)
+                    if nc_frame is not None:
+                        frame = nc_frame
+                        is_nowcast = True
+                if frame is None:
+                    raise HTTPException(status_code=404, detail="Frame not found")
+
+            if geom is None:
+                compute_start = time.perf_counter_ns()
+                geom = await asyncio.to_thread(
+                    compute_tile_geometry,
+                    frame_regions=frame.regions,
                     z=z, x=x, y=y,
-                    cell_style=eff_cells,
-                    cells_by_region=cells_by_region,
-                    cell_counts=cell_counts,
+                    tile_size=tile_size,
+                    smooth=smooth,
+                    snow=snow,
+                    nwp_chain=nwp_chain,
+                    enabled_regions=enabled_regions,
+                    frame_timestamp=timestamp,
+                    nowcast_blend=nowcast_blend,
+                    precip_mask=precip_mask,
                 )
-                present_ns = time.perf_counter_ns() - present_start
-                if is_nowcast:
-                    tile_cache.put(overlay_key, CachedRender(data=tile_bytes, etag=etag))
+                compute_ns = time.perf_counter_ns() - compute_start
+                tile_cache.put(geom_key, geom)
+                # Only fire on the cold-compute path: a fast-path label here means
+                # this request actually paid for the empty-tile work (cache hits
+                # of a previously-computed transparent geometry are already counted
+                # by ``record_request`` above, not a fast-path firing now).
+                if tile_request_tracker is not None and geom.fast_path is not None:
+                    tile_request_tracker.record_fast_path(geom.fast_path)
+
+            flow_regions = None
+            nwp_flow = None
+            if arrow_style:
+                if nowcast_store is not None:
+                    flow_regions = await nowcast_store.get_flows() or None
+                    nwp_flow = await nowcast_store.get_nwp_flow()
+
+            cells_by_region = None
+            cell_counts = None
+            if cell_style and storm_cell_store is not None:
+                # Only show cells on the frame the detection actually ran on --
+                # showing current-detected cells on past or nowcast frames is
+                # misleading (the cells represent "what storms are detected RIGHT
+                # NOW", not historical positions).
+                if timestamp == storm_cell_store.detected_at_timestamp:
+                    cells_by_region = await storm_cell_store.get_cells() or None
+                    cell_counts = await storm_cell_store.get_counts() or None
+
+            # Effective overlay styles as actually passed to ``present_tile``:
+            # an arrows/cells request degrades to plain when no flow or cell
+            # data is available for this request.
+            eff_arrow = arrow_style if (flow_regions or nwp_flow is not None) else ""
+            eff_cells = cell_style if cells_by_region else ""
+
+            if is_plain or not (eff_arrow or eff_cells):
+                # An overlay request with no flow/cell data available also lands
+                # here - it falls through to the exact plain present path (same
+                # present_key, same cache entry) rather than creating a duplicate.
+                cached = tile_cache.get(present_key)
+                if isinstance(cached, CachedRender):
+                    tile_bytes = cached.data
+                    etag = cached.etag
+                else:
+                    present_start = time.perf_counter_ns()
+                    tile_bytes, etag = await _present_tile_async(
+                        geom,
+                        color_scheme=color,
+                        fmt=ext,
+                        arrow_style=eff_arrow,
+                        flow_regions=flow_regions,
+                        frame_regions=frame.regions if frame is not None else None,
+                        enabled_regions=enabled_regions,
+                        nwp_flow=nwp_flow,
+                        nwp_chain=nwp_chain,
+                        frame_timestamp=timestamp,
+                        z=z, x=x, y=y,
+                        cell_style=eff_cells,
+                        cells_by_region=cells_by_region,
+                        cell_counts=cell_counts,
+                    )
+                    present_ns = time.perf_counter_ns() - present_start
+                    tile_cache.put(present_key, CachedRender(data=tile_bytes, etag=etag))
+                    # Publish the fresh encode to the shared store for the other
+                    # workers, fire-and-forget so the response never waits on the
+                    # shared-volume write; the set holds references so tasks
+                    # can't be GC'd mid-flight.  Never fires for nowcast tiles
+                    # (their timestamp has no frame version).  A version bump
+                    # between lookup and publish writes a stale entry, but the
+                    # render worker's poller detects the bump within one poll
+                    # interval (~1 s) and ``invalidate_timestamp`` sweeps every
+                    # key for that timestamp, so the stale window is bounded by
+                    # the poll cadence (pruning covers orphaned entries after
+                    # eviction).
+                    if shared_tile_store is not None and frame_store is not None:
+                        version = frame_store.frame_version(timestamp)
+                        if version is not None:
+                            key = _shared_tile_key(timestamp, version, z, x, y, tile_size, smooth, snow, color, ext)
+                            if io_executor is not None:
+                                loop = asyncio.get_running_loop()
+                                task = asyncio.ensure_future(
+                                    loop.run_in_executor(io_executor, shared_tile_store.publish, key, tile_bytes)
+                                )
+                            else:
+                                task = asyncio.ensure_future(
+                                    asyncio.to_thread(shared_tile_store.publish, key, tile_bytes)
+                                )
+                            _pending_shared_publishes.add(task)
+                            task.add_done_callback(_pending_shared_publishes.discard)
+            else:
+                # Overlay present cache (nowcast frames only): the render worker's
+                # state poller invalidates every nowcast timestamp each cycle, so
+                # a cached overlay entry is never served with flows older than one
+                # fetch cycle.  Past frames are deliberately NOT cached here -
+                # their timestamp survives for 2 hours while flows regenerate
+                # every cycle, which would pin arrows/cells to stale flow fields;
+                # those requests re-render the cheap present tail per request (the
+                # pre-change behaviour).
+                overlay_key = present_key + (eff_arrow, eff_cells)
+                cached = tile_cache.get(overlay_key) if is_nowcast else None
+                if isinstance(cached, CachedRender):
+                    tile_bytes = cached.data
+                    etag = cached.etag
+                else:
+                    present_start = time.perf_counter_ns()
+                    tile_bytes, etag = await _present_tile_async(
+                        geom,
+                        color_scheme=color,
+                        fmt=ext,
+                        arrow_style=eff_arrow,
+                        flow_regions=flow_regions,
+                        frame_regions=frame.regions if frame is not None else None,
+                        enabled_regions=enabled_regions,
+                        nwp_flow=nwp_flow,
+                        nwp_chain=nwp_chain,
+                        frame_timestamp=timestamp,
+                        z=z, x=x, y=y,
+                        cell_style=eff_cells,
+                        cells_by_region=cells_by_region,
+                        cell_counts=cell_counts,
+                    )
+                    present_ns = time.perf_counter_ns() - present_start
+                    if is_nowcast:
+                        tile_cache.put(overlay_key, CachedRender(data=tile_bytes, etag=etag))
 
     if tile_warmer is not None:
         # When the cache hit short-circuited the frame fetch, we still

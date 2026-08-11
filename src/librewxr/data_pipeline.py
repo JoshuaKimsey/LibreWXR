@@ -56,6 +56,7 @@ from librewxr.sources import (
 )
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import prune_shared_coord_store
+from librewxr.tiles.shared_tile_store import SharedTileStore
 
 # The pipeline writes no tiles itself, but RadarFetcher invalidates a
 # TileCache on frame eviction.  A shared one here would be useless to
@@ -205,6 +206,13 @@ async def run_pipeline() -> None:
     # touching the NWP chain.  Multi-mode only.
     precip_mask_store = PrecipMaskStore(cache_dir=cache_dir)
 
+    # Mirrors the render-worker budget resolution in main.py; the
+    # pipeline holds the handle solely to own pruning (it never reads
+    # or publishes tiles).
+    mb = settings.shared_tile_store_mb
+    mb = 2048 if mb is None else mb
+    shared_tiles = SharedTileStore(cache_dir, max_mb=mb) if mb > 0 else None
+
     # Stores keyed by slug — render-only workers consume the same keys
     # via ``apply_state``.  None entries are skipped by snapshot_state.
     stores = {
@@ -236,6 +244,11 @@ async def run_pipeline() -> None:
         # enabled/cache_dir and the helper never raises.  The directory
         # scans run in a worker thread so they never block the loop.
         await asyncio.to_thread(prune_shared_coord_store)
+        # The pipeline is the sole pruner of the shared tile store (render
+        # workers only invalidate by timestamp / sweep on a full clear);
+        # prune full-scans the shard tree so it stays off the event loop.
+        if shared_tiles is not None:
+            await asyncio.to_thread(shared_tiles.prune)
 
     fetcher = RadarFetcher(
         store, tile_cache,
@@ -300,8 +313,12 @@ async def run_pipeline() -> None:
 
 def main() -> None:
     setup_logging()
-    # The pipeline's heavy cv2 work (Farneback nowcast flow) runs once per fetch cycle; 8 threads is ample for the <=1000px flow grids and stays well inside the pipeline container's CPU cap.
-    cv2.setNumThreads(8)
+    # The pipeline's heavy cv2 work (Farneback nowcast flow + cv2.remap
+    # warps) runs once per fetch cycle, now overlapped across the 4-worker
+    # nowcast pool (regions and steps run in parallel).  4 workers × 2 cv2
+    # threads keeps the aggregate cv2 thread count at the previous 8,
+    # respecting the pipeline container's CPU cap.
+    cv2.setNumThreads(2)
     try:
         asyncio.run(run_pipeline())
     except KeyboardInterrupt:

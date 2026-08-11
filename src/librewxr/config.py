@@ -479,6 +479,12 @@ class Settings(BaseSettings):
     # set.  4 fits comfortably in 8 GB; bump higher for fatter rigs to
     # bring fetch-cycle wall time closer to the slowest single source.
     nwp_fetch_concurrency: int = 4
+    # Maximum number of radar region-frame fetches (live or archive)
+    # running in parallel inside one fetch cycle.  Each in-flight fetch
+    # can hold 100-200 MB during decode (MRMS), so 8 caps transient
+    # decode RAM around 1.6 GB; raise on fatter rigs to shorten backfill
+    # wall time.
+    radar_fetch_concurrency: int = 8
     cors_origins: list[str] = ["*"]
 
     @field_validator("mode", mode="before")

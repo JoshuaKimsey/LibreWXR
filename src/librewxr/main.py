@@ -318,16 +318,15 @@ def _maintain_shared_tiles(store, full_clear: bool, ts_set: set[int] | None) -> 
     any in-flight publishes: a concurrent publisher's ``.tmp`` survives
     and its os.replace lands a current-version entry, while every
     published file is removed so stale-NWP content is still fully
-    reclaimed.  ``prune`` runs every pass so cross-worker publishes never
-    grow the store past its budget; it full-scans, hence off the event
-    loop.
+    reclaimed.  ``prune`` (the full on-disk scan / budget enforcement) is
+    owned by the pipeline process, which prunes once per fetch cycle;
+    render workers only do correctness invalidation here.
     """
     if full_clear:
         store.sweep_final_files()
     else:
         for ts in ts_set:
             store.invalidate_timestamp(ts)
-    store.prune()
 
 
 def _drop_absent_stores(stores: dict, refreshed: list[str]) -> None:
@@ -438,7 +437,9 @@ async def _render_only_lifespan(app: FastAPI):
     # Shared on-disk encoded-tile store: one worker's encode serves all
     # workers (plain past-frame tiles only; see routes.radar_tile).  The
     # content-versioned keys make stale entries unreachable between fetch
-    # cycles, so the poller only reclaims space (see _maintain_shared_tiles).
+    # cycles, so the poller only does correctness invalidation on
+    # signature changes (see _maintain_shared_tiles; the pipeline process
+    # owns budget pruning, once per fetch cycle).
     # Auto = 2048 MB for render workers; 0 or negative disables.
     shared_tiles = None
     mb = settings.shared_tile_store_mb
@@ -573,8 +574,12 @@ async def _render_only_lifespan(app: FastAPI):
     # compute pool, floored at 2 - presents are short-lived, computes are
     # the bottleneck.
     present_executor = ThreadPoolExecutor(max_workers=max(2, pool_size // 2))
+    # Dedicated pool for shared-tile-store I/O + state-snapshot apply so
+    # they never queue behind geometry computes on the default executor.
+    io_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='tile-io')
     asyncio.get_running_loop().set_default_executor(request_executor)
     routes.present_executor = present_executor
+    routes.io_executor = io_executor
 
     mem_limit = detect_memory_limit_mb(settings.memory_limit_mb)
     monitor = MemoryMonitor(
@@ -662,8 +667,8 @@ async def _render_only_lifespan(app: FastAPI):
                 # invalidation stays on the loop: it compares payload
                 # content, not in-memory store state, so skipping
                 # __setstate__ for unchanged stores never affects it.
-                payload, refreshed = await asyncio.to_thread(
-                    _load_and_apply_state, cache_dir, stores, last_payload,
+                payload, refreshed = await asyncio.get_running_loop().run_in_executor(
+                    io_executor, _load_and_apply_state, cache_dir, stores, last_payload,
                 )
                 if payload is None:
                     continue
@@ -704,10 +709,10 @@ async def _render_only_lifespan(app: FastAPI):
                         cache.invalidate_timestamp(ts)
                 if shared_tiles is not None:
                     # Same invalidation semantics for the shared on-disk
-                    # encoded-tile store.  prune is a full on-disk scan
-                    # (and the store ops are file I/O), so the whole
-                    # maintenance pass runs off the event loop.
-                    await asyncio.to_thread(
+                    # encoded-tile store.  The store ops are file I/O, so
+                    # the whole maintenance pass runs off the event loop.
+                    await asyncio.get_running_loop().run_in_executor(
+                        io_executor,
                         _maintain_shared_tiles,
                         shared_tiles, full_clear, ts_to_invalidate,
                     )
@@ -773,9 +778,11 @@ async def _render_only_lifespan(app: FastAPI):
         await monitor.stop()
         request_executor.shutdown(wait=False)
         present_executor.shutdown(wait=False)
+        io_executor.shutdown(wait=False)
         # Unwire the routes handle so a stale reference to a shut-down pool
         # can never be scheduled against (single mode always keeps None).
         routes.present_executor = None
+        routes.io_executor = None
         cache.clear()
         store.cleanup()
         if nowcast_store is not None:
