@@ -432,7 +432,18 @@ var MaplibreAdapter = function () {
                     paint: {
                         // Colors mirror the CSS --alert-* tokens in viewer.css.
                         'fill-color': ['match', ['get', 'severity'], 'Extreme', '#d50000', 'Severe', '#ff6d00', 'Moderate', '#ffb300', 'Minor', '#8e24aa', '#546e7a'],
-                        'fill-opacity': 0.18
+                        'fill-opacity': 0.18,
+                        // Higher severity sorts on top within the single fill
+                        // layer (MapLibre v6 fill-sort-key; Emergency > Extreme,
+                        // etc.). Unknown severities fall through to 0.
+                        'fill-sort-key': ['match', ['get', 'severity'],
+                            'Emergency', 5,
+                            'Extreme', 4,
+                            'Severe', 3,
+                            'Moderate', 2,
+                            'Minor', 1,
+                            0
+                        ]
                     }
                 }, beforeId);
                 map.addLayer({

@@ -134,7 +134,7 @@ var LeafletAdapter = function () {
         })
     };
     var currentBaseMap = null;
-    var alertsLayer = null;
+    var alertLayers = [];
 
     // Pane z-values come from the CSS design tokens so theming stays in one place.
     function paneZ(name, fallback) {
@@ -263,23 +263,45 @@ var LeafletAdapter = function () {
         },
 
         setAlertsOverlay: function (geojsonOrNull, styleFn) {
-            if (alertsLayer) {
-                map.removeLayer(alertsLayer);
-                alertsLayer = null;
+            // Clear existing layers
+            if (alertLayers && alertLayers.length) {
+                for (var i = 0; i < alertLayers.length; i++) map.removeLayer(alertLayers[i]);
+                alertLayers = [];
             }
-            if (!geojsonOrNull) return;
-            // L.geoJSON skips features with null geometry, which is exactly
-            // the alerts-catalog contract ("polygon or null").
-            alertsLayer = L.geoJSON(geojsonOrNull, {
-                pane: 'lv-alerts-pane',
-                style: function (feature) { return styleFn(feature); },
-                onEachFeature: function (feature, layer) {
-                    // The engine pre-bakes popup HTML into properties.__popup.
-                    if (feature.properties && feature.properties.__popup) {
-                        layer.bindPopup(feature.properties.__popup);
+            if (!geojsonOrNull || !geojsonOrNull.features) return;
+
+            // Sort features by severity (most severe last = rendered on top by z-index).
+            // Emergency > Extreme > Severe > Moderate > Minor > Unknown.
+            var features = geojsonOrNull.features.slice();
+            var sevOrder = { emergency: 5, extreme: 4, severe: 3, moderate: 2, minor: 1 };
+            features.sort(function (a, b) {
+                var sa = sevOrder[(a.properties && a.properties.severity || '').toLowerCase()] || 0;
+                var sb = sevOrder[(b.properties && b.properties.severity || '').toLowerCase()] || 0;
+                return sa - sb;
+            });
+
+            // Per-feature layer with severity z-index so Emergency renders on top.
+            for (var i = 0; i < features.length; i++) {
+                var feature = features[i];
+                // Skip features without geometry (the alerts-catalog contract is "polygon or null").
+                if (!feature.geometry) continue;
+                var sev = (feature.properties && feature.properties.severity || 'unknown').toLowerCase();
+                var zIdx = sevOrder[sev] ? sevOrder[sev] * 200 + 200 : 300;
+                var fc = { type: 'FeatureCollection', features: [feature] };
+                var layer = L.geoJSON(fc, {
+                    pane: 'lv-alerts-pane',
+                    style: function (f) { return styleFn(f); },
+                    onEachFeature: function (f, lyr) {
+                        // The engine pre-bakes popup HTML into properties.__popup.
+                        if (f.properties && f.properties.__popup) {
+                            lyr.bindPopup(f.properties.__popup);
+                        }
                     }
-                }
-            }).addTo(map);
+                });
+                layer.setZIndex(zIdx);
+                layer.addTo(map);
+                alertLayers.push(layer);
+            }
         },
 
         flyTo: function (lat, lon, zoom) {

@@ -750,22 +750,87 @@ body {
 
 /* === ALERTS POPUP === */
 .lv-alert-popup {
-    font-size: var(--font-size-sm);
-    line-height: 1.4;
-    font-family: var(--font-ui);
+    font-size: 13px;
+    line-height: 1.5;
+    max-width: 320px;
 }
-.lv-alert-popup .lv-alert-sev {
+.lv-alert-popup-title {
+    margin: 0 0 8px;
+    font-size: 14px;
+    font-weight: 700;
+}
+.lv-popup-pulse-fast {
+    animation: lv-pulse 0.8s ease-in-out infinite;
+}
+.lv-popup-pulse-slow {
+    animation: lv-pulse 2s ease-in-out infinite;
+}
+@keyframes lv-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+.lv-alert-popup-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+    flex-wrap: wrap;
+}
+.lv-alert-severity {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
-    font-size: var(--font-size-xs);
-    letter-spacing: 0.05em;
-    margin: 3px 0;
+    letter-spacing: 0.04em;
 }
-.lv-alert-popup .lv-alert-expires {
+.lv-alert-severity.emergency { background: #d50000; color: #fff; }
+.lv-alert-severity.extreme { background: #b71c1c; color: #fff; }
+.lv-alert-severity.severe { background: #e65100; color: #fff; }
+.lv-alert-severity.moderate { background: #fdd835; color: #333; }
+.lv-alert-severity.minor { background: #9e9e9e; color: #fff; }
+.lv-alert-popup-urgency {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+.lv-alert-popup-description {
+    margin: 6px 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+.lv-alert-popup-expires {
+    font-size: 11px;
     color: var(--text-dim);
-    margin-top: 3px;
-    font-size: var(--font-size-xs);
+    margin: 4px 0;
 }
+.lv-alert-popup-hazards {
+    margin: 6px 0;
+    font-size: 12px;
+}
+.lv-alert-popup-hazard-tag {
+    display: inline-block;
+    margin: 2px 4px 2px 0;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    background: rgba(78,168,222,0.15);
+    color: var(--accent);
+    border: 1px solid rgba(78,168,222,0.25);
+}
+.lv-alert-popup-action {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.4;
+}
+.lv-alert-popup-action.emergency { background: rgba(213,0,0,0.15); color: #ff6b6b; border-left: 3px solid #d50000; }
+.lv-alert-popup-action.extreme { background: rgba(230,81,0,0.12); color: #ff8a50; border-left: 3px solid #e65100; }
+.lv-alert-popup-action.severe { background: rgba(230,152,0,0.12); color: #ffb74d; border-left: 3px solid #e69800; }
+.lv-alert-popup-action.moderate { background: rgba(253,216,53,0.1); color: #f9a825; border-left: 3px solid #fdd835; }
 
 /* === RESPONSIVE === */
 @media (max-width: 600px) {
@@ -803,6 +868,10 @@ body {
     .icon-btn:hover,
     .locate-btn:hover {
         transform: none !important;
+    }
+    .lv-popup-pulse-fast,
+    .lv-popup-pulse-slow {
+        animation: none;
     }
 }
 
@@ -1833,10 +1902,51 @@ body {
             return geojson;
         }
 
+        function getHazardType(title) {
+            if (!title) return 'default';
+            var t = title.toLowerCase();
+            if (t.indexOf('tornado') >= 0) return 'tornado';
+            if (t.indexOf('flood') >= 0) return 'flood';
+            if (t.indexOf('thunder') >= 0 || t.indexOf('lightning') >= 0) return 'thunderstorm';
+            if (t.indexOf('snow') >= 0 || t.indexOf('winter') >= 0) return 'snow';
+            if (t.indexOf('ice') >= 0 || t.indexOf('freez') >= 0) return 'ice';
+            if (t.indexOf('wind') >= 0 && t.indexOf('wind chill') < 0) return 'wind';
+            if (t.indexOf('heat') >= 0) return 'heat';
+            if (t.indexOf('cold') >= 0) return 'cold';
+            if (t.indexOf('fog') >= 0) return 'fog';
+            if (t.indexOf('hurricane') >= 0 || t.indexOf('tropical') >= 0) return 'hurricane';
+            if (t.indexOf('dust') >= 0) return 'tornado'; // dust storm = same color family
+            if (t.indexOf('smoke') >= 0 || t.indexOf('fire') >= 0) return 'fire';
+            return 'default';
+        }
+
         function alertStyleFn(feature) {
-            var sev = feature && feature.properties ? feature.properties.severity : null;
-            var colors = severityColors();
-            var color = colors[sev] || colors.Unknown;
+            var sev = feature && feature.properties ? (feature.properties.severity || 'Unknown') : 'Unknown';
+            var title = feature && feature.properties ? (feature.properties.title || '') : '';
+            var sevLower = sev.toLowerCase();
+            var intensity = 0;
+            if (sevLower === 'emergency' || sevLower === 'extreme') intensity = 3;
+            else if (sevLower === 'severe') intensity = 2;
+            else if (sevLower === 'moderate') intensity = 1;
+
+            var hazardType = getHazardType(title);
+            var palettes = {
+                flood:        ['#81C784','#66BB6A','#4CAF50','#2E7D32'],
+                thunderstorm: ['#FFD54F','#FFC107','#FF9800','#F57C00'],
+                tornado:      ['#EF9A9A','#EF5350','#E53935','#B71C1C'],
+                snow:         ['#9FA8DA','#7986CB','#3F51B5','#283593'],
+                ice:          ['#9FA8DA','#7986CB','#3F51B5','#283593'],
+                fire:         ['#FFAB91','#FF7043','#F4511E','#BF360C'],
+                fog:          ['#B0BEC5','#90A4AE','#607D8B','#37474F'],
+                wind:         ['#80CBC4','#4DB6AC','#009688','#00695C'],
+                hurricane:    ['#80CBC4','#4DB6AC','#009688','#00695C'],
+                heat:         ['#FFAB91','#FF7043','#F4511E','#BF360C'],
+                cold:         ['#9FA8DA','#7986CB','#3F51B5','#283593'],
+                default:      ['#B39DDB','#9575CD','#673AB7','#4527A0']
+            };
+            var palette = palettes[hazardType] || palettes['default'];
+            var color = palette[intensity];
+
             var fillAlpha = config.alertsFillAlpha != null
                 ? config.alertsFillAlpha
                 : parseFloat(cssVar('--alert-fill-alpha', '0.18'));
@@ -1845,22 +1955,64 @@ body {
                 color: color,
                 fillColor: color,
                 fillOpacity: fillAlpha,
-                weight: weight
+                weight: intensity >= 3 ? 3 : (intensity >= 2 ? 2.5 : weight)
             };
         }
 
         function alertPopupHtml(p) {
-            var colors = severityColors();
-            var sev = escapeHtml(p.severity || 'Unknown');
-            var title = escapeHtml(p.title || 'Weather alert');
-            var expires = p.expires ? escapeHtml(new Date(p.expires).toLocaleString()) : 'n/a';
-            var regions = (p.regions && p.regions.length) ? escapeHtml(p.regions.join(', ')) : '';
-            var sevColor = colors[p.severity] || colors.Unknown;
-            return '<div class="lv-alert-popup">' +
-                '<strong>' + title + '</strong>' +
-                '<div class="lv-alert-sev" style="color:' + sevColor + '">' + sev + '</div>' +
-                (regions ? '<div>' + regions + '</div>' : '') +
-                '<div class="lv-alert-expires">Expires: ' + expires + '</div>' +
+            var color = (alertStyleFn({properties: p})).color;
+            var sev = p.severity || 'Unknown';
+            var sevLower = sev.toLowerCase();
+            var isEmergency = sevLower === 'emergency';
+            var isExtreme = sevLower === 'extreme';
+            var isSevere = sevLower === 'severe';
+            var pulseClass = isEmergency ? 'lv-popup-pulse-fast' : (isExtreme ? 'lv-popup-pulse-slow' : '');
+            var emoji = (isEmergency || isExtreme) ? '\u26A0\uFE0F ' : '';
+
+            var sevText = isEmergency ? 'EMERGENCY' : (isExtreme ? 'EXTREME' : (isSevere ? 'SEVERE' : (sevLower === 'moderate' ? 'MODERATE' : 'MINOR')));
+            var sevClass = isEmergency ? 'emergency' : (isExtreme ? 'extreme' : (isSevere ? 'severe' : (sevLower === 'moderate' ? 'moderate' : 'minor')));
+
+            var title = escapeHtml(p.title || 'Weather Alert');
+            var desc = p.description ? '<p class="lv-alert-popup-description">' + escapeHtml(p.description) + '</p>' : '';
+
+            var urgency = p.urgency || '';
+            var urgencyHtml = urgency ? '<span class="lv-alert-popup-urgency">' + escapeHtml(urgency.toUpperCase()) + '</span>' : '';
+
+            var expires = p.expires
+                ? '<p class="lv-alert-popup-expires"><strong>Expires:</strong> ' + escapeHtml(new Date(p.expires).toLocaleString()) + '</p>'
+                : '';
+
+            var hazardTypes = p.hazardTypes || [];
+            var hazardHtml = '';
+            if (hazardTypes.length > 0) {
+                hazardHtml = '<div class="lv-alert-popup-hazards"><strong>Reasons:</strong> ';
+                for (var i = 0; i < hazardTypes.length; i++) {
+                    hazardHtml += '<span class="lv-alert-popup-hazard-tag">' + escapeHtml(hazardTypes[i]) + '</span>';
+                }
+                hazardHtml += '</div>';
+            }
+
+            var action = '';
+            if (isEmergency) {
+                action = '<p class="lv-alert-popup-action emergency"><strong>SEEK SHELTER NOW:</strong> This is an EMERGENCY alert. Take immediate life-saving action and follow official instructions.</p>';
+            } else if (isExtreme) {
+                action = '<p class="lv-alert-popup-action extreme"><strong>TAKE ACTION NOW:</strong> This is an EXTREME alert. Seek shelter or follow official instructions immediately.</p>';
+            } else if (isSevere) {
+                action = '<p class="lv-alert-popup-action severe"><strong>BE PREPARED:</strong> This is a SEVERE alert. Prepare to take action if in the affected area.</p>';
+            } else if (sevLower === 'moderate') {
+                action = '<p class="lv-alert-popup-action moderate"><strong>STAY AWARE:</strong> Monitor conditions and follow updates.</p>';
+            }
+
+            return '<div class="lv-alert-popup" style="--alert-color:' + color + '">' +
+                '<h3 class="lv-alert-popup-title ' + pulseClass + '">' + emoji + title + (isEmergency || isExtreme ? ' \u26A0\uFE0F' : '') + '</h3>' +
+                '<div class="lv-alert-popup-meta">' +
+                '<span class="lv-alert-severity ' + sevClass + '">' + sevText + '</span>' +
+                urgencyHtml +
+                '</div>' +
+                desc +
+                expires +
+                hazardHtml +
+                action +
                 '</div>';
         }
 
@@ -2380,7 +2532,7 @@ var LeafletAdapter = function () {
         })
     };
     var currentBaseMap = null;
-    var alertsLayer = null;
+    var alertLayers = [];
 
     // Pane z-values come from the CSS design tokens so theming stays in one place.
     function paneZ(name, fallback) {
@@ -2509,23 +2661,45 @@ var LeafletAdapter = function () {
         },
 
         setAlertsOverlay: function (geojsonOrNull, styleFn) {
-            if (alertsLayer) {
-                map.removeLayer(alertsLayer);
-                alertsLayer = null;
+            // Clear existing layers
+            if (alertLayers && alertLayers.length) {
+                for (var i = 0; i < alertLayers.length; i++) map.removeLayer(alertLayers[i]);
+                alertLayers = [];
             }
-            if (!geojsonOrNull) return;
-            // L.geoJSON skips features with null geometry, which is exactly
-            // the alerts-catalog contract ("polygon or null").
-            alertsLayer = L.geoJSON(geojsonOrNull, {
-                pane: 'lv-alerts-pane',
-                style: function (feature) { return styleFn(feature); },
-                onEachFeature: function (feature, layer) {
-                    // The engine pre-bakes popup HTML into properties.__popup.
-                    if (feature.properties && feature.properties.__popup) {
-                        layer.bindPopup(feature.properties.__popup);
+            if (!geojsonOrNull || !geojsonOrNull.features) return;
+
+            // Sort features by severity (most severe last = rendered on top by z-index).
+            // Emergency > Extreme > Severe > Moderate > Minor > Unknown.
+            var features = geojsonOrNull.features.slice();
+            var sevOrder = { emergency: 5, extreme: 4, severe: 3, moderate: 2, minor: 1 };
+            features.sort(function (a, b) {
+                var sa = sevOrder[(a.properties && a.properties.severity || '').toLowerCase()] || 0;
+                var sb = sevOrder[(b.properties && b.properties.severity || '').toLowerCase()] || 0;
+                return sa - sb;
+            });
+
+            // Per-feature layer with severity z-index so Emergency renders on top.
+            for (var i = 0; i < features.length; i++) {
+                var feature = features[i];
+                // Skip features without geometry (the alerts-catalog contract is "polygon or null").
+                if (!feature.geometry) continue;
+                var sev = (feature.properties && feature.properties.severity || 'unknown').toLowerCase();
+                var zIdx = sevOrder[sev] ? sevOrder[sev] * 200 + 200 : 300;
+                var fc = { type: 'FeatureCollection', features: [feature] };
+                var layer = L.geoJSON(fc, {
+                    pane: 'lv-alerts-pane',
+                    style: function (f) { return styleFn(f); },
+                    onEachFeature: function (f, lyr) {
+                        // The engine pre-bakes popup HTML into properties.__popup.
+                        if (f.properties && f.properties.__popup) {
+                            lyr.bindPopup(f.properties.__popup);
+                        }
                     }
-                }
-            }).addTo(map);
+                });
+                layer.setZIndex(zIdx);
+                layer.addTo(map);
+                alertLayers.push(layer);
+            }
         },
 
         flyTo: function (lat, lon, zoom) {
