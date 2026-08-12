@@ -1050,7 +1050,7 @@ When pre-loading layers for animation, set opacity to `0.001` rather than `0`. S
 
 ### Map pan cleanup
 
-Always clear cached/pre-loaded radar layers when the user pans the map. The tiles are only valid for the viewport that was visible when they loaded. Both examples above demonstrate this pattern.
+Always clear cached/pre-loaded radar layers when the user pans the map. The tiles are only valid for the viewport that was visible when they loaded. The examples restart background preloading after panning so newly visible tiles get cached.
 
 ### CORS
 
@@ -1082,7 +1082,7 @@ setInterval(function () {
 
 ## Complete Working Examples
 
-The `examples/` directory contains two self-contained HTML files that demonstrate every feature covered in this guide:
+The `examples/` directory contains generated HTML files, built from the modular sources in `examples/src/` by `python3 examples/src/build.py` — edit the sources there, not the built HTML. Two full variants, plus a minimal generated `hero.html`, demonstrate every feature covered in this guide:
 
 - **`examples/leaflet.html`** — Full Leaflet integration
 - **`examples/maplibre.html`** — Full MapLibre GL JS integration
@@ -1091,8 +1091,13 @@ Both examples include:
 - **Source selector** — switch between your local server and the public instance (`api.librewxr.net`) without editing code. Auto-detects the best default based on how the file is opened.
 - **Layer modes** — Radar, Satellite, or Radar + Satellite (satellite as a cloud background under animated radar)
 - **Light/dark theme** — toggles both the base map style and UI colors
-- **Color scheme selector**, **motion arrows**, and **nowcast** with full animation support
+- **Color scheme selector** — 13 color schemes plus a raw grayscale (255) option
+- **Motion arrows and nowcast** — with full animation support
 - **Draggable scrubber** — timeline with past/nowcast visual distinction and tick labels
+- **Weather-alerts overlay** — severity-styled WMO alert polygons (toggleable)
+- **Options panel** — collapsible controls for smoothing, snow mask, PNG/WebP output, and 256/512px tile size with HiDPI auto-detection
+- **Storm-cell markers** — light/dark cell-detection labels
+- **Locate Me** — geolocate and zoom to your position
 - **Background preloading** — pre-renders all frames with a progress indicator for smooth playback
 - **Keyboard shortcuts** — Space to play/pause, arrow keys to step through frames
 - **Auto-refresh** — metadata refreshes every 5 minutes to stay current

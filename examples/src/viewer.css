@@ -1,0 +1,792 @@
+/* SPDX-License-Identifier: MIT */
+/* ==========================================================================
+   viewer.css - shared LibreWXR demo page stylesheet
+   Design-token baseline. A separate visual-polish pass lands later; the
+   job here is correct layout/DOM hooks + a clean token structure.
+   ========================================================================== */
+
+/* === DESIGN TOKENS === */
+:root {
+    /* Spacing / radius / elevation */
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-full: 999px;
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.25), 0 1px 2px rgba(0, 0, 0, 0.15);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.25), 0 2px 4px rgba(0, 0, 0, 0.15);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.2);
+    --backdrop-blur: blur(8px) saturate(1.2);
+
+    /* Transitions */
+    --transition-fast: 0.08s ease;
+    --transition-base: 0.18s ease;
+    --transition-slow: 0.3s ease;
+
+    /* Stacking */
+    --z-map: 1;
+    --z-toolbar: 1000;
+    --z-replayer: 1000;
+    --z-overlay: 1100;
+
+    /* Leaflet custom-pane z values (MapLibre derives order from beforeId) */
+    --leaflet-z-satellite: 350;
+    --leaflet-z-alerts: 400;
+    --leaflet-z-radar: 450;
+
+    /* Font */
+    --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    --font-size-xs: 10px;
+    --font-size-sm: 11px;
+    --font-size-md: 13px;
+    --font-size-lg: 14px;
+
+    /* Opacities used by the engine */
+    --radar-opacity: 0.8;
+    --satellite-opacity: 0.8;
+
+    /* Alert severity palette (engine fills in per-feature) */
+    --alert-extreme: #d50000;
+    --alert-severe: #ff6d00;
+    --alert-moderate: #ffb300;
+    --alert-minor: #8e24aa;
+    --alert-unknown: #546e7a;
+    --alert-fill-alpha: 0.18;
+    --alert-stroke-width: 2px;
+}
+
+[data-theme="dark"] {
+    --bg: #0f1117;
+    --toolbar-bg: #161822;
+    --toolbar-border: #2a2d3a;
+    --replayer-bg: #1a1c28;
+    --text: #e0e0e0;
+    --text-secondary: #9ca3af;
+    --text-dim: #6b7280;
+    --accent: #4ea8de;
+    --accent-hover: #6abff0;
+    --accent-glow: rgba(78, 168, 222, 0.25);
+    --input-bg: #1a1c28;
+    --input-border: #2a2d3a;
+    --input-text: #ccc;
+    --scrubber-rail: #3a3d4a;
+    --scrubber-nowcast: repeating-linear-gradient(90deg, #2a5a7a 0px, #2a5a7a 4px, #1a3a4a 4px, #1a3a4a 8px);
+    --btn-bg: rgba(22, 24, 34, 0.92);
+    --btn-border: #2a2d3a;
+    --btn-hover: #252838;
+    --btn-active: var(--accent);
+    --overlay-bg: rgba(15, 17, 23, 0.88);
+    --error-bg: #3a1010;
+    --error-border: #8a2a2a;
+    --card-bg: rgba(26, 28, 40, 0.95);
+}
+
+[data-theme="light"] {
+    --bg: #f0f2f5;
+    --toolbar-bg: #ffffff;
+    --toolbar-border: #e2e4e8;
+    --replayer-bg: #f8f9fa;
+    --text: #1f2937;
+    --text-secondary: #4b5563;
+    --text-dim: #9ca3af;
+    --accent: #0077cc;
+    --accent-hover: #0088dd;
+    --accent-glow: rgba(0, 119, 204, 0.2);
+    --input-bg: #fff;
+    --input-border: #d1d5db;
+    --input-text: #374151;
+    --scrubber-rail: #d1d5db;
+    --scrubber-nowcast: repeating-linear-gradient(90deg, #a0c4e0 0px, #a0c4e0 4px, #c0d8ec 4px, #c0d8ec 8px);
+    --btn-bg: rgba(255, 255, 255, 0.92);
+    --btn-border: #d1d5db;
+    --btn-hover: #eef0f2;
+    --btn-active: var(--accent);
+    --overlay-bg: rgba(255, 255, 255, 0.9);
+    --error-bg: #fef2f2;
+    --error-border: #fca5a5;
+    --card-bg: rgba(255, 255, 255, 0.95);
+}
+
+/* === BASE === */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+    font-family: var(--font-ui);
+    font-size: var(--font-size-md);
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* === TOOLBAR === */
+.toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    background: var(--toolbar-bg);
+    border-bottom: 1px solid var(--toolbar-border);
+    z-index: var(--z-toolbar);
+    flex-wrap: wrap;
+    flex-shrink: 0;
+    box-shadow: 0 1px 0 rgba(0,0,0,0.05);
+}
+.toolbar-title {
+    font-weight: 700;
+    font-size: 15px;
+    color: var(--text);
+    margin-right: var(--space-1);
+    white-space: nowrap;
+    letter-spacing: -0.01em;
+}
+
+/* Cluster the action buttons to the right */
+#lv-alerts {
+    margin-left: auto;
+}
+
+.toolbar select,
+.options-panel select {
+    height: 32px;
+    border: 1px solid var(--input-border);
+    border-radius: var(--radius-sm);
+    background: var(--input-bg);
+    font-size: var(--font-size-md);
+    color: var(--input-text);
+    cursor: pointer;
+    padding: 0 var(--space-2);
+    outline: none;
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 6px center;
+    padding-right: 22px;
+}
+[data-theme="light"] .toolbar select,
+[data-theme="light"] .options-panel select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+}
+.toolbar select:hover,
+.options-panel select:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.toolbar select:focus-visible,
+.options-panel select:focus-visible {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+/* Toolbar icon buttons (theme / alerts / options) */
+.icon-btn {
+    height: 32px;
+    min-width: 32px;
+    padding: 0 var(--space-2);
+    background: var(--btn-bg);
+    border: 1px solid var(--btn-border);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-1);
+    font-size: var(--font-size-sm);
+    white-space: nowrap;
+    transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast), transform var(--transition-fast), box-shadow var(--transition-fast);
+    position: relative;
+}
+.icon-btn:hover {
+    background: var(--btn-hover);
+    color: var(--text);
+    border-color: var(--accent);
+}
+.icon-btn:active {
+    transform: scale(0.96);
+}
+.icon-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+.icon-btn .btn-icon {
+    width: 16px;
+    height: 16px;
+    display: inline-block;
+    flex-shrink: 0;
+}
+.icon-btn svg {
+    width: 100%;
+    height: 100%;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+.icon-btn.active {
+    background: var(--btn-active);
+    border-color: var(--btn-active);
+    color: #fff;
+    box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+/* === OPTIONS PANEL === */
+.options-panel {
+    display: none;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    padding: var(--space-2) var(--space-4);
+    background: var(--replayer-bg);
+    border-bottom: 1px solid var(--toolbar-border);
+    flex-shrink: 0;
+    opacity: 0;
+    transform: translateY(-4px);
+    transition: opacity var(--transition-base), transform var(--transition-base), display var(--transition-base);
+    transition-behavior: allow-discrete;
+}
+.options-panel.open {
+    display: flex;
+    opacity: 1;
+    transform: translateY(0);
+}
+@starting-style {
+    .options-panel.open {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+}
+.options-panel label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: var(--font-size-sm);
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: color var(--transition-fast);
+}
+.options-panel label:hover {
+    color: var(--text);
+}
+.options-panel input[type="checkbox"] {
+    accent-color: var(--accent);
+    cursor: pointer;
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    flex-shrink: 0;
+}
+/* Pill-style checkbox labels */
+.options-panel label:has(input[type="checkbox"]) {
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+    gap: var(--space-1);
+}
+.options-panel label:has(input[type="checkbox"]):hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+}
+.options-panel label:has(input[type="checkbox"]):has(input:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* === MAP === */
+#lv-map {
+    flex: 1;
+    position: relative;
+    z-index: var(--z-map);
+}
+
+/* Leaflet seam fix: radar tiles blend additively so adjacent tiles do not
+   show dark seams on transparent gaps. */
+.leaflet-container img.leaflet-tile {
+    mix-blend-mode: plus-lighter;
+}
+/* 512-url HiDPI trick: tiles are fetched at 512px but rendered at 256 CSS px */
+.leaflet-tile.radar-tile {
+    image-rendering: pixelated;
+    width: 256px !important;
+    height: 256px !important;
+}
+.leaflet-tile.satellite-tile {
+    width: 256px !important;
+    height: 256px !important;
+}
+
+/* === PRELOAD INDICATOR === */
+.preload-indicator {
+    position: absolute;
+    top: var(--space-3);
+    left: var(--space-3);
+    z-index: var(--z-overlay);
+    background: var(--card-bg);
+    border: 1px solid var(--btn-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--font-size-sm);
+    color: var(--text-secondary);
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(-4px);
+    transition: opacity var(--transition-slow), transform var(--transition-slow), display var(--transition-slow);
+    transition-behavior: allow-discrete;
+    backdrop-filter: var(--backdrop-blur);
+    -webkit-backdrop-filter: var(--backdrop-blur);
+    box-shadow: var(--shadow-md);
+    min-width: 140px;
+}
+.preload-indicator.visible {
+    opacity: 1;
+    transform: translateY(0);
+    display: block;
+}
+@starting-style {
+    .preload-indicator.visible {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+}
+.preload-bar {
+    height: 3px;
+    background: var(--scrubber-rail);
+    border-radius: 2px;
+    margin-top: var(--space-1);
+    overflow: hidden;
+}
+.preload-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.2s ease;
+    width: 0%;
+}
+
+/* === LOCATE BUTTON === */
+.locate-btn {
+    position: absolute;
+    top: var(--space-3);
+    right: var(--space-3);
+    z-index: var(--z-overlay);
+    width: 36px;
+    height: 36px;
+    background: var(--card-bg);
+    border: 1px solid var(--btn-border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background var(--transition-fast), border-color var(--transition-fast), transform var(--transition-fast), box-shadow var(--transition-fast);
+    backdrop-filter: var(--backdrop-blur);
+    -webkit-backdrop-filter: var(--backdrop-blur);
+    box-shadow: var(--shadow-sm);
+}
+.locate-btn:hover {
+    background: var(--btn-hover);
+    border-color: var(--accent);
+    box-shadow: var(--shadow-md);
+    transform: translateY(-1px);
+}
+.locate-btn:active {
+    transform: translateY(0) scale(0.94);
+}
+.locate-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+.locate-btn svg {
+    width: 18px;
+    height: 18px;
+    fill: none;
+    stroke: var(--text-secondary);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    transition: stroke var(--transition-fast);
+}
+.locate-btn:hover svg {
+    stroke: var(--accent);
+}
+
+/* === ERROR OVERLAY === */
+.error-overlay {
+    position: absolute;
+    top: var(--space-4);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: var(--z-overlay);
+    max-width: min(90vw, 480px);
+    background: var(--error-bg);
+    border: 1px solid var(--error-border);
+    border-radius: var(--radius-md);
+    padding: var(--space-3) var(--space-4);
+    color: var(--text);
+    font-size: var(--font-size-md);
+    box-shadow: var(--shadow-lg);
+    display: none;
+    opacity: 0;
+    transform: translateX(-50%) translateY(-8px);
+    transition: opacity var(--transition-slow), transform var(--transition-slow), display var(--transition-slow);
+    transition-behavior: allow-discrete;
+    backdrop-filter: var(--backdrop-blur);
+    -webkit-backdrop-filter: var(--backdrop-blur);
+}
+.error-overlay.visible {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+    display: block;
+}
+@starting-style {
+    .error-overlay.visible {
+        opacity: 0;
+        transform: translateX(-50%) translateY(-8px);
+    }
+}
+.error-overlay .error-msg {
+    margin-bottom: var(--space-2);
+    line-height: 1.4;
+}
+.error-overlay .retry-btn {
+    height: 32px;
+    padding: 0 var(--space-4);
+    background: var(--accent);
+    border: none;
+    border-radius: var(--radius-sm);
+    color: #fff;
+    font-size: var(--font-size-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: background var(--transition-fast), transform var(--transition-fast), box-shadow var(--transition-fast);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.error-overlay .retry-btn:hover {
+    background: var(--accent-hover);
+    box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+}
+.error-overlay .retry-btn:active {
+    transform: scale(0.96);
+}
+.error-overlay .retry-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* === REFRESH STATUS BADGE === */
+.refresh-status {
+    position: absolute;
+    top: var(--space-4);
+    right: var(--space-4);
+    z-index: var(--z-overlay);
+    background: var(--card-bg);
+    border: 1px solid var(--error-border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-2);
+    font-size: var(--font-size-xs);
+    color: var(--text-secondary);
+    pointer-events: none;
+    display: none;
+    opacity: 0;
+    transform: translateY(-4px);
+    transition: opacity var(--transition-base), transform var(--transition-base), display var(--transition-base);
+    transition-behavior: allow-discrete;
+    backdrop-filter: var(--backdrop-blur);
+    -webkit-backdrop-filter: var(--backdrop-blur);
+    box-shadow: var(--shadow-sm);
+}
+.refresh-status.visible {
+    display: block;
+    opacity: 1;
+    transform: translateY(0);
+}
+@starting-style {
+    .refresh-status.visible {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+}
+
+/* === REPLAYER / SCRUBBER === */
+.replayer {
+    background: var(--replayer-bg);
+    border-top: 1px solid var(--toolbar-border);
+    padding: var(--space-3) var(--space-4) var(--space-2);
+    z-index: var(--z-replayer);
+    flex-shrink: 0;
+    user-select: none;
+    -webkit-user-select: none;
+    box-shadow: 0 -1px 0 rgba(0,0,0,0.05);
+}
+.replayer-top {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+}
+.play-btn {
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-full);
+    border: none;
+    background: var(--accent);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background var(--transition-fast), transform var(--transition-fast), box-shadow var(--transition-fast);
+    box-shadow: 0 2px 6px var(--accent-glow);
+}
+.play-btn:hover {
+    background: var(--accent-hover);
+    transform: scale(1.06);
+    box-shadow: 0 4px 12px var(--accent-glow);
+}
+.play-btn:active {
+    transform: scale(0.92);
+}
+.play-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+.play-btn svg {
+    width: 16px;
+    height: 16px;
+    fill: #fff;
+    transition: transform var(--transition-fast);
+}
+
+/* Scrubber track - the engine builds rail + thumb inside, ticks below */
+.scrubber-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 2px;
+}
+.scrubber-track {
+    position: relative;
+    height: 32px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    outline: none;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-fast);
+}
+.scrubber-track:hover {
+    background: rgba(128,128,128,0.04);
+}
+.scrubber-track:focus-visible .scrubber-thumb {
+    box-shadow: 0 0 0 3px var(--accent), 0 0 0 5px var(--accent-glow);
+}
+.scrubber-rail {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 5px;
+    border-radius: 3px;
+    overflow: hidden;
+    display: flex;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.15);
+}
+.rail-past {
+    background: var(--scrubber-rail);
+    height: 100%;
+    transition: width var(--transition-base);
+}
+.rail-divider {
+    width: 2px;
+    height: 100%;
+    background: var(--accent);
+    flex-shrink: 0;
+}
+.rail-nowcast {
+    background: var(--scrubber-nowcast);
+    height: 100%;
+    flex: 1;
+}
+.scrubber-thumb {
+    position: absolute;
+    top: 50%;
+    width: 18px;
+    height: 18px;
+    border-radius: var(--radius-full);
+    background: var(--accent);
+    border: 2.5px solid #fff;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3), 0 0 0 4px var(--accent-glow);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 2;
+    transition: left var(--transition-base), box-shadow var(--transition-fast), transform var(--transition-fast);
+}
+.scrubber-thumb.dragging {
+    transition: none;
+    cursor: grabbing;
+    transform: translate(-50%, -50%) scale(1.15);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.35), 0 0 0 6px var(--accent-glow);
+}
+
+/* Tick labels */
+.scrubber-ticks {
+    display: flex;
+    position: relative;
+    height: 20px;
+    margin-top: 2px;
+}
+.tick-label {
+    font-size: var(--font-size-xs);
+    color: var(--text-dim);
+    position: absolute;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    transition: color var(--transition-fast);
+}
+.tick-label::before {
+    content: '';
+    position: absolute;
+    top: -5px;
+    left: 50%;
+    width: 1px;
+    height: 4px;
+    background: var(--scrubber-rail);
+    transform: translateX(-50%);
+    transition: background var(--transition-fast);
+}
+.tick-label.nowcast-tick {
+    color: var(--accent);
+}
+.tick-label.nowcast-tick::before {
+    background: var(--accent);
+}
+.tick-label.active-tick {
+    color: var(--accent);
+    font-weight: 600;
+}
+.tick-label.active-tick::before {
+    background: var(--accent);
+    width: 2px;
+    height: 5px;
+    border-radius: 1px;
+}
+.tick-divider {
+    position: absolute;
+    font-size: var(--font-size-xs);
+    color: var(--accent);
+    transform: translateX(-50%);
+    font-weight: 700;
+}
+.tick-divider::before {
+    content: '';
+    position: absolute;
+    top: -5px;
+    left: 50%;
+    width: 2px;
+    height: 5px;
+    background: var(--accent);
+    transform: translateX(-50%);
+    border-radius: 1px;
+}
+
+/* Timestamp display */
+.timestamp-display {
+    font-size: var(--font-size-lg);
+    font-weight: 700;
+    color: var(--text);
+    white-space: nowrap;
+    min-width: 80px;
+    text-align: right;
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+}
+.timestamp-display .forecast-label {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--accent);
+    margin-left: var(--space-1);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+/* === ALERTS POPUP === */
+.lv-alert-popup {
+    font-size: var(--font-size-sm);
+    line-height: 1.4;
+    font-family: var(--font-ui);
+}
+.lv-alert-popup .lv-alert-sev {
+    font-weight: 700;
+    text-transform: uppercase;
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.05em;
+    margin: 3px 0;
+}
+.lv-alert-popup .lv-alert-expires {
+    color: var(--text-dim);
+    margin-top: 3px;
+    font-size: var(--font-size-xs);
+}
+
+/* === RESPONSIVE === */
+@media (max-width: 600px) {
+    .toolbar { padding: var(--space-1) var(--space-2); gap: var(--space-1); }
+    .toolbar-title { font-size: var(--font-size-md); }
+    .toolbar select,
+    .options-panel select { height: 28px; font-size: 11px; padding: 0 var(--space-1); padding-right: 20px; background-position: right 4px center; }
+    .icon-btn { height: 28px; min-width: 28px; font-size: 11px; }
+    .replayer { padding: var(--space-2) var(--space-2) var(--space-1); }
+    .play-btn { width: 36px; height: 36px; }
+    .timestamp-display { font-size: var(--font-size-sm); min-width: 60px; }
+    .options-panel { padding: var(--space-1) var(--space-2); gap: var(--space-1) var(--space-2); }
+    .scrubber-track { height: 28px; }
+    .scrubber-thumb { width: 16px; height: 16px; }
+    .locate-btn { width: 32px; height: 32px; top: var(--space-2); right: var(--space-2); }
+    .locate-btn svg { width: 16px; height: 16px; }
+    .preload-indicator { top: var(--space-2); left: var(--space-2); }
+    .tick-label { font-size: 9px; }
+}
+
+/* === REDUCED MOTION === */
+@media (prefers-reduced-motion: reduce) {
+    .scrubber-thumb,
+    .preload-indicator,
+    .preload-fill,
+    .error-overlay,
+    .refresh-status,
+    .options-panel,
+    .play-btn,
+    .icon-btn,
+    .locate-btn {
+        transition: none !important;
+    }
+    .play-btn:hover,
+    .icon-btn:hover,
+    .locate-btn:hover {
+        transform: none !important;
+    }
+}

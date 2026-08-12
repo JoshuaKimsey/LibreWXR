@@ -714,7 +714,7 @@ Layered ahead of IFS via specificity-first dispatch (see the [Regional NWP chain
 
 ## Examples
 
-The `examples/` directory contains two self-contained HTML files showcasing the full LibreWXR feature set:
+The `examples/` directory contains two self-contained HTML files showcasing the full LibreWXR feature set. Each file is a single, liftable artifact — copy it into your own project and it runs standalone, no build step required:
 
 - **`leaflet.html`** — Leaflet-based weather map
 - **`maplibre.html`** — MapLibre GL JS-based weather map
@@ -723,13 +723,27 @@ Both examples include:
 - **Source selector** — switch between local (`localhost:8080`) and the public instance (`api.librewxr.net`) with auto-detection
 - **Layer modes** — Radar, Satellite, or Radar + Satellite (satellite as background under radar)
 - **Light/dark theme** — toggles both the base map and UI styling
-- **Color scheme selector** — all 12 color schemes
+- **Color scheme selector** — 13 color schemes plus a raw grayscale (255) option
+- **Weather-alerts overlay** — severity-styled WMO alert polygons
+- **Options panel** — collapsible controls for smoothing, snow mask, PNG/WebP output format, and 256/512px tile size with HiDPI auto-detection
 - **Motion arrows** — off, light, or dark
+- **Storm-cell markers** — cell detection with light/dark label styles
 - **Scrubber bar** — draggable timeline with past/nowcast visual distinction and tick labels
 - **Background preloading** — pre-renders all frames with a progress indicator for smooth animation
 - **Keyboard shortcuts** — Space to play/pause, arrow keys to step through frames
 - **Locate Me** — geolocate and zoom to your position
 - **Auto-refresh** — metadata refreshes every 5 minutes to stay current
+
+### Building / editing
+
+The HTML files are generated — do not hand-edit them. Edit the modular sources in `examples/src/` and rebuild:
+
+```bash
+python3 examples/src/build.py           # regenerate leaflet.html and maplibre.html
+python3 examples/src/build.py --site    # also regenerate the published site variants
+```
+
+Each generated file carries a `GENERATED ... do not edit` header comment.
 
 Open either file in a browser — it auto-detects whether to use your local server or the public instance based on how the file is loaded.
 

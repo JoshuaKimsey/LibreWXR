@@ -7,7 +7,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>LibreWXR - Leaflet Example</title>
+    <title>LibreWXR - Live Radar</title>
     <meta charset="utf-8"/>
     <meta content="width=device-width, initial-scale=1.0" name="viewport">
     <link href="https://unpkg.com/leaflet/dist/leaflet.css" rel="stylesheet"/>
@@ -810,65 +810,7 @@ body {
 </head>
 <body data-theme="dark">
 
-<!-- Toolbar -->
-<div class="toolbar">
-    <span class="toolbar-title">LibreWXR</span>
-    <!-- #lv-source block: removed in --site builds -->
-    <select id="lv-source" aria-label="API source">
-        <option value="local">Local (localhost:8080)</option>
-        <option value="public">Public (api.librewxr.net)</option>
-    </select>
-    <!-- /#lv-source -->
-    <select id="lv-layermode" aria-label="Layer mode">
-        <option value="radar">Radar</option>
-        <option value="satellite">Satellite</option>
-        <option value="both">Radar + Satellite</option>
-    </select>
-    <select id="lv-scheme" aria-label="Color scheme">
-        <option value="10">Loading...</option>
-    </select>
-    <select id="lv-arrows" aria-label="Motion arrows">
-        <option value="">Arrows: Off</option>
-        <option value="light">Arrows: Light</option>
-        <option value="dark">Arrows: Dark</option>
-    </select>
-    <select id="lv-cells" aria-label="Cell detection">
-        <option value="">Cells: Off</option>
-        <option value="light">Cells: Light</option>
-        <option value="dark">Cells: Dark</option>
-    </select>
-    <button type="button" class="icon-btn" id="lv-alerts" aria-pressed="false" aria-label="Toggle weather alerts" title="Weather alerts">
-        <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M12 3 L20 19 H4 Z"/><line x1="12" y1="10" x2="12" y2="15"/><circle cx="12" cy="17.5" r="1"/></svg></span>
-        Alerts
-    </button>
-    <button type="button" class="icon-btn" id="lv-theme" aria-label="Switch to light theme" title="Switch to light theme">
-        <span class="btn-icon" id="lv-theme-sun"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg></span>
-        <span class="btn-icon" id="lv-theme-moon" style="display:none"><svg viewBox="0 0 24 24"><path d="M20 14.5 A8 8 0 0 1 9.5 4 A8 8 0 1 0 20 14.5 Z"/></svg></span>
-    </button>
-    <button type="button" class="icon-btn" id="lv-options-btn" aria-expanded="false" aria-label="Toggle options panel" title="Options">
-        <span class="btn-icon"><svg viewBox="0 0 24 24"><line x1="4" y1="7" x2="20" y2="7"/><circle cx="9" cy="7" r="2"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="15" cy="17" r="2"/></svg></span>
-        Options
-    </button>
-</div>
-
-<!-- Options panel (collapsible) -->
-<div class="options-panel" id="lv-options">
-    <label><input type="checkbox" id="lv-smooth" checked/> Smoothing</label>
-    <label><input type="checkbox" id="lv-snow"/> Snow mask</label>
-    <label for="lv-format">Format</label>
-    <select id="lv-format" aria-label="Tile format">
-        <option value="webp">WebP</option>
-        <option value="png">PNG</option>
-    </select>
-    <label for="lv-tilesize">Tile size</label>
-    <select id="lv-tilesize" aria-label="Tile size">
-        <option value="auto">Auto (device)</option>
-        <option value="256">256</option>
-        <option value="512">512</option>
-    </select>
-</div>
-
-<!-- Map -->
+<!-- Map (hero: no toolbar, no options panel - locked config below) -->
 <div id="lv-map">
     <div class="preload-indicator" id="lv-preload">
         <span id="lv-preload-text">Loading frames 0/0</span>
@@ -2359,15 +2301,14 @@ body {
 </script>
 
 <script>
-// === API SOURCE CONFIG (build.py rewrites for --site) ===
+// === API SOURCE CONFIG (auto-detect local vs public; no selector in hero) ===
 var LVR_API_SOURCES = {
     local: 'http://localhost:8080',
     public: 'https://api.librewxr.net'
 };
-var LVR_API_FIXED = null;
+var LVR_API_FIXED = 'https://api.librewxr.net';
 
-// === LEAFLET ADAPTER ===
-// Implements the viewer-core.js adapter contract with Leaflet 1.x primitives.
+// === LEAFLET ADAPTER (hero is Leaflet-based) ===
 var LeafletAdapter = function () {
     var map = null;
     var maxZoom = 12;
@@ -2382,23 +2323,18 @@ var LeafletAdapter = function () {
     var currentBaseMap = null;
     var alertsLayer = null;
 
-    // Pane z-values come from the CSS design tokens so theming stays in one place.
     function paneZ(name, fallback) {
         var val = parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
         return isNaN(val) ? fallback : val;
     }
 
     return {
-        // Leaflet maps are usable synchronously - no deferred boot needed.
         onMapReady: function (cb) { cb(); },
 
         createMap: function (containerId, view) {
             maxZoom = view.maxZoom;
             map = L.map(containerId, { maxZoom: view.maxZoom, zoomControl: true })
                 .setView([view.lat, view.lon], view.zoom);
-
-            // Custom panes give deterministic z-ordering: satellite under alerts
-            // under radar. Values mirror the --leaflet-z-* CSS tokens.
             map.createPane('lv-satellite-pane');
             map.getPane('lv-satellite-pane').style.zIndex = paneZ('--leaflet-z-satellite', 350);
             map.createPane('lv-alerts-pane');
@@ -2418,19 +2354,13 @@ var LeafletAdapter = function () {
         createFrameLayer: function (url, kind) {
             var pane = kind === 'satellite' ? 'lv-satellite-pane' : 'lv-radar-pane';
             var layer = new L.TileLayer(url, {
-                // 512-url HiDPI trick: the tile URL embeds 256 or 512 (the
-                // devicePixelRatio-aware size) but Leaflet is told the grid is
-                // 256px, and createTile forces tiles to render at 256 CSS px -
-                // crisp on retina without doubling the request count.
-                tileSize: 256,
-                opacity: 0, // created hidden; the engine fades in on ready
+                tileSize: 256, // 512-url HiDPI trick (see leaflet shell)
+                opacity: 0,    // created hidden; the engine fades in on ready
                 maxZoom: maxZoom,
                 pane: pane
             });
             layer.createTile = function (coords, done) {
                 var tile = document.createElement('img');
-                // .radar-tile / .satellite-tile get image-rendering: pixelated
-                // and the 256px !important sizing from viewer.css.
                 tile.className = kind === 'satellite' ? 'satellite-tile' : 'radar-tile';
                 tile.alt = '';
                 var key = coords.x + ':' + coords.y + ':' + coords.z;
@@ -2476,15 +2406,9 @@ var LeafletAdapter = function () {
         },
 
         onLayerReady: function (handle, cb) {
-            // The handler must be dropped on its FIRST fire. Leaflet re-fires
-            // `load` every time all visible tiles for a layer finish
-            // requesting, and a cached layer still attached to the map with
-            // opacity 0 keeps requesting tiles when the viewport changes.
-            // Without first-fire-only semantics a paused animation would
-            // fast-forward on pan and a live one would skip frames.
-            // `load` and `tileerror` can also both fire for the same layer
-            // when some tiles error and others succeed; the settled flag
-            // stops the second one from double-counting.
+            // First-fire-only: Leaflet re-fires `load` on every viewport change
+            // for layers still attached to the map; a lingering handler would
+            // fast-forward paused animations / skip frames in live ones.
             var settled = false;
             var waiter = setTimeout(finish, 25000); // safety net: never stall the
                                                     // engine on a dead tile host
@@ -2514,13 +2438,10 @@ var LeafletAdapter = function () {
                 alertsLayer = null;
             }
             if (!geojsonOrNull) return;
-            // L.geoJSON skips features with null geometry, which is exactly
-            // the alerts-catalog contract ("polygon or null").
             alertsLayer = L.geoJSON(geojsonOrNull, {
                 pane: 'lv-alerts-pane',
                 style: function (feature) { return styleFn(feature); },
                 onEachFeature: function (feature, layer) {
-                    // The engine pre-bakes popup HTML into properties.__popup.
                     if (feature.properties && feature.properties.__popup) {
                         layer.bindPopup(feature.properties.__popup);
                     }
@@ -2543,11 +2464,21 @@ var LeafletAdapter = function () {
     };
 };
 
-// === VIEWER ===
+// === VIEWER (locked hero configuration) ===
 LibreWXR.createViewer({
     apiSources: LVR_API_SOURCES,
     apiFixed: LVR_API_FIXED,
-    view: { lat: 39.8283, lon: -98.5795, zoom: 5, maxZoom: 12 }
+    view: { lat: 33.749, lon: -84.388, zoom: 7, maxZoom: 12 }, // Atlanta
+    layerMode: 'radar',   // radar only - satellite/nowcast split still animates
+    colorScheme: 10,      // default scheme
+    smooth: true,         // 1_1 webp tiles
+    snow: false,
+    format: 'webp',
+    tileSize: 512,        // fixed hi-res tiles
+    theme: 'dark',        // CARTO dark basemap
+    alerts: true,         // alerts overlay on by default (subtle styling below)
+    alertsFillAlpha: 0.10, // hero keeps alerts visually quieter
+    autoplay: true        // start playback once the catalog loads
 }, new LeafletAdapter());
 </script>
 
