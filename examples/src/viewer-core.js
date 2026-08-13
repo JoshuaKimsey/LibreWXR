@@ -56,7 +56,7 @@
         arrows: '',              // '' | 'light' | 'dark'
         cells: '',               // '' | 'light' | 'dark'
         smooth: true,
-        snow: false,
+        snow: true,
         format: 'webp',          // 'webp' | 'png'
         tileSize: 'auto',        // 'auto' | '256' | '512'
         theme: 'dark',
@@ -1592,26 +1592,26 @@
             }
             if ((c = byId('lv-layermode'))) {
                 c.addEventListener('change', function () {
-                    state.layerMode = c.value;
+                    state.layerMode = this.value;
                     updateRadarControlVisibility();
                     reinitialize();
                 });
             }
             if ((c = byId('lv-scheme'))) {
                 c.addEventListener('change', function () {
-                    state.colorScheme = parseInt(c.value, 10);
+                    state.colorScheme = parseInt(this.value, 10);
                     invalidateFrameLayers();
                 });
             }
             if ((c = byId('lv-arrows'))) {
                 c.addEventListener('change', function () {
-                    state.arrows = c.value;
+                    state.arrows = this.value;
                     invalidateFrameLayers();
                 });
             }
             if ((c = byId('lv-cells'))) {
                 c.addEventListener('change', function () {
-                    state.cells = c.value;
+                    state.cells = this.value;
                     invalidateFrameLayers();
                 });
             }
@@ -1634,30 +1634,30 @@
                     var panel = byId('lv-options');
                     if (!panel) return;
                     var open = panel.classList.toggle('open');
-                    c.setAttribute('aria-expanded', open ? 'true' : 'false');
+                    this.setAttribute('aria-expanded', open ? 'true' : 'false');
                 });
             }
             if ((c = byId('lv-smooth'))) {
                 c.addEventListener('change', function () {
-                    state.smooth = c.checked;
+                    state.smooth = this.checked;
                     invalidateFrameLayers();
                 });
             }
             if ((c = byId('lv-snow'))) {
                 c.addEventListener('change', function () {
-                    state.snow = c.checked;
+                    state.snow = this.checked;
                     invalidateFrameLayers();
                 });
             }
             if ((c = byId('lv-format'))) {
                 c.addEventListener('change', function () {
-                    state.format = c.value;
+                    state.format = this.value;
                     invalidateFrameLayers();
                 });
             }
             if ((c = byId('lv-tilesize'))) {
                 c.addEventListener('change', function () {
-                    state.tileSize = c.value;
+                    state.tileSize = this.value;
                     invalidateFrameLayers();
                 });
             }

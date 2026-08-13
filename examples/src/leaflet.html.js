@@ -57,7 +57,7 @@
 <!-- Options panel (collapsible) -->
 <div class="options-panel" id="lv-options">
     <label><input type="checkbox" id="lv-smooth" checked/> Smoothing</label>
-    <label><input type="checkbox" id="lv-snow"/> Snow mask</label>
+    <label><input type="checkbox" id="lv-snow" checked/> Snow mask</label>
     <label for="lv-format">Format</label>
     <select id="lv-format" aria-label="Tile format">
         <option value="webp">WebP</option>

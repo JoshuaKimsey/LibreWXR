@@ -230,7 +230,7 @@ LibreWXR.createViewer({
     layerMode: 'radar',   // radar only - satellite/nowcast split still animates
     colorScheme: 10,      // default scheme
     smooth: true,         // 1_1 webp tiles
-    snow: false,
+    snow: true,
     format: 'webp',
     tileSize: 512,        // fixed hi-res tiles
     theme: 'dark',        // CARTO dark basemap
