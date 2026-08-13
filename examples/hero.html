@@ -758,12 +758,13 @@ body {
     margin: 0 0 8px;
     font-size: 14px;
     font-weight: 700;
+    color: var(--alert-color);
 }
 .lv-popup-pulse-fast {
-    animation: lv-pulse 0.8s ease-in-out infinite;
+    animation: lv-pulse 0.9s ease-in-out infinite;
 }
 .lv-popup-pulse-slow {
-    animation: lv-pulse 2s ease-in-out infinite;
+    animation: lv-pulse 1.5s ease-in-out infinite;
 }
 @keyframes lv-pulse {
     0%, 100% { opacity: 1; }
@@ -772,8 +773,8 @@ body {
 .lv-alert-popup-meta {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-bottom: 6px;
+    gap: 6px;
+    margin-bottom: 8px;
     flex-wrap: wrap;
 }
 .lv-alert-severity {
@@ -784,16 +785,16 @@ body {
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
+    background: var(--alert-color);
+    color: #fff;
 }
-.lv-alert-severity.emergency { background: #d50000; color: #fff; }
-.lv-alert-severity.extreme { background: #b71c1c; color: #fff; }
-.lv-alert-severity.severe { background: #e65100; color: #fff; }
-.lv-alert-severity.moderate { background: #fdd835; color: #333; }
-.lv-alert-severity.minor { background: #9e9e9e; color: #fff; }
 .lv-alert-popup-urgency {
+    background: #424242;
+    color: #fff;
+    padding: 2px 6px;
+    border-radius: 4px;
     font-size: 11px;
     font-weight: 600;
-    color: var(--text-secondary);
 }
 .lv-alert-popup-description {
     margin: 6px 0;
@@ -809,28 +810,120 @@ body {
     margin: 6px 0;
     font-size: 12px;
 }
+.lv-alert-popup-hazards-label {
+    margin: 0 0 5px;
+    font-size: 12px;
+}
+.lv-alert-popup-hazard-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
 .lv-alert-popup-hazard-tag {
-    display: inline-block;
-    margin: 2px 4px 2px 0;
-    padding: 1px 6px;
+    background: #616161;
+    color: #fff;
+    padding: 2px 6px;
     border-radius: 4px;
     font-size: 11px;
-    background: rgba(78,168,222,0.15);
-    color: var(--accent);
-    border: 1px solid rgba(78,168,222,0.25);
 }
 .lv-alert-popup-action {
-    margin-top: 10px;
+    margin: 10px 0;
     padding: 8px 10px;
     border-radius: 6px;
     font-size: 12px;
     font-weight: 600;
     line-height: 1.4;
+    border-left: 3px solid transparent;
 }
-.lv-alert-popup-action.emergency { background: rgba(213,0,0,0.15); color: #ff6b6b; border-left: 3px solid #d50000; }
-.lv-alert-popup-action.extreme { background: rgba(230,81,0,0.12); color: #ff8a50; border-left: 3px solid #e65100; }
-.lv-alert-popup-action.severe { background: rgba(230,152,0,0.12); color: #ffb74d; border-left: 3px solid #e69800; }
-.lv-alert-popup-action.moderate { background: rgba(253,216,53,0.1); color: #f9a825; border-left: 3px solid #fdd835; }
+.lv-alert-popup-action.emergency {
+    background: rgba(123, 31, 162, 0.14);
+    border-left-color: #7B1FA2;
+    color: #d8a6e8;
+}
+.lv-alert-popup-action.extreme {
+    background: rgba(183, 28, 28, 0.14);
+    border-left-color: #B71C1C;
+    color: #ef9a9a;
+}
+.lv-alert-popup-action.severe {
+    background: rgba(198, 40, 40, 0.14);
+    border-left-color: #C62828;
+    color: #ef9a9a;
+}
+.lv-alert-popup-action.moderate {
+    background: rgba(239, 108, 0, 0.14);
+    border-left-color: #EF6C00;
+    color: #ffb74d;
+}
+.lv-alert-popup-summary {
+    cursor: pointer;
+    background: #424242;
+    color: #fff;
+    padding: 6px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    outline: none;
+    margin-top: 8px;
+}
+.lv-alert-popup-fulltext {
+    margin-top: 8px;
+    max-height: 200px;
+    overflow-y: auto;
+    padding: 8px 10px;
+    background: #f5f5f5;
+    color: #1a1a1a;
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+/* === ALERT POLYGON ANIMATIONS === */
+@keyframes emergency-alert-pulse {
+    0%, 100% {
+        stroke-opacity: 1;
+        fill-opacity: 0.45;
+        stroke-width: 3.5px;
+    }
+    50% {
+        stroke-opacity: 1;
+        fill-opacity: 0.7;
+        stroke-width: 6px;
+    }
+}
+@keyframes extreme-alert-pulse {
+    0%, 100% {
+        stroke-opacity: 0.9;
+        fill-opacity: 0.3;
+        stroke-width: 3px;
+    }
+    50% {
+        stroke-opacity: 1;
+        fill-opacity: 0.5;
+        stroke-width: 5px;
+    }
+}
+@keyframes severe-alert-pulse {
+    0%, 100% {
+        stroke-opacity: 0.8;
+        fill-opacity: 0.25;
+        stroke-width: 2.5px;
+    }
+    50% {
+        stroke-opacity: 0.9;
+        fill-opacity: 0.35;
+        stroke-width: 3.5px;
+    }
+}
+.emergency-alert-polygon {
+    animation: emergency-alert-pulse 1s infinite ease-in-out;
+}
+.extreme-alert-polygon {
+    animation: extreme-alert-pulse 2s infinite ease-in-out;
+}
+.severe-alert-polygon {
+    animation: severe-alert-pulse 3s infinite ease-in-out;
+}
 
 /* === RESPONSIVE === */
 @media (max-width: 600px) {
@@ -870,7 +963,10 @@ body {
         transform: none !important;
     }
     .lv-popup-pulse-fast,
-    .lv-popup-pulse-slow {
+    .lv-popup-pulse-slow,
+    .emergency-alert-polygon,
+    .extreme-alert-polygon,
+    .severe-alert-polygon {
         animation: none;
     }
 }
@@ -994,7 +1090,8 @@ body {
     var SAT_ANIMATION_DELAY = 800;
     var SAT_ANIMATION_PAUSE = 2000;
     var PRELOAD_CONCURRENCY = 3;       // in-flight preload pool size
-    var ALERTS_DEBOUNCE_MS = 800;      // viewport -> alerts refetch debounce
+    var ALERTS_DEBOUNCE_MS = 800;      // viewport -> alerts re-filter debounce
+    var ALERTS_THROTTLE_MS = 3000;      // client-side filter/redraw throttle (global-cache path)
     var RETRY_DELAYS = [5000, 15000, 30000]; // catalog load auto-retry backoff
 
     function createViewer(userConfig, adapter) {
@@ -1031,6 +1128,12 @@ body {
             alertsEnabled: config.alerts,
             alertsEpoch: 0,         // guards against stale alert responses
             alertsDebounce: null,
+            alertsCachedGlobal: null,   // full FeatureCollection features[] from the last global fetch
+            alertsLastFetchTime: 0,     // last /v2/alerts API fetch (ms epoch)
+            alertsLastFilterTime: 0,    // last client-side filter + overlay rebuild (ms epoch)
+            alertsInFlight: false,      // guards against concurrent alert API fetches
+            lastClickedAlertId: null,   // reopen this alert's popup after overlay rebuilds
+            alertsSkipNextViewport: false, // skip one viewport refetch (popup autoPan after a polygon click)
             sourceDefault: 'public',
             preloadEpoch: 0,        // guards against stale preload work
             preloadIndicatorVisible: false,
@@ -1059,18 +1162,6 @@ body {
             var val = getComputedStyle(document.documentElement).getPropertyValue(name);
             val = val ? val.trim() : '';
             return val || fallback;
-        }
-
-        /* Alert severity palette, sourced from the CSS design tokens so a
-           future visual pass can retheme alerts without touching the engine. */
-        function severityColors() {
-            return {
-                Extreme: cssVar('--alert-extreme', '#d50000'),
-                Severe: cssVar('--alert-severe', '#ff6d00'),
-                Moderate: cssVar('--alert-moderate', '#ffb300'),
-                Minor: cssVar('--alert-minor', '#8e24aa'),
-                Unknown: cssVar('--alert-unknown', '#546e7a')
-            };
         }
 
         function escapeHtml(s) {
@@ -1318,9 +1409,16 @@ body {
                 }
                 var cur = state.cache[frame.path];
                 if (!cur) {
-                    // Cache was cleared while this layer was loading: discard.
-                    adapter.destroyFrameLayer(handle);
-                    return;
+                    // Cache was cleared while this layer was loading. If this
+                    // layer is still the one on screen, re-adopt it into the
+                    // cache and show it rather than leaving a blank map until
+                    // the next scrub/play.
+                    if (state.currentHandle === handle) {
+                        cur = state.cache[frame.path] = { handle: handle, kind: kind, settled: false };
+                    } else {
+                        adapter.destroyFrameLayer(handle);
+                        return;
+                    }
                 }
                 if (state.animationPosition === position) {
                     crossFade(handle, targetOpacity);
@@ -1450,14 +1548,13 @@ body {
                 adapter.onLayerReady(handle, function () {
                     var entry = state.cache[frame.path];
                     if (epoch !== state.preloadEpoch) {
-                        // Cancelled mid-flight. Only discard the layer if the
-                        // cached entry still points at THIS handle - a newer
-                        // preload may have re-created an entry for the same
-                        // path with a fresh handle that we must not touch.
-                        if (entry && !entry.settled && entry.handle === handle) {
-                            delete state.cache[frame.path];
-                            adapter.destroyFrameLayer(handle);
-                        }
+                        // Cancelled mid-flight: leave the layer parked in the
+                        // cache (hidden). Destroying it here races with any
+                        // pending showFrame waiter on the same handle (which
+                        // would find the entry gone and never crossfade), and
+                        // makes every pan re-create and refetch every frame
+                        // layer. Real teardown is owned by
+                        // clearAllFrameLayers / destroyCacheEntry.
                         return;
                     }
                     if (entry) entry.settled = true;
@@ -1732,9 +1829,9 @@ body {
             document.body.setAttribute('data-theme', theme);
             adapter.setBasemap(theme);
             updateThemeButton();
-            // Alert severity colors are read from CSS custom properties at
-            // overlay-build time, so a theme switch re-bakes them: refetch.
-            if (state.alertsEnabled) fetchAlerts();
+            // Rebuild the overlay from the cached catalog so popup styling
+            // stays consistent with the new theme.
+            if (state.alertsEnabled) fetchAlerts(false, true);
         }
 
         function updateThemeButton() {
@@ -1750,9 +1847,9 @@ body {
         }
 
         /* === ALERTS OVERLAY ===
-           WMO CAP alerts as GeoJSON at /v2/alerts. Refetched on viewport change
-           (debounced) and on the auto-refresh cadence. A 5xx from the alerts
-           endpoint hides the overlay gracefully instead of crashing. */
+           WMO CAP alerts as GeoJSON at /v2/alerts. Fetched globally once per
+           cadence and filtered client-side by viewport (throttled), per the
+           Variable Weather pattern. */
         function setAlertsEnabled(on) {
             if (on && config.alertsFileWarning) {
                 showError('Weather alerts require serving this page over HTTP or HTTPS. From file:// the browser blocks the web worker that renders alert polygons.', false);
@@ -1764,7 +1861,7 @@ body {
             state.alertsEnabled = on;
             updateAlertsButton();
             if (on) {
-                fetchAlerts();
+                fetchAlerts(true);
             } else {
                 adapter.setAlertsOverlay(null);
             }
@@ -1777,61 +1874,111 @@ body {
             btn.setAttribute('aria-pressed', state.alertsEnabled ? 'true' : 'false');
         }
 
-        function fetchAlerts() {
+        /* Global-cache fetch flow (Variable Weather pattern): the full alert
+           catalog is fetched once and filtered client-side by viewport, so
+           pan/zoom never hits the API. Redraws are throttled, and any fetch
+           failure keeps the previous overlay (stale is better than none). */
+        function fetchAlerts(force, bypassThrottle) {
             if (!state.alertsEnabled || !state.mapReady) {
                 console.warn('LibreWXR alerts: fetch skipped (alertsEnabled=' + state.alertsEnabled + ', mapReady=' + state.mapReady + ')');
                 return;
             }
-            var b = adapter.getBounds();
-            var bbox = b.west + ',' + b.south + ',' + b.east + ',' + b.north;
-            var url = apiBase() + '/v2/alerts?bbox=' + bbox + '&simplify=1000';
+            if (state.alertsInFlight) return;
+            var now = Date.now();
+
+            if (state.alertsCachedGlobal) {
+                if (!force) {
+                    if (!bypassThrottle && now - state.alertsLastFilterTime < ALERTS_THROTTLE_MS) return;
+                    state.alertsLastFilterTime = now;
+                    applyCachedAlerts();
+                    return;
+                }
+                if (!bypassThrottle && now - state.alertsLastFetchTime < ALERTS_THROTTLE_MS) {
+                    applyCachedAlerts();
+                    return;
+                }
+            }
+
+            // No cache yet, or a force refresh past the throttle: hit the API.
+            state.alertsLastFetchTime = now;
+            state.alertsInFlight = true;
             var epoch = ++state.alertsEpoch; // cancel stale in-flight responses
 
+            var url = apiBase() + '/v2/alerts?simplify=1000';
             var xhr = new XMLHttpRequest();
             xhr.open('GET', url, true);
             xhr.onload = function () {
-                console.log('LibreWXR alerts: xhr onload, status=' + xhr.status);
+                state.alertsInFlight = false;
                 if (epoch !== state.alertsEpoch || !state.alertsEnabled) return;
                 if (xhr.status >= 200 && xhr.status < 300) {
-                    var parsed = null;
                     try {
-                        parsed = JSON.parse(xhr.responseText);
-                        console.log('LibreWXR alerts: received', (parsed && parsed.features ? parsed.features.length : 0), 'features');
-                        var withGeom = 0;
-                        var list = parsed && parsed.features ? parsed.features : [];
-                        for (var i = 0; i < list.length; i++) {
-                            if (list[i] && list[i].geometry) withGeom++;
-                        }
-                        console.log('LibreWXR alerts: ' + withGeom + ' with geometry, ' + (list.length - withGeom) + ' null-geometry (skipped at render)');
-                        adapter.setAlertsOverlay(decorateAlerts(parsed), alertStyleFn);
+                        var parsed = JSON.parse(xhr.responseText);
+                        state.alertsCachedGlobal = (parsed && parsed.features) ? parsed.features : [];
+                        applyCachedAlerts();
                     } catch (e) {
-                        // Keep whatever overlay is already shown, but log so a
-                        // failed overlay render (e.g. adapter throw) is visible
-                        // in the console instead of silently disappearing.
+                        // Keep whatever overlay is already shown.
                         console.warn('LibreWXR: failed to render alerts overlay', e);
                     }
-                } else if (xhr.status === 503 || xhr.status >= 500) {
-                    // Alerts API unavailable - hide the layer, no crash.
-                    console.warn('LibreWXR alerts: API unavailable (status ' + xhr.status + ')');
-                    adapter.setAlertsOverlay(null);
                 } else {
-                    // Non-2xx, non-5xx (e.g. 4xx): previously a silent gap, so
-                    // surface it in the console.
-                    console.warn('LibreWXR alerts: unexpected status', xhr.status);
+                    // 5xx/4xx: keep the existing overlay, no crash.
+                    console.warn('LibreWXR alerts: unexpected status ' + xhr.status + ' - keeping previous overlay');
                 }
             };
             xhr.onerror = function () {
-                // Network error: stale alerts are better than none, so keep them.
-                console.warn('LibreWXR alerts: network error');
+                state.alertsInFlight = false;
+                console.warn('LibreWXR alerts: network error - keeping previous overlay');
             };
             xhr.ontimeout = function () {
-                console.warn('LibreWXR alerts: request timed out');
+                state.alertsInFlight = false;
+                console.warn('LibreWXR alerts: request timed out - keeping previous overlay');
             };
             xhr.onabort = function () {
-                console.warn('LibreWXR alerts: request aborted');
+                state.alertsInFlight = false;
+                console.warn('LibreWXR alerts: request aborted - keeping previous overlay');
             };
             console.log('LibreWXR alerts: fetching', url);
             xhr.send();
+        }
+
+        function applyCachedAlerts() {
+            var bounds = adapter.getBounds();
+            var filtered = filterAlertsByBounds(state.alertsCachedGlobal, bounds);
+            var fc = { type: 'FeatureCollection', features: filtered };
+            adapter.setAlertsOverlay(decorateAlerts(fc), alertStyleFn, state.lastClickedAlertId);
+        }
+
+        function filterAlertsByBounds(features, viewport) {
+            var out = [];
+            for (var i = 0; i < features.length; i++) {
+                var f = features[i];
+                if (!f || !f.geometry) continue;
+                var coords;
+                if (f.geometry.type === 'Polygon') {
+                    coords = f.geometry.coordinates[0];
+                } else if (f.geometry.type === 'MultiPolygon') {
+                    coords = [];
+                    for (var j = 0; j < f.geometry.coordinates.length; j++) {
+                        var ring = f.geometry.coordinates[j][0];
+                        for (var k = 0; k < ring.length; k++) coords.push(ring[k]);
+                    }
+                } else {
+                    continue;
+                }
+                if (!coords || coords.length === 0) continue;
+                var minLon = Infinity, maxLon = -Infinity;
+                var minLat = Infinity, maxLat = -Infinity;
+                for (var m = 0; m < coords.length; m++) {
+                    var lon = coords[m][0], lat = coords[m][1];
+                    if (lon < minLon) minLon = lon;
+                    if (lon > maxLon) maxLon = lon;
+                    if (lat < minLat) minLat = lat;
+                    if (lat > maxLat) maxLat = lat;
+                }
+                var outside = maxLon < viewport.west || minLon > viewport.east ||
+                    maxLat < viewport.south || minLat > viewport.north;
+                if (!outside) out.push(f);
+            }
+            return out;
         }
 
         function decorateAlerts(geojson) {
@@ -1844,118 +1991,332 @@ body {
             return geojson;
         }
 
-        function getHazardType(title) {
-            if (!title) return 'default';
-            var t = title.toLowerCase();
-            if (t.indexOf('tornado') >= 0) return 'tornado';
-            if (t.indexOf('flood') >= 0) return 'flood';
-            if (t.indexOf('thunder') >= 0 || t.indexOf('lightning') >= 0) return 'thunderstorm';
-            if (t.indexOf('snow') >= 0 || t.indexOf('winter') >= 0) return 'snow';
-            if (t.indexOf('ice') >= 0 || t.indexOf('freez') >= 0) return 'ice';
-            if (t.indexOf('wind') >= 0 && t.indexOf('wind chill') < 0) return 'wind';
-            if (t.indexOf('heat') >= 0) return 'heat';
-            if (t.indexOf('cold') >= 0) return 'cold';
-            if (t.indexOf('fog') >= 0) return 'fog';
-            if (t.indexOf('hurricane') >= 0 || t.indexOf('tropical') >= 0) return 'hurricane';
-            if (t.indexOf('dust') >= 0) return 'tornado'; // dust storm = same color family
-            if (t.indexOf('smoke') >= 0 || t.indexOf('fire') >= 0) return 'fire';
-            return 'default';
+        /* --- Alert field derivation (ported from the Variable Weather PWA:
+             js/api/alerts/alertsApi.js + js/ui/components/radar.js) --- */
+
+        // "Tornado Watch issued May 7 at 12:15AM CDT by NWS Birmingham AL"
+        // -> "Tornado Watch"
+        function extractEventFromTitle(title) {
+            if (!title) return '';
+            var t = String(title);
+            var idx = t.toLowerCase().indexOf(' issued ');
+            return idx !== -1 ? t.substring(0, idx) : t;
+        }
+
+        // Five-tier severity classifier (emergency/extreme/severe/moderate/minor)
+        // derived from the event type and full text, as in the Variable Weather PWA.
+        function determineAlertSeverity(event, title, description) {
+            var e = String(event || '').toLowerCase();
+            var combined = (String(title || '') + ' ' + String(description || '')).toLowerCase();
+
+            if (e.indexOf('extreme wind warning') >= 0 ||
+                combined.indexOf('tornado emergency') >= 0 ||
+                combined.indexOf('flash flood emergency') >= 0 ||
+                combined.indexOf('particularly dangerous situation') >= 0) {
+                return 'emergency';
+            }
+            if (e.indexOf('tornado warning') >= 0 ||
+                e.indexOf('hurricane warning') >= 0 ||
+                e.indexOf('flash flood warning') >= 0 ||
+                e.indexOf('tsunami warning') >= 0 ||
+                e.indexOf('storm surge warning') >= 0) {
+                return 'extreme';
+            }
+            // Southern offices issue freeze warnings for any sub-32F night.
+            if (e.indexOf('freeze warning') >= 0) return 'moderate';
+            if (e.indexOf('storm surge watch') >= 0) return 'severe';
+            if (e.indexOf('special weather statement') >= 0 ||
+                e.indexOf('hazardous weather outlook') >= 0 ||
+                e.indexOf('air quality alert') >= 0 ||
+                e.indexOf('hydrologic outlook') >= 0 ||
+                e.indexOf('beach hazards statement') >= 0 ||
+                e.indexOf('urban and small stream') >= 0 ||
+                e.indexOf('lake wind advisory') >= 0 ||
+                e.indexOf('short term forecast') >= 0 ||
+                e.indexOf('advisory') >= 0 ||
+                e.indexOf('statement') >= 0) {
+                return 'minor';
+            }
+            if (e.indexOf('warning') >= 0) return 'severe';
+            if (e.indexOf('watch') >= 0) return 'moderate';
+            return 'moderate';
+        }
+
+        function deriveUrgency(event) {
+            var e = String(event || '').toLowerCase();
+            return e.indexOf('warning') >= 0 ? 'Immediate' : 'Expected';
+        }
+
+        // Word-boundary hazard detection with place-name false-positive guards.
+        function identifyAlertHazards(alertTitle, fullDescription) {
+            var hazards = {};
+            var combinedText = (String(alertTitle || '') + ' ' + String(fullDescription || '')).toLowerCase();
+
+            var placeNamePatterns = [
+                /\b(road|rd\.?|street|st\.?|ave\.?|avenue|ln\.?|lane|blvd\.?|boulevard|dr\.?|drive|way|place|pl\.?|parkway|pkwy\.?|highway|hwy\.?)\b/,
+                /\b(city|town|county|village|district|neighborhood|park|plaza|center|square|region|area|zone)\b/,
+                /\b(creek|river|lake|pond|bay|mountain|hill|valley|canyon|ridge|peak|summit|basin)\b/
+            ];
+
+            function isLikelyPlaceName(matchText, context) {
+                context = context || 50;
+                var m = String(matchText).toLowerCase();
+                var matchIndex = combinedText.indexOf(m);
+                if (matchIndex === -1) return false;
+                var start = Math.max(0, matchIndex - context);
+                var end = Math.min(combinedText.length, matchIndex + m.length + context);
+                var surrounding = combinedText.substring(start, end);
+                for (var i = 0; i < placeNamePatterns.length; i++) {
+                    if (placeNamePatterns[i].test(surrounding)) return true;
+                }
+                return false;
+            }
+
+            var hazardPatterns = [
+                { pattern: /\btornado\b/, type: 'tornado' },
+                { pattern: /\bhail\b/, type: 'hail' },
+                { pattern: /\bflash flood\b|\bflooding\b|\bflood\b/, type: 'flood' },
+                { pattern: /\bthunder\b|\bthunderstorm\b|\bsevere thunderstorm\b/, type: 'thunderstorm' },
+                { pattern: /\blightning\b/, type: 'lightning' },
+                { pattern: /\bfire weather\b|\bred flag\b|\bwildfire\b|\bfire warning\b|\bextreme fire\b/, type: 'fire' },
+                { pattern: /\bair quality\b|\bair stagnation\b|\bsmoke advisory\b|\bparticulate\b/, type: 'air-quality' },
+                { pattern: /\bavalanche\b/, type: 'avalanche' },
+                { pattern: /\bstorm surge\b|\bcoastal flood\b/, type: 'surge' },
+                { pattern: /\btsunami\b/, type: 'tsunami' },
+                { pattern: /\bsmall craft\b|\bgale warning\b|\bmarine warning\b|\bmarine weather\b|\bbeach hazard\b|\brip current\b|\bhigh surf\b/, type: 'marine' },
+                { pattern: /\b(?:winter storm|winter weather|heavy snow|snowfall|snow accumulation|snow and ice|snow advisory|snow warning|snow emergency|snowstorm|snow covered|snow level)\b/, type: 'snow' },
+                { pattern: /\bice storm\b|\bsleet\b|\bfreezing rain\b|\bfreezing drizzle\b|\bice pellets\b/, type: 'ice' },
+                { pattern: /\bfreeze\b|\bfreezing\b|\bfrost\b|\bsub-freezing\b/, type: 'cold' },
+                { pattern: /\bwind\b|\bgust\b|\bstrong winds\b/, type: 'wind' },
+                { pattern: /\bdust\b/, type: 'dust' },
+                { pattern: /\bsmoke\b/, type: 'smoke' },
+                { pattern: /\bfog\b/, type: 'fog' },
+                { pattern: /\bheat\b/, type: 'heat' },
+                { pattern: /\bcold\b|\bchill\b|\bwind chill\b|\bhypothermia\b/, type: 'cold' },
+                { pattern: /\brain\b|\bshower\b/, type: 'rain' },
+                { pattern: /\b(?:hurricane warning|hurricane watch|hurricane advisory|hurricane threat|approaching hurricane|major hurricane|potential hurricane|category \d hurricane|hurricane force|tropical storm|tropical cyclone|tropical depression)\b/, type: 'hurricane' }
+            ];
+
+            for (var i = 0; i < hazardPatterns.length; i++) {
+                var hp = hazardPatterns[i];
+                if (hp.pattern.test(combinedText)) hazards[hp.type] = true;
+            }
+
+            if (!hazards.snow) {
+                var snowMatches = combinedText.match(/\bsnow\b/g);
+                if (snowMatches) {
+                    var hasWeatherContext = /snow.{0,30}(weather|forecast|warning|advisory|inches|feet|heavy|condition|expect|potential|accumulation|amount|total|depth|fall|coverage)/.test(combinedText);
+                    for (var s = 0; s < snowMatches.length; s++) {
+                        if (hasWeatherContext && !isLikelyPlaceName(snowMatches[s])) {
+                            hazards.snow = true;
+                            break;
+                        }
+                    }
+                }
+                if (!hazards.snow && /\bblizzard\b/.test(combinedText) && !isLikelyPlaceName('blizzard')) {
+                    hazards.snow = true;
+                }
+                if (!hazards.snow && /\bwinter\b/.test(combinedText) &&
+                    /winter.{0,20}(weather|storm|advisory|warning)/.test(combinedText) &&
+                    !isLikelyPlaceName('winter')) {
+                    hazards.snow = true;
+                }
+            }
+
+            if (!hazards.hurricane && /\bhurricane\b/.test(combinedText)) {
+                var weatherContextMatch = /hurricane.{0,30}(warning|watch|advisory|category|mph|wind|storm|evacuat|weather|intensity|eye|cyclone|damage|impact|approach|strength)/.test(combinedText);
+                if (weatherContextMatch && !isLikelyPlaceName('hurricane')) {
+                    hazards.hurricane = true;
+                }
+            }
+
+            return Object.keys(hazards);
+        }
+
+        function getPrimaryHazardType(eventType) {
+            var title = String(eventType || '').toLowerCase();
+
+            function isLikelyPlaceName(term) {
+                var placePatterns = [
+                    /(city|town|county|village|district|road|rd\.?|street|st\.?|avenue|ave\.?|lane|ln\.?|drive|dr\.?|way|blvd\.?|plaza|park)/,
+                    /(creek|river|lake|pond|bay|mountain|hill|valley|canyon|ridge)/
+                ];
+                for (var i = 0; i < placePatterns.length; i++) {
+                    if (new RegExp(term + '\\s+' + placePatterns[i].source, 'i').test(title)) return true;
+                    if (new RegExp(placePatterns[i].source + '\\s+' + term, 'i').test(title)) return true;
+                }
+                return false;
+            }
+
+            if (/\btornado\b/.test(title)) return 'tornado';
+            if (/\btsunami\b/.test(title)) return 'tsunami';
+            if (/\bhurricane warning\b|\bhurricane watch\b|\btropical storm\b|\bcategory \d hurricane\b/.test(title)) return 'hurricane';
+            if (/\bstorm surge\b|\bcoastal flood\b/.test(title)) return 'surge';
+            if (/\bfire weather\b|\bred flag\b|\bwildfire\b|\bextreme fire\b/.test(title)) return 'fire';
+            if (/\bair quality\b|\bair stagnation\b|\bsmoke advisory\b/.test(title)) return 'air-quality';
+            if (/\bavalanche\b/.test(title)) return 'avalanche';
+            if (/\bsmall craft\b|\bgale warning\b|\bmarine warning\b|\bmarine weather\b|\bbeach hazard\b|\brip current\b|\bhigh surf\b/.test(title)) return 'marine';
+            if (/\bflash flood\b/.test(title)) return 'flood';
+            if (/\bthunderstorm\b/.test(title)) return 'thunderstorm';
+            if (/\blightning\b/.test(title)) return 'lightning';
+            if (/\bflood\b/.test(title)) return 'flood';
+            if (/\b(winter storm|winter weather|heavy snow|snowfall|snowstorm)\b/.test(title)) return 'snow';
+            if (/\bsnow\b/.test(title) && !/\bsnow creek\b/.test(title) && !isLikelyPlaceName('snow')) return 'snow';
+            if (/\bblizzard\b/.test(title) && !isLikelyPlaceName('blizzard')) return 'snow';
+            if (/\bice\b|\bfreezing rain\b|\bfreezing drizzle\b|\bice storm\b/.test(title)) return 'ice';
+            if (/\bfreeze\b|\bfreezing\b|\bfrost\b/.test(title)) return 'cold';
+            if (/\bwind\b/.test(title)) return 'wind';
+            if (/\bheat\b/.test(title)) return 'heat';
+            if (/\bcold\b/.test(title)) return 'cold';
+            if (/\bfog\b/.test(title)) return 'fog';
+            if (/\bdust\b/.test(title)) return 'dust';
+            if (/\bsmoke\b/.test(title)) return 'smoke';
+            if (/\brain\b/.test(title)) return 'rain';
+            if (/\bweather statement\b/.test(title)) return 'special-weather';
+
+            if (/\bhurricane\b/.test(title) && !isLikelyPlaceName('hurricane')) return 'hurricane';
+
+            var firstWord = title.split(' ')[0];
+            return firstWord === 'watch' || firstWord === 'warning' || firstWord === 'advisory'
+                ? (title.split(' ')[1] || 'unknown')
+                : firstWord;
         }
 
         function alertStyleFn(feature) {
-            var sev = feature && feature.properties ? (feature.properties.severity || 'Unknown') : 'Unknown';
-            var title = feature && feature.properties ? (feature.properties.title || '') : '';
-            var sevLower = sev.toLowerCase();
-            var intensity = 0;
-            if (sevLower === 'emergency' || sevLower === 'extreme') intensity = 3;
-            else if (sevLower === 'severe') intensity = 2;
-            else if (sevLower === 'moderate') intensity = 1;
+            var props = feature && feature.properties ? feature.properties : {};
+            var headline = props.title || '';
+            var event = extractEventFromTitle(headline);
+            var severity = determineAlertSeverity(event, headline, props.description || '');
 
-            var hazardType = getHazardType(title);
+            // Emergency overrides hazard coloring with a distinct purple so it
+            // never blends into the hazard palette (Variable Weather behavior).
+            if (severity === 'emergency') {
+                return {
+                    color: '#7B1FA2',
+                    fillColor: '#7B1FA2',
+                    fillOpacity: 0.4,
+                    weight: 3.5,
+                    opacity: 1,
+                    className: 'emergency-alert-polygon'
+                };
+            }
+
+            var intensity = severity === 'extreme' ? 3 : (severity === 'severe' ? 2 : (severity === 'minor' ? 0 : 1));
+            var borderOpacity = 0.7 + intensity * 0.1;
+            var fillOpacity = 0.15 + intensity * 0.05;
+
+            var hazardType = getPrimaryHazardType(event);
             var palettes = {
-                flood:        ['#81C784','#66BB6A','#4CAF50','#2E7D32'],
-                thunderstorm: ['#FFD54F','#FFC107','#FF9800','#F57C00'],
-                tornado:      ['#EF9A9A','#EF5350','#E53935','#B71C1C'],
-                snow:         ['#9FA8DA','#7986CB','#3F51B5','#283593'],
-                ice:          ['#9FA8DA','#7986CB','#3F51B5','#283593'],
-                fire:         ['#FFAB91','#FF7043','#F4511E','#BF360C'],
-                fog:          ['#B0BEC5','#90A4AE','#607D8B','#37474F'],
-                wind:         ['#80CBC4','#4DB6AC','#009688','#00695C'],
-                hurricane:    ['#80CBC4','#4DB6AC','#009688','#00695C'],
-                heat:         ['#FFAB91','#FF7043','#F4511E','#BF360C'],
-                cold:         ['#9FA8DA','#7986CB','#3F51B5','#283593'],
-                default:      ['#B39DDB','#9575CD','#673AB7','#4527A0']
+                flood:          ['#81C784', '#66BB6A', '#4CAF50', '#2E7D32'],
+                thunderstorm:   ['#FFD54F', '#FFC107', '#FF9800', '#F57C00'],
+                'special-weather': ['#FFD54F', '#FFC107', '#FF9800', '#F57C00'],
+                tornado:        ['#EF9A9A', '#EF5350', '#E53935', '#B71C1C'],
+                dust:           ['#EF9A9A', '#EF5350', '#E53935', '#B71C1C'],
+                snow:           ['#9FA8DA', '#7986CB', '#3F51B5', '#283593'],
+                ice:            ['#9FA8DA', '#7986CB', '#3F51B5', '#283593'],
+                fire:           ['#FFAB91', '#FF7043', '#F4511E', '#BF360C'],
+                fog:            ['#B0BEC5', '#90A4AE', '#607D8B', '#37474F'],
+                wind:           ['#80CBC4', '#4DB6AC', '#009688', '#00695C'],
+                hurricane:      ['#80CBC4', '#4DB6AC', '#009688', '#00695C'],
+                heat:           ['#FFAB91', '#FF7043', '#F4511E', '#BF360C'],
+                cold:           ['#9FA8DA', '#7986CB', '#3F51B5', '#283593'],
+                default:        ['#B39DDB', '#9575CD', '#673AB7', '#4527A0']
             };
             var palette = palettes[hazardType] || palettes['default'];
             var color = palette[intensity];
 
-            var fillAlpha = config.alertsFillAlpha != null
-                ? config.alertsFillAlpha
-                : parseFloat(cssVar('--alert-fill-alpha', '0.18'));
-            var weight = parseFloat(cssVar('--alert-stroke-width', '2')) || 2;
+            var className = severity === 'extreme' ? 'extreme-alert-polygon'
+                : (severity === 'severe' ? 'severe-alert-polygon' : '');
+
             return {
                 color: color,
                 fillColor: color,
-                fillOpacity: fillAlpha,
-                weight: intensity >= 3 ? 3 : (intensity >= 2 ? 2.5 : weight)
+                fillOpacity: config.alertsFillAlpha != null ? config.alertsFillAlpha : fillOpacity,
+                weight: severity === 'extreme' ? 3 : (severity === 'severe' ? 2.5 : 2),
+                opacity: borderOpacity,
+                className: className
             };
         }
 
         function alertPopupHtml(p) {
-            var color = (alertStyleFn({properties: p})).color;
-            var sev = p.severity || 'Unknown';
-            var sevLower = sev.toLowerCase();
-            var isEmergency = sevLower === 'emergency';
-            var isExtreme = sevLower === 'extreme';
-            var isSevere = sevLower === 'severe';
+            var headline = p.title || 'Weather Alert';
+            var event = extractEventFromTitle(headline) || headline;
+            var severity = determineAlertSeverity(event, headline, p.description || '');
+            var urgency = deriveUrgency(event);
+            var hazards = identifyAlertHazards(headline, p.description || '');
+            var color = (alertStyleFn({ properties: p })).color;
+
+            var isEmergency = severity === 'emergency';
+            var isExtreme = severity === 'extreme';
+            var isSevere = severity === 'severe';
             var pulseClass = isEmergency ? 'lv-popup-pulse-fast' : (isExtreme ? 'lv-popup-pulse-slow' : '');
             var emoji = (isEmergency || isExtreme) ? '\u26A0\uFE0F ' : '';
 
-            var sevText = isEmergency ? 'EMERGENCY' : (isExtreme ? 'EXTREME' : (isSevere ? 'SEVERE' : (sevLower === 'moderate' ? 'MODERATE' : 'MINOR')));
-            var sevClass = isEmergency ? 'emergency' : (isExtreme ? 'extreme' : (isSevere ? 'severe' : (sevLower === 'moderate' ? 'moderate' : 'minor')));
+            var sevText = severity.toUpperCase();
+            var sevClass = isEmergency ? 'emergency' : (isExtreme ? 'extreme' : (isSevere ? 'severe' : (severity === 'moderate' ? 'moderate' : 'minor')));
 
-            var title = escapeHtml(p.title || 'Weather Alert');
-            var desc = p.description ? '<p class="lv-alert-popup-description">' + escapeHtml(p.description) + '</p>' : '';
-
-            var urgency = p.urgency || '';
-            var urgencyHtml = urgency ? '<span class="lv-alert-popup-urgency">' + escapeHtml(urgency.toUpperCase()) + '</span>' : '';
-
-            var expires = p.expires
-                ? '<p class="lv-alert-popup-expires"><strong>Expires:</strong> ' + escapeHtml(new Date(p.expires).toLocaleString()) + '</p>'
+            // Headline as the description line, only when it adds info beyond the
+            // extracted event type (avoids showing the title twice).
+            var desc = (headline !== event && headline !== 'Weather Alert')
+                ? '<p class="lv-alert-popup-description">' + escapeHtml(headline) + '</p>'
                 : '';
 
-            var hazardTypes = p.hazardTypes || [];
+            var expires = p.expires
+                ? '<p class="lv-alert-popup-expires"><strong>Expires:</strong> ' + escapeHtml(formatAlertTime(p.expires)) + '</p>'
+                : '';
+
             var hazardHtml = '';
-            if (hazardTypes.length > 0) {
-                hazardHtml = '<div class="lv-alert-popup-hazards"><strong>Reasons:</strong> ';
-                for (var i = 0; i < hazardTypes.length; i++) {
-                    hazardHtml += '<span class="lv-alert-popup-hazard-tag">' + escapeHtml(hazardTypes[i]) + '</span>';
+            if (hazards.length > 0) {
+                hazardHtml = '<div class="lv-alert-popup-hazards">' +
+                    '<p class="lv-alert-popup-hazards-label"><strong>Hazards:</strong></p>' +
+                    '<div class="lv-alert-popup-hazard-tags">';
+                for (var i = 0; i < hazards.length; i++) {
+                    hazardHtml += '<span class="lv-alert-popup-hazard-tag">' +
+                        escapeHtml(hazards[i].charAt(0).toUpperCase() + hazards[i].slice(1)) + '</span>';
                 }
-                hazardHtml += '</div>';
+                hazardHtml += '</div></div>';
             }
 
             var action = '';
             if (isEmergency) {
-                action = '<p class="lv-alert-popup-action emergency"><strong>SEEK SHELTER NOW:</strong> This is an EMERGENCY alert. Take immediate life-saving action and follow official instructions.</p>';
+                action = '<p class="lv-alert-popup-action emergency"><strong>SEEK SHELTER NOW:</strong> This is an EMERGENCY. Take immediate life-saving action and follow official instructions.</p>';
             } else if (isExtreme) {
                 action = '<p class="lv-alert-popup-action extreme"><strong>TAKE ACTION NOW:</strong> This is an EXTREME alert. Seek shelter or follow official instructions immediately.</p>';
             } else if (isSevere) {
                 action = '<p class="lv-alert-popup-action severe"><strong>BE PREPARED:</strong> This is a SEVERE alert. Prepare to take action if in the affected area.</p>';
-            } else if (sevLower === 'moderate') {
+            } else if (severity === 'moderate') {
                 action = '<p class="lv-alert-popup-action moderate"><strong>STAY AWARE:</strong> Monitor conditions and follow updates.</p>';
             }
 
+            var fullText = p.description
+                ? '<details><summary class="lv-alert-popup-summary">View Full Alert</summary>' +
+                  '<div class="lv-alert-popup-fulltext">' + escapeHtml(p.description).replace(/\n/g, '<br>') + '</div></details>'
+                : '';
+
             return '<div class="lv-alert-popup" style="--alert-color:' + color + '">' +
-                '<h3 class="lv-alert-popup-title ' + pulseClass + '">' + emoji + title + (isEmergency || isExtreme ? ' \u26A0\uFE0F' : '') + '</h3>' +
+                '<h3 class="lv-alert-popup-title ' + pulseClass + '">' + emoji + escapeHtml(event) + (isEmergency || isExtreme ? ' \u26A0\uFE0F' : '') + '</h3>' +
                 '<div class="lv-alert-popup-meta">' +
                 '<span class="lv-alert-severity ' + sevClass + '">' + sevText + '</span>' +
-                urgencyHtml +
+                '<span class="lv-alert-popup-urgency">' + escapeHtml(urgency.toUpperCase()) + '</span>' +
                 '</div>' +
                 desc +
                 expires +
                 hazardHtml +
                 action +
+                fullText +
                 '</div>';
+        }
+
+        function formatAlertTime(v) {
+            var d = (typeof v === 'number') ? new Date(v * 1000) : new Date(v);
+            if (isNaN(d.getTime())) return String(v);
+            return d.toLocaleString(undefined, {
+                weekday: 'short',
+                month: 'short',
+                day: 'numeric',
+                hour: 'numeric',
+                minute: '2-digit'
+            });
         }
 
         /* === COLOR SCHEME DROPDOWN ===
@@ -2188,7 +2549,7 @@ body {
                         applyCatalogDiff(JSON.parse(xhr.responseText));
                         state.lastCatalogLoad = Date.now();
                         hideRefreshStatus();
-                        if (state.alertsEnabled) fetchAlerts(); // keep alerts on cadence
+                        if (state.alertsEnabled) fetchAlerts(true); // keep alerts on cadence
                     } catch (e) {
                         showRefreshStatus('Refresh failed - invalid response');
                     }
@@ -2406,12 +2767,21 @@ body {
         }
 
         /* === VIEWPORT CHANGE ===
-           The engine uses this for (a) debounced alerts bbox refetch and
-           (b) restarting preload so cached layers refresh for visible tiles. */
+           The engine uses this for (a) debounced client-side alerts re-filter
+           (popup autoPan after a polygon click is skipped) and (b) restarting
+           preload so cached layers refresh for visible tiles. */
         function onViewportChange() {
-            if (state.alertsEnabled) {
-                clearTimeout(state.alertsDebounce);
-                state.alertsDebounce = setTimeout(fetchAlerts, ALERTS_DEBOUNCE_MS);
+            if (state.alertsSkipNextViewport) {
+                // Popup autoPan after a polygon click: keep the popup open.
+                state.alertsSkipNextViewport = false;
+            } else {
+                // User moved the map: stop reopening the clicked popup and
+                // re-filter the cached catalog (debounced).
+                state.lastClickedAlertId = null;
+                if (state.alertsEnabled) {
+                    clearTimeout(state.alertsDebounce);
+                    state.alertsDebounce = setTimeout(fetchAlerts, ALERTS_DEBOUNCE_MS);
+                }
             }
             restartBackgroundPreload();
         }
@@ -2422,7 +2792,7 @@ body {
             state.booted = true;
             adapter.setBasemap(state.theme);
             startAutoRefresh();
-            if (state.alertsEnabled) fetchAlerts();
+            if (state.alertsEnabled) fetchAlerts(true);
             loadCatalog();
         }
 
@@ -2437,6 +2807,14 @@ body {
             state.mapReady = true;
 
             adapter.onViewportChange(onViewportChange);
+
+            // Track polygon clicks so a clicked popup survives overlay rebuilds.
+            if (adapter.onAlertClick) {
+                adapter.onAlertClick(function (id) {
+                    state.lastClickedAlertId = id;
+                    state.alertsSkipNextViewport = true;
+                });
+            }
 
             // Leaflet maps are usable synchronously; MapLibre needs the style
             // loaded before sources/layers can be added.
@@ -2540,7 +2918,11 @@ var LeafletAdapter = function () {
                 var abortTile = function () {
                     aborted = true;
                     layer.off('remove', abortTile);
-                    tile.src = '';
+                    // Do NOT use tile.src = '': assigning an empty src makes the
+                    // browser fetch the page's own URL as an image, which on
+                    // file:// pages logs a spurious "Unsafe attempt to load
+                    // URL file://..." console error.
+                    tile.removeAttribute('src');
                     tile.removeEventListener('load', onLoad);
                     tile.removeEventListener('error', onError);
                 };

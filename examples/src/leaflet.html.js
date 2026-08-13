@@ -135,6 +135,7 @@ var LeafletAdapter = function () {
     };
     var currentBaseMap = null;
     var alertLayers = [];
+    var alertClickCb = null;
 
     // Pane z-values come from the CSS design tokens so theming stays in one place.
     function paneZ(name, fallback) {
@@ -212,7 +213,11 @@ var LeafletAdapter = function () {
                 var abortTile = function () {
                     aborted = true;
                     layer.off('remove', abortTile);
-                    tile.src = '';
+                    // Do NOT use tile.src = '': assigning an empty src makes the
+                    // browser fetch the page's own URL as an image, which on
+                    // file:// pages logs a spurious "Unsafe attempt to load
+                    // URL file://..." console error.
+                    tile.removeAttribute('src');
                     tile.removeEventListener('load', onLoad);
                     tile.removeEventListener('error', onError);
                 };
@@ -262,7 +267,9 @@ var LeafletAdapter = function () {
             if (handle && map && map.hasLayer(handle)) map.removeLayer(handle);
         },
 
-        setAlertsOverlay: function (geojsonOrNull, styleFn) {
+        onAlertClick: function (cb) { alertClickCb = cb; },
+
+        setAlertsOverlay: function (geojsonOrNull, styleFn, reopenId) {
             // Clear existing layers
             if (alertLayers && alertLayers.length) {
                 for (var i = 0; i < alertLayers.length; i++) map.removeLayer(alertLayers[i]);
@@ -281,6 +288,9 @@ var LeafletAdapter = function () {
             });
 
             // Per-feature layer with severity z-index so Emergency renders on top.
+            // Paths are tracked by uri so a clicked popup can be reopened after
+            // the overlay is rebuilt (e.g. the 5-minute refresh cadence).
+            var pathsByUri = {};
             for (var i = 0; i < features.length; i++) {
                 var feature = features[i];
                 // Skip features without geometry (the alerts-catalog contract is "polygon or null").
@@ -294,13 +304,40 @@ var LeafletAdapter = function () {
                     onEachFeature: function (f, lyr) {
                         // The engine pre-bakes popup HTML into properties.__popup.
                         if (f.properties && f.properties.__popup) {
-                            lyr.bindPopup(f.properties.__popup);
+                            lyr.bindPopup(f.properties.__popup, {
+                                maxWidth: 320,
+                                autoPan: true,
+                                autoPanPadding: [20, 20],
+                                closeOnClick: true
+                            });
+                        }
+                        // Let the engine know which alert was clicked so the
+                        // autoPan viewport change doesn't close the popup.
+                        lyr.on('click', function (e) {
+                            L.DomEvent.stopPropagation(e);
+                            if (alertClickCb) {
+                                alertClickCb(f.properties && (f.properties.uri || f.properties.title));
+                            }
+                        });
+                        if (f.properties && f.properties.uri) {
+                            pathsByUri[f.properties.uri] = lyr;
                         }
                     }
                 });
                 layer.setZIndex(zIdx);
                 layer.addTo(map);
                 alertLayers.push(layer);
+            }
+
+            // Reopen the popup the user had open before the rebuild, if the
+            // alert is still in view.
+            if (reopenId && pathsByUri[reopenId]) {
+                var reopenPath = pathsByUri[reopenId];
+                setTimeout(function () {
+                    try {
+                        if (reopenPath._map) reopenPath.openPopup();
+                    } catch (e) { /* map or layer gone - fine */ }
+                }, 0);
             }
         },
 

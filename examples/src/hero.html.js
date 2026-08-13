@@ -142,7 +142,11 @@ var LeafletAdapter = function () {
                 var abortTile = function () {
                     aborted = true;
                     layer.off('remove', abortTile);
-                    tile.src = '';
+                    // Do NOT use tile.src = '': assigning an empty src makes the
+                    // browser fetch the page's own URL as an image, which on
+                    // file:// pages logs a spurious "Unsafe attempt to load
+                    // URL file://..." console error.
+                    tile.removeAttribute('src');
                     tile.removeEventListener('load', onLoad);
                     tile.removeEventListener('error', onError);
                 };
