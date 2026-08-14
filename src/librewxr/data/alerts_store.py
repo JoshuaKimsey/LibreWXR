@@ -37,11 +37,13 @@ class AlertsStore:
         with self._lock:
             return list(self._alerts)
 
-    def replace_all(self, alerts: list[AlertEntry]) -> None:
+    def replace_all(
+        self, alerts: list[AlertEntry], *, fetch_success: bool = True
+    ) -> None:
         with self._lock:
             self._alerts = alerts
             self.last_updated = time.time()
-            self._fetch_success = True
+            self._fetch_success = fetch_success
 
     def mark_failed(self) -> None:
         with self._lock:

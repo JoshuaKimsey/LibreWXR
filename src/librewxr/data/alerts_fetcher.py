@@ -28,7 +28,11 @@ _WMO_ALL_URL = f"{_WMO_BASE}/v2/json/wmo_all.json"
 
 # NWS API (direct GeoJSON, avoids WMO lag for US alerts)
 _NWS_API_URL = "https://api.weather.gov/alerts/active"
-_NWS_USER_AGENT = "(LibreWXR, librewxr@localhost)"
+# Shared User-Agent for all outbound alert requests (WMO, NWS, MeteoAlarm,
+# RSS/CAP).  NWS requires a contact UA; sending the default httpx UA to WMO
+# was a likely trigger for rejections, so every request now identifies as
+# LibreWXR.  Per-request headers (NWS) still override the client default.
+_USER_AGENT = "(LibreWXR, librewxr@localhost)"
 
 # Zone-based NWS alerts (Tornado Watches, Special Weather Statements, ...)
 # ship with ``geometry: null`` — their polygons come from affected zones.
@@ -139,6 +143,7 @@ def _extract_polygons_from_cap(
         effective = _cap_text(info, "effective", ns) or _cap_text(info, "onset", ns)
         expires = _cap_text(info, "expires", ns)
 
+        n_before = len(results)
         for area in info.findall("cap:area" if ns else "area", ns):
             area_desc = (
                 area.findtext("cap:areaDesc" if ns else "areaDesc", "", ns) or ""
@@ -227,6 +232,18 @@ def _extract_polygons_from_cap(
                                 polygon=poly,
                             )
                         )
+
+        # Fully-processed <info> that produced no entry (no usable <polygon>
+        # and no EMMA_ID/NUTS3 geocode resolved) is dropped — surface it at
+        # DEBUG so dropped alerts are discoverable.
+        if len(results) == n_before:
+            logger.debug(
+                "Dropped CAP alert for %s: no usable polygon or EMMA_ID/NUTS3 "
+                "geocode (event=%r headline=%r)",
+                source_id,
+                event or "",
+                headline or "",
+            )
 
     return results
 
@@ -440,7 +457,11 @@ class WMOAlertsFetcher:
                 max_connections=self._concurrency,
                 max_keepalive_connections=self._concurrency,
             )
-            self._client = httpx.AsyncClient(limits=limits, timeout=self._timeout)
+            self._client = httpx.AsyncClient(
+                limits=limits,
+                timeout=self._timeout,
+                headers={"User-Agent": _USER_AGENT},
+            )
         return self._client
 
     async def _ensure_meteoalarm_data(self) -> None:
@@ -522,7 +543,7 @@ class WMOAlertsFetcher:
                 try:
                     resp = await client.get(
                         url,
-                        headers={"User-Agent": _NWS_USER_AGENT},
+                        headers={"User-Agent": _USER_AGENT},
                         timeout=self._timeout,
                     )
                 except Exception as exc:
@@ -567,7 +588,7 @@ class WMOAlertsFetcher:
         try:
             resp = await client.get(
                 _NWS_API_URL,
-                headers={"User-Agent": _NWS_USER_AGENT},
+                headers={"User-Agent": _USER_AGENT},
                 timeout=self._timeout,
             )
             if resp.status_code != 200:
@@ -632,6 +653,15 @@ class WMOAlertsFetcher:
         logger.debug("NWS API: %d active alerts", len(entries))
         return entries
 
+    async def _await_nws(self, nws_task: asyncio.Task) -> list[AlertEntry]:
+        """Await the parallel NWS fetch task, never letting its failure kill
+        the cycle — a WMO outage must not freeze the US slice either."""
+        try:
+            return await nws_task
+        except Exception:
+            logger.warning("NWS alert fetch failed", exc_info=True)
+            return []
+
     async def _fetch_once(self) -> None:
         """Full ingest pipeline."""
         client = await self._get_client()
@@ -643,7 +673,13 @@ class WMOAlertsFetcher:
         resp = await retry_get(client, _SOURCES_URL, log_name="wmo_sources")
         if resp is None or resp.status_code != 200:
             logger.warning("Failed to fetch sources.json")
-            self._store.mark_failed()
+            # WMO is down: still salvage the US slice from the NWS API and
+            # keep last-known non-NWS alerts (expiry filtering on the serve
+            # side hides stale ones).  fetch_success stays False so the
+            # outage stays visible in /health.
+            nws_alerts = await self._await_nws(nws_task)
+            kept = [a for a in self._store.alerts if a.source_id != "nws-api"]
+            self._store.replace_all(kept + nws_alerts, fetch_success=False)
             return
         sources_data = resp.json()
         sources = sources_data.get("sources", [])
@@ -652,7 +688,9 @@ class WMOAlertsFetcher:
         resp = await retry_get(client, _WMO_ALL_URL, log_name="wmo_all")
         if resp is None or resp.status_code != 200:
             logger.warning("Failed to fetch wmo_all.json")
-            self._store.mark_failed()
+            nws_alerts = await self._await_nws(nws_task)
+            kept = [a for a in self._store.alerts if a.source_id != "nws-api"]
+            self._store.replace_all(kept + nws_alerts, fetch_success=False)
             return
         wmo_all_data = resp.json()
         wmo_all_items = wmo_all_data.get("items", [])
@@ -727,7 +765,7 @@ class WMOAlertsFetcher:
         await asyncio.gather(*(process_feed(sid) for sid in source_ids))
 
         # 4. Merge NWS results
-        nws_alerts = await nws_task
+        nws_alerts = await self._await_nws(nws_task)
         all_alerts.extend(nws_alerts)
 
         # 5. Replace store

@@ -428,9 +428,11 @@ class TestAlertsStore:
 # ---------------------------------------------------------------------------
 
 class _FakeNwsResponse:
-    def __init__(self, status_code=200, payload=None):
+    def __init__(self, status_code=200, payload=None, content=b"", text=""):
         self.status_code = status_code
         self._payload = payload
+        self.content = content
+        self.text = text
 
     def json(self):
         return self._payload
@@ -614,3 +616,195 @@ class TestNwsZoneResolution:
         assert entries[0].polygon is not None
         assert entries[0].polygon.area == pytest.approx(0.5)
         assert set(u for u in client.calls if u != alerts_url) == {zone_a, zone_c}
+
+
+# ---------------------------------------------------------------------------
+# Ingest cycle: WMO degradation must not orphan/freeze the parallel NWS fetch
+# ---------------------------------------------------------------------------
+
+_WMO_SOURCES_URL = "https://severeweather.wmo.int/json/sources.json"
+_WMO_ALL_URL = "https://severeweather.wmo.int/v2/json/wmo_all.json"
+_NWS_ACTIVE_URL = "https://api.weather.gov/alerts/active"
+
+
+def _nws_poly_feature(alert_id="urn:oid:poly"):
+    """NWS feature carrying inline geometry (no zone resolution needed)."""
+    return {
+        "type": "Feature",
+        "id": f"https://api.weather.gov/alerts/{alert_id}",
+        "geometry": _zone_geojson((-105.5, 39.0, -105.0, 39.5)),
+        "properties": {
+            "status": "Actual",
+            "messageType": "Alert",
+            "headline": "Severe Thunderstorm Warning issued",
+            "event": "Severe Thunderstorm Warning",
+            "description": "Severe thunderstorms expected",
+            "severity": "Severe",
+            "effective": "2026-05-07T00:15:00-05:00",
+            "expires": "2099-05-07T06:00:00-05:00",
+            "areaDesc": "Test County",
+            "id": f"https://api.weather.gov/alerts/{alert_id}",
+        },
+    }
+
+
+def _cap_xml_with_polygon():
+    """Minimal CAP 1.2 XML with a usable polygon."""
+    return """<?xml version="1.0" encoding="UTF-8"?>
+    <alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">
+      <info>
+        <language>en-US</language>
+        <event>Severe Thunderstorm Warning</event>
+        <headline>Severe Thunderstorm Warning issued</headline>
+        <description>Severe thunderstorms expected</description>
+        <urgency>Immediate</urgency>
+        <severity>Severe</severity>
+        <effective>2026-05-07T00:15:00-05:00</effective>
+        <expires>2099-05-07T06:00:00-05:00</expires>
+        <area>
+          <areaDesc>Test Area</areaDesc>
+          <polygon>32.5,-85.2 32.6,-85.1 32.5,-85.0 32.4,-85.1 32.5,-85.2</polygon>
+        </area>
+      </info>
+    </alert>"""
+
+
+def _rss_with_item():
+    """Minimal RSS 2.0 with one item whose guid matches a wmo_all id."""
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<rss version=\"2.0\"><channel>"
+        "<item><link>https://severeweather.wmo.int/cap/fr-meteofrance-xx/1.xml</link>"
+        "<guid>wmo-alert-1</guid></item>"
+        "</channel></rss>"
+    )
+
+
+def _non_nws_alert():
+    """A pre-existing non-NWS alert used to check preservation on degradation."""
+    return AlertEntry(
+        source_id="fr-meteofrance-xx",
+        event="Heavy Rain Warning",
+        description="Heavy rain expected in Normandy",
+        severity="Moderate",
+        effective="2026-05-07T06:00:00+02:00",
+        expires="2099-05-07T12:00:00+02:00",
+        area_desc="Normandy",
+        url="https://example.com/alert",
+        polygon=None,
+    )
+
+
+@pytest.mark.alerts
+class TestFetchOnceDegradedPath:
+    """WMO sources.json / wmo_all.json failures must not freeze the US slice."""
+
+    def _fetcher(self, store, client, tmp_path):
+        fetcher = WMOAlertsFetcher(store=store, cache_dir=str(tmp_path))
+
+        async def _get_client():
+            return client
+
+        fetcher._get_client = _get_client  # type: ignore[method-assign]
+        return fetcher
+
+    def _sources_fail_client(self):
+        return _FakeNwsClient({
+            _WMO_SOURCES_URL: _FakeNwsResponse(500),
+            _NWS_ACTIVE_URL: _FakeNwsResponse(
+                200, {"features": [_nws_poly_feature("urn:oid:degraded")]}
+            ),
+        })
+
+    def _wmo_all_fail_client(self):
+        return _FakeNwsClient({
+            _WMO_SOURCES_URL: _FakeNwsResponse(200, {"sources": []}),
+            _WMO_ALL_URL: _FakeNwsResponse(500),
+            _NWS_ACTIVE_URL: _FakeNwsResponse(
+                200, {"features": [_nws_poly_feature("urn:oid:degraded")]}
+            ),
+        })
+
+    async def test_sources_failure_refreshes_nws_and_preserves_others(self, tmp_path):
+        store = AlertsStore()
+        store.replace_all([_non_nws_alert()])
+
+        fetcher = self._fetcher(store, self._sources_fail_client(), tmp_path)
+        await fetcher._fetch_once()
+
+        assert store.fetch_success is False
+        alerts = store.alerts
+        nws = [a for a in alerts if a.source_id == "nws-api"]
+        others = [a for a in alerts if a.source_id != "nws-api"]
+        assert len(nws) == 1
+        assert nws[0].event == "Severe Thunderstorm Warning issued"
+        assert nws[0].polygon is not None
+        assert len(others) == 1
+        assert others[0].event == "Heavy Rain Warning"
+
+    async def test_wmo_all_failure_refreshes_nws_and_preserves_others(self, tmp_path):
+        store = AlertsStore()
+        store.replace_all([_non_nws_alert()])
+
+        fetcher = self._fetcher(store, self._wmo_all_fail_client(), tmp_path)
+        await fetcher._fetch_once()
+
+        assert store.fetch_success is False
+        alerts = store.alerts
+        nws = [a for a in alerts if a.source_id == "nws-api"]
+        others = [a for a in alerts if a.source_id != "nws-api"]
+        assert len(nws) == 1
+        assert nws[0].event == "Severe Thunderstorm Warning issued"
+        assert len(others) == 1
+        assert others[0].event == "Heavy Rain Warning"
+
+    async def test_degraded_path_bumps_last_updated(self, tmp_path):
+        store = AlertsStore()
+        store.replace_all([_non_nws_alert()])
+        old_ts = store.last_updated
+
+        fetcher = self._fetcher(store, self._sources_fail_client(), tmp_path)
+        await fetcher._fetch_once()
+
+        assert store.last_updated >= old_ts
+
+    def _wmo_ok_client(self):
+        rss = _rss_with_item()
+        cap_xml = _cap_xml_with_polygon()
+        return _FakeNwsClient({
+            _WMO_SOURCES_URL: _FakeNwsResponse(200, {
+                "sources": [
+                    {"source": {
+                        "sourceId": "fr-meteofrance-xx",
+                        "capAlertFeedStatus": "operating",
+                    }},
+                ],
+            }),
+            _WMO_ALL_URL: _FakeNwsResponse(200, {
+                "items": [{"id": "wmo-alert-1", "capURL": "fr-meteofrance-xx", "url": ""}],
+            }),
+            "https://severeweather.wmo.int/v2/cap-alerts/fr-meteofrance-xx/rss.xml": (
+                _FakeNwsResponse(200, content=rss.encode("utf-8"))
+            ),
+            "https://severeweather.wmo.int/cap/fr-meteofrance-xx/1.xml": (
+                _FakeNwsResponse(200, text=cap_xml)
+            ),
+        })
+
+    async def test_nws_failure_does_not_block_wmo_alerts(self, tmp_path):
+        store = AlertsStore()
+        fetcher = self._fetcher(store, self._wmo_ok_client(), tmp_path)
+
+        async def _boom():
+            raise RuntimeError("NWS API down")
+
+        fetcher._fetch_nws_alerts = _boom  # type: ignore[method-assign]
+
+        await fetcher._fetch_once()
+
+        assert store.fetch_success is True
+        alerts = store.alerts
+        assert len(alerts) == 1
+        assert alerts[0].source_id == "fr-meteofrance-xx"
+        assert alerts[0].event == "Severe Thunderstorm Warning issued"
+        assert alerts[0].polygon is not None
