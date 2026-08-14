@@ -559,7 +559,17 @@ class GMGSISource:
         if ts is None:
             return out
 
-        grid = self._frames[ts]
+        grid = self._frames.get(ts)
+        if grid is None:
+            # _sorted_timestamps and _frames can disagree briefly while a
+            # concurrent __setstate__ applies a new snapshot; fall back to
+            # the newest frame actually present.
+            for candidate in reversed(self._sorted_timestamps):
+                grid = self._frames.get(candidate)
+                if grid is not None:
+                    break
+        if grid is None:
+            return out
 
         # Mercator row inversion: rows are uniform in y=atanh(sin(lat)),
         # not in lat.  Clip sin(lat) shy of ±1 so atanh stays finite at
@@ -615,27 +625,29 @@ class GMGSISource:
         cache_root = state.get("cache_root")
         self._cache_root = Path(cache_root) if cache_root else None
         self._max_frames = state.get("max_frames", 12)
-        self._frames = {}
-        self._sorted_timestamps = []
+        frames: dict[int, np.ndarray] = {}
         self._fs = None
         self.name = self.friendly_name
 
         if self._cache_root is None:
             self._channel_cache_dir = None
-            return
-        self._channel_cache_dir = (
-            self._cache_root / "gmgsi" / CACHE_LAYOUT_VERSION / self.channel
-        )
-        # The directory may not exist yet on render-worker cold start
-        # if pipeline hasn't created it — handle gracefully.
-        if not self._channel_cache_dir.exists():
-            return
+        else:
+            self._channel_cache_dir = (
+                self._cache_root / "gmgsi" / CACHE_LAYOUT_VERSION / self.channel
+            )
+            # The directory may not exist yet on render-worker cold start
+            # if pipeline hasn't created it — handle gracefully.
+            if self._channel_cache_dir.exists():
+                for unix_ts in state.get("timestamps", []):
+                    arr = self._read_cache(unix_ts)
+                    if arr is not None:
+                        frames[unix_ts] = arr
 
-        for unix_ts in state.get("timestamps", []):
-            arr = self._read_cache(unix_ts)
-            if arr is not None:
-                self._frames[unix_ts] = arr
-        self._sorted_timestamps = sorted(self._frames)
+        # Build-then-swap: publish both references in one terminal step so
+        # a concurrent render thread never observes a timestamp in
+        # _sorted_timestamps that is absent from _frames.
+        self._frames = frames
+        self._sorted_timestamps = sorted(frames)
 
 
 # ── Concrete channel subclasses ──

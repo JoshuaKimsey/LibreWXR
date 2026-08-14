@@ -228,6 +228,32 @@ def test_sample_returns_zero_when_no_frames(tmp_path: Path):
     assert (out == 0).all()
 
 
+def test_sample_falls_back_when_sorted_timestamps_desync_from_frames(tmp_path: Path):
+    """sample() survives a _sorted_timestamps / _frames desync instead of KeyErroring.
+
+    A concurrent __setstate__ swaps ``_frames`` to a fresh half-built dict
+    while a render thread still holds a timestamp from the OLD sorted list.
+    sample() must not raise: it falls back to the newest frame actually
+    present in ``_frames``.
+    """
+    src = GMGSILWSource(cache_dir=tmp_path, max_frames=12)
+    grid = np.full((GRID_HEIGHT, GRID_WIDTH), 137, dtype=np.uint8)
+    stale_ts = 11111
+    present_ts = 22222
+    src._frames[present_ts] = grid
+    # Stale sorted list still names an old timestamp that is missing from
+    # _frames - the exact desync the concurrent-snapshot race produces.
+    src._sorted_timestamps = [stale_ts, present_ts]
+
+    lat = np.array([[0.0]], dtype=np.float32)
+    lon = np.array([[0.0]], dtype=np.float32)
+    # Nearest-timestamp selection picks the stale ts (absent from _frames).
+    out = src.sample(lat, lon, timestamp=stale_ts)
+    assert out.dtype == np.uint8
+    assert out.shape == (1, 1)
+    assert out[0, 0] == 137  # fell back to the newest frame actually present
+
+
 # ── Width coercion (NESDIS 2026-07 column drop) ──
 
 
@@ -346,6 +372,32 @@ def test_pickle_round_trip_handles_missing_cache_files(tmp_path: Path):
     render_src = GMGSILWSource.__new__(GMGSILWSource)
     render_src.__setstate__(state)
     assert render_src.timestamps == []
+
+
+def test_setstate_leaves_frames_and_sorted_timestamps_consistent(tmp_path: Path):
+    """__setstate__ publishes _frames and _sorted_timestamps with the same key set.
+
+    One listed timestamp has no readable cache file on disk.  The restored
+    store must never leave a sorted timestamp that is absent from _frames -
+    that desync is what lets a concurrent render thread hit a KeyError.
+    """
+    grid = np.full((GRID_HEIGHT, GRID_WIDTH), 55, dtype=np.uint8)
+    for ts in (1000, 2000):
+        src = GMGSILWSource(cache_dir=tmp_path, max_frames=12)
+        src._frames[ts] = grid
+        src._write_cache(ts, grid)
+    # Snapshot lists three timestamps, but 3000 has no cache file on disk.
+    state = {
+        "cache_root": str(tmp_path),
+        "channel": "LW",
+        "timestamps": [1000, 2000, 3000],
+        "max_frames": 12,
+    }
+    render_src = GMGSILWSource.__new__(GMGSILWSource)
+    render_src.__setstate__(state)
+    assert set(render_src._frames) == set(render_src._sorted_timestamps)
+    assert render_src._sorted_timestamps == [1000, 2000]
+    np.testing.assert_array_equal(render_src._frames[2000], grid)
 
 
 # ── Cache layout ──
