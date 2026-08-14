@@ -42,6 +42,7 @@ from librewxr.sources import (
     collect_nwp_contributions,
     collect_radar_coverage_metadata,
     collect_satellite_contributions,
+    enabled_regions_with_always_on,
     nwp_grid_slug,
     satellite_source_slug,
 )
@@ -524,7 +525,10 @@ async def _render_only_lifespan(app: FastAPI):
     storm_cell_store = stores["storm_cell_store"]
     alerts_store = stores["alerts_store"]
 
-    enabled = settings.get_enabled_regions()
+    # The enabled set includes every always-on contribution region (the
+    # coarse global observed tier stays fetchable/renderable even under a
+    # narrow region spec).
+    enabled = enabled_regions_with_always_on(settings)
     station_map, range_overrides, coverage_polygons = collect_radar_coverage_metadata(settings)
     # Prefer the persisted masks (read-only memmap) when the pipeline has
     # already saved a set built from identical parameters; otherwise build
@@ -805,12 +809,14 @@ async def lifespan(app: FastAPI):
     nwp_cache_dir = Path(settings.cache_dir) if settings.cache_dir else None
     # Walk the auto-discovered NWP providers under ``librewxr.sources``;
     # each returns a contribution (or ``None`` when its config flag is
-    # off).  Chain order is set by ``NWPContribution.priority``: RRQPE
-    # (5 — observed satellite precip, past frames only) → HRRR (10) →
-    # HRRR-Alaska (11) → HRDPS (20) → JMA MSM (20) → AROME Antilles
-    # (25) → AROME Guyane (26) → AROME Indien (27) → AROME Ncaled (28)
-    # → AROME Polyn (29) → DMI DINI (30) → ICON-EU (35) → WRF-SMN (40)
-    # → IFS (1000 — global catch-all).
+    # off).  Chain order is set by ``NWPContribution.priority``: HRRR
+    # (10) → HRRR-Alaska (11) → HRDPS (20) → JMA MSM (20) → AROME
+    # Antilles (25) → AROME Guyane (26) → AROME Indien (27) → AROME
+    # Ncaled (28) → AROME Polyn (29) → DMI DINI (30) → ICON-EU (35) →
+    # WRF-SMN (40) → IFS (1000 — global catch-all).  NOAA RRQPE used to
+    # lead the chain at priority 5; it is now the global *observed*
+    # radar region (``sources/world/rrqpe``) and flows through the
+    # FrameStore / radar compositor instead of the NWP chain.
     nwp_contribs = collect_nwp_contributions(settings, nwp_cache_dir)
     nwp_grids_by_slug: dict[str, object] = {
         nwp_grid_slug(c): c.instance for c in nwp_contribs
@@ -830,7 +836,10 @@ async def lifespan(app: FastAPI):
             "Satellite chain: [%s]",
             ", ".join(c.name for c in satellite_contribs),
         )
-    enabled = settings.get_enabled_regions()
+    # The enabled set includes every always-on contribution region (the
+    # coarse global observed tier stays fetchable/renderable even under a
+    # narrow region spec).
+    enabled = enabled_regions_with_always_on(settings)
 
     # Precompute radar station coverage masks used by the ECMWF fallback
     # to distinguish "outside radar range" from "clear sky within range".

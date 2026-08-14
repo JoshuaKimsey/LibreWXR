@@ -318,6 +318,10 @@ def detect_storm_cells(
         region = REGIONS.get(region_name)
         if region is None:
             continue
+        # Coarse global fill layers (RRQPE) opt out of cell detection —
+        # no meaningful convective-cell structure at the min-area cutoff.
+        if not region.storm_cells:
+            continue
 
         # Threshold: pixels >= threshold are part of candidate cells.
         # ascontiguousarray guards against memmap-backed frames that may

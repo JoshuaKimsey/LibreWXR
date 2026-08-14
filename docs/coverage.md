@@ -43,6 +43,7 @@ box that would have implied coverage where none exists.
 | CWA Taiwan QPESUMS | S/C-band (7) | 240 km | 10 min | ~0.0125° (~1.4 km) |
 | MET Malaysia | S-band (12, national network) | 240 km | 10 min | ~0.022° lon / 0.019° lat (~2.5 km) |
 | JMA HRPN (Japan) | C-band (20) + XRAIN X-band + AMeDAS gauges | 240 km | 5 min | ~0.0125° (~1.4 km) |
+| NOAA RRQPE (observed) | geostationary IR blend (no radar stations) | — | 10 min | 0.04° stored (0.02° native) |
 
 MRMS and MSC ingest each other's stations along the US/Canada border,
 so the cross-border zone has overlap rather than a hard seam.
@@ -63,6 +64,16 @@ LibreWXR's internal optical-flow extrapolation, blended with the
 **JMA MSM** mesoscale NWP source over the same domain (see the
 Regional NWP models section below).
 
+NOAA RRQPE is not a radar network — it is the Enterprise Rain Rate
+GLB-5 blend, satellite-derived **observed** precipitation (an IR-based
+estimate) covering the 60°S–70°N geostationary ring at all
+longitudes.  LibreWXR ingests it as a single coarse global radar
+region that sorts **last** in the multi-region compositor: the
+always-on observed tier that fills only pixels no finer radar region
+claims, beneath every regional composite.  It joins radar nowcast
+extrapolation like any other region and stays active even under narrow
+`LIBREWXR_ENABLED_REGIONS` specs.
+
 ---
 
 ## Regional NWP models
@@ -75,7 +86,6 @@ show. Anywhere none of these models reach, ECMWF IFS fills in.
 
 | Source | Coverage | Resolution | Projection | Cycles |
 |---|---|---|---|---|
-| NOAA RRQPE (observed) | 60°S–70°N, all longitudes | 0.04° stored (0.02° native) | regular lat/lon | 10 min |
 | NOAA HRRR-CONUS | Continental US | 3 km | LCC | hourly |
 | NOAA HRRR-Alaska | Alaska + adjacent Pacific | 3 km | polar stereographic | 3-hourly |
 | ECCC HRDPS-Continental | Canada + northern US | 2.5 km | rotated lat/lon | 6-hourly |
@@ -88,15 +98,6 @@ show. Anywhere none of these models reach, ECMWF IFS fills in.
 | Météo-France AROME Polynésie | French Polynesia (Society + Tuamotu + Marquesas archipelagoes) | 2.5 km | regular lat/lon | 6-hourly |
 | SMN Argentina WRF-DET | South American Cone (AR/CL/UY/PY + S. Brazil + Bolivia) | 4 km | LCC | 6-hourly |
 | JMA MSM | Japan + Korean Peninsula + Taiwan + Yellow Sea | 5 km | regular lat/lon | 3-hourly |
-
-NOAA RRQPE is not a forecast model — it is the Enterprise Rain Rate
-GLB-5 blend, satellite-derived **observed** precipitation (an IR-based
-estimate) covering the 60°S–70°N geostationary ring at all
-longitudes.  It serves past frames only, never future / nowcast
-timestamps, and sits at the front of the chain (priority 5): where a
-fresh observed scan exists for a past radar frame slot it wins, and
-the models only step in for nowcast / future times or outside the
-band.
 
 The HRRR-Alaska polygon wraps across the antimeridian onto the Russian
 Far East — the polar-stereographic grid genuinely covers that area

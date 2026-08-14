@@ -117,11 +117,14 @@ soft cap - `LIBREWXR_COORD_STORE_MB` - is a **disk** budget, not RAM
 (default 8192 in multi mode; lower it on small disks - it prunes once
 per fetch cycle).
 
-**NWP memory:** the RRQPE observed-precipitation layer (NOAA Enterprise
-Rain Rate) adds ~29 MB/frame at the default downsample
-(`LIBREWXR_RRQPE_DOWNSAMPLE=2`, 0.04° stored) - roughly 350-380 MB of
-file-backed memmap for the default 2-hour window (12 frames).  Factor 4
-(0.08°) cuts that to ~90 MB; factor 1 (native 0.02°) is ~1.4 GB.
+**RRQPE memory:** the RRQPE observed-precipitation layer (NOAA
+Enterprise Rain Rate) is now a radar region, so its frames live in the
+FrameStore like any other region: 12 past frames × ~29 MB at the
+default downsample (`LIBREWXR_RRQPE_DOWNSAMPLE=2`, 0.04° stored) is
+~350 MB, plus ~175 MB of nowcast-extrapolated frames (6 × ~29 MB) and
+transient warp buffers comparable to USCOMP's existing peaks.  Net add
+versus the old NWP-source form is roughly the nowcast half.  Factor 4
+(0.08°) cuts a frame to ~7 MB; factor 1 (native 0.02°) is ~117 MB.
 
 ## Configuration Knobs
 

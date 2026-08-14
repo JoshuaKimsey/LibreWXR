@@ -35,11 +35,13 @@ _DEFAULT_PX_TO_KM2 = _DEFAULT_PS_LON_KM * _DEFAULT_PS_LAT_KM  # ~1.2321
 def _make_region(
     name: str = "SYNTH_REGION",
     pixel_size: float = _DEFAULT_PS,
+    storm_cells: bool = True,
 ) -> RegionDef:
     return RegionDef(
         name=name,
         west=0.0, east=10.0, south=0.0, north=10.0,
         pixel_size=pixel_size, group="TEST",
+        storm_cells=storm_cells,
     )
 
 
@@ -252,6 +254,32 @@ class TestDetectStormCells:
         )
         assert "SYNTH_REGION" in result
         assert "SYNTH_REGION_2" not in result
+
+    @pytest.mark.storm_cells
+    def test_skips_regions_flagged_storm_cells_false(self, syn_regions, monkeypatch):
+        """Regions with ``RegionDef.storm_cells=False`` (the coarse global
+        fill layer) are skipped even when enabled."""
+        from librewxr.data import regions as _regions_mod
+
+        no_cells = _make_region("SYNTH_NO_CELLS", storm_cells=False)
+        monkeypatch.setitem(_regions_mod.REGIONS, "SYNTH_NO_CELLS", no_cells)
+
+        frame = np.zeros((100, 100), dtype=np.uint8)
+        frame[20:30, 30:40] = 160
+        result = detect_storm_cells(
+            latest_frame_regions={
+                "SYNTH_REGION": frame,
+                "SYNTH_NO_CELLS": frame,
+            },
+            enabled_regions=["SYNTH_REGION", "SYNTH_NO_CELLS"],
+            flows_by_region=None,
+            min_dbz=40,
+            min_area_km2=2.0,
+            fetch_interval_s=600,
+        )
+        assert "SYNTH_REGION" in result
+        assert len(result["SYNTH_REGION"]) == 1
+        assert "SYNTH_NO_CELLS" not in result
 
 
 # ---------------------------------------------------------------------------

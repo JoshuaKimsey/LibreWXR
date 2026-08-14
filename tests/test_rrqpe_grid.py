@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
-"""Tests for the NOAA Enterprise Rain Rate (RRQPE) GLB-5 blend grid.
+"""Tests for the NOAA Enterprise Rain Rate (RRQPE) GLB-5 blend radar source.
 
 Synthetic data only — no network.  The fetch tests drive the real
 ``_fetch_sync`` path through ``httpx.MockTransport`` with an S3 listing
-XML body and tiny in-memory NetCDF4 files.
+XML body and tiny in-memory NetCDF4 files.  The source-level fetch tests
+stub the scan-store refresh so no real S3 traffic is ever attempted.
 """
 from __future__ import annotations
 
 import os
-import pickle
 import tempfile
 import time
 import warnings
@@ -21,12 +21,8 @@ import pytest
 
 pytestmark = pytest.mark.rrqpe
 
-from librewxr.data.nwp_source import NWPChain, NWPSource
-from librewxr.sources.world.ifs.grid import (
-    ECMWFGrid,
-    GRID_HEIGHT as IFS_H,
-    GRID_WIDTH as IFS_W,
-)
+from librewxr.config import settings
+from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.sources.world.rrqpe.grid import (
     GLB5_KEY_RE,
     NATIVE_COLS,
@@ -41,10 +37,11 @@ from librewxr.sources.world.rrqpe.grid import (
     precip_rate_to_dbz_encoded,
     scan_ts_from_key,
 )
+from librewxr.sources.world.rrqpe.source import RRQPESource
 
 
 def _inject_frame(grid: RRQPEGrid, ts: int, value: int):
-    """Inject a uniform-value frame into the RRQPE store."""
+    """Inject a uniform-value frame into the RRQPE scan store."""
     arr = np.full(grid.effective_shape, value, dtype=np.uint8)
     grid._timesteps[ts] = arr
     grid._sorted_timestamps = sorted(grid._timesteps)
@@ -130,28 +127,81 @@ class TestGridGeometry:
         assert row[1] == int(69.99 / 0.04)  # 1749
         assert row[2] == rows - 1
 
-    def test_domain_and_feather_weights(self):
-        grid = RRQPEGrid()
-        lats = np.array([0.0, 71.0, -61.0, 68.5, -59.0, -58.0])
-        lons = np.zeros_like(lats)
-        f = grid.feather_mask(lats, lons)
-        assert f.dtype == np.float32
-        assert f[0] == pytest.approx(1.0)    # mid-band full weight
-        assert f[1] == 0.0                   # north of band
-        assert f[2] == 0.0                   # south of band
-        assert f[3] == pytest.approx(0.75)   # 68.5 → (70-68.5)/2
-        assert f[4] == pytest.approx(0.5)    # -59 → (-59+60)/2
-        assert f[5] == pytest.approx(1.0)    # -58 still full weight
-        d = grid.domain_mask(lats, lons)
-        assert d.dtype == np.bool_
-        assert d.tolist() == [True, False, False, True, True, True]
 
-    def test_feather_taper_monotonic(self):
+# ── Region registration ────────────────────────────────────────────────
+
+
+class TestRegionRegistration:
+    """RRQPE is a single coarse global region, always-on, no narrow group."""
+
+    def test_region_fields_match_downsample(self):
+        region = REGIONS["RRQPE"]
+        F = max(1, int(settings.rrqpe_downsample))
+        assert region.name == "RRQPE"
+        assert (region.west, region.east, region.south, region.north) == (
+            -180.0, 180.0, -60.0, 70.0,
+        )
+        assert region.proj == "latlon"
+        assert region.pixel_size == pytest.approx(NATIVE_PIXEL * F)
+        assert region.pixel_size_y == pytest.approx(NATIVE_PIXEL * F)
+        assert region.grid_width == NATIVE_COLS // F
+        assert region.grid_height == (NATIVE_ROWS // F) * F // F
+        assert region.width == NATIVE_COLS // F
+        assert region.height == NATIVE_ROWS // F
+        assert region.is_global is True
+        assert region.storm_cells is False
+
+    def test_grid_shape_matches_region(self):
+        region = REGIONS["RRQPE"]
         grid = RRQPEGrid()
-        north = grid.feather_mask(np.linspace(67.0, 71.0, 25), np.zeros(25))
-        south = grid.feather_mask(np.linspace(-57.0, -61.0, 25), np.zeros(25))
-        assert (np.diff(north) <= 1e-6).all()
-        assert (np.diff(south) <= 1e-6).all()
+        assert grid.effective_shape == (region.height, region.width)
+
+    def test_in_regions_but_no_narrow_group(self):
+        from librewxr.data.regions import REGION_GROUPS
+
+        assert "RRQPE" in REGIONS
+        for names in REGION_GROUPS.values():
+            assert "RRQPE" not in names
+        # The group label on the RegionDef itself is a plain label, not a
+        # resolvable alias.
+        assert REGIONS["RRQPE"].group == "GLOBAL"
+
+    def test_block_centers_register_with_renderer_convention(self):
+        """The renderer samples latlon grids with ``row = rint((north -
+        lat)/ps_y)``, ``col = rint((lon - west)/ps_x)`` (edge-based, pixel
+        centres at ``north - ps_y*(k+0.5)``).  Block ``k``'s centre must
+        land on row/col ``k`` so the block-averaged grid registers exactly
+        against the region bbox.
+        """
+        F = max(1, int(settings.rrqpe_downsample))
+        region = REGIONS["RRQPE"]
+        pixel = NATIVE_PIXEL * F
+        _, north_eff, west_eff, rows, cols = effective_grid(F)
+
+        for kr in (0, 1, rows // 2, rows - 1):
+            lat = north_eff - pixel * kr  # block centre latitude
+            row = int(np.rint((region.north - lat) / region._ps_y))
+            assert row == kr
+        for kc in (0, 1, cols // 2, cols - 1):
+            lon = west_eff + pixel * kc  # block centre longitude
+            col = int(np.rint((lon - region.west) / region.pixel_size))
+            assert col == kc
+
+        # Bbox edges stay in-bounds (row/col indices within the grid).
+        lat_edge = region.south
+        lon_edge = region.east
+        row = int(np.rint((region.north - lat_edge) / region._ps_y))
+        col = int(np.rint((lon_edge - region.west) / region.pixel_size))
+        assert 0 <= row <= region.height
+        assert 0 <= col <= region.width
+
+    def test_coverage_polygon_is_full_inset_band(self):
+        from librewxr.sources.world.rrqpe.regions import RRQPE_COVERAGE_POLYGON
+
+        lats = [p[0] for p in RRQPE_COVERAGE_POLYGON]
+        lons = [p[1] for p in RRQPE_COVERAGE_POLYGON]
+        assert min(lats) == -58.0 and max(lats) == 68.0
+        assert min(lons) == -180.0 and max(lons) == 180.0
 
 
 # ── Lag-shifted relative matching ──────────────────────────────────────
@@ -184,25 +234,26 @@ class TestLagShift:
             _inject_frame(grid, newest - (len(values) - 1 - i) * 600, value)
         return grid, floor_now, newest
 
+    @staticmethod
+    def _matched_value(grid, ts):
+        """The uniform value of the scan matched at ``ts``, or None."""
+        match = grid.match_timestamp(ts)
+        if match is None:
+            return None
+        frame = grid.frame_at(match)
+        return None if frame is None else int(np.asarray(frame).flat[0])
+
     def test_newest_frame_maps_to_newest_scan(self):
         grid, floor_now, _ = self._store_scans([101, 102, 103, 104])
-        assert grid.has_data_at(floor_now) is True
-        out = grid.sample(np.array([0.0]), np.array([0.0]), timestamp=floor_now)
-        assert int(out[0]) == 104
+        assert self._matched_value(grid, floor_now) == 104
 
     def test_consecutive_frames_map_to_consecutive_scans(self):
         """1:1 distinct: every past frame gets its own scan, stepping
         backward through the store (values oldest -> newest: 101..104)."""
         grid, floor_now, _ = self._store_scans([101, 102, 103, 104])
-        out_new = grid.sample(np.array([0.0]), np.array([0.0]), timestamp=floor_now)
-        out_next = grid.sample(
-            np.array([0.0]), np.array([0.0]), timestamp=floor_now - 600,
-        )
-        out_old = grid.sample(
-            np.array([0.0]), np.array([0.0]), timestamp=floor_now - 1800,
-        )
-        assert [int(out_new[0]), int(out_next[0]), int(out_old[0])] == [104, 103, 101]
-        assert len({int(x[0]) for x in (out_new, out_next, out_old)}) == 3
+        assert self._matched_value(grid, floor_now) == 104
+        assert self._matched_value(grid, floor_now - 600) == 103
+        assert self._matched_value(grid, floor_now - 1800) == 101
 
     def test_missing_slot_falls_to_neighbor(self):
         """A single missed scan slot degrades to the adjacent scan — never a
@@ -211,49 +262,30 @@ class TestLagShift:
         # Delete the scan that the floor_now - 600 frame maps to (value 103).
         del grid._timesteps[newest - 600]
         grid._sorted_timestamps = sorted(grid._timesteps)
-        assert grid.has_data_at(floor_now - 600) is True
-        out = grid.sample(
-            np.array([0.0]), np.array([0.0]), timestamp=floor_now - 600,
-        )
-        assert int(out[0]) in (102, 104)
+        assert self._matched_value(grid, floor_now - 600) in (102, 104)
 
     def test_lag_at_cap_inclusive_serves(self):
         """Lag == tolerance (1800 s, floored) still serves."""
         now = int(time.time())
         grid = RRQPEGrid(downsample=1)
         _inject_frame(grid, now - 1900, 111)   # lag = 1800, at cap
-        assert grid.has_data_at(now) is True
-        out = grid.sample(np.array([0.0]), np.array([0.0]), timestamp=now)
-        assert int(out[0]) == 111
+        assert self._matched_value(grid, now) == 111
 
     def test_lag_beyond_cap_declines_whole_source(self):
         """Lag > tolerance (2400 s) declines the whole source: no past
-        query matches and sample returns zeros."""
+        query matches."""
         now = int(time.time())
         grid = RRQPEGrid(downsample=1)
         _inject_frame(grid, now - 2500, 111)   # lag = 2400 > 1800
-        assert grid.has_data_at(now) is False
-        assert grid.has_data_at(now - 600) is False
-        out = grid.sample(np.array([0.0]), np.array([0.0]), timestamp=now)
-        assert out.dtype == np.uint8
-        assert out[0] == 0
+        assert grid.match_timestamp(now) is None
+        assert grid.match_timestamp(now - 600) is None
 
     def test_empty_store_false(self):
         grid = RRQPEGrid()
-        assert grid.has_data_at(_floor_now()) is False
-        assert grid.has_data() is False
+        assert grid.match_timestamp(_floor_now()) is None
         assert grid.reference_time is None
         assert grid.timestep_count == 0
-
-    def test_bilinear_zero_guard(self):
-        """Bilinear must not ghost precip into clear-sky neighbours."""
-        grid, floor_now, _ = self._store_scans([137])
-        lats = np.array([0.0, 0.0, 0.0])
-        lons = np.array([-179.9, -179.8, -179.7])
-        # Uniform-value frame: bilinear equals the frame value everywhere
-        # (no zero neighbours to trigger the guard).
-        out = grid.sample(lats, lons, timestamp=floor_now, bilinear=True)
-        assert (out == 137).all()
+        assert grid.timestamps == []
 
 
 # ── Wall-clock observed-only gate ──────────────────────────────────────
@@ -274,7 +306,7 @@ class TestWallClockGate:
         now = int(time.time())
         grid = RRQPEGrid(downsample=1)
         _inject_frame(grid, now - 1200, 100)
-        assert grid.has_data_at(now - 600) is True
+        assert grid.match_timestamp(now - 600) is not None
 
     def test_future_ts_within_tolerance_still_rejected(self):
         """now + 600 is 1800 s from the stored scan — inside the tolerance —
@@ -282,116 +314,20 @@ class TestWallClockGate:
         now = int(time.time())
         grid = RRQPEGrid(downsample=1)
         _inject_frame(grid, now - 1200, 100)
-        assert grid.has_data_at(now + 600) is False
+        assert grid.match_timestamp(now + 600) is None
 
-    def test_sample_zeros_for_future_ts(self):
+    def test_no_match_for_future_ts(self):
         now = int(time.time())
         grid = RRQPEGrid(downsample=1)
         _inject_frame(grid, now - 1200, 100)
-        out = grid.sample(np.array([0.0]), np.array([0.0]), timestamp=now + 600)
-        assert out.shape == (1,)
-        assert out.dtype == np.uint8
-        assert out[0] == 0
+        assert grid.match_timestamp(now + 600) is None
 
     def test_stale_past_frame_rejected(self):
         """2100 s staleness is beyond the 1800 s tolerance for past frames."""
         now = int(time.time())
         grid = RRQPEGrid(downsample=1)
         _inject_frame(grid, now - 2400, 100)
-        assert grid.has_data_at(now - 300) is False
-
-    def test_chain_falls_to_ifs_for_future_wall_clock_ts(self):
-        """Chain-level nowcast-leak pin: a future wall-clock query inside
-        RRQPE's band must come from IFS, not RRQPE."""
-        now = int(time.time())
-        rrqpe = RRQPEGrid(downsample=1)
-        _inject_frame(rrqpe, now - 1200, 200)
-        ifs = ECMWFGrid()
-        ifs_dbz = np.full((IFS_H, IFS_W), 84, dtype=np.uint8)
-        ifs._timesteps[1000000] = (ifs_dbz, np.zeros_like(ifs_dbz, dtype=bool))
-        ifs._sorted_timestamps = [1000000]
-        chain = NWPChain([rrqpe, ifs])
-        out = chain.sample(np.array([0.0]), np.array([0.0]), timestamp=now + 600)
-        assert int(out[0]) == 84
-
-
-# ── Chain integration ──────────────────────────────────────────────────
-
-
-class TestChainIntegration:
-    @staticmethod
-    def _chain(rrqpe_value, ifs_value=84):
-        """RRQPE with a single newest scan at ``floor_now - 1200`` (~20-min
-        lag, within the tolerance) ahead of a global IFS fallback."""
-        floor_now = _floor_now()
-        grid = RRQPEGrid(downsample=1)
-        _inject_frame(grid, floor_now - 1200, rrqpe_value)
-        ifs = ECMWFGrid()
-        ifs_dbz = np.full((IFS_H, IFS_W), ifs_value, dtype=np.uint8)
-        ifs._timesteps[1000000] = (ifs_dbz, np.zeros_like(ifs_dbz, dtype=bool))
-        ifs._sorted_timestamps = [1000000]
-        return grid, ifs, floor_now
-
-    def test_past_ts_inside_band_prefers_rrqpe(self):
-        rrqpe, ifs, floor_now = self._chain(200)
-        chain = NWPChain([rrqpe, ifs])
-        out = chain.sample(np.array([0.0]), np.array([0.0]), timestamp=floor_now)
-        assert int(out[0]) == 200
-
-    def test_past_ts_outside_band_falls_to_ifs(self):
-        rrqpe, ifs, floor_now = self._chain(200)
-        chain = NWPChain([rrqpe, ifs])
-        out = chain.sample(np.array([75.0]), np.array([0.0]), timestamp=floor_now)
-        assert int(out[0]) == 84
-
-    def test_future_ts_inside_band_falls_to_ifs(self):
-        """Critical regression pin: observations must never answer future ts."""
-        rrqpe, ifs, floor_now = self._chain(200)
-        chain = NWPChain([rrqpe, ifs])
-        out = chain.sample(
-            np.array([0.0]), np.array([0.0]), timestamp=floor_now + 3600,
-        )
-        assert int(out[0]) == 84
-
-    def test_snow_mask_still_comes_from_ifs(self):
-        rrqpe, ifs, floor_now = self._chain(200)
-        ifs_snow = np.ones((IFS_H, IFS_W), dtype=bool)
-        ifs._timesteps[1000000] = (
-            np.full((IFS_H, IFS_W), 84, dtype=np.uint8), ifs_snow,
-        )
-        chain = NWPChain([rrqpe, ifs])
-        out = chain.get_snow_mask(np.array([0.0]), np.array([0.0]), timestamp=floor_now)
-        assert out.tolist() == [True]
-
-    def test_real_chain_places_rrqpe_before_hrrr(self, tmp_path, monkeypatch):
-        """The real sorted contribution list puts RRQPE ahead of HRRR."""
-        from librewxr.config import settings as real_settings
-        from librewxr.sources import collect_nwp_contributions, nwp_grid_slug
-
-        monkeypatch.setattr(real_settings, "regional_nwp_enabled", True)
-        monkeypatch.setattr(real_settings, "na_nwp_source", "hrrr")
-        monkeypatch.setattr(real_settings, "eu_nwp_profile", "ifs")
-        contribs = collect_nwp_contributions(real_settings, cache_dir=tmp_path)
-        slugs = [nwp_grid_slug(c) for c in contribs]
-        assert slugs[0] == "rrqpe_grid"
-        assert "hrrr_grid" in slugs
-        assert slugs.index("rrqpe_grid") < slugs.index("hrrr_grid")
-
-
-# ── Protocol conformance ───────────────────────────────────────────────
-
-
-class TestProtocol:
-    def test_satisfies_nwpsource(self):
-        assert isinstance(RRQPEGrid(), NWPSource)
-        assert RRQPEGrid().name == "rrqpe"
-
-    def test_supports_snow_false(self):
-        grid = RRQPEGrid()
-        assert grid.supports_snow is False
-        out = grid.get_snow_mask(np.array([0.0]), np.array([0.0]))
-        assert out.dtype == np.bool_
-        assert not out.any()
+        assert grid.match_timestamp(now - 300) is None
 
 
 # ── Downsample ─────────────────────────────────────────────────────────
@@ -588,16 +524,9 @@ class TestFetch:
             assert grid.timestep_count == 2
             assert grid.reference_time == slot_b
             # The newest past frame maps (lag-shifted) onto the newest scan.
-            assert grid.has_data_at(now_ts) is True
+            assert grid.match_timestamp(now_ts) == slot_b
             # Decode pipeline produced non-zero encoded data (rate 3 mm/h).
             assert int(np.asarray(grid._timesteps[slot_a]).max()) > 0
-            # Sample maps inside the newest stored frame (top-left block
-            # centre) when queried at the newest past frame time.
-            out = grid.sample(
-                np.array([69.99]), np.array([-179.99]), timestamp=now_ts,
-            )
-            assert out.dtype == np.uint8
-            assert int(out[0]) > 0
         finally:
             grid._client.close()
 
@@ -659,36 +588,10 @@ class TestFetch:
             grid._client.close()
 
 
-# ── Persistence ────────────────────────────────────────────────────────
+# ── Scan-store boot hygiene ────────────────────────────────────────────
 
 
-class TestPersistence:
-    async def test_getstate_setstate_round_trip(self, tmp_path):
-        grid = RRQPEGrid(cache_dir=tmp_path, downsample=4)
-        floor_now = _floor_now()
-        ts = floor_now - 1200   # newest scan with a ~20-min publish lag
-        value = 137
-        mm = grid._to_memmap(
-            str(ts), np.full(grid.effective_shape, value, dtype=np.uint8),
-        )
-        grid._timesteps[ts] = mm
-        grid._sorted_timestamps = [ts]
-
-        state = grid.__getstate__()
-        assert state["timesteps"] == [ts]
-        assert state["downsample"] == 4
-        assert state["shape"] == list(grid.effective_shape)
-
-        restored = pickle.loads(pickle.dumps(grid))
-        assert restored.timestep_count == 1
-        assert restored.reference_time == ts
-        assert restored._rows == grid._rows
-        # Lag-shifted: the newest past frame (floor_now) maps onto ts.
-        out = restored.sample(np.array([0.0]), np.array([0.0]), timestamp=floor_now)
-        assert int(out[0]) == value
-        await grid.close()
-        await restored.close()
-
+class TestBootHygiene:
     async def test_stale_tmp_swept_at_boot(self, tmp_path):
         cache_dir = tmp_path / "rrqpe"
         cache_dir.mkdir(parents=True)
@@ -697,3 +600,234 @@ class TestPersistence:
         grid = RRQPEGrid(cache_dir=tmp_path)
         assert not stale.exists()
         await grid.close()
+
+
+# ── Radar-source fetch protocol (fetch_frame slotting) ─────────────────
+
+
+def _rrqpe_region(factor: int = 4) -> RegionDef:
+    """RegionDef matching an F=``factor`` grid so tests stay cheap."""
+    pixel = NATIVE_PIXEL * factor
+    return RegionDef(
+        name="RRQPE",
+        west=-180.0, east=180.0, south=-60.0, north=70.0,
+        pixel_size=pixel, pixel_size_y=pixel, group="GLOBAL",
+        grid_width=NATIVE_COLS // factor,
+        grid_height=(NATIVE_ROWS // factor) * factor // factor,
+        storm_cells=False,
+    )
+
+
+class TestFetchFrameSlotting:
+    """Radar-source protocol: lag-shifted slotting with distinct scans per
+    frame slot, None beyond the tolerance cap, and the scan-store refresh
+    only on the newest-slot request."""
+
+    @staticmethod
+    def _store_scans(grid, values):
+        """Inject scans at aligned slots ending at ``floor_now - 1200``."""
+        floor_now = _floor_now()
+        newest = floor_now - 1200
+        for i, value in enumerate(values):
+            arr = np.full(grid.effective_shape, value, dtype=np.uint8)
+            grid._timesteps[newest - (len(values) - 1 - i) * 600] = arr
+        grid._sorted_timestamps = sorted(grid._timesteps)
+        return floor_now, newest
+
+    async def test_fetch_frame_slots_map_to_distinct_scans(self, monkeypatch):
+        grid = RRQPEGrid(downsample=4)
+        self._store_scans(grid, [101, 102, 103, 104])
+
+        async def _no_refresh(**kwargs):
+            pass
+
+        monkeypatch.setattr(grid, "fetch", _no_refresh)
+        src = RRQPESource(grid)
+        region = _rrqpe_region(4)
+        # ``minutes_ago`` is in minutes (the fetcher passes i*interval_min).
+        out_new = await src.fetch_frame(region, 0)
+        out_mid = await src.fetch_frame(region, 10)
+        out_old = await src.fetch_frame(region, 30)
+        assert [int(np.asarray(o).flat[0]) for o in (out_new, out_mid, out_old)] == [
+            104, 103, 101,
+        ]
+        assert len({id(o) for o in (out_new, out_mid, out_old)}) == 3
+        for o in (out_new, out_mid, out_old):
+            assert o.dtype == np.uint8
+            assert o.shape == grid.effective_shape
+
+    async def test_fetch_frame_none_beyond_tolerance_cap(self, monkeypatch):
+        """A scan more than ``rrqpe_match_tolerance_seconds`` old declines
+        the whole source — region absent from every frame."""
+        now = int(time.time())
+        grid = RRQPEGrid(downsample=4)
+        arr = np.full(grid.effective_shape, 111, dtype=np.uint8)
+        grid._timesteps[now - 2500] = arr
+        grid._sorted_timestamps = [now - 2500]
+
+        async def _no_refresh(**kwargs):
+            pass
+
+        monkeypatch.setattr(grid, "fetch", _no_refresh)
+        src = RRQPESource(grid)
+        region = _rrqpe_region(4)
+        assert await src.fetch_frame(region, 0) is None
+        assert await src.fetch_frame(region, 20) is None
+
+    async def test_fetch_archive_frame_uses_lag_shift(self, monkeypatch):
+        grid = RRQPEGrid(downsample=4)
+        self._store_scans(grid, [101, 102, 103, 104])
+        src = RRQPESource(grid)
+        floor_now = _floor_now()
+        region = _rrqpe_region(4)
+        when = datetime.fromtimestamp(floor_now, tz=timezone.utc)
+        out = await src.fetch_archive_frame(region, when)
+        assert out is not None
+        assert int(np.asarray(out).flat[0]) == 104
+        # Naive datetimes are treated as UTC wall-clock (house convention).
+        when_naive = datetime.fromtimestamp(
+            floor_now - 600, tz=timezone.utc,
+        ).replace(tzinfo=None)
+        out2 = await src.fetch_archive_frame(region, when_naive)
+        assert out2 is not None
+        assert int(np.asarray(out2).flat[0]) == 103
+
+    async def test_scan_refresh_triggered_only_on_newest_slot(self, monkeypatch):
+        """The bulk scan-store refresh runs on the minutes_ago==0 request
+        only — once per cycle — with a history window covering the whole
+        frame span plus the lag tolerance."""
+        grid = RRQPEGrid(downsample=4)
+        calls = []
+
+        async def _fake_fetch(**kwargs):
+            calls.append(kwargs)
+
+        monkeypatch.setattr(grid, "fetch", _fake_fetch)
+        src = RRQPESource(grid)
+        region = _rrqpe_region(4)
+        # No scans stored: every slot declines, but the refresh side effect
+        # is what we pin here.  minutes_ago=10/110 are mid/old-frame slots.
+        await src.fetch_frame(region, 0)
+        await src.fetch_frame(region, 10)
+        await src.fetch_frame(region, 110)
+        assert len(calls) == 1
+        expected_history = (
+            settings.max_frames * settings.fetch_interval
+            + settings.rrqpe_match_tolerance_seconds
+        )
+        assert calls[0]["history_seconds"] == expected_history
+
+
+# ── Always-on enabled set ──────────────────────────────────────────────
+
+
+class TestAlwaysEnabled:
+    def test_contribution_defaults_to_not_always_enabled(self):
+        from librewxr.sources._base import RadarSourceContribution
+
+        contrib = RadarSourceContribution(
+            regions=[], instance=None, group="X",  # type: ignore[arg-type]
+        )
+        assert contrib.always_enabled is False
+
+    def test_rrqpe_contribution_flagged_always_enabled(self, monkeypatch):
+        from librewxr.config import settings as real_settings
+        from librewxr.sources import collect_radar_contributions
+
+        monkeypatch.setattr(real_settings, "radar_enabled", True)
+        real_settings.rrqpe_enabled = True
+        contribs = collect_radar_contributions(real_settings)
+        rrqpe = [
+            c for c in contribs
+            if any(r.name == "RRQPE" for r in c.regions)
+        ]
+        assert len(rrqpe) == 1
+        assert rrqpe[0].always_enabled is True
+        assert rrqpe[0].group == "GLOBAL"
+
+    def test_rrqpe_kept_in_effective_enabled_set_under_narrow_spec(self, monkeypatch):
+        """With ``enabled_regions=['USCOMP']`` the always-on RRQPE region
+        remains in the effective enabled set."""
+        from librewxr.config import settings as real_settings
+        from librewxr.sources import enabled_regions_with_always_on
+
+        monkeypatch.setattr(real_settings, "radar_enabled", True)
+        real_settings.rrqpe_enabled = True
+        monkeypatch.setattr(real_settings, "enabled_regions", "USCOMP")
+        names = enabled_regions_with_always_on(real_settings)
+        assert "USCOMP" in names
+        assert "RRQPE" in names
+
+    def test_rrqpe_dropped_from_effective_set_when_disabled(self, monkeypatch):
+        from librewxr.config import settings as real_settings
+        from librewxr.sources import enabled_regions_with_always_on
+
+        monkeypatch.setattr(real_settings, "radar_enabled", True)
+        real_settings.rrqpe_enabled = False
+        monkeypatch.setattr(real_settings, "enabled_regions", "USCOMP")
+        try:
+            names = enabled_regions_with_always_on(real_settings)
+            assert "USCOMP" in names
+            assert "RRQPE" not in names
+        finally:
+            real_settings.rrqpe_enabled = True
+
+
+# ── Compositor ordering pin ────────────────────────────────────────────
+
+
+class TestCompositorOrdering:
+    """RRQPE sorts last in the multi-region compositor (coarsest
+    pixel_size) and fills only pixels no finer region claims — the fine
+    region's authoritative zeros win inside its coverage."""
+
+    # Tile z=4 x=8 y=5: lon 0..22.5, lat ~31.8..49 — inside both the fine
+    # region's bbox and RRQPE's band.
+    _Z, _X, _Y, _TILE = 4, 8, 5, 256
+
+    def test_rrqpe_fills_only_unclaimed_pixels(self, monkeypatch):
+        from librewxr.tiles import renderer as renderer_mod
+
+        from librewxr.config import settings as real_settings
+
+        monkeypatch.setattr(real_settings, "noise_floor_dbz", 10.0)
+
+        fine = RegionDef(
+            name="FINE", west=-10.0, east=10.0, south=30.0, north=50.0,
+            pixel_size=0.01, group="TEST",
+            grid_width=2000, grid_height=2000,
+        )
+        rrqpe = REGIONS["RRQPE"]
+        monkeypatch.setattr(
+            renderer_mod, "overlapping_regions",
+            lambda z, x, y, enabled=None: [fine, rrqpe],
+        )
+        monkeypatch.setattr(
+            renderer_mod, "sample_coverage",
+            lambda name, lat, lon: (
+                # FINE's bbox within the tile (lat 31.8..49 ⊂ 30..50, so
+                # only the longitude edge bites); RRQPE covers everything.
+                ((lon >= fine.west) & (lon <= fine.east))
+                if name == "FINE"
+                else np.ones(lat.shape, dtype=bool)
+            ),
+        )
+
+        fine_frame = np.zeros((fine.height, fine.width), dtype=np.uint8)
+        rrqpe_frame = np.full(
+            (rrqpe.height, rrqpe.width), 200, dtype=np.uint8,
+        )
+        geom = renderer_mod.compute_tile_geometry(
+            {"FINE": fine_frame, "RRQPE": rrqpe_frame},
+            self._Z, self._X, self._Y, tile_size=self._TILE,
+            nwp_chain=None,
+        )
+        assert geom.is_transparent is False
+        values = geom.values
+        assert values.shape == (self._TILE, self._TILE)
+        # Inside FINE's coverage (lon ≤ 10 → first ~114 columns) the fine
+        # region's zeros win — RRQPE's 200s must not bleed through.
+        n_fine_cols = int(round((fine.east - 0.0) / (22.5 / self._TILE)))
+        assert (values[:, :n_fine_cols] == 0).all()
+        # Outside FINE's coverage RRQPE fills.
+        assert (values[:, n_fine_cols:] == 200).all()

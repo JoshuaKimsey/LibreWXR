@@ -275,9 +275,12 @@ class Settings(BaseSettings):
     # *observed* precipitation on a global uniform 0.02° grid, consumed
     # from the anonymous NOAA Open Data bucket
     # ``noaa-enterprise-rainrate-pds``.  Because it is observations
-    # rather than model output it sits at the FRONT of the NWP chain
-    # (priority 5) and only ever answers for past valid times — future /
-    # nowcast timestamps fall through to the models behind it.
+    # rather than model output it is ingested as a RADAR source (a single
+    # coarse global region, ``sources/world/rrqpe``) rather than an NWP
+    # chain member: it participates in the radar compositor, nowcast
+    # extrapolation, carry-forward, and state sync like any other region,
+    # and only ever answers for past valid times — future / nowcast
+    # timestamps fall through to the models.
     rrqpe_enabled: bool = True
     rrqpe_base_url: str = "https://noaa-enterprise-rainrate-pds.s3.amazonaws.com"
     # How long after a 10-min scan start the file is considered safely
@@ -295,13 +298,14 @@ class Settings(BaseSettings):
     # ~117 MB float32 frame becomes a ~29 MB uint8 store.
     rrqpe_downsample: int = 2
     # Maximum tolerated publish lag — the newest stored scan's age,
-    # floored to whole 10-min slots — before the source declines to the
-    # models for ALL frames (product severely late, >= 2 missed scans;
-    # self-heals next fetch cycle).  Per-frame matching is lag-shifted
-    # relative matching: each frame is served the scan ``lag`` seconds
-    # its senior, so the per-frame slot slack is one scan interval
-    # (600 s), not this value.  Future/nowcast timestamps are rejected
-    # by the wall-clock observed-only gate in the RRQPE grid.
+    # floored to whole 10-min slots — before the source declines the
+    # region for ALL frames (product severely late, >= 2 missed scans;
+    # self-heals next fetch cycle; the fetcher's carry-forward covers up
+    # to two intervals, then tiles fall through to NWP fill).  Per-frame
+    # matching is lag-shifted relative matching: each frame is served the
+    # scan ``lag`` seconds its senior, so the per-frame slot slack is one
+    # scan interval (600 s), not this value.  Future/nowcast timestamps
+    # are rejected by the wall-clock observed-only gate in the RRQPE grid.
     rrqpe_match_tolerance_seconds: int = 1800
     # North American NWP source for the chain. "ifs" uses ECMWF IFS as the
     # only source (current behavior). "hrrr" prepends NOAA HRRR-subh as the

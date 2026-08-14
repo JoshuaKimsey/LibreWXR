@@ -139,6 +139,13 @@ class RadarSourceContribution:
     shapes (DPC Italy uses the latter for mainland + Sicily + Sardinia
     + the deep-Tyrrhenian / Ionian patches where no OPERA neighbour
     reaches).
+
+    ``always_enabled`` marks the contribution's regions as part of the
+    effective enabled set regardless of ``LIBREWXR_ENABLED_REGIONS`` —
+    the coarse global observed-precip layer (RRQPE) must keep fetching
+    and rendering as the bottom compositing tier even in a CONUS-only
+    deployment.  The ``*_enabled`` per-source toggles and the global
+    ``radar_enabled`` master switch still gate the contribution itself.
     """
 
     regions: list[RegionDef]
@@ -150,6 +157,7 @@ class RadarSourceContribution:
     coverage_polygons: dict[
         str, list[tuple[float, float]] | list[list[tuple[float, float]]],
     ] = field(default_factory=dict)
+    always_enabled: bool = False
 
 
 @dataclass

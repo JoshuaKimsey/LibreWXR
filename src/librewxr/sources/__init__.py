@@ -233,6 +233,42 @@ def collect_satellite_contributions(settings, cache_dir) -> list:
     return contributions
 
 
+def always_enabled_region_names(settings) -> list[str]:
+    """Region names contributed by providers flagged ``always_enabled``.
+
+    These regions are fetched and rendered regardless of
+    ``LIBREWXR_ENABLED_REGIONS`` — the coarse global observed-precip
+    layer (RRQPE) must always be present as the bottom compositing tier,
+    even in a CONUS-only deployment.  The per-source ``*_enabled``
+    toggles and the global ``radar_enabled`` master switch still gate
+    the contribution (via ``collect_radar_contributions``), so a
+    disabled source contributes nothing here.
+    """
+    names: list[str] = []
+    for contribution in collect_radar_contributions(settings):
+        if not contribution.always_enabled:
+            continue
+        for region in contribution.regions:
+            if region.name not in names:
+                names.append(region.name)
+    return names
+
+
+def enabled_regions_with_always_on(settings) -> list[str]:
+    """The resolved region spec plus every always-on contribution region.
+
+    Union helper for boot-time callers that need the full effective
+    enabled set (fetcher, lifespans, pipeline).  The base list comes
+    from ``settings.get_enabled_regions()``; always-on regions are
+    appended once each.
+    """
+    names = list(settings.get_enabled_regions())
+    for name in always_enabled_region_names(settings):
+        if name not in names:
+            names.append(name)
+    return names
+
+
 def collect_radar_coverage_metadata(
     settings,
 ) -> tuple[

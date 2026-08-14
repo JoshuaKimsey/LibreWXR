@@ -39,6 +39,13 @@ def _make_blob(cy: int, cx: int, radius: int = 20, value: int = 150) -> np.ndarr
     return grid
 
 
+def _disk(h: int, w: int, cy: int, cx: int, radius: int, value: int = 150) -> np.ndarray:
+    """Circular blob on an arbitrary-size grid (no seam wrap)."""
+    ys, xs = np.mgrid[0:h, 0:w]
+    mask = (ys - cy) ** 2 + (xs - cx) ** 2 <= radius ** 2
+    return np.where(mask, value, 0).astype(np.uint8)
+
+
 # ---------------------------------------------------------------------------
 # NowcastStore tests
 # ---------------------------------------------------------------------------
@@ -645,6 +652,94 @@ class TestExtrapolationClampingPreventsStreaks:
         # 0.01° → max ≈ 30 px/step.
         mag = np.sqrt(flows["USCOMP"][..., 0] ** 2 + flows["USCOMP"][..., 1] ** 2)
         assert mag.max() <= 30.5  # within rounding of the cap
+
+
+# ---------------------------------------------------------------------------
+# Dateline wrap (full-longitude regions)
+# ---------------------------------------------------------------------------
+#
+# RRQPE is a full-longitude (global) radar region: content that advects
+# across the ±180° seam must re-enter on the other side instead of being
+# zeroed at a hard edge.  Both the Farneback flow computation and the
+# inverse-warp remap wrap-pad the column axis for regions where
+# ``RegionDef.is_global``; every other region keeps the legacy path.
+
+
+class TestDatelineWrap:
+    _H, _W = 60, 100
+
+    @pytest.fixture
+    def global_region(self, monkeypatch):
+        """Register a synthetic full-longitude region in REGIONS."""
+        from librewxr.data import regions as _regions_mod
+        from librewxr.data.regions import RegionDef
+
+        r = RegionDef(
+            name="GLOBAL_REGION",
+            west=-180.0, east=180.0, south=-60.0, north=70.0,
+            pixel_size=0.1, pixel_size_y=0.1, group="TEST",
+            grid_width=self._W, grid_height=self._H,
+        )
+        monkeypatch.setitem(_regions_mod.REGIONS, "GLOBAL_REGION", r)
+        return r
+
+    def test_extrapolate_forward_wrap_reenters_seam_content(self):
+        """A blob just west of the seam advecting east must re-enter on
+        the east side of the seam (content on BOTH sides afterwards)."""
+        h, w = self._H, self._W
+        latest = _disk(h, w, 30, w - 6, 8)  # cols 86..99, fully west
+        flow = np.zeros((h, w, 2), dtype=np.float32)
+        flow[..., 0] = 3.0
+
+        out_nowrap = _extrapolate_forward(latest, flow, steps=3, wrap=False)
+        assert not out_nowrap[:, :8].any()  # lost at the seam
+        assert int((out_nowrap > 0).sum()) < int((latest > 0).sum())
+
+        out_wrap = _extrapolate_forward(latest, flow, steps=3, wrap=True)
+        assert out_wrap[:, :8].any(), "content must re-enter east of the seam"
+        assert out_wrap[:, w - 8 :].any(), "trailing content stays west of the seam"
+        # Mass is preserved through the wrap (vs. the ~3/4 lost without it).
+        assert int((out_wrap > 0).sum()) >= 0.9 * int((latest > 0).sum())
+
+    def test_extrapolate_forward_wrap_zero_flow_identity(self):
+        """wrap=True with zero flow must reproduce the frame exactly."""
+        h, w = self._H, self._W
+        latest = _disk(h, w, 30, w - 6, 8)
+        flow = np.zeros((h, w, 2), dtype=np.float32)
+        out = _extrapolate_forward(latest, flow, steps=3, wrap=True)
+        assert np.array_equal(out, latest)
+
+    def test_generate_sync_global_region_seam_survives(self, global_region):
+        """End-to-end: Farneback between two seam-adjacent frames and a
+        3-step warp keeps the blob on BOTH sides of the seam."""
+        h, w = self._H, self._W
+        prev = _disk(h, w, 30, w - 9, 8)
+        latest = _disk(h, w, 30, w - 6, 8)
+        frames, flows = NowcastGenerator._generate_sync(
+            {"GLOBAL_REGION": prev}, {"GLOBAL_REGION": latest},
+            latest_ts=1000, n_steps=3, interval=600,
+        )
+        assert len(frames) == 3
+        assert "GLOBAL_REGION" in flows
+        # Flow is stored at the unpadded grid shape.
+        assert flows["GLOBAL_REGION"].shape == (h, w, 2)
+        out = frames[-1].regions["GLOBAL_REGION"]
+        assert out.shape == (h, w)
+        assert out[:, :8].any(), "blob must re-enter east of the seam"
+        assert out[:, w - 8 :].any(), "blob tail must remain west of the seam"
+
+    def test_non_global_region_path_unchanged(self):
+        """A non-global region keeps the legacy shapes (no padding) and
+        the pre-refactor behaviour."""
+        blob0 = _make_blob(60, 100)
+        blob1 = _make_blob(60, 110)
+        frames, flows = NowcastGenerator._generate_sync(
+            {"USCOMP": blob0}, {"USCOMP": blob1},
+            latest_ts=1000, n_steps=2, interval=600,
+        )
+        assert flows["USCOMP"].shape == (H, W, 2)
+        assert frames[0].regions["USCOMP"].shape == (H, W)
+        assert frames[0].regions["USCOMP"].dtype == np.uint8
 
 
 # ---------------------------------------------------------------------------

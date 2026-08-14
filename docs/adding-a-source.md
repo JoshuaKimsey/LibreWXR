@@ -309,7 +309,6 @@ Current assignments:
 
 | Source                   | Priority | Notes                                              |
 |--------------------------|----------|----------------------------------------------------|
-| RRQPE                    | 5        | NOAA Enterprise Rain Rate GLB-5 blend — satellite-derived **observed** precip, 60S-70N global band. Serves past frames only (never future / nowcast timestamps) |
 | HRRR                     | 10       | 3 km CONUS, narrowest domain                       |
 | HRRR-Alaska              | 11       | Same model, disjoint domain                        |
 | HRDPS                    | 20       | 2.5 km Canada                                      |

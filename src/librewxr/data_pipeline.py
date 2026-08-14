@@ -51,6 +51,7 @@ from librewxr.sources import (
     collect_nwp_contributions,
     collect_radar_coverage_metadata,
     collect_satellite_contributions,
+    enabled_regions_with_always_on,
     nwp_grid_slug,
     satellite_source_slug,
 )
@@ -82,7 +83,10 @@ async def run_pipeline() -> None:
     cache_dir = Path(settings.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    enabled = settings.get_enabled_regions()
+    # The enabled set includes every always-on contribution region (the
+    # coarse global observed tier stays fetchable even under a narrow
+    # region spec).
+    enabled = enabled_regions_with_always_on(settings)
     logger.info(
         "Pipeline starting (cache_dir=%s, regions=%s, fetch_interval=%ds)",
         cache_dir, ", ".join(enabled), settings.fetch_interval,

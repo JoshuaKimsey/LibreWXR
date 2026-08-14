@@ -312,6 +312,18 @@ def build_radar_sources() -> list[Source]:
     def range_for(region: str) -> float:
         return REGION_RADAR_RANGE.get(region, RADAR_RANGE_KM)
 
+    # NOAA RRQPE — satellite-derived observed precipitation (Enterprise
+    # Rain Rate GLB-5 blend) ingested as a single coarse global radar
+    # region on a 60S-70N band at all longitudes; the always-on bottom
+    # compositing tier beneath every finer radar composite.  The band is
+    # split into two half-world boxes at the ±180° seam — a single
+    # -180..180 ring collapses to a degenerate line under the renderer's
+    # antimeridian unwrap.  The two pieces share one label so the legend
+    # shows a single entry.
+    rrqpe_color = "#7f7f7f"
+    radar.append(Source("NOAA RRQPE", rrqpe_color, latlon_box(-180, 0, -60, 70)))
+    radar.append(Source("NOAA RRQPE", rrqpe_color, latlon_box(0, 180, -60, 70)))
+
     # MRMS — five composites sharing one upstream operator (NOAA) and
     # one legend swatch.  Each composite gets its own union polygon
     # built from that region's NEXRAD stations.
@@ -404,19 +416,6 @@ def build_radar_sources() -> list[Source]:
 
 def build_model_sources() -> list[Source]:
     models: list[Source] = []
-
-    # NOAA RRQPE — satellite-derived observed precipitation (Enterprise
-    # Rain Rate GLB-5 blend) on a global 60S-70N band at all
-    # longitudes; chain priority 5 (ahead of every model).  IFS is
-    # deliberately not drawn because it is fully global; RRQPE's
-    # 130-degree latitude band IS meaningful, so it gets a box.  The
-    # ring is split into two half-world boxes at the ±180° seam — a
-    # single -180..180 ring collapses to a degenerate line under the
-    # renderer's antimeridian unwrap.  The two pieces share one label
-    # so the legend shows a single entry.
-    rrqpe_color = "#7f7f7f"
-    models.append(Source("NOAA RRQPE", rrqpe_color, latlon_box(-180, 0, -60, 70)))
-    models.append(Source("NOAA RRQPE", rrqpe_color, latlon_box(0, 180, -60, 70)))
 
     # HRRR-CONUS (LCC)
     hrrr_crs = CRS.from_proj4(
@@ -787,7 +786,7 @@ if __name__ == "__main__":
         sources=build_radar_sources(),
         output_path=RADAR_OUTPUT,
         title="LibreWXR — Radar Composite Coverage",
-        subtitle="NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe · DPC Italy · CWA / QPESUMS Taiwan · JMA HRPN Japan · MET Malaysia",
+        subtitle="NOAA RRQPE · NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe · DPC Italy · CWA / QPESUMS Taiwan · JMA HRPN Japan · MET Malaysia",
         legend_title="Radar composites",
         alpha_fill=0.40,
         hatch="//",

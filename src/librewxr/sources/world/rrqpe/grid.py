@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
-"""NOAA Enterprise Rain Rate (RRQPE) GLB-5 blend grid — observed precip.
+"""NOAA Enterprise Rain Rate (RRQPE) GLB-5 blend — observed precip scan store.
 
 The RRQPE GLB-5 blend is a satellite-derived 10-minute rain-rate product
 built by NOAA's Enterprise Rain Rate algorithm from the geostationary
-constellation.  It is *observed* precipitation, not model output, so it
-sits at the very front of the NWP chain (priority 5) and only ever
-answers for past valid times — no future frames are ever stored, so
-nowcast/forecast timestamps automatically fall through to the models
-behind it.
+constellation.  It is *observed* precipitation, ingested as a radar
+source: the package's ``source.py`` serves its frames into the FrameStore
+via the standard RadarSource fetch protocol (lag-shifted relative
+matching — see below), and the region participates in the radar
+compositor, nowcast extrapolation, carry-forward, and state sync like
+any other region.
 
 Data layout (verified against the live anonymous S3 bucket
 ``noaa-enterprise-rainrate-pds``):
@@ -92,6 +93,12 @@ GLB5_KEY_RE = re.compile(
 # Scan cadence — 10 minutes.  Used to enumerate the needed scan-start
 # slots in the fetch window.
 SCAN_INTERVAL_SECONDS = 600
+
+# Throttle between scan-store refresh passes.  The fetch cycle is 600 s,
+# but the source's lazy refresh may be invoked twice in quick succession
+# at startup (initial backfill + the first full cycle); collapsing the
+# second call into the first avoids a redundant S3 listing pass.
+_REFRESH_THROTTLE_SECONDS = 120
 
 
 # ── Pure helpers (grid math, keys, XML) ────────────────────────────────
@@ -216,21 +223,20 @@ def _fmt_slot(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%MZ")
 
 
-# ── RRQPEGrid: the public NWPSource implementation ─────────────────────
+# ── RRQPEGrid: the scan store behind the radar source ──────────────────
 
 
 class RRQPEGrid:
-    """NOAA Enterprise Rain Rate GLB-5 blend as an NWP-chain source.
+    """NOAA Enterprise Rain Rate GLB-5 blend scan store.
 
-    Observed-only contract: every stored frame is a past scan, so
-    ``has_data_at`` only answers for past valid times and the chain
-    falls through to the models for future/nowcast timestamps.  Matching
-    is lag-shifted relative matching — frames are served the scan ``lag``
-    seconds their senior (the uniform ~15-25 min temporal fib described
-    in the module docstring) so client animations step smoothly.  Frames
-    are uint8 dBZ-encoded memmaps keyed by scan timestamp
-    (``dict[int, np.ndarray]``), mirroring the ECMWF IFS grid's memmap
-    patterns for multi-worker state snapshots.
+    Fetch-side only: downloads any missing 10-min scan slots in the
+    recent window, decodes them to uint8 dBZ-encoded memmaps keyed by
+    scan timestamp (``dict[int, np.ndarray]``), and answers lag-shifted
+    relative matches (see the module docstring).  The radar source
+    (``source.RRQPESource``) drives the fetch cycle and serves matched
+    scans as radar frames; the frames themselves flow through the
+    FrameStore's state sync, so this class carries no cross-process
+    pickling surface.
     """
 
     name = "rrqpe"
@@ -248,6 +254,9 @@ class RRQPEGrid:
         self._sorted_timestamps: list[int] = []
         self._client: httpx.Client | None = None
         self._fetch_lock = asyncio.Lock()
+        # Monotonic timestamp of the last completed refresh pass, for the
+        # ``_REFRESH_THROTTLE_SECONDS`` gate in ``fetch``.
+        self._last_refresh_monotonic = 0.0
 
         if cache_dir is not None:
             self._memmap_dir = Path(cache_dir) / "rrqpe"
@@ -267,13 +276,6 @@ class RRQPEGrid:
     # ── Public state ──────────────────────────────────────────────────
 
     @property
-    def data(self) -> np.ndarray | None:
-        """The latest stored scan frame, or None if none are loaded."""
-        if not self._sorted_timestamps:
-            return None
-        return self._timesteps.get(self._sorted_timestamps[-1])
-
-    @property
     def reference_time(self) -> int | None:
         """Latest stored scan timestamp (Unix seconds) or None."""
         if not self._sorted_timestamps:
@@ -285,13 +287,13 @@ class RRQPEGrid:
         return len(self._timesteps)
 
     @property
-    def data_bytes(self) -> int:
-        """Total bytes across all stored frames (for the /health payload)."""
-        return sum(arr.nbytes for arr in self._timesteps.values())
-
-    @property
     def effective_shape(self) -> tuple[int, int]:
         return (self._rows, self._cols)
+
+    @property
+    def timestamps(self) -> list[int]:
+        """Sorted stored scan timestamps."""
+        return list(self._sorted_timestamps)
 
     # ── Cache management ──────────────────────────────────────────────
 
@@ -299,8 +301,10 @@ class RRQPEGrid:
         """Write array to disk atomically and return a read-only memmap.
 
         Atomic write (``.tmp`` → ``os.replace``) ensures readers in other
-        processes never see a half-written file — required for multi-
-        worker safety.  Mirrors the ECMWF IFS grid.
+        processes never see a half-written file.  The scan store is
+        fetch-side only (radar frames flow through the FrameStore), but
+        the atomic write pattern is kept for consistency with the rest of
+        the project's memmap usage.
         """
         final = self._memmap_dir / f"{name}.dat"
         tmp = final.with_suffix(".dat.tmp")
@@ -311,9 +315,9 @@ class RRQPEGrid:
         os.replace(tmp, final)
         return np.memmap(final, dtype=data.dtype, mode="r", shape=data.shape)
 
-    # ── NWPSource Protocol ────────────────────────────────────────────
+    # ── Frame → scan matching (lag-shifted relative) ──────────────────
 
-    def _match_timestamp(self, timestamp: int | None) -> int | None:
+    def match_timestamp(self, timestamp: int | None) -> int | None:
         """Lag-shifted relative match: serve the frame the scan ``lag``
         seconds its senior so client animations stay smooth.
 
@@ -367,106 +371,9 @@ class RRQPEGrid:
             return nearest
         return None
 
-    def has_data_at(self, timestamp: int) -> bool:
-        """True iff a lag-shifted scan matches ``timestamp``."""
-        return self._match_timestamp(timestamp) is not None
-
-    def has_data(self) -> bool:
-        """True if any frame is stored."""
-        return bool(self._sorted_timestamps)
-
-    def domain_mask(self, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
-        """True where the feather weight is non-zero (latitude band)."""
-        return self.feather_mask(lat, lon) > 0
-
-    def feather_mask(self, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
-        """Latitude-band feather mask (float32 in [0, 1]).
-
-        Full weight (1.0) for lat in [-58, 68]; linear taper to 0.0
-        across [68, 70] on the north and [-60, -58] on the south; 0.0
-        outside the band.  The GLB-5 grid itself spans +70..-60, but the
-        outer 2° of each edge are edge-of-scan / heavily distorted, so
-        the chain tapers them out in favour of the models.
-        """
-        lat = np.asarray(lat, dtype=np.float32)
-        north_taper = np.clip((NORTH_EDGE - lat) / 2.0, 0.0, 1.0)  # 1 at 68, 0 at 70
-        south_taper = np.clip((lat - SOUTH_EDGE) / 2.0, 0.0, 1.0)  # 1 at -58, 0 at -60
-        return np.minimum(north_taper, south_taper).astype(np.float32)
-
-    @property
-    def supports_snow(self) -> bool:
-        """RRQPE is rain-rate only — no snow classification."""
-        return False
-
-    def get_snow_mask(
-        self, lat: np.ndarray, lon: np.ndarray, timestamp: int | None = None,
-    ) -> np.ndarray:
-        """RRQPE has no snow field; always False (the chain reaches IFS)."""
-        return np.zeros(lat.shape, dtype=bool)
-
-    def sample(
-        self,
-        lat: np.ndarray,
-        lon: np.ndarray,
-        timestamp: int | None = None,
-        bilinear: bool = False,
-    ) -> np.ndarray:
-        """Return uint8 dBZ-encoded values at the given lat/lon points.
-
-        Same encoding as radar composites (pixel = (dBZ + 32) * 2).
-        Returns zeros when no lag-shifted scan matches the timestamp (or
-        the store is empty) — never NaN.  With ``bilinear``, uses
-        bilinear interpolation with the IFS clear-sky guard: any corner
-        at zero falls back to the nearest neighbour so precip never
-        ghosts into clear-sky pixels.
-        """
-        ts = self._match_timestamp(timestamp)
-        if ts is None:
-            return np.zeros(lat.shape, dtype=np.uint8)
-        grid = self._timesteps.get(ts)
-        if grid is None:
-            return np.zeros(lat.shape, dtype=np.uint8)
-
-        if not bilinear:
-            row = ((self._north_eff - lat) / self._pixel_eff).astype(np.int32)
-            col = ((lon - self._west_eff) / self._pixel_eff).astype(np.int32)
-            row = np.clip(row, 0, self._rows - 1)
-            col = np.clip(col, 0, self._cols - 1)
-            return grid[row, col]
-
-        # Bilinear sampling (mirrors ECMWF IFS with the clear-sky guard).
-        row_f = (self._north_eff - lat) / self._pixel_eff
-        col_f = (lon - self._west_eff) / self._pixel_eff
-
-        r0 = np.floor(row_f).astype(np.int32)
-        c0 = np.floor(col_f).astype(np.int32)
-        r1 = r0 + 1
-        c1 = c0 + 1
-
-        r0 = np.clip(r0, 0, self._rows - 1)
-        c0 = np.clip(c0, 0, self._cols - 1)
-        r1 = np.clip(r1, 0, self._rows - 1)
-        c1 = np.clip(c1, 0, self._cols - 1)
-
-        dr = np.clip(row_f - np.floor(row_f), 0.0, 1.0).astype(np.float32)
-        dc = np.clip(col_f - np.floor(col_f), 0.0, 1.0).astype(np.float32)
-
-        v00 = grid[r0, c0].astype(np.float32)
-        v01 = grid[r0, c1].astype(np.float32)
-        v10 = grid[r1, c0].astype(np.float32)
-        v11 = grid[r1, c1].astype(np.float32)
-
-        # Don't bleed precipitation into adjacent zero (clear-sky) cells.
-        any_zero = (v00 == 0) | (v01 == 0) | (v10 == 0) | (v11 == 0)
-
-        interp = (
-            v00 * (1 - dr) * (1 - dc)
-            + v01 * (1 - dr) * dc
-            + v10 * dr * (1 - dc)
-            + v11 * dr * dc
-        )
-        result = np.where(any_zero, v00, interp)
-        return np.clip(result + 0.5, 0, 255).astype(np.uint8)
+    def frame_at(self, ts: int) -> np.ndarray | None:
+        """The stored scan frame for ``ts``, or None."""
+        return self._timesteps.get(ts)
 
     # ── Fetch loop ────────────────────────────────────────────────────
 
@@ -490,10 +397,27 @@ class RRQPEGrid:
         ``now - rrqpe_publish_delay_minutes``, so nothing future is ever
         stored.  ``horizon_seconds`` is accepted for signature parity
         with the fetcher's introspection and ignored.
+
+        Throttled to one pass per ``_REFRESH_THROTTLE_SECONDS`` — the
+        radar fetch cycle calls this once per cycle (on the newest-slot
+        request), and the startup backfill can fire two live requests
+        back-to-back, which should collapse into a single S3 pass.
         """
+        now = time.monotonic()
+        if now - self._last_refresh_monotonic < _REFRESH_THROTTLE_SECONDS:
+            logger.debug("RRQPE: refresh throttled")
+            return
         async with self._fetch_lock:
+            # Re-check under the lock so two queued callers don't both
+            # run the pass back-to-back.
+            if (
+                time.monotonic() - self._last_refresh_monotonic
+                < _REFRESH_THROTTLE_SECONDS
+            ):
+                return
             try:
                 await asyncio.to_thread(self._fetch_sync, now_ts, history_seconds)
+                self._last_refresh_monotonic = time.monotonic()
             except Exception:
                 logger.exception("Error fetching NOAA RRQPE data")
 
@@ -589,8 +513,7 @@ class RRQPEGrid:
 
         # Build-then-swap: the new dict is fully assembled before the
         # reference is published, so a concurrent reader sees either the
-        # old or new snapshot — never a mix (matches the __setstate__
-        # contract).
+        # old or new snapshot — never a mix.
         new_count = sum(1 for s in missing if s in new_frames)
         self._timesteps = new_frames
         self._sorted_timestamps = sorted(new_frames.keys())
@@ -681,61 +604,13 @@ class RRQPEGrid:
                 except OSError:
                     pass
 
-    # ── Cross-process snapshot (pickle for multi-worker) ──────────────
-
-    def __getstate__(self) -> dict:
-        """Serialize for cross-worker reload via master_state.
-
-        Carries the memmap dir, the sorted scan timestamps, the
-        downsample factor (which fixes the effective grid), and the
-        frame shape so decoded/synthetic shapes round-trip exactly.
-        Render workers never repeat the fetch — they re-open the memmaps
-        the pipeline already wrote.
-        """
-        return {
-            "memmap_dir": str(self._memmap_dir),
-            "timesteps": list(self._sorted_timestamps),
-            "downsample": self._downsample,
-            "shape": [self._rows, self._cols],
-        }
-
-    def __setstate__(self, state: dict) -> None:
-        """Restore state by re-opening the memmap files read-only.
-
-        Build-then-swap: the new ``_timesteps`` dict is fully assembled
-        before either reference is published, so a concurrent reader sees
-        either the old or new snapshot — never a mix.
-        """
-        memmap_dir = Path(state["memmap_dir"])
-        downsample = state.get("downsample")
-        if downsample is None:
-            downsample = getattr(self, "_downsample", 2)
-        shape = tuple(state.get("shape", downsampled_shape(downsample)))
-        new_timesteps: dict[int, np.ndarray] = {}
-        for ts in state["timesteps"]:
-            new_timesteps[ts] = np.memmap(
-                memmap_dir / f"{ts}.dat", dtype=np.uint8, mode="r", shape=shape,
-            )
-        (
-            self._pixel_eff, self._north_eff, self._west_eff,
-            self._rows, self._cols,
-        ) = effective_grid(downsample)
-        self._memmap_dir = memmap_dir
-        self._downsample = downsample
-        self._client = None
-        self._fetch_lock = asyncio.Lock()
-        self._persistent = True
-        self._timesteps = new_timesteps
-        self._sorted_timestamps = sorted(new_timesteps.keys())
-
     # ── Lifecycle ─────────────────────────────────────────────────────
 
     async def close(self) -> None:
         """Release resources.
 
         Persistent mode keeps the memmap files on disk so a fresh process
-        can re-open them via ``__setstate__``; temp-dir mode wipes the
-        directory.
+        can re-open them; temp-dir mode wipes the directory.
         """
         if self._client is not None and not self._client.is_closed:
             self._client.close()

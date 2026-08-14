@@ -92,6 +92,18 @@ _MIN_PREV_NONZERO_PX = 1000
 # range from 0.01° to 0.05° per pixel.
 _MAX_FLOW_KM_PER_HOUR = 200.0
 
+# Wrap-padding width (in columns) for full-longitude (global) regions
+# whose grid crosses the ±180° seam — RRQPE's observed-precip tier.
+# The seam must be *periodic* for both Farneback and the inverse-warp:
+# content that advects across the dateline re-enters on the other side
+# instead of being zeroed at a hard edge.  The pad needs to exceed the
+# maximum advection distance, which is bounded by the flow clamp
+# (``_max_flow_pixels`` ≈ 7.5 px/step at 0.04° → ≤ ~45 px over a 6-step
+# nowcast) — 256 px covers that at any plausible region resolution and
+# stays a small fraction of a global grid's width; ``width // 8`` is
+# the effective cap for tiny synthetic grids so the pad never dominates.
+_WRAP_FLOW_PAD = 256
+
 # ── Composite NWP flow raster geometry ────────────────────────────────
 #
 # The arrow overlay outside radar coverage historically fell through to
@@ -1096,9 +1108,31 @@ def _compute_region_flow(
             region_name, prev_nz, latest_nz,
         )
         return None
+
+    from librewxr.data.regions import REGIONS as _ALL_REGIONS  # local import: avoid circular at module load
+    region_def = _ALL_REGIONS.get(region_name)
+    wrap_pad = 0
+    if region_def is not None and region_def.is_global:
+        # Full-longitude grid: wrap-pad the column axis so Farneback sees
+        # the content across the ±180° seam as adjacent (periodic), not as
+        # a hard edge.  Pixels away from the seam are untouched — their
+        # neighbourhoods are unchanged — so the flow for every non-global
+        # region is bit-identical to the unpadded path.
+        wrap_pad = min(_WRAP_FLOW_PAD, max(1, data0.shape[1] // 8))
+        data0 = np.pad(data0, ((0, 0), (wrap_pad, wrap_pad)), mode="wrap")
+        data1 = np.pad(data1, ((0, 0), (wrap_pad, wrap_pad)), mode="wrap")
+
     flow_small, scale = _compute_flow_low(
         data0, data1, target_dim=flow_target_dim,
     )
+    if wrap_pad:
+        # Slice the padding back off the computed flow so the stored /
+        # warp-time fields keep the unpadded grid shape.  The central
+        # region's vectors were computed against the wrapped content and
+        # are correct; only the pad columns are discarded.
+        pad_small = max(1, int(round(wrap_pad * scale)))
+        flow_small = flow_small[:, pad_small:-pad_small, :]
+
     # Store the flow at the resolution it was computed at, with
     # vectors pre-multiplied by 1/scale so they stay in
     # full-resolution pixel units.  Consumers upscale with
@@ -1137,8 +1171,6 @@ def _compute_region_flow(
     #    warp-time clamp is skipped and both paths share one
     #    array.  The stored clamped field is what the arrow
     #    overlay / storm cells sample, keeping them bounded.
-    from librewxr.data.regions import REGIONS as _ALL_REGIONS  # local import: avoid circular at module load
-    region_def = _ALL_REGIONS.get(region_name)
     clamp_bound = None
     if region_def is not None:
         ps_y = (
@@ -1160,6 +1192,7 @@ def _extrapolate_forward(
     xs: np.ndarray | None = None,
     ys: np.ndarray | None = None,
     max_px: float | None = None,
+    wrap: bool = False,
 ) -> np.ndarray:
     """Warp *frame* forward by *steps* × flow using inverse remap.
 
@@ -1187,13 +1220,32 @@ def _extrapolate_forward(
     (bilinear upscaling is a convex combination) and the clamp would be
     a no-op, so it is skipped to avoid a full-res magnitude pass per
     step.
+
+    ``wrap`` selects the periodic-seam path for full-longitude (global)
+    regions: the frame and flow are wrap-padded on the column axis
+    (``_WRAP_FLOW_PAD`` — larger than the clamp-bounded maximum
+    displacement, so central samples never leave the padded frame), the
+    map is built on the padded grid, and the warp uses
+    ``cv2.BORDER_WRAP`` so any sample that does fall outside the padded
+    frame still lands on the periodic continuation rather than zero.
+    The result is cropped back to the unpadded width.  ``False`` (every
+    regional radar composite) reproduces the legacy behaviour exactly —
+    no padding, BORDER_CONSTANT, no crop.
     """
     h, w = frame.shape
     if flow.shape[0] != h or flow.shape[1] != w:
         flow = _upscale_flow(flow, (h, w))
     if max_px is not None:
         flow = _clamp_flow(flow, max_px)
-    if xs is None or ys is None:
+    if wrap:
+        pad = min(_WRAP_FLOW_PAD, w // 8)
+        frame = np.pad(frame, ((0, 0), (pad, pad)), mode="wrap")
+        flow = np.pad(flow, ((0, 0), (pad, pad), (0, 0)), mode="wrap")
+        # Coordinate grid over the PADDED frame (column indices are P-space
+        # already — the crop back below restores the unwrapped view).  The
+        # row axis never wraps.
+        ys, xs = np.mgrid[0:h, 0 : w + 2 * pad].astype(np.float32)
+    elif xs is None or ys is None:
         ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
 
     map_x = xs - steps * flow[..., 0]
@@ -1202,8 +1254,13 @@ def _extrapolate_forward(
     warped = cv2.remap(
         frame, map_x, map_y,
         interpolation=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+        borderMode=(
+            cv2.BORDER_WRAP if wrap else cv2.BORDER_CONSTANT
+        ),
+        borderValue=0,
     )
+    if wrap:
+        warped = warped[:, pad : pad + w]
 
     # Note: intensity preservation (rescaling warped pixels to match
     # source mean) was removed because bilinear interpolation only
@@ -1248,9 +1305,16 @@ def _extrapolate_region_step(
     data = latest_regions.get(region_name)
     if flow is not None and data is not None:
         ys, xs = coord_grids[region_name]
+        # Full-longitude regions wrap at the ±180° seam — the warp pads
+        # the column axis periodically so seam-crossing advection
+        # re-enters on the other side instead of zeroing.
+        from librewxr.data.regions import REGIONS as _ALL_REGIONS
+        region_def = _ALL_REGIONS.get(region_name)
+        wrap = bool(region_def is not None and region_def.is_global)
         return region_name, _extrapolate_forward(
             data, flow, step, xs=xs, ys=ys,
             max_px=flow_clamps.get(region_name),
+            wrap=wrap,
         )
     # No external for this step, no internal flow — skip this region
     # for this step.  Renderer falls back to NWP fill which is the

@@ -125,9 +125,6 @@ class RadarFetcher:
         # Provenance of carry-forward fills: ts -> region names whose
         # store entry is a stale copy, still awaiting the real product.
         self._carried_regions: dict[int, set[str]] = {}
-        self._enabled_regions = [
-            REGIONS[name] for name in settings.get_enabled_regions()
-        ]
 
         self._na_source = settings.na_source
         self._ca_source = settings.ca_source
@@ -136,17 +133,30 @@ class RadarFetcher:
         # registry under ``librewxr.sources``.  Each source package
         # owns a ``radar_provider`` function that reads ``settings``
         # and returns a contribution (or ``None`` to opt out).  The
-        # loop below applies the contribution to every enabled region
-        # it covers; ``setdefault`` lets the first provider to claim
-        # a region keep it (currently no two providers contest the
+        # enabled set starts from the region spec and is widened with
+        # every always-on contribution region (the coarse global
+        # observed tier stays enabled even under a narrow spec); the
+        # loop below then applies the contributions to every enabled
+        # region they cover.  ``setdefault`` lets the first provider to
+        # claim a region keep it (currently no two providers contest the
         # same region, but the guard is cheap and keeps order
         # deterministic).
+        radar_contribs = collect_radar_contributions(settings)
+        base_names = settings.get_enabled_regions()
+        enabled_names = list(base_names)
+        for contribution in radar_contribs:
+            if not contribution.always_enabled:
+                continue
+            for region in contribution.regions:
+                if region.name not in enabled_names:
+                    enabled_names.append(region.name)
+        self._enabled_regions = [REGIONS[name] for name in enabled_names]
         self._sources: dict[
             str,
             IEMSource | MRMSCompositeSource | MSCCanadaSource,
         ] = {}
         enabled_names = {r.name for r in self._enabled_regions}
-        for contribution in collect_radar_contributions(settings):
+        for contribution in radar_contribs:
             for region in contribution.regions:
                 if region.name in enabled_names:
                     self._sources.setdefault(region.name, contribution.instance)

@@ -31,6 +31,13 @@ class RegionDef:
     grid_scale: float = 1000.0  # meters per pixel
     grid_width: int = 0   # explicit grid dimensions; 0 = compute from pixel_size
     grid_height: int = 0
+    # Opt out of storm-cell detection for this region.  Coarse global
+    # fill layers (RRQPE's 0.04° observed-precip grid) have no meaningful
+    # convective-cell structure at the 25 km² minimum, so running
+    # connectedComponents on them every cycle is wasted CPU plus a pile of
+    # junk cell markers in the ``?cells=`` overlay.  Default True — every
+    # Doppler-derived regional composite stays eligible.
+    storm_cells: bool = True
     # Lambert Azimuthal Equal Area parameters (only used when proj="laea")
     laea_lat0: float = 0.0   # latitude of projection origin
     laea_lon0: float = 0.0   # central meridian
@@ -60,6 +67,19 @@ class RegionDef:
         if self.grid_height > 0:
             return self.grid_height
         return int(round((self.north - self.south) / self._ps_y))
+
+    @property
+    def is_global(self) -> bool:
+        """True for full-longitude regions whose grid wraps the ±180° seam.
+
+        Used by the nowcast extrapolation to decide whether to wrap-pad
+        the column axis before optical-flow / remap work — content that
+        advects across the dateline must re-enter on the other side
+        instead of being zeroed at a hard seam (see ``nowcast.py``).
+        The tolerance is one pixel so a region covering "360° ± a pixel"
+        (rounding on the native grid) still counts as global.
+        """
+        return abs((self.east - self.west) - 360.0) < self.pixel_size
 
 
 # All available radar composite regions
