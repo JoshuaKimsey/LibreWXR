@@ -44,3 +44,7 @@ emails/
 
 # OpenCode example (not ready for release)
 examples/opencode-example.html
+
+# Local log file directory (LIBREWXR_LOG_FILE)
+logs/
+

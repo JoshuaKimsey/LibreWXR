@@ -2,6 +2,8 @@
 # Copyright (C) 2026 Joshua Kimsey
 import logging
 import os
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from rich.logging import RichHandler
 
@@ -67,23 +69,68 @@ def normalize_level(value: str) -> str:
     return normalized
 
 
-def setup_logging(level: str | None = None) -> None:
+logger = logging.getLogger(__name__)
+
+
+def setup_logging(level: str | None = None, log_file: str | None = None) -> None:
     """Install the shared Rich-tagged root handler at the given level.
 
-    ``level`` defaults to the ``LIBREWXR_LOG_LEVEL`` env var (INFO when
-    unset).  Only httpx/httpcore are additionally quieted; every other
-    logger propagates to the root handler.
+    Both parameters resolve in the same order: an explicit argument
+    wins, then the live ``LIBREWXR_*`` env var, then the pydantic
+    settings object (which itself resolves real env vars over ``.env``
+    over built-in defaults).  ``level`` therefore defaults to the
+    ``LIBREWXR_LOG_LEVEL`` env var, then to ``settings.log_level``
+    (INFO when unset anywhere).  ``log_file`` mirrors WARNING+ records
+    (warnings, errors, exception tracebacks) to a rotating file (5 MB x
+    3 backups); it is enabled by default at ``logs/librewxr.log``
+    (relative to the process CWD), and an empty/whitespace value
+    disables the file entirely.  Only httpx/httpcore are additionally
+    quieted; every other logger propagates to the root handler.
     """
+    # Imported here, not at module top: pydantic-settings validates
+    # defaults at instantiation, so importing config at module load runs
+    # Settings() -> the log_level validator -> back into this module
+    # before it has finished defining normalize_level (circular import).
+    from librewxr.config import settings
+
     if level is None:
-        level = os.getenv("LIBREWXR_LOG_LEVEL", "INFO")
+        level = os.getenv("LIBREWXR_LOG_LEVEL") or settings.log_level
     normalized = normalize_level(level)
+    if log_file is None:
+        log_file = os.getenv("LIBREWXR_LOG_FILE")
+    if log_file is None:
+        log_file = settings.log_file
     handler = RichHandler(rich_tracebacks=True, show_path=False)
     handler.setFormatter(_TagFormatter("[%(tag)s] %(message)s"))
+    handlers: list[logging.Handler] = [handler]
+
+    log_path: Path | None = None
+    if log_file.strip():
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_path,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+            delay=True,
+        )
+        file_handler.setLevel(logging.WARNING)
+        file_handler.setFormatter(
+            _TagFormatter(
+                "%(asctime)s %(levelname)-8s [%(tag)s] %(message)s",
+                datefmt="[%x %X]",
+            )
+        )
+        handlers.append(file_handler)
+
     logging.basicConfig(
         level=getattr(logging, normalized),
-        handlers=[handler],
+        handlers=handlers,
         force=True,
     )
+    if log_path is not None:
+        logger.info("Warning/error log file: %s", log_path)
     # Suppress noisy per-request INFO logs from httpx/httpcore — sources
     # already log fetch results themselves in fetcher.py / the sources.
     logging.getLogger("httpx").setLevel(logging.WARNING)

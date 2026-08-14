@@ -107,6 +107,24 @@ LIBREWXR_LOG_LEVEL=DEBUG
 
 ---
 
+### `LIBREWXR_LOG_FILE`
+
+Path to a rotating log file capturing WARNING and above (warnings, errors, and exception tracebacks) in addition to the Rich-tagged console output. Enabled by default at `logs/librewxr.log`; each file is capped at 5 MB with 3 rotated backups (`librewxr.log`, `.1`, `.2`, `.3`). Set it to an empty value to disable the file entirely - console behaviour is unchanged.
+
+| | |
+|---|---|
+| **Default** | `logs/librewxr.log` (enabled; empty disables) |
+| **Type** | string (file path) |
+
+Relative paths resolve against the process working directory - the project root for local runs, `/app` in the container. The stock docker-compose.yml sets `LIBREWXR_LOG_FILE=/logs/librewxr.log` and bind-mounts `./logs:/logs`, so every Docker deployment maps the container log to `./logs/` in the clone directory on the host with zero setup. In multi mode every process (pipeline and all render workers) appends to the same file.
+
+**Example:**
+```bash
+LIBREWXR_LOG_FILE=logs/librewxr.log
+```
+
+---
+
 ## Radar Data
 
 ### `LIBREWXR_FETCH_INTERVAL`

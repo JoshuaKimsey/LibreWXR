@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     # Root log level: DEBUG / INFO / WARNING / ERROR / CRITICAL
     # (case-insensitive; normalized to uppercase by the validator).
     log_level: str = "INFO"
+    # File capturing WARNING+ records (rotated 5 MB x 3); empty = disabled
+    log_file: str = "logs/librewxr.log"
     # Deployment shape.  Drives sensible defaults for workers, tile cache,
     # coord cache, and warmer threads via ``_apply_mode_defaults``.
     #   single  - one container, fetcher + renderer in the same process

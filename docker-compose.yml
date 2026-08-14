@@ -27,11 +27,13 @@ services:
       - .env
     environment:
       LIBREWXR_CACHE_DIR: /data/cache
+      LIBREWXR_LOG_FILE: /logs/librewxr.log
     volumes:
       - librewxr-cache:/data/cache
       # earthkit-regrid downloads ~50 MB of grid lookup tables on first
       # use; persisting them avoids the cold-start hit on every restart.
       - earthkit-cache:/root/.cache/earthkit-regrid
+      - ./logs:/logs
     restart: unless-stopped
     stop_grace_period: 30s
     logging:
@@ -81,9 +83,11 @@ services:
       - .env
     environment:
       LIBREWXR_CACHE_DIR: /data/cache
+      LIBREWXR_LOG_FILE: /logs/librewxr.log
     volumes:
       - librewxr-cache:/data/cache
       - earthkit-cache:/root/.cache/earthkit-regrid
+      - ./logs:/logs
     restart: unless-stopped
     stop_grace_period: 30s
     logging:
@@ -117,8 +121,10 @@ services:
       # render_only skips fetcher / NWP / satellite / nowcast init —
       # the renderer reads everything from the pipeline's snapshot.
       LIBREWXR_RENDER_ONLY: "1"
+      LIBREWXR_LOG_FILE: /logs/librewxr.log
     volumes:
       - librewxr-cache:/data/cache
+      - ./logs:/logs
     # Render workers wait for state.json with a 300 s default timeout
     # (LIBREWXR_STATE_WAIT_TIMEOUT).  depends_on starts the pipeline
     # first so the wait window is shorter on cold start.
