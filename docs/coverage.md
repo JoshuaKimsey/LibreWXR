@@ -75,6 +75,7 @@ show. Anywhere none of these models reach, ECMWF IFS fills in.
 
 | Source | Coverage | Resolution | Projection | Cycles |
 |---|---|---|---|---|
+| NOAA RRQPE (observed) | 60°S–70°N, all longitudes | 0.04° stored (0.02° native) | regular lat/lon | 10 min |
 | NOAA HRRR-CONUS | Continental US | 3 km | LCC | hourly |
 | NOAA HRRR-Alaska | Alaska + adjacent Pacific | 3 km | polar stereographic | 3-hourly |
 | ECCC HRDPS-Continental | Canada + northern US | 2.5 km | rotated lat/lon | 6-hourly |
@@ -87,6 +88,15 @@ show. Anywhere none of these models reach, ECMWF IFS fills in.
 | Météo-France AROME Polynésie | French Polynesia (Society + Tuamotu + Marquesas archipelagoes) | 2.5 km | regular lat/lon | 6-hourly |
 | SMN Argentina WRF-DET | South American Cone (AR/CL/UY/PY + S. Brazil + Bolivia) | 4 km | LCC | 6-hourly |
 | JMA MSM | Japan + Korean Peninsula + Taiwan + Yellow Sea | 5 km | regular lat/lon | 3-hourly |
+
+NOAA RRQPE is not a forecast model — it is the Enterprise Rain Rate
+GLB-5 blend, satellite-derived **observed** precipitation (an IR-based
+estimate) covering the 60°S–70°N geostationary ring at all
+longitudes.  It serves past frames only, never future / nowcast
+timestamps, and sits at the front of the chain (priority 5): where a
+fresh observed scan exists for a past radar frame slot it wins, and
+the models only step in for nowcast / future times or outside the
+band.
 
 The HRRR-Alaska polygon wraps across the antimeridian onto the Russian
 Far East — the polar-stereographic grid genuinely covers that area

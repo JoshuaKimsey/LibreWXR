@@ -405,6 +405,19 @@ def build_radar_sources() -> list[Source]:
 def build_model_sources() -> list[Source]:
     models: list[Source] = []
 
+    # NOAA RRQPE — satellite-derived observed precipitation (Enterprise
+    # Rain Rate GLB-5 blend) on a global 60S-70N band at all
+    # longitudes; chain priority 5 (ahead of every model).  IFS is
+    # deliberately not drawn because it is fully global; RRQPE's
+    # 130-degree latitude band IS meaningful, so it gets a box.  The
+    # ring is split into two half-world boxes at the ±180° seam — a
+    # single -180..180 ring collapses to a degenerate line under the
+    # renderer's antimeridian unwrap.  The two pieces share one label
+    # so the legend shows a single entry.
+    rrqpe_color = "#7f7f7f"
+    models.append(Source("NOAA RRQPE", rrqpe_color, latlon_box(-180, 0, -60, 70)))
+    models.append(Source("NOAA RRQPE", rrqpe_color, latlon_box(0, 180, -60, 70)))
+
     # HRRR-CONUS (LCC)
     hrrr_crs = CRS.from_proj4(
         "+proj=lcc +lat_0=38.5 +lon_0=-97.5 +lat_1=38.5 +lat_2=38.5 "

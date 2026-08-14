@@ -223,19 +223,21 @@ def test_radar_disabled_skips_coverage_metadata(monkeypatch):
     assert coverage_polygons == {}
 
 
-def test_regional_nwp_disabled_keeps_only_ifs(tmp_path):
-    """LIBREWXR_REGIONAL_NWP_ENABLED=false collapses the chain to IFS only.
+def test_regional_nwp_disabled_keeps_only_global_sources(tmp_path):
+    """LIBREWXR_REGIONAL_NWP_ENABLED=false collapses the chain to the global
+    sources.
 
     Locks in the master-toggle contract for any future regional NWP
     source: as long as it leaves ``NWPContribution.regional`` at its
     default (True), the central collector drops it when the toggle is
     off.  IFS opts out via ``regional=False`` so the global base layer
-    keeps running.
+    keeps running, and RRQPE (global observed satellite data) also opts
+    out so it stays ahead of the base layer.
     """
     from librewxr.config import settings as real_settings
     from librewxr.sources import collect_nwp_contributions
 
-    # Baseline: when enabled, more than just IFS contributes.
+    # Baseline: when enabled, more than just the global sources contribute.
     real_settings.regional_nwp_enabled = True
     enabled = collect_nwp_contributions(real_settings, cache_dir=tmp_path)
     assert len(enabled) > 1, "expected regional sources alongside IFS"
@@ -245,7 +247,51 @@ def test_regional_nwp_disabled_keeps_only_ifs(tmp_path):
     real_settings.regional_nwp_enabled = False
     try:
         disabled = collect_nwp_contributions(real_settings, cache_dir=tmp_path)
-        assert [c.name for c in disabled] == ["ECMWF IFS"]
+        assert [c.name for c in disabled] == ["NOAA RRQPE", "ECMWF IFS"]
+    finally:
+        real_settings.regional_nwp_enabled = True
+
+
+def test_rrqpe_contribution_present_when_enabled(tmp_path):
+    """RRQPE registers as the highest-priority chain member when enabled."""
+    from librewxr.config import settings as real_settings
+    from librewxr.sources import collect_nwp_contributions
+
+    real_settings.rrqpe_enabled = True
+    contribs = collect_nwp_contributions(real_settings, cache_dir=tmp_path)
+    rrqpe = [c for c in contribs if c.slug == "rrqpe_grid"]
+    assert len(rrqpe) == 1
+    assert rrqpe[0].priority == 5
+    assert rrqpe[0].name == "NOAA RRQPE"
+    # Priority 5 sorts ahead of HRRR (10) — first in the chain.
+    assert contribs[0].slug == "rrqpe_grid"
+    assert contribs[0].priority == 5
+
+
+def test_rrqpe_dropped_when_disabled(tmp_path):
+    """``rrqpe_enabled=False`` drops the contribution entirely."""
+    from librewxr.config import settings as real_settings
+    from librewxr.sources import collect_nwp_contributions
+
+    real_settings.rrqpe_enabled = False
+    try:
+        contribs = collect_nwp_contributions(real_settings, cache_dir=tmp_path)
+        assert not any(c.slug == "rrqpe_grid" for c in contribs)
+    finally:
+        real_settings.rrqpe_enabled = True
+
+
+def test_rrqpe_survives_regional_nwp_disabled(tmp_path):
+    """RRQPE is a global observed layer — ``regional_nwp_enabled`` must not
+    drop it (``regional=False``), keeping it ahead of IFS."""
+    from librewxr.config import settings as real_settings
+    from librewxr.sources import collect_nwp_contributions
+
+    real_settings.regional_nwp_enabled = False
+    try:
+        contribs = collect_nwp_contributions(real_settings, cache_dir=tmp_path)
+        assert all(c.regional is False for c in contribs)
+        assert [c.slug for c in contribs] == ["rrqpe_grid", "ecmwf_grid"]
     finally:
         real_settings.regional_nwp_enabled = True
 

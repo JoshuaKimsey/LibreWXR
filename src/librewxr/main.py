@@ -805,9 +805,12 @@ async def lifespan(app: FastAPI):
     nwp_cache_dir = Path(settings.cache_dir) if settings.cache_dir else None
     # Walk the auto-discovered NWP providers under ``librewxr.sources``;
     # each returns a contribution (or ``None`` when its config flag is
-    # off).  Chain order is set by ``NWPContribution.priority``: HRRR
-    # (10) → HRRR-Alaska (11) → HRDPS (20) → AROME Antilles (25) → DMI
-    # DINI (30) → ICON-EU (35) → WRF-SMN (40) → IFS (1000 — catch-all).
+    # off).  Chain order is set by ``NWPContribution.priority``: RRQPE
+    # (5 — observed satellite precip, past frames only) → HRRR (10) →
+    # HRRR-Alaska (11) → HRDPS (20) → JMA MSM (20) → AROME Antilles
+    # (25) → AROME Guyane (26) → AROME Indien (27) → AROME Ncaled (28)
+    # → AROME Polyn (29) → DMI DINI (30) → ICON-EU (35) → WRF-SMN (40)
+    # → IFS (1000 — global catch-all).
     nwp_contribs = collect_nwp_contributions(settings, nwp_cache_dir)
     nwp_grids_by_slug: dict[str, object] = {
         nwp_grid_slug(c): c.instance for c in nwp_contribs

@@ -15,6 +15,7 @@ This document is the **full** reference for every setting LibreWXR understands. 
 - [Workers and Memory](#workers-and-memory)
 - [Multi-mode Tile-Server Split](#multi-mode-tile-server-split)
 - [ECMWF IFS Global Coverage](#ecmwf-ifs-global-coverage)
+  - [Global: NOAA RRQPE](#global-noaa-rrqpe)
 - [Regional NWP Sources](#regional-nwp-sources)
   - [North American: HRRR / HRRR-Alaska](#north-american-hrrr--hrrr-alaska)
   - [North American: HRDPS](#north-american-hrdps)
@@ -714,6 +715,72 @@ Enable optical flow interpolation of ECMWF IFS hourly data to 10-minute frames. 
 | **Type** | boolean |
 
 Adds ~130 MB RAM for synthetic frames and ~5-10 seconds of compute per IFS fetch cycle.
+
+### Global: NOAA RRQPE
+
+NOAA's Enterprise Rain Rate (RRQPE) GLB-5 blend sits at the **front** of the NWP chain (priority 5, ahead of every model): satellite-derived **observed** precipitation on a global 0.02° grid, consumed from the anonymous NOAA Open Data bucket `noaa-enterprise-rainrate-pds`. Because it is observations rather than model output, it only ever answers for past / observed frame times — future and nowcast timestamps fall through to the models behind it.
+
+It is an IR-based satellite **estimate**, not a measurement: it underestimates warm / stratiform rain, is unreliable over snow and ice surfaces, and only covers the 60°S-70°N geostationary ring. Scans publish on a 10-min cadence with ~17-min median latency.
+
+Data is distributed under the NOAA Open Data Dissemination (NODD) program. Attribution is requested: "Precipitation data from NOAA Enterprise Rain Rate (RRQPE)". No endorsement by NOAA is implied, and don't present modified data as unaltered NOAA data. Blend inputs include JMA Himawari-9 and EUMETSAT Meteosat-9/10; courtesy attribution to the contributing agencies is appreciated but not required.
+
+#### `LIBREWXR_RRQPE_ENABLED`
+
+Master switch for the RRQPE layer.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+#### `LIBREWXR_RRQPE_BASE_URL`
+
+S3 bucket for the NOAA Enterprise Rain Rate GLB-5 files.
+
+| | |
+|---|---|
+| **Default** | `https://noaa-enterprise-rainrate-pds.s3.amazonaws.com` |
+| **Type** | string |
+
+#### `LIBREWXR_RRQPE_PUBLISH_DELAY_MINUTES`
+
+How long after a 10-min scan start the file is considered safely published. The fetch window ends at `now - publish_delay`, so not-yet-published slots are never requested; a missed scan simply has no key in its hour directory and is skipped.
+
+| | |
+|---|---|
+| **Default** | `15` |
+| **Type** | integer |
+| **Unit** | minutes |
+
+#### `LIBREWXR_RRQPE_DBZ_OFFSET`
+
+dBZ calibration shift applied after Z-R conversion of RRQPE rain rates (Marshall-Palmer 200·R^1.6). Satellite QPE is a surface rain rate; radar reflectivity samples the storm column and reads higher, so nudge the derived dBZ up to match.
+
+| | |
+|---|---|
+| **Default** | `6.0` |
+| **Type** | float |
+| **Unit** | dBZ |
+
+#### `LIBREWXR_RRQPE_DOWNSAMPLE`
+
+Integer block-averaging factor for the 0.02° native grid (1/2/4 → 0.02°/0.04°/0.08°). 2 is the default: each decoded ~117 MB float32 frame becomes a ~29 MB uint8 store.
+
+| | |
+|---|---|
+| **Default** | `2` |
+| **Type** | integer |
+| **Values** | `1` (0.02° native) · `2` (0.04°) · `4` (0.08°) |
+
+#### `LIBREWXR_RRQPE_MATCH_TOLERANCE_SECONDS`
+
+A stored scan matches a radar frame timestamp when `|scan_ts - frame_ts| <=` this. With the 10-min product cadence and the radar frame cadence, 900 s is the natural tolerance.
+
+| | |
+|---|---|
+| **Default** | `900` |
+| **Type** | integer |
+| **Unit** | seconds |
 
 ---
 

@@ -271,6 +271,33 @@ class Settings(BaseSettings):
     # leaves IFS on; turn off only when you specifically want to see what
     # a regional model contributes on its own.
     ecmwf_enabled: bool = True
+    # NOAA Enterprise Rain Rate (RRQPE) GLB-5 blend — satellite-derived
+    # *observed* precipitation on a global uniform 0.02° grid, consumed
+    # from the anonymous NOAA Open Data bucket
+    # ``noaa-enterprise-rainrate-pds``.  Because it is observations
+    # rather than model output it sits at the FRONT of the NWP chain
+    # (priority 5) and only ever answers for past valid times — future /
+    # nowcast timestamps fall through to the models behind it.
+    rrqpe_enabled: bool = True
+    rrqpe_base_url: str = "https://noaa-enterprise-rainrate-pds.s3.amazonaws.com"
+    # How long after a 10-min scan start the file is considered safely
+    # published.  The fetch window ends at ``now - publish_delay`` so
+    # not-yet-published slots are never requested; a missed scan simply
+    # has no key in its hour directory and is skipped.
+    rrqpe_publish_delay_minutes: int = 15
+    # dBZ calibration shift applied after Z-R conversion of RRQPE rain
+    # rates.  Same Marshall-Palmer caveat as ICON-EU / DINI: satellite
+    # QPE is a surface rain rate, radar reflectivity samples the storm
+    # column and reads higher, so nudge the derived dBZ up to match.
+    rrqpe_dbz_offset: float = 6.0
+    # Integer block-averaging factor for the 0.02° native grid
+    # (1/2/4 → 0.02°/0.04°/0.08°).  2 is the default: each decoded
+    # ~117 MB float32 frame becomes a ~29 MB uint8 store.
+    rrqpe_downsample: int = 2
+    # A stored scan matches a radar frame timestamp when
+    # ``|scan_ts - frame_ts| <=`` this.  With the 10-min product cadence
+    # and the radar frame cadence, 900 s is the natural tolerance.
+    rrqpe_match_tolerance_seconds: int = 900
     # North American NWP source for the chain. "ifs" uses ECMWF IFS as the
     # only source (current behavior). "hrrr" prepends NOAA HRRR-subh as the
     # CONUS-priority source, falling back to IFS outside HRRR's domain.
