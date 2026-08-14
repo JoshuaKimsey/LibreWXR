@@ -774,11 +774,11 @@ Integer block-averaging factor for the 0.02° native grid (1/2/4 → 0.02°/0.04
 
 #### `LIBREWXR_RRQPE_MATCH_TOLERANCE_SECONDS`
 
-A stored scan matches a radar frame timestamp when `|scan_ts - frame_ts| <=` this. With the 10-min product cadence and the radar frame cadence, 900 s is the natural tolerance.
+A stored scan matches a **past** radar frame timestamp when `|scan_ts - frame_ts| <=` this. Must exceed the product's worst typical scan-to-frame lag (~15-25 min publish latency plus frame cadence) so the newest radar frame always matches the freshest stored scan. Future / nowcast timestamps are rejected by the wall-clock observed-only gate in the RRQPE grid, not by this value, so it can safely be this generous.
 
 | | |
 |---|---|
-| **Default** | `900` |
+| **Default** | `1800` |
 | **Type** | integer |
 | **Unit** | seconds |
 

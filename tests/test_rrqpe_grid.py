@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import pickle
 import tempfile
+import time
 import warnings
 from datetime import datetime, timezone
 
@@ -174,8 +175,8 @@ class TestObservedOnlyContract:
 
     def test_beyond_tolerance_false(self):
         grid = self._store((1000000, 100))
-        assert grid.has_data_at(1000000 + 901) is False
-        assert grid.has_data_at(1000000 - 901) is False
+        assert grid.has_data_at(1000000 + 1801) is False
+        assert grid.has_data_at(1000000 - 1801) is False
 
     def test_future_ts_false(self):
         grid = self._store((1000000, 100))
@@ -212,6 +213,65 @@ class TestObservedOnlyContract:
         # (no zero neighbours to trigger the guard).
         out = grid.sample(lats, lons, timestamp=1000000, bilinear=True)
         assert (out == 137).all()
+
+
+# ── Wall-clock observed-only gate ──────────────────────────────────────
+
+
+class TestWallClockGate:
+    """The hard wall-clock gate rejects future-dated queries even when they
+    fall inside the staleness tolerance (the nowcast-leak regression pin).
+
+    Timestamps here are relative to the current wall clock so the pins
+    stay valid no matter when the suite runs: stored scans are always in
+    the past, and future queries exercise only the gate.
+    """
+
+    def test_newest_frame_matches_newest_past_query(self):
+        """Frame 20 min old answers a 10-min-old query — the production case
+        that the 1800 s tolerance exists to serve."""
+        now = int(time.time())
+        grid = RRQPEGrid(downsample=1)
+        _inject_frame(grid, now - 1200, 100)
+        assert grid.has_data_at(now - 600) is True
+
+    def test_future_ts_within_tolerance_still_rejected(self):
+        """now + 600 is 1800 s from the stored scan — inside the tolerance —
+        but future-dated, so the wall-clock gate must reject it."""
+        now = int(time.time())
+        grid = RRQPEGrid(downsample=1)
+        _inject_frame(grid, now - 1200, 100)
+        assert grid.has_data_at(now + 600) is False
+
+    def test_sample_zeros_for_future_ts(self):
+        now = int(time.time())
+        grid = RRQPEGrid(downsample=1)
+        _inject_frame(grid, now - 1200, 100)
+        out = grid.sample(np.array([0.0]), np.array([0.0]), timestamp=now + 600)
+        assert out.shape == (1,)
+        assert out.dtype == np.uint8
+        assert out[0] == 0
+
+    def test_stale_past_frame_rejected(self):
+        """2100 s staleness is beyond the 1800 s tolerance for past frames."""
+        now = int(time.time())
+        grid = RRQPEGrid(downsample=1)
+        _inject_frame(grid, now - 2400, 100)
+        assert grid.has_data_at(now - 300) is False
+
+    def test_chain_falls_to_ifs_for_future_wall_clock_ts(self):
+        """Chain-level nowcast-leak pin: a future wall-clock query inside
+        RRQPE's band must come from IFS, not RRQPE."""
+        now = int(time.time())
+        rrqpe = RRQPEGrid(downsample=1)
+        _inject_frame(rrqpe, now - 1200, 200)
+        ifs = ECMWFGrid()
+        ifs_dbz = np.full((IFS_H, IFS_W), 84, dtype=np.uint8)
+        ifs._timesteps[1000000] = (ifs_dbz, np.zeros_like(ifs_dbz, dtype=bool))
+        ifs._sorted_timestamps = [1000000]
+        chain = NWPChain([rrqpe, ifs])
+        out = chain.sample(np.array([0.0]), np.array([0.0]), timestamp=now + 600)
+        assert int(out[0]) == 84
 
 
 # ── Chain integration ──────────────────────────────────────────────────
@@ -459,7 +519,13 @@ class _S3Transport:
 class TestFetch:
     @staticmethod
     def _now():
-        return int(datetime(2026, 8, 14, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+        """Current wall clock floored to 10 min.
+
+        Wall-clock-relative so the stored slots are always in the past
+        (the observed-only gate rejects future-dated queries) regardless
+        of when the suite runs.
+        """
+        return (int(time.time()) // 600) * 600
 
     async def test_fetch_stores_expected_slots(self, tmp_path):
         now_ts = self._now()

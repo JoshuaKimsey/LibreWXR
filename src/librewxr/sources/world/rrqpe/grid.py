@@ -41,6 +41,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -302,14 +303,22 @@ class RRQPEGrid:
     def _match_timestamp(self, timestamp: int | None) -> int | None:
         """Nearest stored scan timestamp within match tolerance, else None.
 
-        Since only past scans are ever stored, future timestamps (and
-        nowcast lookahead) always land beyond the tolerance and return
-        None — the chain falls through to the models behind us.
+        The match tolerance below only governs staleness matching of PAST
+        frames; future timestamps are rejected by the wall-clock gate
+        above, never by the tolerance.
         """
         if timestamp is None:
             if not self._sorted_timestamps:
                 return None
             return self._sorted_timestamps[-1]
+        # Hard observed-only gate: nowcast frames are always future-dated
+        # and past frames never are, so anything beyond a small clock-skew
+        # slack is not an observed time and can't be answered.  This is
+        # what stops RRQPE leaking into nowcast tiles; the match tolerance
+        # below therefore only governs staleness matching of PAST frames
+        # and can safely exceed the product's publish lag.
+        if timestamp > int(time.time()) + 120:
+            return None
         ts_list = self._sorted_timestamps
         if not ts_list:
             return None

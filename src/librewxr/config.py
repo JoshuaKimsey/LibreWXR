@@ -294,10 +294,14 @@ class Settings(BaseSettings):
     # (1/2/4 → 0.02°/0.04°/0.08°).  2 is the default: each decoded
     # ~117 MB float32 frame becomes a ~29 MB uint8 store.
     rrqpe_downsample: int = 2
-    # A stored scan matches a radar frame timestamp when
-    # ``|scan_ts - frame_ts| <=`` this.  With the 10-min product cadence
-    # and the radar frame cadence, 900 s is the natural tolerance.
-    rrqpe_match_tolerance_seconds: int = 900
+    # A stored scan matches a PAST radar frame timestamp when
+    # ``|scan_ts - frame_ts| <=`` this.  Must exceed the product's worst
+    # typical scan-to-frame lag (~15-25 min publish latency plus frame
+    # cadence) so the newest radar frame always matches the freshest
+    # stored scan.  Future/nowcast timestamps are rejected by the
+    # wall-clock observed-only gate in the RRQPE grid, not by this value,
+    # so it can safely be this generous.
+    rrqpe_match_tolerance_seconds: int = 1800
     # North American NWP source for the chain. "ifs" uses ECMWF IFS as the
     # only source (current behavior). "hrrr" prepends NOAA HRRR-subh as the
     # CONUS-priority source, falling back to IFS outside HRRR's domain.
