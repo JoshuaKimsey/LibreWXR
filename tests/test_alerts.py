@@ -14,6 +14,7 @@ from shapely.geometry import Polygon
 from librewxr.api import routes
 from librewxr.data.alerts_fetcher import (
     WMOAlertsFetcher,
+    _ZONE_FAILURE_TTL,
     _extract_polygons_from_cap,
     _parse_cap_time,
 )
@@ -462,6 +463,24 @@ def _zone_geojson(bounds):
     }
 
 
+def _zone_geometrycollection():
+    """GeometryCollection wrapping two disjoint triangle polygons (area 0.5
+    each) - mirrors how the NWS API serves some zone geometries (e.g. FLZ011)."""
+    return {
+        "type": "GeometryCollection",
+        "geometries": [
+            {
+                "type": "Polygon",
+                "coordinates": [[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]],
+            },
+            {
+                "type": "Polygon",
+                "coordinates": [[[2.0, 0.0], [3.0, 0.0], [2.0, 1.0], [2.0, 0.0]]],
+            },
+        ],
+    }
+
+
 def _nws_feature(zone_urls, alert_id="urn:oid:test"):
     """Geometry-less NWS feature carrying ``affectedZones``."""
     return {
@@ -616,6 +635,115 @@ class TestNwsZoneResolution:
         assert entries[0].polygon is not None
         assert entries[0].polygon.area == pytest.approx(0.5)
         assert set(u for u in client.calls if u != alerts_url) == {zone_a, zone_c}
+
+    async def test_geometrycollection_zone_resolves_to_union(self, tmp_path):
+        zone_a = "https://api.weather.gov/zones/forecast/FLZ011"
+        alerts_url = "https://api.weather.gov/alerts/active"
+        client = _FakeNwsClient({
+            alerts_url: _FakeNwsResponse(200, {
+                "features": [_nws_feature([zone_a])],
+            }),
+            zone_a: _FakeNwsResponse(200, {"geometry": _zone_geometrycollection()}),
+        })
+
+        entries = await self._fetch(tmp_path, client)
+
+        # GeometryCollection of two disjoint triangles unions to a MultiPolygon
+        assert len(entries) == 1
+        assert entries[0].polygon is not None
+        assert entries[0].polygon.geom_type == "MultiPolygon"
+        assert entries[0].polygon.area == pytest.approx(1.0)
+        # Resolved polygon written to the disk cache
+        zones_dir = Path(tmp_path) / "alerts" / "zones"
+        assert (zones_dir / "FLZ011.json").exists()
+
+    async def test_alert_feature_with_geometrycollection_polygon(self, tmp_path):
+        alerts_url = "https://api.weather.gov/alerts/active"
+        feature = _nws_poly_feature("urn:oid:gc-alert")
+        feature["geometry"] = {
+            "type": "GeometryCollection",
+            "geometries": [
+                {
+                    "type": "Polygon",
+                    "coordinates": [[[-105.5, 39.0], [-105.0, 39.0], [-105.25, 39.5], [-105.5, 39.0]]],
+                },
+            ],
+        }
+        client = _FakeNwsClient({
+            alerts_url: _FakeNwsResponse(200, {"features": [feature]}),
+        })
+
+        entries = await self._fetch(tmp_path, client)
+
+        assert len(entries) == 1
+        assert entries[0].polygon is not None
+        assert entries[0].polygon.area == pytest.approx(0.125)
+
+    async def test_null_geometry_writes_failure_marker_and_suppresses_retry(
+        self, tmp_path, caplog
+    ):
+        zone_a = "https://api.weather.gov/zones/forecast/FLZ011"
+        client = _FakeNwsClient({zone_a: _FakeNwsResponse(200, {"geometry": None})})
+        fetcher = WMOAlertsFetcher(store=AlertsStore(), cache_dir=str(tmp_path))
+
+        async def _get_client():
+            return client
+
+        fetcher._get_client = _get_client  # type: ignore[method-assign]
+
+        with caplog.at_level("WARNING"):
+            result = await fetcher._fetch_zone_polygons({zone_a})
+
+        assert result == {}
+        assert "NWS zone FLZ011 has no usable geometry" in caplog.text
+
+        # Failure marker written to the zone cache path
+        marker = Path(tmp_path) / "alerts" / "zones" / "FLZ011.json"
+        assert marker.exists()
+        data = json.loads(marker.read_text())
+        assert data["failed"] is True
+        assert data["geometry"] is None
+
+        # Fresh marker: second call makes no HTTP request and logs nothing
+        client.calls.clear()
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            result2 = await fetcher._fetch_zone_polygons({zone_a})
+
+        assert result2 == {}
+        assert client.calls == []
+        assert caplog.records == []
+
+    async def test_stale_failure_marker_triggers_refetch(self, tmp_path):
+        zone_a = "https://api.weather.gov/zones/forecast/FLZ011"
+        marker = Path(tmp_path) / "alerts" / "zones" / "FLZ011.json"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps({
+            "fetched_at": time.time() - _ZONE_FAILURE_TTL - 60,
+            "geometry": None,
+            "failed": True,
+        }))
+
+        client = _FakeNwsClient({
+            zone_a: _FakeNwsResponse(200, {"geometry": _zone_geojson((-105.5, 39.0, -105.0, 39.5))}),
+        })
+        fetcher = WMOAlertsFetcher(store=AlertsStore(), cache_dir=str(tmp_path))
+
+        async def _get_client():
+            return client
+
+        fetcher._get_client = _get_client  # type: ignore[method-assign]
+
+        result = await fetcher._fetch_zone_polygons({zone_a})
+
+        # Stale marker ignored -> zone refetched and now resolved
+        assert zone_a in result
+        assert result[zone_a] is not None
+        assert client.calls == [zone_a]
+        # Success now cached in place of the failure marker
+        data = json.loads(marker.read_text())
+        assert data.get("failed") is not True
+        assert data.get("geometry") is not None
 
 
 # ---------------------------------------------------------------------------

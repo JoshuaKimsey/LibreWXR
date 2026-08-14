@@ -41,6 +41,7 @@ _USER_AGENT = "(LibreWXR, librewxr@localhost)"
 # replaces the old per-request ``?point=`` enrichment: no query path ever
 # touches api.weather.gov at request time anymore.
 _ZONE_CACHE_TTL = 30 * 24 * 60 * 60  # 30 days
+_ZONE_FAILURE_TTL = 24 * 60 * 60  # 1 day - retry genuinely-broken zones daily, not every cycle
 
 # UGC codes encode the zone type in the 3rd character: Z = forecast zone,
 # C = county.  Only these two map to api.weather.gov zone URLs.
@@ -333,6 +334,30 @@ def _parse_cap_time(value: str) -> int | None:
 # NWS zone geometry helpers
 # ---------------------------------------------------------------------------
 
+def _polygonal(geom: dict | None) -> Optional[Polygon]:
+    """Parse GeoJSON geometry to a Polygon/MultiPolygon, unwrapping
+    GeometryCollections by unioning their polygonal members (NWS serves
+    some zone geometries as GeometryCollection-wrapped MultiPolygons).
+    Returns None for missing, unparseable, empty, or non-polygonal input."""
+    if geom is None:
+        return None
+    try:
+        parsed = shape(geom)
+    except Exception:
+        return None
+    if parsed.geom_type == "GeometryCollection":
+        members = [
+            m for m in parsed.geoms
+            if m.geom_type in ("Polygon", "MultiPolygon") and not m.is_empty
+        ]
+        if not members:
+            return None
+        parsed = unary_union(members)
+    if parsed.is_empty or parsed.geom_type not in ("Polygon", "MultiPolygon"):
+        return None
+    return parsed
+
+
 def _nws_zone_urls(props: dict) -> list[str]:
     """Resolve an NWS feature's zone references to api.weather.gov URLs.
 
@@ -375,13 +400,7 @@ def _read_zone_cache(cache_path: Path) -> Optional[Polygon]:
             data = json.load(f)
         if time.time() - float(data["fetched_at"]) > _ZONE_CACHE_TTL:
             return None
-        geom = data.get("geometry")
-        if geom is None:
-            return None
-        polygon = shape(geom)
-        if polygon.is_empty:
-            return None
-        return polygon
+        return _polygonal(data.get("geometry"))
     except Exception:
         return None
 
@@ -395,6 +414,34 @@ def _write_zone_cache(cache_path: Path, polygon: Polygon) -> None:
             f,
         )
     os.replace(tmp_path, cache_path)
+
+
+def _write_zone_failure(cache_path: Path) -> None:
+    """Atomically write a failure marker so genuinely-broken zones are
+    retried at most once per day instead of every fetch cycle."""
+    tmp_path = cache_path.with_suffix(".json.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {"fetched_at": int(time.time()), "geometry": None, "failed": True},
+            f,
+        )
+    os.replace(tmp_path, cache_path)
+
+
+def _read_zone_failure(cache_path: Path) -> bool:
+    """True iff a fresh failure marker exists for the zone.
+
+    Any unparseable/missing marker or a marker older than
+    ``_ZONE_FAILURE_TTL`` reads as False so the zone is refetched.
+    """
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not data.get("failed"):
+            return False
+        return time.time() - float(data["fetched_at"]) <= _ZONE_FAILURE_TTL
+    except Exception:
+        return False
 
 
 def _alert_entry_from_nws(
@@ -538,6 +585,10 @@ class WMOAlertsFetcher:
             if polygon is not None:
                 polygons[url] = polygon
                 return
+            if _read_zone_failure(cache_path):
+                # Genuinely-broken zone: retried at most once per day, stays
+                # silent (and HTTP-free) in between.
+                return
             async with sem:
                 client = await self._get_client()
                 try:
@@ -551,18 +602,19 @@ class WMOAlertsFetcher:
                     return
                 if resp.status_code != 200:
                     logger.warning("NWS zone %s returned %d", zone_id, resp.status_code)
+                    _write_zone_failure(cache_path)
                     return
                 try:
-                    geom = resp.json().get("geometry")
-                    if geom is None:
-                        logger.warning("NWS zone %s has null geometry", zone_id)
-                        return
-                    polygon = shape(geom)
-                    if polygon.is_empty or polygon.geom_type not in ("Polygon", "MultiPolygon"):
-                        logger.warning("NWS zone %s has unusable geometry", zone_id)
-                        return
+                    polygon = _polygonal(resp.json().get("geometry"))
                 except Exception as exc:
-                    logger.warning("Failed to parse NWS zone %s geometry: %s", zone_id, exc)
+                    logger.warning(
+                        "Failed to parse NWS zone %s geometry: %s", zone_id, exc
+                    )
+                    _write_zone_failure(cache_path)
+                    return
+                if polygon is None:
+                    logger.warning("NWS zone %s has no usable geometry", zone_id)
+                    _write_zone_failure(cache_path)
                     return
                 _write_zone_cache(cache_path, polygon)
                 polygons[url] = polygon
@@ -618,10 +670,7 @@ class WMOAlertsFetcher:
             # Geometry already in GeoJSON [lon, lat] order
             polygon = None
             if geom is not None:
-                try:
-                    polygon = shape(geom)
-                except Exception:
-                    pass
+                polygon = _polygonal(geom)
 
             zone_urls = _nws_zone_urls(props)
             if polygon is None and zone_urls:
