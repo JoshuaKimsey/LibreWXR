@@ -774,7 +774,7 @@ Integer block-averaging factor for the 0.02° native grid (1/2/4 → 0.02°/0.04
 
 #### `LIBREWXR_RRQPE_MATCH_TOLERANCE_SECONDS`
 
-A stored scan matches a **past** radar frame timestamp when `|scan_ts - frame_ts| <=` this. Must exceed the product's worst typical scan-to-frame lag (~15-25 min publish latency plus frame cadence) so the newest radar frame always matches the freshest stored scan. Future / nowcast timestamps are rejected by the wall-clock observed-only gate in the RRQPE grid, not by this value, so it can safely be this generous.
+Maximum tolerated publish lag — the newest stored scan's age, floored to whole 10-min slots — before RRQPE declines to the models for all frames (the product is severely late, e.g. ≥ 2 missed scans; it self-heals next fetch cycle). Frame → scan matching is **lag-shifted relative matching**: every past frame is served the scan `lag` seconds its senior, so the animation steps one scan per frame instead of clamping the leading 2-3 frames onto the newest scan (which would freeze the fill, then lurch). This is a deliberate, uniform temporal fib — all frames show scans ~lag minutes older than their label (less accurate in absolute time) in exchange for smooth stepping; the data is still observational. Per-frame slot slack is one scan interval (600 s), not this value, so a single missed scan slot falls to its neighbor instead of blinking.
 
 | | |
 |---|---|

@@ -32,6 +32,16 @@ Variables:
 Valid time = the filename / global-attr ``s`` timestamp (scan start,
 10-min aligned).  Median publish lag ~17 min; the configurable publish
 delay keeps the fetch window clear of not-yet-published slots.
+
+Frame → scan matching is *lag-shifted relative matching*: because the
+newest scan is always ~15-25 min behind the newest radar frame, every
+past frame is served the scan ``lag`` seconds its senior (where ``lag``
+is the newest scan's current age, floored to whole 10-min slots).  The
+resulting ~15-25 min uniform temporal fib is deliberate — absolute
+nearest-match would clamp the leading 2-3 frames onto the same newest
+scan and the fill would freeze, then lurch.  Lag-shifted matching steps
+the fill every frame: less accurate in absolute time, but smooth — and
+still observational.
 """
 from __future__ import annotations
 
@@ -213,11 +223,14 @@ class RRQPEGrid:
     """NOAA Enterprise Rain Rate GLB-5 blend as an NWP-chain source.
 
     Observed-only contract: every stored frame is a past scan, so
-    ``has_data_at`` only answers for past valid times within the match
-    tolerance and the chain falls through to the models for
-    future/nowcast timestamps.  Frames are uint8 dBZ-encoded memmaps
-    keyed by scan timestamp (``dict[int, np.ndarray]``), mirroring the
-    ECMWF IFS grid's memmap patterns for multi-worker state snapshots.
+    ``has_data_at`` only answers for past valid times and the chain
+    falls through to the models for future/nowcast timestamps.  Matching
+    is lag-shifted relative matching — frames are served the scan ``lag``
+    seconds their senior (the uniform ~15-25 min temporal fib described
+    in the module docstring) so client animations step smoothly.  Frames
+    are uint8 dBZ-encoded memmaps keyed by scan timestamp
+    (``dict[int, np.ndarray]``), mirroring the ECMWF IFS grid's memmap
+    patterns for multi-worker state snapshots.
     """
 
     name = "rrqpe"
@@ -301,11 +314,17 @@ class RRQPEGrid:
     # ── NWPSource Protocol ────────────────────────────────────────────
 
     def _match_timestamp(self, timestamp: int | None) -> int | None:
-        """Nearest stored scan timestamp within match tolerance, else None.
+        """Lag-shifted relative match: serve the frame the scan ``lag``
+        seconds its senior so client animations stay smooth.
 
-        The match tolerance below only governs staleness matching of PAST
-        frames; future timestamps are rejected by the wall-clock gate
-        above, never by the tolerance.
+        The product's newest scan is always ~15-25 min behind the newest
+        radar frame (publish latency).  Absolute nearest-match would clamp
+        the leading 2-3 frames onto the same newest scan — the fill
+        freezes for 2-3 animation frames, then lurches.  Instead every
+        past frame gets its own scan, shifted by the current lag: a
+        uniform temporal fib (~15-25 min) that steps the fill every
+        frame.  Less accurate in absolute time, but smooth — and still
+        observational.
         """
         if timestamp is None:
             if not self._sorted_timestamps:
@@ -314,15 +333,26 @@ class RRQPEGrid:
         # Hard observed-only gate: nowcast frames are always future-dated
         # and past frames never are, so anything beyond a small clock-skew
         # slack is not an observed time and can't be answered.  This is
-        # what stops RRQPE leaking into nowcast tiles; the match tolerance
-        # below therefore only governs staleness matching of PAST frames
-        # and can safely exceed the product's publish lag.
+        # what stops RRQPE leaking into nowcast tiles.
         if timestamp > int(time.time()) + 120:
             return None
         ts_list = self._sorted_timestamps
         if not ts_list:
             return None
-        idx = np.searchsorted(ts_list, timestamp)
+        # Current publish lag, floored to whole 10-min slots.  The newest
+        # stored scan is (now - newest) seconds old; every query is shifted
+        # back by that lag so the newest past frame maps to the newest scan
+        # and consecutive frames map to consecutive scans (1:1 distinct).
+        newest = ts_list[-1]
+        now = int(time.time())
+        lag_slots = max(0, (now - newest) // SCAN_INTERVAL_SECONDS)
+        lag = lag_slots * SCAN_INTERVAL_SECONDS
+        if lag > settings.rrqpe_match_tolerance_seconds:
+            # Product severely late (>= 2 missed scans): decline the whole
+            # source so the models fill; self-heals next fetch cycle.
+            return None
+        shifted = timestamp - lag
+        idx = np.searchsorted(ts_list, shifted)
         if idx == 0:
             nearest = ts_list[0]
         elif idx >= len(ts_list):
@@ -330,13 +360,15 @@ class RRQPEGrid:
         else:
             before = ts_list[idx - 1]
             after = ts_list[idx]
-            nearest = before if timestamp - before <= after - timestamp else after
-        if abs(nearest - timestamp) <= settings.rrqpe_match_tolerance_seconds:
+            nearest = before if shifted - before <= after - shifted else after
+        # One-slot slack: a single missed scan slot falls to its neighbor,
+        # never a blink.
+        if abs(nearest - shifted) <= SCAN_INTERVAL_SECONDS:
             return nearest
         return None
 
     def has_data_at(self, timestamp: int) -> bool:
-        """True iff a stored frame matches ``timestamp`` within tolerance."""
+        """True iff a lag-shifted scan matches ``timestamp``."""
         return self._match_timestamp(timestamp) is not None
 
     def has_data(self) -> bool:
@@ -382,8 +414,8 @@ class RRQPEGrid:
         """Return uint8 dBZ-encoded values at the given lat/lon points.
 
         Same encoding as radar composites (pixel = (dBZ + 32) * 2).
-        Returns zeros when no stored frame is within the match tolerance
-        (or the store is empty) — never NaN.  With ``bilinear``, uses
+        Returns zeros when no lag-shifted scan matches the timestamp (or
+        the store is empty) — never NaN.  With ``bilinear``, uses
         bilinear interpolation with the IFS clear-sky guard: any corner
         at zero falls back to the nearest neighbour so precip never
         ghosts into clear-sky pixels.

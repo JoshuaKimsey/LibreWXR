@@ -154,64 +154,105 @@ class TestGridGeometry:
         assert (np.diff(south) <= 1e-6).all()
 
 
-# ── Observed-only contract ────────────────────────────────────────────
+# ── Lag-shifted relative matching ──────────────────────────────────────
 
 
-class TestObservedOnlyContract:
-    def _store(self, *slots):
+def _floor_now() -> int:
+    """Current wall clock floored to the 10-min scan cadence."""
+    return (int(time.time()) // 600) * 600
+
+
+class TestLagShift:
+    """Lag-shifted 1:1 matching: frames are served the scan ``lag`` seconds
+    their senior so animations step every frame instead of clamping the
+    leading frames onto the newest scan.
+
+    All timestamps are wall-clock-relative (10-min aligned slots) so the
+    lag math serves every query.  ``_store_scans`` simulates a ~20-min
+    publish lag: scans at the last ``len(values)`` aligned slots ending
+    at ``floor_now - 1200``.
+    """
+
+    @staticmethod
+    def _store_scans(values):
+        """Inject scans at 10-min-aligned slots ending at ``floor_now -
+        1200`` (a ~20-min publish lag).  ``values`` are oldest -> newest."""
+        floor_now = _floor_now()
+        newest = floor_now - 1200
         grid = RRQPEGrid(downsample=1)
-        for ts, value in slots:
-            _inject_frame(grid, ts, value)
-        return grid
+        for i, value in enumerate(values):
+            _inject_frame(grid, newest - (len(values) - 1 - i) * 600, value)
+        return grid, floor_now, newest
 
-    def test_exact_slot_true(self):
-        grid = self._store((1000000, 100))
-        assert grid.has_data_at(1000000) is True
+    def test_newest_frame_maps_to_newest_scan(self):
+        grid, floor_now, _ = self._store_scans([101, 102, 103, 104])
+        assert grid.has_data_at(floor_now) is True
+        out = grid.sample(np.array([0.0]), np.array([0.0]), timestamp=floor_now)
+        assert int(out[0]) == 104
 
-    def test_within_tolerance_true(self):
-        grid = self._store((1000000, 100))
-        assert grid.has_data_at(1000000 + 900) is True
-        assert grid.has_data_at(1000000 - 899) is True
+    def test_consecutive_frames_map_to_consecutive_scans(self):
+        """1:1 distinct: every past frame gets its own scan, stepping
+        backward through the store (values oldest -> newest: 101..104)."""
+        grid, floor_now, _ = self._store_scans([101, 102, 103, 104])
+        out_new = grid.sample(np.array([0.0]), np.array([0.0]), timestamp=floor_now)
+        out_next = grid.sample(
+            np.array([0.0]), np.array([0.0]), timestamp=floor_now - 600,
+        )
+        out_old = grid.sample(
+            np.array([0.0]), np.array([0.0]), timestamp=floor_now - 1800,
+        )
+        assert [int(out_new[0]), int(out_next[0]), int(out_old[0])] == [104, 103, 101]
+        assert len({int(x[0]) for x in (out_new, out_next, out_old)}) == 3
 
-    def test_beyond_tolerance_false(self):
-        grid = self._store((1000000, 100))
-        assert grid.has_data_at(1000000 + 1801) is False
-        assert grid.has_data_at(1000000 - 1801) is False
+    def test_missing_slot_falls_to_neighbor(self):
+        """A single missed scan slot degrades to the adjacent scan — never a
+        blink (zeros) and never a decline (None)."""
+        grid, floor_now, newest = self._store_scans([101, 102, 103, 104])
+        # Delete the scan that the floor_now - 600 frame maps to (value 103).
+        del grid._timesteps[newest - 600]
+        grid._sorted_timestamps = sorted(grid._timesteps)
+        assert grid.has_data_at(floor_now - 600) is True
+        out = grid.sample(
+            np.array([0.0]), np.array([0.0]), timestamp=floor_now - 600,
+        )
+        assert int(out[0]) in (102, 104)
 
-    def test_future_ts_false(self):
-        grid = self._store((1000000, 100))
-        assert grid.has_data_at(1000000 + 3600) is False
-        assert grid.has_data_at(1000000 + 20000) is False
+    def test_lag_at_cap_inclusive_serves(self):
+        """Lag == tolerance (1800 s, floored) still serves."""
+        now = int(time.time())
+        grid = RRQPEGrid(downsample=1)
+        _inject_frame(grid, now - 1900, 111)   # lag = 1800, at cap
+        assert grid.has_data_at(now) is True
+        out = grid.sample(np.array([0.0]), np.array([0.0]), timestamp=now)
+        assert int(out[0]) == 111
+
+    def test_lag_beyond_cap_declines_whole_source(self):
+        """Lag > tolerance (2400 s) declines the whole source: no past
+        query matches and sample returns zeros."""
+        now = int(time.time())
+        grid = RRQPEGrid(downsample=1)
+        _inject_frame(grid, now - 2500, 111)   # lag = 2400 > 1800
+        assert grid.has_data_at(now) is False
+        assert grid.has_data_at(now - 600) is False
+        out = grid.sample(np.array([0.0]), np.array([0.0]), timestamp=now)
+        assert out.dtype == np.uint8
+        assert out[0] == 0
 
     def test_empty_store_false(self):
         grid = RRQPEGrid()
-        assert grid.has_data_at(1000000) is False
+        assert grid.has_data_at(_floor_now()) is False
         assert grid.has_data() is False
         assert grid.reference_time is None
         assert grid.timestep_count == 0
 
-    def test_sample_zeros_when_no_match(self):
-        grid = RRQPEGrid()
-        out = grid.sample(np.array([0.0]), np.array([0.0]), timestamp=1000000)
-        assert out.shape == (1,)
-        assert out.dtype == np.uint8
-        assert out[0] == 0
-
-    def test_sample_returns_frame_within_tolerance(self):
-        grid = self._store((1000000, 137))
-        out = grid.sample(
-            np.array([0.0]), np.array([0.0]), timestamp=1000000 + 600,
-        )
-        assert int(out[0]) == 137
-
     def test_bilinear_zero_guard(self):
         """Bilinear must not ghost precip into clear-sky neighbours."""
-        grid = self._store((1000000, 137))
+        grid, floor_now, _ = self._store_scans([137])
         lats = np.array([0.0, 0.0, 0.0])
         lons = np.array([-179.9, -179.8, -179.7])
         # Uniform-value frame: bilinear equals the frame value everywhere
         # (no zero neighbours to trigger the guard).
-        out = grid.sample(lats, lons, timestamp=1000000, bilinear=True)
+        out = grid.sample(lats, lons, timestamp=floor_now, bilinear=True)
         assert (out == 137).all()
 
 
@@ -278,44 +319,48 @@ class TestWallClockGate:
 
 
 class TestChainIntegration:
-    def _chain(self, rrqpe_ts, rrqpe_value, ifs_value=84):
+    @staticmethod
+    def _chain(rrqpe_value, ifs_value=84):
+        """RRQPE with a single newest scan at ``floor_now - 1200`` (~20-min
+        lag, within the tolerance) ahead of a global IFS fallback."""
+        floor_now = _floor_now()
         grid = RRQPEGrid(downsample=1)
-        _inject_frame(grid, rrqpe_ts, rrqpe_value)
+        _inject_frame(grid, floor_now - 1200, rrqpe_value)
         ifs = ECMWFGrid()
         ifs_dbz = np.full((IFS_H, IFS_W), ifs_value, dtype=np.uint8)
         ifs._timesteps[1000000] = (ifs_dbz, np.zeros_like(ifs_dbz, dtype=bool))
         ifs._sorted_timestamps = [1000000]
-        return grid, ifs
+        return grid, ifs, floor_now
 
     def test_past_ts_inside_band_prefers_rrqpe(self):
-        rrqpe, ifs = self._chain(1000000, 200)
+        rrqpe, ifs, floor_now = self._chain(200)
         chain = NWPChain([rrqpe, ifs])
-        out = chain.sample(np.array([0.0]), np.array([0.0]), timestamp=1000000)
+        out = chain.sample(np.array([0.0]), np.array([0.0]), timestamp=floor_now)
         assert int(out[0]) == 200
 
     def test_past_ts_outside_band_falls_to_ifs(self):
-        rrqpe, ifs = self._chain(1000000, 200)
+        rrqpe, ifs, floor_now = self._chain(200)
         chain = NWPChain([rrqpe, ifs])
-        out = chain.sample(np.array([75.0]), np.array([0.0]), timestamp=1000000)
+        out = chain.sample(np.array([75.0]), np.array([0.0]), timestamp=floor_now)
         assert int(out[0]) == 84
 
     def test_future_ts_inside_band_falls_to_ifs(self):
         """Critical regression pin: observations must never answer future ts."""
-        rrqpe, ifs = self._chain(1000000, 200)
+        rrqpe, ifs, floor_now = self._chain(200)
         chain = NWPChain([rrqpe, ifs])
         out = chain.sample(
-            np.array([0.0]), np.array([0.0]), timestamp=1000000 + 3600,
+            np.array([0.0]), np.array([0.0]), timestamp=floor_now + 3600,
         )
         assert int(out[0]) == 84
 
     def test_snow_mask_still_comes_from_ifs(self):
-        rrqpe, ifs = self._chain(1000000, 200)
+        rrqpe, ifs, floor_now = self._chain(200)
         ifs_snow = np.ones((IFS_H, IFS_W), dtype=bool)
         ifs._timesteps[1000000] = (
             np.full((IFS_H, IFS_W), 84, dtype=np.uint8), ifs_snow,
         )
         chain = NWPChain([rrqpe, ifs])
-        out = chain.get_snow_mask(np.array([0.0]), np.array([0.0]), timestamp=1000000)
+        out = chain.get_snow_mask(np.array([0.0]), np.array([0.0]), timestamp=floor_now)
         assert out.tolist() == [True]
 
     def test_real_chain_places_rrqpe_before_hrrr(self, tmp_path, monkeypatch):
@@ -529,8 +574,8 @@ class TestFetch:
 
     async def test_fetch_stores_expected_slots(self, tmp_path):
         now_ts = self._now()
-        slot_a = now_ts - 30 * 60   # 11:30
-        slot_b = now_ts - 20 * 60   # 11:40
+        slot_a = now_ts - 30 * 60
+        slot_b = now_ts - 20 * 60
         grid = RRQPEGrid(cache_dir=tmp_path, downsample=1)
         nc = _synthetic_nc_bytes(rows=4, cols=4, rate=3.0)
         grid._client = httpx.Client(transport=httpx.MockTransport(
@@ -542,12 +587,14 @@ class TestFetch:
             assert slot_b in grid._timesteps
             assert grid.timestep_count == 2
             assert grid.reference_time == slot_b
-            assert grid.has_data_at(slot_a) is True
+            # The newest past frame maps (lag-shifted) onto the newest scan.
+            assert grid.has_data_at(now_ts) is True
             # Decode pipeline produced non-zero encoded data (rate 3 mm/h).
             assert int(np.asarray(grid._timesteps[slot_a]).max()) > 0
-            # Sample maps inside the stored frame (top-left block centre).
+            # Sample maps inside the newest stored frame (top-left block
+            # centre) when queried at the newest past frame time.
             out = grid.sample(
-                np.array([69.99]), np.array([-179.99]), timestamp=slot_a,
+                np.array([69.99]), np.array([-179.99]), timestamp=now_ts,
             )
             assert out.dtype == np.uint8
             assert int(out[0]) > 0
@@ -618,7 +665,8 @@ class TestFetch:
 class TestPersistence:
     async def test_getstate_setstate_round_trip(self, tmp_path):
         grid = RRQPEGrid(cache_dir=tmp_path, downsample=4)
-        ts = 1000000
+        floor_now = _floor_now()
+        ts = floor_now - 1200   # newest scan with a ~20-min publish lag
         value = 137
         mm = grid._to_memmap(
             str(ts), np.full(grid.effective_shape, value, dtype=np.uint8),
@@ -635,7 +683,8 @@ class TestPersistence:
         assert restored.timestep_count == 1
         assert restored.reference_time == ts
         assert restored._rows == grid._rows
-        out = restored.sample(np.array([0.0]), np.array([0.0]), timestamp=ts)
+        # Lag-shifted: the newest past frame (floor_now) maps onto ts.
+        out = restored.sample(np.array([0.0]), np.array([0.0]), timestamp=floor_now)
         assert int(out[0]) == value
         await grid.close()
         await restored.close()
