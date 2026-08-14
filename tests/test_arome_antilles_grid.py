@@ -3,8 +3,11 @@
 """Unit tests for AROME Antilles grid math, decode, and chain integration."""
 from __future__ import annotations
 
+import logging
+import re
 from datetime import datetime, timezone
 
+import httpx
 import numpy as np
 import pytest
 
@@ -551,3 +554,208 @@ class TestNWPSourceProtocol:
         assert grid.supports_snow is False
         out = grid.get_snow_mask(np.array([16.24]), np.array([-61.55]))
         assert (out == False).all()
+
+
+# - Fetch loop: accum rebuild + failure-category logging ---------------
+
+
+class _FakeHTTPResponse:
+    """Minimal stand-in for ``httpx.Response`` in the fetch-loop tests."""
+
+    def __init__(self, status_code: int, content: bytes = b"",
+                 url: str = "http://fake.invalid/arome"):
+        self.status_code = status_code
+        self.content = content
+        self._request = httpx.Request("GET", url)
+        self._response = httpx.Response(status_code, request=self._request)
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"HTTP {self.status_code} for {self._request.url}",
+                request=self._request,
+                response=self._response,
+            )
+
+
+_AROME_LOGGER = "librewxr.sources._shared.arome"
+
+
+class TestFetchAccumRebuild:
+    """Regression: accums are memory-only, so after a pipeline restart
+    frames reload from disk while ``_accum`` is empty.  The old
+    prev-accum recursion hit the cached-frame early return (which does
+    NOT rebuild ``_accum``) and every step past an already-cached prev
+    frame returned -1 forever for that run.  A step's accum is just its
+    own decoded cumulative-tp GRIB, so ``_ensure_accum`` rebuilds it on
+    demand."""
+
+    @staticmethod
+    def _step_decoder(grib_bytes: bytes) -> np.ndarray:
+        """Fake ``decode_tp_message``: cumulative precip = 2 mm x step."""
+        step = int(grib_bytes.split(b"=")[1])
+        return np.full(
+            (AROME_ANT_GRID_HEIGHT, AROME_ANT_GRID_WIDTH),
+            float(step) * 2.0, dtype=np.float32,
+        )
+
+    def _install_fetchable_gribs(self, monkeypatch) -> dict:
+        """Mock ``retry_get`` so every step's URL serves a fake body that
+        encodes the lead-hour, which ``_step_decoder`` acts on."""
+        calls = {"n": 0}
+
+        async def fake_retry_get(client, url, **kwargs):
+            calls["n"] += 1
+            step = int(re.search(r"__(\d{3})H__", url).group(1))
+            return _FakeHTTPResponse(
+                200, content=f"step={step}".encode(), url=url,
+            )
+
+        monkeypatch.setattr("librewxr.data.retry.retry_get", fake_retry_get)
+        return calls
+
+    async def test_ingests_step_after_restart_when_prev_frame_cached(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        run_dt = datetime(2026, 5, 8, 0, tzinfo=timezone.utc)
+        run_ts = int(run_dt.timestamp())
+        calls = self._install_fetchable_gribs(monkeypatch)
+
+        # Cycle 1 (08:00 UTC): steps 7..10 of the 00Z run ingest and
+        # their frames land on the persistent memmap cache.
+        grid1 = AROMEAntillesGrid(cache_dir=tmp_path)
+        grid1.decode_tp_message = self._step_decoder
+        await grid1.fetch(
+            now_ts=int(datetime(2026, 5, 8, 8, tzinfo=timezone.utc).timestamp()),
+        )
+        for step in range(7, 11):
+            assert (run_ts, step * 3600) in grid1._frames
+        await grid1.close()
+
+        # "Restart": fresh instance over the same cache dir.  Frames
+        # reload from disk, ``_accum`` is empty - the exact production
+        # post-restart state.
+        grid2 = AROMEAntillesGrid(cache_dir=tmp_path)
+        grid2.decode_tp_message = self._step_decoder
+        assert (run_ts, 10 * 3600) in grid2._frames
+        assert len(grid2._accum) == 0
+
+        # Cycle 2 (09:00 UTC): the window covers steps 8..11.  Step 11's
+        # frame is missing; its prev (step 10) frame IS cached, but the
+        # accum must be rebuilt from the GRIB or step 11 fails forever.
+        before = calls["n"]
+        await grid2.fetch(
+            now_ts=int(datetime(2026, 5, 8, 9, tzinfo=timezone.utc).timestamp()),
+        )
+        assert calls["n"] > before
+        assert (run_ts, 11 * 3600) in grid2._frames
+        frame = grid2._frames[(run_ts, 11 * 3600)]
+        assert (frame > 0).any()
+        # Both accums were rebuilt and cached for the next cycle.
+        assert (run_ts, 10) in grid2._accum
+        assert (run_ts, 11) in grid2._accum
+        await grid2.close()
+
+
+class TestNotPublishedQuieting:
+    """Routine upstream delay (every file 404s): the aggregate used to
+    WARN every 10-minute cycle.  It should INFO once per run and DEBUG
+    on repeats, never WARNING."""
+
+    @staticmethod
+    def _install_404s(monkeypatch) -> None:
+        async def fake_retry_get(client, url, **kwargs):
+            return _FakeHTTPResponse(404, url=url)
+
+        monkeypatch.setattr("librewxr.data.retry.retry_get", fake_retry_get)
+
+    async def test_info_once_then_debug_same_run(self, monkeypatch, caplog):
+        grid = AROMEAntillesGrid()
+        self._install_404s(monkeypatch)
+        now = int(datetime(2026, 5, 8, 8, tzinfo=timezone.utc).timestamp())
+
+        with caplog.at_level(logging.DEBUG, logger=_AROME_LOGGER):
+            await grid.fetch(now_ts=now)
+            infos = [
+                r for r in caplog.records
+                if r.levelno == logging.INFO
+                and "not yet published upstream" in r.getMessage()
+            ]
+            assert len(infos) == 1, "first cycle must INFO exactly once"
+            assert not [
+                r for r in caplog.records if r.levelno == logging.WARNING
+            ], "404s must not WARN"
+
+            caplog.clear()
+            await grid.fetch(now_ts=now)
+            infos = [
+                r for r in caplog.records
+                if r.levelno == logging.INFO
+                and "not yet published upstream" in r.getMessage()
+            ]
+            assert not infos, "repeat cycle must not INFO again"
+            debugs = [
+                r for r in caplog.records
+                if r.levelno == logging.DEBUG
+                and "not yet published upstream" in r.getMessage()
+            ]
+            assert len(debugs) == 1, "repeat cycle must DEBUG exactly once"
+            assert not [
+                r for r in caplog.records if r.levelno == logging.WARNING
+            ], "404s must not WARN"
+
+    async def test_new_run_infos_again(self, monkeypatch, caplog):
+        """A later, also-unpublished run gets its own INFO line."""
+        grid = AROMEAntillesGrid()
+        self._install_404s(monkeypatch)
+        with caplog.at_level(logging.INFO, logger=_AROME_LOGGER):
+            await grid.fetch(
+                now_ts=int(datetime(2026, 5, 8, 8, tzinfo=timezone.utc).timestamp()),
+            )
+            caplog.clear()
+            await grid.fetch(
+                now_ts=int(datetime(2026, 5, 9, 8, tzinfo=timezone.utc).timestamp()),
+            )
+            infos = [
+                r for r in caplog.records
+                if r.levelno == logging.INFO
+                and "not yet published upstream" in r.getMessage()
+            ]
+            assert len(infos) == 1
+            assert "2026-05-09T00:00:00Z" in infos[0].getMessage()
+
+
+class TestHardFailureWarning:
+    """Genuine failures (non-404 HTTP error, decode failure) must keep
+    the aggregate WARNING."""
+
+    async def test_non_404_http_error_still_warns(self, monkeypatch, caplog):
+        async def fake_retry_get(client, url, **kwargs):
+            return _FakeHTTPResponse(500, url=url)
+
+        monkeypatch.setattr("librewxr.data.retry.retry_get", fake_retry_get)
+        grid = AROMEAntillesGrid()
+        now = int(datetime(2026, 5, 8, 8, tzinfo=timezone.utc).timestamp())
+        with caplog.at_level(logging.WARNING, logger=_AROME_LOGGER):
+            await grid.fetch(now_ts=now)
+        assert [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "no frames ingested" in r.getMessage()
+        ], "non-404 failures must keep the aggregate WARNING"
+
+    async def test_decode_failure_still_warns(self, monkeypatch, caplog):
+        async def fake_retry_get(client, url, **kwargs):
+            return _FakeHTTPResponse(200, content=b"garbage", url=url)
+
+        monkeypatch.setattr("librewxr.data.retry.retry_get", fake_retry_get)
+        grid = AROMEAntillesGrid()
+        grid.decode_tp_message = lambda grib_bytes: None
+        now = int(datetime(2026, 5, 8, 8, tzinfo=timezone.utc).timestamp())
+        with caplog.at_level(logging.WARNING, logger=_AROME_LOGGER):
+            await grid.fetch(now_ts=now)
+        assert [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "no frames ingested" in r.getMessage()
+        ], "decode failures must keep the aggregate WARNING"

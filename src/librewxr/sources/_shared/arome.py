@@ -184,6 +184,19 @@ class AROMEOverseasGrid:
         # units and the recursive prev-step lookups share one task per
         # (run, step) so the same file is never downloaded twice.
         self._in_flight: dict[tuple[int, int], asyncio.Task[int]] = {}
+        # (run_ts, step_hour) -> in-flight accum-rebuild task.  Concurrent
+        # gather units and overlapping prev-step lookups share one task
+        # per (run, step) so the same cumulative-tp GRIB is never
+        # downloaded twice during a cycle.
+        self._accum_in_flight: dict[
+            tuple[int, int], asyncio.Task[np.ndarray | None]
+        ] = {}
+        # Per-cycle failure accounting for the aggregate log: 404s mean
+        # "run not yet published upstream" (quiet), everything else is a
+        # genuine failure (keeps the WARNING).
+        self._cycle_not_published: int = 0
+        self._cycle_hard_failures: int = 0
+        self._not_published_notice_run: int | None = None
 
         if cache_dir is not None:
             self._memmap_dir = Path(cache_dir) / self.memmap_subdir
@@ -260,6 +273,10 @@ class AROMEOverseasGrid:
         self._client = None
         self._fetch_lock = asyncio.Lock()
         self._in_flight = {}
+        self._accum_in_flight = {}
+        self._cycle_not_published = 0
+        self._cycle_hard_failures = 0
+        self._not_published_notice_run = None
         self._frames = {}
         self._accum = {}
         self._latest_run_ts = None
@@ -574,6 +591,8 @@ class AROMEOverseasGrid:
         async with self._fetch_lock:
             if now_ts is None:
                 now_ts = int(datetime.now(tz=timezone.utc).timestamp())
+            self._cycle_not_published = 0
+            self._cycle_hard_failures = 0
 
             publish_delay = self._get_setting("publish_delay_minutes") * 60
             latest_run_ts, runs_to_consider = self._window_runs(
@@ -644,11 +663,30 @@ class AROMEOverseasGrid:
                     self.friendly_name, total_fetched, len(runs_to_consider),
                     len(self._frames),
                 )
+                self._not_published_notice_run = None
             elif total_failed:
-                logger.warning(
-                    "%s: no frames ingested (%d file(s) failed)",
-                    self.friendly_name, total_failed,
-                )
+                if self._cycle_hard_failures > 0:
+                    logger.warning(
+                        "%s: no frames ingested (%d file(s) failed)",
+                        self.friendly_name, total_failed,
+                    )
+                else:
+                    run_str = _format_run_ts(
+                        datetime.fromtimestamp(latest_run_ts, tz=timezone.utc),
+                    )
+                    if self._not_published_notice_run != latest_run_ts:
+                        self._not_published_notice_run = latest_run_ts
+                        logger.info(
+                            "%s: run %s not yet published upstream; "
+                            "will keep retrying",
+                            self.friendly_name, run_str,
+                        )
+                    else:
+                        logger.debug(
+                            "%s: run %s not yet published upstream; "
+                            "will keep retrying",
+                            self.friendly_name, run_str,
+                        )
 
     async def _fetch_one_step(
         self, run: datetime, step_hour: int, client: httpx.AsyncClient,
@@ -658,12 +696,11 @@ class AROMEOverseasGrid:
         -1 on fetch error.
 
         Concurrent-safe entry: the bounded gather runs one unit per
-        step and the prev-step fallback below re-enters this method, so
-        any two concurrent attempts on the same (run, step) share one
-        in-flight task via ``_in_flight`` rather than re-downloading
-        the file.  A finished attempt is deregistered immediately, so a
-        prev-step retry after a failed download still performs a fresh
-        fetch exactly as the sequential loop did.
+        step, and prev-step accum lookups share one task per (run, step)
+        via ``_accum_in_flight`` inside ``_ensure_accum``, so the same
+        file is never downloaded twice.  A finished task is deregistered
+        immediately, so a prev-step retry after a failed download still
+        performs a fresh fetch exactly as the sequential loop did.
         """
         run_ts = int(run.timestamp())
         key = (run_ts, step_hour)
@@ -680,12 +717,101 @@ class AROMEOverseasGrid:
             if self._in_flight.get(key) is task:
                 self._in_flight.pop(key, None)
 
+    async def _ensure_accum(
+        self, run: datetime, step_hour: int, client: httpx.AsyncClient,
+    ) -> np.ndarray | None:
+        """Guarantee ``self._accum[(run_ts, step_hour)]`` if at all possible.
+
+        A step's accum is just the decoded cumulative-tp field of that
+        step's own GRIB file - it does not depend on the previous step,
+        so it is always rebuildable on demand from the GRIB, independent
+        of the frame-cache state.  That makes it safe to call after a
+        pipeline restart, when frames have been reloaded from disk
+        memmaps but ``_accum`` (memory-only) is empty.
+
+        Concurrent-safe entry: the bounded gather and overlapping
+        prev-step lookups share one task per (run, step) via
+        ``_accum_in_flight`` rather than re-downloading the file.
+        Returns the grid on success, ``None`` after a logged failure.
+        """
+        run_ts = int(run.timestamp())
+        key = (run_ts, step_hour)
+
+        cached = self._accum.get(key)
+        if cached is not None:
+            return cached
+
+        if step_hour == 0:
+            self._accum[key] = np.zeros(
+                (self.GRID_HEIGHT, self.GRID_WIDTH), dtype=np.float32,
+            )
+            return self._accum[key]
+
+        in_flight = self._accum_in_flight.get(key)
+        if in_flight is not None:
+            return await in_flight
+        task = asyncio.create_task(
+            self._ensure_accum_impl(run, step_hour, client),
+        )
+        self._accum_in_flight[key] = task
+        try:
+            return await task
+        finally:
+            if self._accum_in_flight.get(key) is task:
+                self._accum_in_flight.pop(key, None)
+
+    async def _ensure_accum_impl(
+        self, run: datetime, step_hour: int, client: httpx.AsyncClient,
+    ) -> np.ndarray | None:
+        """Download + decode one step's cumulative-tp GRIB and cache it.
+
+        Returns the cached grid on success or ``None`` after logging the
+        failure.  Tracks the failure category on the per-cycle counters
+        so ``fetch()`` can tell "not yet published" 404s apart from
+        genuine failures when composing the aggregate log line.
+        """
+        run_ts = int(run.timestamp())
+        key = (run_ts, step_hour)
+
+        url = self.file_url(run, step_hour)
+        from librewxr.data.retry import retry_get
+        resp = await retry_get(client, url, log_name=f"{self.friendly_name} data")
+        if resp is None:
+            self._cycle_hard_failures += 1
+            return None
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if getattr(e.response, "status_code", None) == 404:
+                self._cycle_not_published += 1
+                logger.debug("%s not yet published for %s", self.friendly_name, url)
+            else:
+                self._cycle_hard_failures += 1
+                logger.warning(
+                    "%s fetch failed for %s: %s", self.friendly_name, url, e,
+                )
+            return None
+        grib_bytes = resp.content
+
+        # cfgrib decode runs in a worker thread — a full GRIB2 parse
+        # blocks the loop for seconds on the larger overseas grids.
+        accum = await asyncio.to_thread(self.decode_tp_message, grib_bytes)
+        if accum is None:
+            self._cycle_hard_failures += 1
+            return None
+
+        self._accum[key] = accum
+        return accum
+
     async def _fetch_one_step_impl(
         self, run: datetime, step_hour: int, client: httpx.AsyncClient,
     ) -> int:
-        """Original sequential fetch/decode/store body behind
-        ``_fetch_one_step`` — the recursion below re-enters the
-        concurrent-safe wrapper, so it dedups against in-flight units.
+        """Fetch one step, difference it against the previous accum, and
+        store.  The accum grids come from ``_ensure_accum`` (each step's
+        own GRIB is decoded independently), so ingestion never depends
+        on the prev step's frame having been fetched this cycle - the
+        step-0 baseline and any step whose frame is already cached are
+        handled without a download.
         """
         run_ts = int(run.timestamp())
         lead_seconds = step_hour * self.BRACKET_INTERVAL_SECONDS
@@ -700,33 +826,15 @@ class AROMEOverseasGrid:
         if (run_ts, lead_seconds) in self._frames:
             return 0
 
-        url = self.file_url(run, step_hour)
-        from librewxr.data.retry import retry_get
-        resp = await retry_get(client, url, log_name=f"{self.friendly_name} data")
-        if resp is None:
-            return -1
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            if getattr(e.response, "status_code", None) == 404:
-                logger.debug("%s not yet published for %s", self.friendly_name, url)
-            else:
-                logger.warning("%s fetch failed for %s: %s", self.friendly_name, url, e)
-            return -1
-        grib_bytes = resp.content
-
-        # cfgrib decode runs in a worker thread — a full GRIB2 parse
-        # blocks the loop for seconds on the larger overseas grids.
-        accum = await asyncio.to_thread(self.decode_tp_message, grib_bytes)
+        accum = await self._ensure_accum(run, step_hour, client)
         if accum is None:
             return -1
-
-        prev_key = (run_ts, step_hour - 1)
-        prev = self._accum.get(prev_key)
-        if prev is None and step_hour - 1 >= 0:
-            await self._fetch_one_step(run, step_hour - 1, client)
-            prev = self._accum.get(prev_key)
+        prev = await self._ensure_accum(run, step_hour - 1, client)
         if prev is None:
+            logger.debug(
+                "%s: previous accum unavailable for run %s step %d",
+                self.friendly_name, _format_run_ts(run), step_hour,
+            )
             return -1
 
         rate_mm_per_hour = accum - prev
@@ -736,7 +844,6 @@ class AROMEOverseasGrid:
         )
         mm = self._to_memmap(f"r{run_ts}_l{lead_seconds}", encoded)
         self._frames[(run_ts, lead_seconds)] = mm
-        self._accum[(run_ts, step_hour)] = accum
 
         return 1
 
@@ -782,6 +889,9 @@ class AROMEOverseasGrid:
         for t in self._in_flight.values():
             t.cancel()
         self._in_flight.clear()
+        for t in self._accum_in_flight.values():
+            t.cancel()
+        self._accum_in_flight.clear()
         if self._client is not None and not self._client.is_closed:
             await self._client.aclose()
         self._client = None
