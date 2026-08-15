@@ -351,7 +351,13 @@ var MaplibreAdapter = function () {
                 // Tile/source failures arrive as map-level 'error' events.
                 // Treat any error tied to our source as "settled" so the
                 // animation does not hang on a dead tile host.
-                if (e.sourceId === handle.sourceId || (e.error && e.error.sourceId === handle.sourceId)) finish();
+                if (e.sourceId === handle.sourceId || (e.error && e.error.sourceId === handle.sourceId)) {
+                    // Surface the failure in the browser console - the engine
+                    // settles on this event, so without this a dead tile host
+                    // is silent (MapLibre just renders empty tiles).
+                    console.warn('[librewxr] map tile/source error:', e.error ? (e.error.message || e.error) : e);
+                    finish();
+                }
             }
             // Leak-safe: the sourcedata listener must be removed on success,
             // on error, AND on timeout - a never-loading source must not leave

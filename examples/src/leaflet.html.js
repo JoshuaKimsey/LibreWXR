@@ -124,6 +124,7 @@ var LVR_API_FIXED = null;
 // Implements the viewer-core.js adapter contract with Leaflet 1.x primitives.
 var LeafletAdapter = function () {
     var map = null;
+    var lvTileErrors = 0; // module-level tile-load failure counter (browser diagnostics)
     var maxZoom = 12;
     var baseMaps = {
         dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
@@ -206,6 +207,12 @@ var LeafletAdapter = function () {
                     tile.removeEventListener('load', onLoad);
                     tile.removeEventListener('error', onError);
                     if (aborted) return;
+                    // Make tile-load failures visible from the browser console:
+                    // Leaflet swaps failed tiles for a 1x1 placeholder and the
+                    // engine treats tileerror as settled, so without this a
+                    // dead tile host is silent.
+                    console.warn('[librewxr] tile load failed:', url);
+                    lvTileErrors++;
                     if (!layer._tiles || !layer._tiles[key]) return;
                     if (done) done(new Error('Tile load failed'), tile);
                     layer.off('remove', abortTile);
@@ -224,7 +231,8 @@ var LeafletAdapter = function () {
                 layer.on('remove', abortTile);
                 tile.addEventListener('load', onLoad);
                 tile.addEventListener('error', onError);
-                tile.src = this.getTileUrl(coords);
+                var url = this.getTileUrl(coords);
+                tile.src = url;
                 return tile;
             };
             // MUST be attached before returning: until a layer is on the map
@@ -257,6 +265,16 @@ var LeafletAdapter = function () {
             }
             handle.on('load', finish);
             handle.on('tileerror', finish);
+            // Persistent logging-only listener: records tile failures so a
+            // broken tile host is visible in the browser console. It does NOT
+            // settle the handoff - the first of load/tileerror still finishes
+            // the layer handoff exactly once via `finish` above, and this
+            // listener only logs (and stays attached for the layer's lifetime
+            // so later pan-in failures are caught too).
+            handle.on('tileerror', function (e) {
+                var failedUrl = (e && e.tile && e.tile.src) ? e.tile.src : handle._url;
+                console.warn('[librewxr] tile load failed:', failedUrl);
+            });
         },
 
         setFrameOpacity: function (handle, v) {

@@ -38,7 +38,9 @@ Stdlib only; no third-party dependencies.
 """
 
 import argparse
+import datetime
 import os
+import subprocess
 import sys
 
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -162,6 +164,29 @@ def read_file(path):
 def write_file(path, text):
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
+
+
+def git_short_hash():
+    """Short HEAD hash for the build marker; 'unknown' outside a git repo."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if out.returncode == 0:
+            return out.stdout.strip() or "unknown"
+    except Exception:
+        pass  # no git, or git unavailable: fall back to 'unknown'
+    return "unknown"
+
+
+def build_marker():
+    """Build-stamp comment, emitted right after the GENERATED line."""
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return "<!-- librewxr-examples build: %s git:%s -->" % (ts, git_short_hash())
 
 
 def inline_assets(html):
@@ -289,13 +314,14 @@ def rebuild_site_index_hero():
 
 
 def build_pages(args):
+    marker = build_marker()  # one timestamp/hash per run, stamped into every page
     pages = [
         ("leaflet.html.js", "leaflet.html"),
         ("maplibre.html.js", "maplibre.html"),
         ("hero.html.js", "hero.html"),
     ]
     for shell, out in pages:
-        html = GENERATED_COMMENT + "\n" + inline_assets(read_file(os.path.join(SRC_DIR, shell)))
+        html = GENERATED_COMMENT + "\n" + marker + "\n" + inline_assets(read_file(os.path.join(SRC_DIR, shell)))
         dest = os.path.join(EXAMPLES_DIR, out)
         write_file(dest, html)
         print("wrote %s (%d bytes)" % (os.path.join("examples", out), os.path.getsize(dest)))
@@ -305,7 +331,7 @@ def build_pages(args):
             print("notice: librewxr-site/ not found, skipping --site output")
             return
         for shell, out in pages[:2]:
-            html = GENERATED_COMMENT + "\n" + inline_assets(read_file(os.path.join(SRC_DIR, shell)))
+            html = GENERATED_COMMENT + "\n" + marker + "\n" + inline_assets(read_file(os.path.join(SRC_DIR, shell)))
             key = out[: -len(".html")]  # 'leaflet' / 'maplibre'
             html = make_site_variant(html, SITE_META.format(**SITE_PAGES[key]))
             dest = os.path.join(SITE_EXAMPLES_DIR, out)

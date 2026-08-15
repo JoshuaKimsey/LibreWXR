@@ -1398,6 +1398,12 @@
             buildScrubber();
 
             if (state.mapFrames.length === 0) {
+                // An empty satellite catalog currently prints nothing - the
+                // timestamp just says "No satellite data" - so a production
+                // satellite outage is invisible from the browser. Log it.
+                if (state.layerMode === 'satellite') {
+                    console.warn('[librewxr] satellite catalog section empty - no satellite frames to display');
+                }
                 setTimestampText(noDataMessage());
                 return;
             }
