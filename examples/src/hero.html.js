@@ -239,7 +239,9 @@ LibreWXR.createViewer({
     theme: 'dark',        // CARTO dark basemap
     alerts: true,         // alerts overlay on by default (subtle styling below)
     alertsFillAlpha: 0.10, // hero keeps alerts visually quieter
-    autoplay: false       // don't auto-play; user presses play to start the frame animation
+    autoplay: false,      // don't auto-play; user presses play to start the frame animation
+    nowMarker: true,    // red wall-clock 'now' marker on the scrubber (opt-in)
+    nowMarkerLabel: true, // small current-time label above the now marker
 }, new LeafletAdapter());
 </script>
 

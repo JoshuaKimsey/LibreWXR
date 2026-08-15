@@ -378,7 +378,9 @@ var LeafletAdapter = function () {
 LibreWXR.createViewer({
     apiSources: LVR_API_SOURCES,
     apiFixed: LVR_API_FIXED,
-    view: { lat: 39.8283, lon: -98.5795, zoom: 5, maxZoom: 12 }
+    view: { lat: 39.8283, lon: -98.5795, zoom: 5, maxZoom: 12 },
+    nowMarker: true,        // red line on the scrubber marking the current wall-clock time
+    nowMarkerLabel: true    // small current-time label above the marker
 }, new LeafletAdapter());
 </script>
 

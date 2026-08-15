@@ -608,6 +608,7 @@ body {
     flex-direction: column;
     min-width: 0;
     gap: 2px;
+    padding-left: 24px; /* keep the first tick label clear of the play button */
 }
 .scrubber-track {
     position: relative;
@@ -670,6 +671,35 @@ body {
     cursor: grabbing;
     transform: translate(-50%, -50%) scale(1.15);
     box-shadow: 0 2px 8px rgba(0,0,0,0.35), 0 0 0 6px var(--accent-glow);
+}
+
+/* Now marker (opt-in via config.nowMarker) - wall-clock position indicator */
+.now-marker {
+    position: absolute;
+    top: 50%;
+    width: 2px;
+    height: 16px;
+    border-radius: 1px;
+    background: #e53935;
+    box-shadow: 0 0 3px rgba(229, 57, 53, 0.6);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 1; /* above the rail, below the thumb */
+    transition: left var(--transition-slow);
+}
+/* Current-time label above the now marker (config.nowMarkerLabel) */
+.now-marker-label {
+    position: absolute;
+    bottom: calc(100% + 2px);
+    font-size: 9px;
+    line-height: 1;
+    color: #e53935;
+    white-space: nowrap;
+    transform: translateX(-50%);
+    pointer-events: none;
+    z-index: 1;
+    font-variant-numeric: tabular-nums;
+    transition: left var(--transition-slow);
 }
 
 /* Tick labels */
@@ -753,6 +783,9 @@ body {
     margin-left: var(--space-1);
     text-transform: uppercase;
     letter-spacing: 0.03em;
+}
+.timestamp-display .forecast-label--off {
+    visibility: hidden;
 }
 
 /* === ALERTS POPUP === */

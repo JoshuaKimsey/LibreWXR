@@ -63,6 +63,8 @@
         alerts: false,           // alerts overlay enabled by default?
         alertsFileWarning: false, // MapLibre on file:// can't render GeoJSON (worker blocked)
         autoplay: false,         // start playback after the first catalog load?
+        nowMarker: false,        // red wall-clock 'now' marker on the scrubber?
+        nowMarkerLabel: true,    // show current time above the now marker?
         alertsFillAlpha: null,   // null = read --alert-fill-alpha from CSS
         refreshMs: 5 * 60 * 1000 // auto-refresh cadence (300s)
     };
@@ -78,6 +80,7 @@
     var ALERTS_DEBOUNCE_MS = 800;      // viewport -> alerts re-filter debounce
     var ALERTS_THROTTLE_MS = 3000;      // client-side filter/redraw throttle (global-cache path)
     var RETRY_DELAYS = [5000, 15000, 30000]; // catalog load auto-retry backoff
+    var NOW_MARKER_TICK_MS = 30000; // wall-clock now-marker advance cadence
 
     function createViewer(userConfig, adapter) {
         /* Merge user config over defaults (shells may omit any key). */
@@ -125,6 +128,9 @@
             singleLoads: 0,         // concurrent single-frame loads in flight
             isDragging: false,
             refreshTimer: null,
+            nowMarkerEl: null,      // opt-in wall-clock marker element (config.nowMarker)
+            nowMarkerTimer: null,
+            nowMarkerLabelEl: null,
             refreshInFlight: false,
             retryAttempt: 0,
             lastCatalogLoad: 0,
@@ -340,11 +346,11 @@
             var el = byId('lv-timestamp');
             if (!el) return;
             var timeStr = formatTime(frame.time);
-            if (isNowcastFrame(position)) {
-                el.innerHTML = timeStr + '<span class="forecast-label">Forecast</span>';
-            } else {
-                el.textContent = timeStr;
-            }
+            // Always render the Forecast label so its width stays reserved in the
+            // flex row; toggling visibility (instead of adding/removing the span)
+            // keeps the scrubber track from resizing when the label appears.
+            var labelCls = isNowcastFrame(position) ? 'forecast-label' : 'forecast-label forecast-label--off';
+            el.innerHTML = timeStr + '<span class="' + labelCls + '">Forecast</span>';
         }
 
         /* === FRAME DISPLAY ===
@@ -672,24 +678,59 @@
             state.scrubberRailDivider = railDivider;
             state.scrubberRailNowcast = railNowcast;
 
+            // Opt-in wall-clock 'now' marker (config.nowMarker): a thin red bar
+            // that advances along the track as real time passes. Re-created on
+            // every rebuild because track.innerHTML was cleared above.
+            state.nowMarkerEl = null;
+            state.nowMarkerLabelEl = null;
+            if (config.nowMarker) {
+                var nowMarker = document.createElement('div');
+                nowMarker.className = 'now-marker';
+                track.appendChild(nowMarker);
+                state.nowMarkerEl = nowMarker;
+                if (config.nowMarkerLabel) {
+                    var nowLabel = document.createElement('span');
+                    nowLabel.className = 'now-marker-label';
+                    track.appendChild(nowLabel);
+                    state.nowMarkerLabelEl = nowLabel;
+                }
+                if (!state.nowMarkerTimer) {
+                    state.nowMarkerTimer = setInterval(updateNowMarker, NOW_MARKER_TICK_MS);
+                }
+                updateNowMarker();
+            }
+
             // Tick label density: skip some when there are many frames.
             var step = 1;
             if (total > 20) step = 3;
             else if (total > 12) step = 2;
 
-            var pastCount = state.nowcastStartIndex >= 0 ? state.nowcastStartIndex : total;
-            var pastPct = (pastCount / total) * 100;
+            var hasNowcast = state.nowcastStartIndex >= 0;
+            var pastCount = hasNowcast ? state.nowcastStartIndex : total;
+            // Place the past/nowcast boundary on the same frame-index scale the
+            // thumb and tick labels use (i / (total - 1)), anchored at the "now"
+            // frame (the last past frame), so the playhead at the current time
+            // sits exactly on the divider instead of half a frame to its left.
+            var pastPct = hasNowcast
+                ? (total > 1 ? (Math.max(0, pastCount - 1) / (total - 1)) * 100 : 0)
+                : 100;
             railPast.style.width = pastPct + '%';
             railDivider.style.display = state.nowcastStartIndex >= 0 ? '' : 'none';
             railNowcast.style.display = state.nowcastStartIndex >= 0 ? '' : 'none';
 
-            // Divider marker between past and nowcast rails.
-            if (state.nowcastStartIndex >= 0) {
-                var divEl = document.createElement('span');
-                divEl.className = 'tick-divider';
-                divEl.style.left = pastPct + '%';
-                divEl.textContent = '|';
-                ticks.appendChild(divEl);
+            // Divider marker between past and nowcast rails. Skip the glyph when
+            // a tick label already occupies the now index (dense layouts), since
+            // the divider now sits exactly on that index and they would overlap.
+            if (hasNowcast) {
+                var nowIndex = pastCount - 1;
+                var tickAtNow = nowIndex >= 0 && (nowIndex % step) === 0;
+                if (!tickAtNow) {
+                    var divEl = document.createElement('span');
+                    divEl.className = 'tick-divider';
+                    divEl.style.left = pastPct + '%';
+                    divEl.textContent = '|';
+                    ticks.appendChild(divEl);
+                }
             }
 
             for (var i = 0; i < total; i += step) {
@@ -748,6 +789,47 @@
                 var idx = parseInt(ticks[i].getAttribute('data-index'), 10);
                 if (idx === state.animationPosition) ticks[i].classList.add('active-tick');
                 else ticks[i].classList.remove('active-tick');
+            }
+        }
+
+        /* Position the opt-in wall-clock 'now' marker: locate the two frames
+           bracketing the current time and interpolate on the same index scale
+           the thumb and tick labels use (i / (total - 1)), clamped to the
+           track ends. */
+        function updateNowMarker() {
+            var el = state.nowMarkerEl;
+            if (!el) return;
+            var frames = state.mapFrames;
+            if (!frames || frames.length < 2) {
+                el.style.display = 'none';
+                if (state.nowMarkerLabelEl) state.nowMarkerLabelEl.style.display = 'none';
+                return;
+            }
+            el.style.display = '';
+            if (state.nowMarkerLabelEl) state.nowMarkerLabelEl.style.display = '';
+            var nowSec = Date.now() / 1000;
+            var total = frames.length;
+            var pos;
+            if (nowSec <= frames[0].time) {
+                pos = 0;
+            } else if (nowSec >= frames[total - 1].time) {
+                pos = total - 1;
+            } else {
+                pos = total - 1;
+                for (var i = 0; i < total - 1; i++) {
+                    var t0 = frames[i].time;
+                    var t1 = frames[i + 1].time;
+                    if (nowSec >= t0 && nowSec < t1) {
+                        pos = t1 > t0 ? i + (nowSec - t0) / (t1 - t0) : i;
+                        break;
+                    }
+                }
+            }
+            var leftPct = (pos / (total - 1)) * 100;
+            el.style.left = leftPct + '%';
+            if (state.nowMarkerLabelEl) {
+                state.nowMarkerLabelEl.style.left = leftPct + '%';
+                state.nowMarkerLabelEl.textContent = formatTime(nowSec);
             }
         }
 
