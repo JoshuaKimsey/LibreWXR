@@ -433,6 +433,28 @@ body {
     stroke: var(--accent);
 }
 
+/* Alerts toggle on the map (hero only): same look as the locate button,
+   stacked directly above it with a --space-2 gap. The engine's
+   updateAlertsButton() toggles the `.active` class and `aria-pressed`
+   together; the `aria-pressed` selector also covers the pre-init markup so
+   the default ON state (hero config has alerts: true) renders accent from
+   first paint, while OFF dims the icon against the neutral card. */
+.locate-btn.alerts-btn ~ .locate-btn {
+    top: calc(var(--space-3) + 36px + var(--space-2));
+}
+.locate-btn.alerts-btn.active,
+.locate-btn.alerts-btn[aria-pressed="true"] {
+    border-color: var(--accent);
+    box-shadow: var(--shadow-sm), 0 0 0 3px var(--accent-glow);
+}
+.locate-btn.alerts-btn.active svg,
+.locate-btn.alerts-btn[aria-pressed="true"] svg {
+    stroke: var(--accent);
+}
+.locate-btn.alerts-btn[aria-pressed="false"] svg {
+    opacity: 0.45;
+}
+
 /* === ERROR OVERLAY === */
 .error-overlay {
     position: absolute;
@@ -925,6 +947,7 @@ body {
     .scrubber-thumb { width: 16px; height: 16px; }
     .locate-btn { width: 32px; height: 32px; top: var(--space-2); right: var(--space-2); }
     .locate-btn svg { width: 16px; height: 16px; }
+    .locate-btn.alerts-btn ~ .locate-btn { top: calc(var(--space-2) + 32px + var(--space-2)); }
     .preload-indicator { top: var(--space-2); left: var(--space-2); }
     .tick-label { font-size: 9px; }
 }

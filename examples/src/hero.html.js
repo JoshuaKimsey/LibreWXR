@@ -13,7 +13,7 @@
 </head>
 <body data-theme="dark">
 
-<!-- Map (hero: no toolbar, no options panel - locked config below) -->
+<!-- Map (hero: no toolbar, no options panel - locked config below; map buttons: alerts toggle + locate) -->
 <div id="lv-map">
     <div class="preload-indicator" id="lv-preload">
         <span id="lv-preload-text">Loading frames 0/0</span>
@@ -24,6 +24,9 @@
         <button type="button" class="retry-btn" id="lv-error-retry" style="display:none">Retry</button>
     </div>
     <div class="refresh-status" id="lv-refresh-status" role="status"></div>
+    <button type="button" class="locate-btn alerts-btn" id="lv-alerts" aria-pressed="true" aria-label="Toggle weather alerts" title="Toggle weather alerts">
+        <svg viewBox="0 0 24 24"><path d="M12 3 L20 19 H4 Z"/><line x1="12" y1="10" x2="12" y2="15"/><circle cx="12" cy="17.5" r="1"/></svg>
+    </button>
     <button type="button" class="locate-btn" id="lv-locate" aria-label="Locate me" title="Locate me">
         <svg viewBox="0 0 24 24">
             <circle cx="12" cy="12" r="3"/>
@@ -236,7 +239,7 @@ LibreWXR.createViewer({
     theme: 'dark',        // CARTO dark basemap
     alerts: true,         // alerts overlay on by default (subtle styling below)
     alertsFillAlpha: 0.10, // hero keeps alerts visually quieter
-    autoplay: true        // start playback once the catalog loads
+    autoplay: false       // don't auto-play; user presses play to start the frame animation
 }, new LeafletAdapter());
 </script>
 
