@@ -138,6 +138,8 @@ class Source:
     label: str
     color: str
     polygon: np.ndarray  # shape (N, 2), [lon, lat]
+    alpha: float | None = None  # per-source fill alpha override (None = render()'s alpha_fill)
+    legend_alpha: float | None = None  # per-source legend swatch override (None = derived from alpha)
 
 
 def project_grid_perimeter(
@@ -316,13 +318,25 @@ def build_radar_sources() -> list[Source]:
     # Rain Rate GLB-5 blend) ingested as a single coarse global radar
     # region on a 60S-70N band at all longitudes; the always-on bottom
     # compositing tier beneath every finer radar composite.  The band is
-    # split into two half-world boxes at the ±180° seam — a single
+    # split into two half-world boxes at the -180/+180 seam — a single
     # -180..180 ring collapses to a degenerate line under the renderer's
     # antimeridian unwrap.  The two pieces share one label so the legend
-    # shows a single entry.
+    # shows a single entry.  Both pieces are appended first, and list
+    # order is draw order here (uniform zorder=2, no sorting), so the
+    # band always renders beneath every radar polygon.  Its low fill
+    # alpha keeps it a muted backdrop tier — darkening open-ocean
+    # regions just enough to read as the always-on global band without
+    # overpowering the regional sources drawn on top; the legend swatch
+    # keeps a separate, readable alpha.
     rrqpe_color = "#7f7f7f"
-    radar.append(Source("NOAA RRQPE", rrqpe_color, latlon_box(-180, 0, -60, 70)))
-    radar.append(Source("NOAA RRQPE", rrqpe_color, latlon_box(0, 180, -60, 70)))
+    radar.append(Source(
+        "NOAA RRQPE", rrqpe_color, latlon_box(-180, 0, -60, 70),
+        alpha=0.20, legend_alpha=0.50,
+    ))
+    radar.append(Source(
+        "NOAA RRQPE", rrqpe_color, latlon_box(0, 180, -60, 70),
+        alpha=0.20, legend_alpha=0.50,
+    ))
 
     # MRMS — five composites sharing one upstream operator (NOAA) and
     # one legend swatch.  Each composite gets its own union polygon
@@ -665,6 +679,9 @@ def _draw_polygon(ax, src: Source, alpha_fill: float, hatch: str | None) -> None
     and the others are clipped away by matplotlib.  This avoids the
     half-closed sliver artefact you get from splitting the polygon at
     the wrap and rendering each segment separately.
+
+    A source with its own ``alpha`` override (e.g. the muted RRQPE
+    backdrop band) is drawn at that alpha instead of ``alpha_fill``.
     """
     poly = src.polygon
     if poly.shape[0] < 3:
@@ -679,7 +696,8 @@ def _draw_polygon(ax, src: Source, alpha_fill: float, hatch: str | None) -> None
         ax.fill(
             shifted_lon, lat,
             facecolor=src.color, edgecolor=src.color,
-            alpha=alpha_fill, linewidth=1.2,
+            alpha=src.alpha if src.alpha is not None else alpha_fill,
+            linewidth=1.2,
             hatch=hatch, zorder=2,
         )
 
@@ -757,7 +775,12 @@ def render(
             label = f"{key} ({len(distinct)} composites)"
         handles.append(Patch(
             facecolor=s.color, edgecolor=s.color,
-            alpha=min(0.95, alpha_fill + 0.10), hatch=hatch,
+            alpha=(
+                s.legend_alpha
+                if s.legend_alpha is not None
+                else min(0.95, (s.alpha if s.alpha is not None else alpha_fill) + 0.10)
+            ),
+            hatch=hatch,
             label=label,
         ))
     ax.legend(
