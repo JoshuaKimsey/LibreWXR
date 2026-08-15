@@ -297,15 +297,15 @@ class Settings(BaseSettings):
     # (1/2/4 → 0.02°/0.04°/0.08°).  2 is the default: each decoded
     # ~117 MB float32 frame becomes a ~29 MB uint8 store.
     rrqpe_downsample: int = 2
-    # Maximum tolerated publish lag — the newest stored scan's age,
-    # floored to whole 10-min slots — before the source declines the
-    # region for ALL frames (product severely late, >= 2 missed scans;
-    # self-heals next fetch cycle; the fetcher's carry-forward covers up
-    # to two intervals, then tiles fall through to NWP fill).  Per-frame
-    # matching is lag-shifted relative matching: each frame is served the
-    # scan ``lag`` seconds its senior, so the per-frame slot slack is one
-    # scan interval (600 s), not this value.  Future/nowcast timestamps
-    # are rejected by the wall-clock observed-only gate in the RRQPE grid.
+    # Match slack around the ideal constant-shift target slot: every frame
+    # is served the scan exactly ``RRQPE_LAG_SECONDS`` (30 min) its senior
+    # (see the RRQPE grid), and this value bounds how far the nearest
+    # stored scan may sit from that ideal target.  At the default it
+    # tolerates up to ~2 consecutive missed scan slots before the region
+    # declines for the affected frames — carry-forward / NWP fill take
+    # over until the next fetch cycle heals.  Not a publish-lag cap: the
+    # shift is constant by design.  Future/nowcast timestamps are
+    # rejected by the wall-clock observed-only gate in the RRQPE grid.
     rrqpe_match_tolerance_seconds: int = 1800
     # North American NWP source for the chain. "ifs" uses ECMWF IFS as the
     # only source (current behavior). "hrrr" prepends NOAA HRRR-subh as the

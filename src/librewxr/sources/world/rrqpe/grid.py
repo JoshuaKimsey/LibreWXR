@@ -6,7 +6,7 @@ The RRQPE GLB-5 blend is a satellite-derived 10-minute rain-rate product
 built by NOAA's Enterprise Rain Rate algorithm from the geostationary
 constellation.  It is *observed* precipitation, ingested as a radar
 source: the package's ``source.py`` serves its frames into the FrameStore
-via the standard RadarSource fetch protocol (lag-shifted relative
+via the standard RadarSource fetch protocol (constant-shift relative
 matching — see below), and the region participates in the radar
 compositor, nowcast extrapolation, carry-forward, and state sync like
 any other region.
@@ -34,15 +34,16 @@ Valid time = the filename / global-attr ``s`` timestamp (scan start,
 10-min aligned).  Median publish lag ~17 min; the configurable publish
 delay keeps the fetch window clear of not-yet-published slots.
 
-Frame → scan matching is *lag-shifted relative matching*: because the
-newest scan is always ~15-25 min behind the newest radar frame, every
-past frame is served the scan ``lag`` seconds its senior (where ``lag``
-is the newest scan's current age, floored to whole 10-min slots).  The
-resulting ~15-25 min uniform temporal fib is deliberate — absolute
-nearest-match would clamp the leading 2-3 frames onto the same newest
-scan and the fill would freeze, then lurch.  Lag-shifted matching steps
-the fill every frame: less accurate in absolute time, but smooth — and
-still observational.
+Frame → scan matching is *constant-shift relative matching*: every past
+frame is served the scan exactly ``RRQPE_LAG_SECONDS`` (30 min) its
+senior.  A constant shift keeps the frame → scan mapping deterministic
+1:1 — the target 30-min-old scan is essentially always published given
+the product's ~13-25 min publish latency, so the target slot exists every
+cycle and consecutive frames step one scan per frame (no freezing, no
+skipping).  The uniform ~30 min temporal fib is deliberate — honest
+staleness over fabricated motion: all frames show scans ~30 min older
+than their label, but animation steps smoothly and the data is still
+observational.
 """
 from __future__ import annotations
 
@@ -93,6 +94,17 @@ GLB5_KEY_RE = re.compile(
 # Scan cadence — 10 minutes.  Used to enumerate the needed scan-start
 # slots in the fetch window.
 SCAN_INTERVAL_SECONDS = 600
+
+# Constant frame→scan shift: every frame is served the scan exactly 3
+# slots (30 min) its senior.  A FIXED shift makes the mapping
+# deterministic 1:1 — the target 30-min-old scan is essentially always
+# published given the product's ~13-25 min publish latency, so the
+# target slot exists every cycle and consecutive frames step one scan
+# per frame (no freezing, no skipping).  The fib is therefore constant
+# ~30 min (previously 15-25 min and wobbling as latency varied); scans
+# only miss on genuine NOAA scan gaps, which the match tolerance
+# absorbs.
+RRQPE_LAG_SECONDS = 3 * SCAN_INTERVAL_SECONDS
 
 # Throttle between scan-store refresh passes.  The fetch cycle is 600 s,
 # but the source's lazy refresh may be invoked twice in quick succession
@@ -231,8 +243,8 @@ class RRQPEGrid:
 
     Fetch-side only: downloads any missing 10-min scan slots in the
     recent window, decodes them to uint8 dBZ-encoded memmaps keyed by
-    scan timestamp (``dict[int, np.ndarray]``), and answers lag-shifted
-    relative matches (see the module docstring).  The radar source
+    scan timestamp (``dict[int, np.ndarray]``), and answers constant-
+    shift relative matches (see the module docstring).  The radar source
     (``source.RRQPESource``) drives the fetch cycle and serves matched
     scans as radar frames; the frames themselves flow through the
     FrameStore's state sync, so this class carries no cross-process
@@ -315,20 +327,20 @@ class RRQPEGrid:
         os.replace(tmp, final)
         return np.memmap(final, dtype=data.dtype, mode="r", shape=data.shape)
 
-    # ── Frame → scan matching (lag-shifted relative) ──────────────────
+    # ── Frame → scan matching (constant shift) ────────────────────────
 
     def match_timestamp(self, timestamp: int | None) -> int | None:
-        """Lag-shifted relative match: serve the frame the scan ``lag``
-        seconds its senior so client animations stay smooth.
+        """Constant-shift relative match: serve the frame the scan exactly
+        ``RRQPE_LAG_SECONDS`` (30 min) its senior.
 
-        The product's newest scan is always ~15-25 min behind the newest
-        radar frame (publish latency).  Absolute nearest-match would clamp
-        the leading 2-3 frames onto the same newest scan — the fill
-        freezes for 2-3 animation frames, then lurches.  Instead every
-        past frame gets its own scan, shifted by the current lag: a
-        uniform temporal fib (~15-25 min) that steps the fill every
-        frame.  Less accurate in absolute time, but smooth — and still
-        observational.
+        A FIXED shift makes the frame → scan mapping deterministic 1:1 —
+        the target 30-min-old scan is essentially always published given
+        the product's ~13-25 min publish latency, so the target slot
+        exists every cycle and consecutive frames step one scan per frame
+        (no freezing, no skipping).  The fib is constant ~30 min; the
+        match tolerance only absorbs genuine NOAA scan gaps (missed
+        slots).  The wall-clock gate remains the observed-only
+        enforcement: future/nowcast timestamps are always rejected.
         """
         if timestamp is None:
             if not self._sorted_timestamps:
@@ -343,19 +355,7 @@ class RRQPEGrid:
         ts_list = self._sorted_timestamps
         if not ts_list:
             return None
-        # Current publish lag, floored to whole 10-min slots.  The newest
-        # stored scan is (now - newest) seconds old; every query is shifted
-        # back by that lag so the newest past frame maps to the newest scan
-        # and consecutive frames map to consecutive scans (1:1 distinct).
-        newest = ts_list[-1]
-        now = int(time.time())
-        lag_slots = max(0, (now - newest) // SCAN_INTERVAL_SECONDS)
-        lag = lag_slots * SCAN_INTERVAL_SECONDS
-        if lag > settings.rrqpe_match_tolerance_seconds:
-            # Product severely late (>= 2 missed scans): decline the whole
-            # source so the models fill; self-heals next fetch cycle.
-            return None
-        shifted = timestamp - lag
+        shifted = timestamp - RRQPE_LAG_SECONDS
         idx = np.searchsorted(ts_list, shifted)
         if idx == 0:
             nearest = ts_list[0]
@@ -365,9 +365,10 @@ class RRQPEGrid:
             before = ts_list[idx - 1]
             after = ts_list[idx]
             nearest = before if shifted - before <= after - shifted else after
-        # One-slot slack: a single missed scan slot falls to its neighbor,
-        # never a blink.
-        if abs(nearest - shifted) <= SCAN_INTERVAL_SECONDS:
+        # Tolerance slack around the ideal shifted target: absorbs missed
+        # scan slots (a neighbor is served instead of a blink) and
+        # declines when the store is too stale to serve anything honest.
+        if abs(nearest - shifted) <= settings.rrqpe_match_tolerance_seconds:
             return nearest
         return None
 

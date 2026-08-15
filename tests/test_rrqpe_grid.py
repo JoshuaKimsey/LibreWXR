@@ -28,7 +28,9 @@ from librewxr.sources.world.rrqpe.grid import (
     NATIVE_COLS,
     NATIVE_PIXEL,
     NATIVE_ROWS,
+    RRQPE_LAG_SECONDS,
     RRQPEGrid,
+    SCAN_INTERVAL_SECONDS,
     block_nanmean_downsample,
     downsampled_shape,
     effective_grid,
@@ -204,7 +206,7 @@ class TestRegionRegistration:
         assert min(lons) == -180.0 and max(lons) == 180.0
 
 
-# ── Lag-shifted relative matching ──────────────────────────────────────
+# ── Constant-shift frame → scan matching ───────────────────────────────
 
 
 def _floor_now() -> int:
@@ -212,23 +214,24 @@ def _floor_now() -> int:
     return (int(time.time()) // 600) * 600
 
 
-class TestLagShift:
-    """Lag-shifted 1:1 matching: frames are served the scan ``lag`` seconds
-    their senior so animations step every frame instead of clamping the
-    leading frames onto the newest scan.
+class TestConstantShift:
+    """Constant-shift 1:1 matching: every frame is served the scan exactly
+    ``RRQPE_LAG_SECONDS`` (30 min) its senior — deterministic, so
+    consecutive frames step one scan per frame.
 
     All timestamps are wall-clock-relative (10-min aligned slots) so the
-    lag math serves every query.  ``_store_scans`` simulates a ~20-min
-    publish lag: scans at the last ``len(values)`` aligned slots ending
-    at ``floor_now - 1200``.
+    shift math serves every query.  ``_store_scans`` places scans at the
+    constant-shift targets of the newest frames: the last ``len(values)``
+    aligned slots ending at ``floor_now - RRQPE_LAG_SECONDS``.
     """
 
     @staticmethod
     def _store_scans(values):
         """Inject scans at 10-min-aligned slots ending at ``floor_now -
-        1200`` (a ~20-min publish lag).  ``values`` are oldest -> newest."""
+        RRQPE_LAG_SECONDS`` (the constant-shift target of the newest
+        frame).  ``values`` are oldest -> newest."""
         floor_now = _floor_now()
-        newest = floor_now - 1200
+        newest = floor_now - RRQPE_LAG_SECONDS
         grid = RRQPEGrid(downsample=1)
         for i, value in enumerate(values):
             _inject_frame(grid, newest - (len(values) - 1 - i) * 600, value)
@@ -243,42 +246,54 @@ class TestLagShift:
         frame = grid.frame_at(match)
         return None if frame is None else int(np.asarray(frame).flat[0])
 
-    def test_newest_frame_maps_to_newest_scan(self):
-        grid, floor_now, _ = self._store_scans([101, 102, 103, 104])
-        assert self._matched_value(grid, floor_now) == 104
-
-    def test_consecutive_frames_map_to_consecutive_scans(self):
-        """1:1 distinct: every past frame gets its own scan, stepping
-        backward through the store (values oldest -> newest: 101..104)."""
+    def test_frame_maps_to_three_slots_older_scan(self):
+        """Frame F is served the scan at F - RRQPE_LAG_SECONDS exactly."""
         grid, floor_now, _ = self._store_scans([101, 102, 103, 104])
         assert self._matched_value(grid, floor_now) == 104
         assert self._matched_value(grid, floor_now - 600) == 103
-        assert self._matched_value(grid, floor_now - 1800) == 101
+        assert self._matched_value(grid, floor_now - 1200) == 102
+
+    def test_deterministic_distinct_mapping_no_duplicates(self):
+        """With the newest scan exactly 3 slots behind and no newer scan
+        present (simulate worst latency), consecutive frame slots still
+        map to consecutive DISTINCT scans — the regression the constant
+        shift fixes (dynamic lag used to wobble 2-3 slots, freezing or
+        skipping frames)."""
+        grid, floor_now, _ = self._store_scans([101, 102, 103, 104])
+        matches = [
+            grid.match_timestamp(floor_now),
+            grid.match_timestamp(floor_now - 600),
+            grid.match_timestamp(floor_now - 1200),
+        ]
+        assert None not in matches
+        assert len(set(matches)) == 3
+        assert matches[1] == matches[0] - 600
+        assert matches[2] == matches[1] - 600
 
     def test_missing_slot_falls_to_neighbor(self):
-        """A single missed scan slot degrades to the adjacent scan — never a
-        blink (zeros) and never a decline (None)."""
+        """A single missed scan slot degrades to the adjacent scan — never
+        a blink (None)."""
         grid, floor_now, newest = self._store_scans([101, 102, 103, 104])
-        # Delete the scan that the floor_now - 600 frame maps to (value 103).
+        # Delete the scan that the floor_now - 600 frame targets (103).
         del grid._timesteps[newest - 600]
         grid._sorted_timestamps = sorted(grid._timesteps)
         assert self._matched_value(grid, floor_now - 600) in (102, 104)
 
-    def test_lag_at_cap_inclusive_serves(self):
-        """Lag == tolerance (1800 s, floored) still serves."""
-        now = int(time.time())
+    def test_beyond_tolerance_declines(self):
+        """Only scan ≥ tolerance from the shifted target: no match."""
+        floor_now = _floor_now()
         grid = RRQPEGrid(downsample=1)
-        _inject_frame(grid, now - 1900, 111)   # lag = 1800, at cap
-        assert self._matched_value(grid, now) == 111
+        _inject_frame(grid, floor_now - 4800, 111)
+        assert grid.match_timestamp(floor_now) is None
+        assert self._matched_value(grid, floor_now) is None
 
-    def test_lag_beyond_cap_declines_whole_source(self):
-        """Lag > tolerance (2400 s) declines the whole source: no past
-        query matches."""
-        now = int(time.time())
+    def test_dead_store_declines(self):
+        """Newest scan ~2 h old: the region declines for current frames."""
+        floor_now = _floor_now()
         grid = RRQPEGrid(downsample=1)
-        _inject_frame(grid, now - 2500, 111)   # lag = 2400 > 1800
-        assert grid.match_timestamp(now) is None
-        assert grid.match_timestamp(now - 600) is None
+        _inject_frame(grid, floor_now - 7200, 111)
+        assert grid.match_timestamp(floor_now) is None
+        assert grid.match_timestamp(floor_now - 600) is None
 
     def test_empty_store_false(self):
         grid = RRQPEGrid()
@@ -292,8 +307,9 @@ class TestLagShift:
 
 
 class TestWallClockGate:
-    """The hard wall-clock gate rejects future-dated queries even when they
-    fall inside the staleness tolerance (the nowcast-leak regression pin).
+    """The hard wall-clock gate rejects future-dated queries even when a
+    constant-shift match would otherwise exist (the nowcast-leak
+    regression pin).
 
     Timestamps here are relative to the current wall clock so the pins
     stay valid no matter when the suite runs: stored scans are always in
@@ -301,16 +317,15 @@ class TestWallClockGate:
     """
 
     def test_newest_frame_matches_newest_past_query(self):
-        """Frame 20 min old answers a 10-min-old query — the production case
-        that the 1800 s tolerance exists to serve."""
+        """A past query near the store's newest scan still matches."""
         now = int(time.time())
         grid = RRQPEGrid(downsample=1)
         _inject_frame(grid, now - 1200, 100)
         assert grid.match_timestamp(now - 600) is not None
 
     def test_future_ts_within_tolerance_still_rejected(self):
-        """now + 600 is 1800 s from the stored scan — inside the tolerance —
-        but future-dated, so the wall-clock gate must reject it."""
+        """now + 600 is within the slack of a stored scan — but
+        future-dated, so the wall-clock gate must reject it."""
         now = int(time.time())
         grid = RRQPEGrid(downsample=1)
         _inject_frame(grid, now - 1200, 100)
@@ -321,13 +336,6 @@ class TestWallClockGate:
         grid = RRQPEGrid(downsample=1)
         _inject_frame(grid, now - 1200, 100)
         assert grid.match_timestamp(now + 600) is None
-
-    def test_stale_past_frame_rejected(self):
-        """2100 s staleness is beyond the 1800 s tolerance for past frames."""
-        now = int(time.time())
-        grid = RRQPEGrid(downsample=1)
-        _inject_frame(grid, now - 2400, 100)
-        assert grid.match_timestamp(now - 300) is None
 
 
 # ── Downsample ─────────────────────────────────────────────────────────
@@ -523,8 +531,9 @@ class TestFetch:
             assert slot_b in grid._timesteps
             assert grid.timestep_count == 2
             assert grid.reference_time == slot_b
-            # The newest past frame maps (lag-shifted) onto the newest scan.
-            assert grid.match_timestamp(now_ts) == slot_b
+            # The newest past frame maps (constant shift) onto the scan
+            # exactly 30 min its senior.
+            assert grid.match_timestamp(now_ts) == slot_a
             # Decode pipeline produced non-zero encoded data (rate 3 mm/h).
             assert int(np.asarray(grid._timesteps[slot_a]).max()) > 0
         finally:
@@ -619,15 +628,17 @@ def _rrqpe_region(factor: int = 4) -> RegionDef:
 
 
 class TestFetchFrameSlotting:
-    """Radar-source protocol: lag-shifted slotting with distinct scans per
-    frame slot, None beyond the tolerance cap, and the scan-store refresh
-    only on the newest-slot request."""
+    """Radar-source protocol: constant-shift slotting with distinct scans
+    per frame slot, None when the store is too stale, and the scan-store
+    refresh only on the newest-slot request."""
 
     @staticmethod
     def _store_scans(grid, values):
-        """Inject scans at aligned slots ending at ``floor_now - 1200``."""
+        """Inject scans at aligned slots ending at ``floor_now -
+        RRQPE_LAG_SECONDS`` (the constant-shift target of the newest
+        frame)."""
         floor_now = _floor_now()
-        newest = floor_now - 1200
+        newest = floor_now - RRQPE_LAG_SECONDS
         for i, value in enumerate(values):
             arr = np.full(grid.effective_shape, value, dtype=np.uint8)
             grid._timesteps[newest - (len(values) - 1 - i) * 600] = arr
@@ -656,14 +667,14 @@ class TestFetchFrameSlotting:
             assert o.dtype == np.uint8
             assert o.shape == grid.effective_shape
 
-    async def test_fetch_frame_none_beyond_tolerance_cap(self, monkeypatch):
-        """A scan more than ``rrqpe_match_tolerance_seconds`` old declines
-        the whole source — region absent from every frame."""
-        now = int(time.time())
+    async def test_fetch_frame_dead_store_declines(self, monkeypatch):
+        """A scan store far from the constant-shift target (dead, ~2 h
+        old) declines the region — absent from every frame."""
+        floor_now = _floor_now()
         grid = RRQPEGrid(downsample=4)
         arr = np.full(grid.effective_shape, 111, dtype=np.uint8)
-        grid._timesteps[now - 2500] = arr
-        grid._sorted_timestamps = [now - 2500]
+        grid._timesteps[floor_now - 7200] = arr
+        grid._sorted_timestamps = [floor_now - 7200]
 
         async def _no_refresh(**kwargs):
             pass
@@ -674,7 +685,7 @@ class TestFetchFrameSlotting:
         assert await src.fetch_frame(region, 0) is None
         assert await src.fetch_frame(region, 20) is None
 
-    async def test_fetch_archive_frame_uses_lag_shift(self, monkeypatch):
+    async def test_fetch_archive_frame_uses_constant_shift(self, monkeypatch):
         grid = RRQPEGrid(downsample=4)
         self._store_scans(grid, [101, 102, 103, 104])
         src = RRQPESource(grid)
@@ -695,7 +706,7 @@ class TestFetchFrameSlotting:
     async def test_scan_refresh_triggered_only_on_newest_slot(self, monkeypatch):
         """The bulk scan-store refresh runs on the minutes_ago==0 request
         only — once per cycle — with a history window covering the whole
-        frame span plus the lag tolerance."""
+        frame span plus the tolerance and one extra scan interval."""
         grid = RRQPEGrid(downsample=4)
         calls = []
 
@@ -714,6 +725,7 @@ class TestFetchFrameSlotting:
         expected_history = (
             settings.max_frames * settings.fetch_interval
             + settings.rrqpe_match_tolerance_seconds
+            + SCAN_INTERVAL_SECONDS
         )
         assert calls[0]["history_seconds"] == expected_history
 
