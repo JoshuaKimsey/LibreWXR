@@ -161,7 +161,7 @@ More frames = longer animation history = more RAM usage.
 US-side radar data source — applies to USCOMP, AKCOMP, HICOMP, PRCOMP, and GUCOMP only. **Canada (CACOMP) is controlled independently** by `LIBREWXR_CA_SOURCE`. Three modes:
 
 - **`mrms_fallback`** (default) — NCEP MRMS quality-controlled mosaics as the primary source, with IEM NEXRAD fallback when MRMS fails for a specific frame. Best coverage.
-- **`mrms`** — NCEP MRMS only, no fallback. Pure MRMS where available; gaps show as empty (the global ECMWF IFS layer still fills in outside radar coverage). Least bandwidth.
+- **`mrms`** — NCEP MRMS only, no fallback. Pure MRMS where available; gaps inside the RRQPE band fall through to the global observed RRQPE layer first, then ECMWF IFS (poleward / fringe / RRQPE-decline). Least bandwidth.
 - **`iem`** — Legacy mode. IEM NEXRAD N0Q only. NEXRAD-only without quality control. Simplest and most battle-tested, but fewer radars and no QC.
 
 | | |
@@ -177,7 +177,7 @@ US-side radar data source — applies to USCOMP, AKCOMP, HICOMP, PRCOMP, and GUC
 Canada-side radar data source — applies to CACOMP only. Fully independent of `LIBREWXR_NA_SOURCE`: any US choice can be combined with any Canada choice. Three modes:
 
 - **`mrms_with_msc_blend`** (default) — NCEP MRMS as the primary source covering southern Canada via its CONUS product, with MSC Canada blended in to fill gaps north of MRMS's bbox (latitudes north of ~55°N) and as a fallback if MRMS fails. Best coverage.
-- **`mrms`** — NCEP MRMS only via the CONUS product. Southern Canada is covered; northern Canada (outside the MRMS bbox) falls through to the global ECMWF IFS layer. No MSC fetched.
+- **`mrms`** — NCEP MRMS only via the CONUS product. Southern Canada is covered; northern Canada (outside the MRMS bbox) falls through to the global observed RRQPE layer first, then ECMWF IFS. No MSC fetched.
 - **`msc`** — MSC Canada standalone — Environment and Climate Change Canada's native composite covering all of Canada (RADAR_1KM_RRAI via WMS, MRMS makes no contribution to CACOMP).
 
 | | |
@@ -642,15 +642,15 @@ Seconds for render workers to wait for the first `state.json` on cold start befo
 
 ## ECMWF IFS Global Coverage
 
-LibreWXR uses ECMWF IFS 9 km global data from [Open-Meteo](https://open-meteo.com/) S3 as the global base layer of its NWP chain. IFS provides:
+LibreWXR uses ECMWF IFS 9 km global data from [Open-Meteo](https://open-meteo.com/) S3 as the terminal model of its NWP chain. IFS provides:
 
-- Precipitation animation everywhere the regional NWP chain doesn't reach
+- Model precipitation everywhere the regional NWP chain doesn't reach — for past frames that means poleward of the RRQPE band, the 2-degree fringe excluded by RRQPE's coverage polygon (68-70N, -60 to -58S), and wherever RRQPE declines (missed scans / stale store); within the band, past/current frames come from the always-on observed radar region NOAA RRQPE (below)
 - Per-pixel snow/rain classification
-- Nowcast extrapolation outside regional model coverage
+- The model side of the nowcast blend tail (RRQPE joins nowcast extrapolation like any radar region)
 
 ### `LIBREWXR_ECMWF_ENABLED`
 
-Disable ECMWF IFS entirely. Useful only for isolating regional NWP layers during debugging — anywhere outside the regional models will then simply show zero precipitation.
+Disable ECMWF IFS entirely. Useful only for isolating regional NWP layers during debugging — the always-on observed radar region RRQPE (see below) still renders the 60S-70N band, so only pixels poleward of the band or in the fringe excluded by RRQPE's coverage polygon will then simply show zero precipitation.
 
 | | |
 |---|---|
@@ -1487,6 +1487,8 @@ Each worker process holds its own copy of radar frames, NWP grids, coordinate ca
 | ALL regions + IFS only, 1 worker, 12 frames | ~7-8 GB |
 | ALL regions + full NWP chain, 1 worker, 12 frames | ~9-10 GB |
 | ALL regions + full NWP chain, 2 workers, 12 frames | ~16-18 GB |
+
+> **Note:** The "ALL regions" rows include the always-on RRQPE global observed region — ~350 MB of frame store (12 × ~29 MB past frames) plus ~175 MB of nowcast-extrapolated frames, per [`self-host-sizing.md`](self-host-sizing.md).
 
 ### Multi-worker mode
 

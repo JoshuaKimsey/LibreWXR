@@ -4,9 +4,12 @@ Visual reference for the radar composites and regional NWP grids
 LibreWXR fuses into its tiles.
 
 **ECMWF IFS is not drawn.** IFS provides 9 km global coverage as the
-base of the NWP chain — it covers every pixel everywhere, so showing
-it as a polygon would just paint the whole map. The two maps below
-highlight where the regional chain wins over the global IFS layer.
+terminal model of the NWP chain — as a model layer it covers every
+pixel everywhere, so showing it as a polygon would just paint the
+whole map. Within the 60S-70N band the observed bottom tier is the
+always-on RRQPE radar region (see the NOAA RRQPE note below the radar
+table). The two maps below highlight where the regional chain wins
+over the global IFS model layer.
 
 Polygon shapes follow each grid's actual projected domain (LCC, polar
 stereographic, LAEA, rotated lat/lon, or regular lat/lon) — not a
@@ -82,7 +85,11 @@ extrapolation like any other region and stays active even under narrow
 
 The NWP chain dispatches per pixel to the **narrowest** model whose
 domain covers it, soft-feathering at every domain edge so seams don't
-show. Anywhere none of these models reach, ECMWF IFS fills in.
+show. Anywhere none of these models reach, ECMWF IFS fills in — for
+past frames within the 60S-70N band, RRQPE's observed fill (the
+always-on bottom radar tier above) applies first, and the models only
+cover the polar fringe outside the band, the fringe excluded by
+RRQPE's coverage polygon, and RRQPE-decline pixels.
 
 | Source | Coverage | Resolution | Projection | Cycles |
 |---|---|---|---|---|

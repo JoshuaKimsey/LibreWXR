@@ -321,7 +321,9 @@ Current assignments:
 | DMI DINI                 | 30       | 2 km Nordic / NW Europe                            |
 | ICON-EU                  | 35       | 7 km Europe (catches what DMI DINI doesn't)        |
 | WRF-SMN                  | 40       | 4 km Southern Cone                                 |
-| **IFS**                  | **1000** | Global catch-all                                   |
+| **IFS**                  | **1000** | Terminal model (past-frame fill: polar fringe / RRQPE-decline) |
+
+Note: RRQPE — the always-on global observed radar region (60S-70N band) — is a radar region, not part of this NWP table. It fills in-band past frames wherever no finer radar region claims the pixel, so IFS only fills poleward of the band, in the fringe excluded by RRQPE's coverage polygon, and when RRQPE declines (missed scans / stale store).
 
 Pick a number that places your source in the right spot. If your source's domain is disjoint from every other regional, the exact number between 10 and 999 doesn't matter behaviorally — just keep it deterministic and self-documenting. If your source overlaps another regional, put it before or after based on which should win inside the overlap.
 

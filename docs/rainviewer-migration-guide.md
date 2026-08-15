@@ -65,7 +65,7 @@ LibreWXR provides everything the pre-restriction Rain Viewer API offered, self-h
 Plus additional features Rain Viewer didn't offer:
 - Precipitation motion arrows (`?arrows=light` or `?arrows=dark`)
 - Configurable noise filtering and speckle removal
-- ECMWF IFS 9km global precipitation coverage + regional NWP layers (HRRR, HRDPS, DMI DINI, ICON-EU, AROME Antilles, WRF-SMN)
+- ECMWF IFS 9km global model layer + NOAA RRQPE global observed precipitation (60S-70N) + regional NWP layers (HRRR, HRDPS, DMI DINI, ICON-EU, AROME Antilles, WRF-SMN)
 - Optical flow interpolation for smooth global animation
 - Fully configurable via environment variables
 
@@ -171,7 +171,7 @@ Every parameter works the same way:
 | Nowcast/Forecast | No | ~60 min | Up to 60 min |
 | Satellite IR | No | Yes | Not yet |
 | Motion arrows | No | No | Yes |
-| Coverage | Global | Global | US, Canada, Europe, El Salvador, Taiwan, SE Asia radar + global ECMWF IFS + regional NWP |
+| Coverage | Global | Global | US, Canada, Europe, El Salvador, Taiwan, SE Asia radar + global RRQPE observed + global ECMWF IFS + regional NWP |
 | Rate limits | Yes | Higher limits | None (self-hosted) |
 | Cost | Free | Subscription | Free (self-hosted) |
 
@@ -181,7 +181,7 @@ Every parameter works the same way:
 
 These are things to be aware of but generally don't require code changes:
 
-- **Coverage area**: Rain Viewer sourced radar data globally from many countries. LibreWXR has high-resolution radar composites for the US, Canada, Europe, El Salvador (MARN/SNET), Taiwan (CWA QPESUMS), and Peninsular Malaysia + Borneo + Brunei + Singapore + N. Sumatra (MET Malaysia), plus a chain of regional NWP models (HRRR, HRDPS, DMI DINI, ICON-EU, AROME Antilles, WRF-SMN) layered on top of ECMWF IFS for global precipitation coverage. Outside the radar domains, the precipitation layer is modelled rather than observed — at a few-km resolution where regional NWP applies, and at IFS 9 km globally. If your users are primarily in any of these radar regions, the experience is equivalent or better.
+- **Coverage area**: Rain Viewer sourced radar data globally from many countries. LibreWXR has high-resolution radar composites for the US, Canada, Europe, El Salvador (MARN/SNET), Taiwan (CWA QPESUMS), and Peninsular Malaysia + Borneo + Brunei + Singapore + N. Sumatra (MET Malaysia), plus NOAA RRQPE — a global observed (satellite-derived) precipitation radar region covering the 60S-70N band — and a chain of regional NWP models (HRRR, HRDPS, DMI DINI, ICON-EU, AROME Antilles, WRF-SMN) layered on top of ECMWF IFS. Outside the radar domains but inside the band, the precipitation layer is observed (RRQPE, satellite-derived); it is modelled only poleward of the band, in the fringe excluded by RRQPE's coverage polygon, and when RRQPE declines — at a few-km resolution where regional NWP applies, and at IFS 9 km elsewhere. If your users are primarily in any of these radar regions, the experience is equivalent or better.
 
 - **Data update cadence**: Both use 10-minute intervals. LibreWXR aligns to clock boundaries (:00, :10, :20, etc.) just like Rain Viewer.
 

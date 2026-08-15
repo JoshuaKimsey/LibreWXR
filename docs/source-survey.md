@@ -44,7 +44,7 @@ Region: CACOMP. Source: MSC GeoMet WMS, `RADAR_1KM_RRAI` layer with `Radar-Rain_
 
 ### Europe — OPERA Pan-European CIRRUS Composite
 
-Region: OPERA (\~155 radars across 24 countries). Source: EUMETNET OPERA CIRRUS MAX reflectivity via MeteoGate/Cloudferro S3 — anonymous, no key required. ODIM HDF5, float64 dBZ. Resolution 3800×4400 at 1 km, LAEA projection. 5-minute cadence, rolling 24-hour archive. Sentinels: nodata `-9999000.0`, undetect `-8888000.0` (both map to 0 in uint8, so clear sky falls through to the NWP chain). URL pattern: `https://s3.waw3-1.cloudferro.com/openradar-24h/YYYY/MM/DD/OPERA/COMP/OPERA@YYYYMMDDTHHMM@0@DBZH.h5`.
+Region: OPERA (\~155 radars across 24 countries). Source: EUMETNET OPERA CIRRUS MAX reflectivity via MeteoGate/Cloudferro S3 — anonymous, no key required. ODIM HDF5, float64 dBZ. Resolution 3800×4400 at 1 km, LAEA projection. 5-minute cadence, rolling 24-hour archive. Sentinels: nodata `-9999000.0`, undetect `-8888000.0` (both map to 0 in uint8, so clear sky falls through to the RRQPE bottom radar tier for in-band past frames, then to the NWP chain). URL pattern: `https://s3.waw3-1.cloudferro.com/openradar-24h/YYYY/MM/DD/OPERA/COMP/OPERA@YYYYMMDDTHHMM@0@DBZH.h5`.
 
 The legal lever that opened European radar data is the **EU High Value Datasets regulation (EU 2023/138)**, not WMO policy — it legally requires European meteorological data to be free, open-licensed, and API-accessible.
 
@@ -82,6 +82,12 @@ Format: animated GIF89a, 1352×570, 6 frames at 10-min cadence (\~60 min of back
 2. **State-boundary gaps**: a burned-in state-boundary line leaves hairline gaps in the decoded reflectivity. Post-decode morphological close fills them.
 
 Vendor credit visible in the burned-in chrome ("Rainbow 5 / LEONARDO Germany GmbH") is a tool credit, not a license obligation.
+
+### Global — NOAA Enterprise Rain Rate (RRQPE)
+
+Region: `RRQPE` — a single coarse global radar region covering the 60°S–70°N geostationary ring at all longitudes. Source: NOAA Enterprise Rain Rate GLB-5 blend — satellite-derived **observed** precipitation (IR-based estimate; inputs include GOES-East/West, EUMETSAT Meteosat-9/10, JMA Himawari-9) from the anonymous NOAA NODD bucket `noaa-enterprise-rainrate-pds`. 10-minute cadence, ~17-min publish latency. Native 0.02° grid block-averaged to 0.04° stored at the default downsample. Always-on bottom tier of the multi-region compositor — it fills only pixels no finer radar region claims (past frames within the band), joins radar nowcast extrapolation like any region, and keeps fetching/rendering even under narrow `LIBREWXR_ENABLED_REGIONS` specs.
+
+License: NOAA Open Data Dissemination (NODD) program. Attribution requested — "Precipitation data from NOAA Enterprise Rain Rate (RRQPE)". No endorsement by NOAA implied; don't present modified data as unaltered NOAA data.
 
 ## Radar — Reverted and removed
 
@@ -166,7 +172,7 @@ Format: PNG RGBA via the `synopsis_reflectivity_oppidum_transparence` style — 
 
 License: **Etalab Licence Ouverte v2.0** with attribution "Météo-France" — the same licence as the already-shipped AROME Antilles NWP source. The official Données Radar API on `portail-api.meteofrance.fr` requires account registration (auto-Tier-3 under the no-API-keys rule in `adding-a-source.md`), but the public viewer's WMS at `rwg.meteofrance.com` exposes the same data with the session-cookie bootstrap and is covered by the same Etalab licence.
 
-**Why this is uniquely valuable**: pairs radar + high-res NWP across the same domain. First source to do so outside CONUS and Europe, since AROME Antilles is already running for the model side. Three regions (Guadeloupe, Martinique, French Guiana) are otherwise covered only by the IFS global base.
+**Why this is uniquely valuable**: pairs radar + high-res NWP across the same domain. First source to do so outside CONUS and Europe, since AROME Antilles is already running for the model side. Three regions (Guadeloupe, Martinique, French Guiana) are otherwise covered only by the RRQPE observed band layer for past frames, with IFS / the NWP chain for the model side.
 
 Open questions: JWT lifetime under sustained use (needs probing across hours — short-lived sessions need a refresh cycle, long-lived sessions can bootstrap once at startup); time-archive depth (capabilities suppresses the list; the viewer animation length suggests \~1–2 h); courtesy email to `contact.api@meteo.fr` for a paper trail on the `rwg.meteofrance.com` endpoint's specific terms.
 
@@ -364,7 +370,7 @@ Trigger to revisit: DMN publishes radar to `data.gov.ma` (which would also requi
 
 Pre-war Ukraine had a small radar network operated by State Enterprise «UAMC» under the Ukrainian Hydrometeorological Center: Boryspil (UKBB) near Kyiv, relaunched April 2019 after years of dormancy, plus Zaporizhya (UKDE) listed historically by aggregators. Per the Ukrainian Hydrometeorological Center Wikipedia entry, *"Weather radar (operated by SE «UAMC» and relaunched in 2019, it was destroyed in 2022 during Russian invasion."* Many other surface stations were also lost or damaged.
 
-Current state (2026-05): `meteo.gov.ua` has no radar product in its public navigation, only forecasts, Meteosat-derived satellite composites, and warnings. Rain Viewer still lists UKBB+UKDE but the upstream WMS returns server errors for both — consistent with a long-term outage rather than a transient blip. Ukraine is not a EUMETNET member, so its radars were never part of the OPERA composite either. Aggregators currently displaying "Ukraine radar" (AccuWeather, Weather.com, meteoblue) are showing model-derived precipitation, not radar returns — the same approach LibreWXR uses with IFS over uncovered regions.
+Current state (2026-05): `meteo.gov.ua` has no radar product in its public navigation, only forecasts, Meteosat-derived satellite composites, and warnings. Rain Viewer still lists UKBB+UKDE but the upstream WMS returns server errors for both — consistent with a long-term outage rather than a transient blip. Ukraine is not a EUMETNET member, so its radars were never part of the OPERA composite either. Aggregators currently displaying "Ukraine radar" (AccuWeather, Weather.com, meteoblue) are showing model-derived precipitation, not radar returns — LibreWXR instead uses RRQPE observed precipitation (satellite-derived, 60S-70N band) over such uncovered in-band regions for past frames, with the model layer only poleward / fringe / RRQPE-decline.
 
 A different shape of Tier 3 blocker from the rest of this section: not licence, not policy, not API-key — infrastructure unavailable. The same shape applies in principle to other countries with ongoing severe disruption (Gaza, Sudan, Yemen); not worth surveying proactively, the agency announcement is the trigger.
 
@@ -454,9 +460,9 @@ Per-file size (\~34 MB NetCDF4) makes serial download painfully slow, so this so
 
 Pairs with the JMA HRPN radar composite (JPCOMP, analysis-only post-revert) to give Japan a proper mesoscale NWP overlay instead of falling through to global IFS for the model side of the nowcast blend.
 
-### ECMWF IFS (priority 1000, global base)
+### ECMWF IFS (priority 1000, terminal model)
 
-9 km native (O1280 reduced Gaussian → regridded to 0.1° lat/lon). Open-Meteo S3 mirror, CC-BY-4.0. Provides pseudo-reflectivity (precipitation rate → dBZ via Marshall-Palmer) plus snow/rain classification globally. Optical flow interpolation of hourly IFS → 10-minute frames. This is the global base layer, not a "fallback" — it provides coverage everywhere a regional model isn't running.
+9 km native (O1280 reduced Gaussian → regridded to 0.1° lat/lon). Open-Meteo S3 mirror, CC-BY-4.0. Provides pseudo-reflectivity (precipitation rate → dBZ via Marshall-Palmer) plus snow/rain classification globally. Optical flow interpolation of hourly IFS → 10-minute frames. IFS is the terminal model of the chain — it provides model coverage everywhere a regional model isn't running. For past frames within the 60S-70N band that means it answers only poleward of the band, in the 2-degree fringe excluded by RRQPE's coverage polygon, and when RRQPE declines: the observed band layer is NOAA RRQPE, an always-on radar region (see Radar — Implemented), not IFS.
 
 ## NWP — Tier 2
 
