@@ -178,6 +178,43 @@ def _max_flow_pixels(
     return max_km_per_step / km_per_px
 
 
+def _coarsen_sigma_km(step: int, max_blend_steps: int, max_km: float) -> float:
+    """Gaussian sigma (km) for coarsening a nowcast extrapolation.
+
+    Quadratic ramp: negligible at T+10, full ``max_km`` at the last
+    blend step — early frames stay crisp, late frames get broad and
+    soft, encoding the growing positional uncertainty of the optical-
+    flow extrapolation and low-passing its warping artifacts.
+    """
+    t = min(step, max_blend_steps) / max(1, max_blend_steps)
+    return max_km * t * t
+
+
+def _coarsen_frame(frame: np.ndarray, sigma_px: float, wrap: bool) -> np.ndarray:
+    """Gaussian-smooth a uint8 extrapolated frame, preserving dtype/shape.
+
+    Blurs in float32 and rounds back to uint8.  For full-longitude
+    (``is_global``) grids the column axis is wrap-padded first so the
+    blur is seamless across the +/-180 deg meridian (cv2.GaussianBlur
+    has no BORDER_WRAP); the pad/crop idiom matches the flow/warp code.
+    """
+    if sigma_px < 0.4:
+        # No visible effect at this sigma — skip the work entirely and
+        # return the caller's array untouched (it may alias stored data).
+        return frame
+    f = frame.astype(np.float32)
+    if wrap:
+        pad = min(int(np.ceil(sigma_px * 3)), max(1, frame.shape[1] // 8))
+        f = np.pad(f, ((0, 0), (pad, pad)), mode="wrap")
+        f = cv2.GaussianBlur(f, (0, 0), sigma_px)
+        f = f[:, pad : pad + frame.shape[1]]
+    else:
+        # Default border (replicate) — zero-constant edges would erode
+        # echoes sitting on the coverage boundary.
+        f = cv2.GaussianBlur(f, (0, 0), sigma_px)
+    return np.rint(f).clip(0, 255).astype(np.uint8)
+
+
 def _clamp_flow(flow: np.ndarray, max_magnitude_px: float) -> np.ndarray:
     """Cap per-pixel flow magnitudes at ``max_magnitude_px``.
 
@@ -893,11 +930,31 @@ class NowcastGenerator:
                 t = step / max_blend_steps
                 blend_weight = 0.20 + 0.80 * (1.0 - t) ** 1.4
 
+            # Lead-time coarsening of the extrapolated field: as the
+            # forecast ages, Gaussian-smooth the warp output with a sigma
+            # that ramps quadratically in km — negligible at T+10, the
+            # configured ``nowcast_coarsen_max_km`` effective-resolution
+            # floor at the last blend step.  This low-passes the high-
+            # frequency melt/filament artifacts Farneback extrapolation
+            # produces at long lead times and honestly encodes the growing
+            # positional uncertainty.  External contribution frames are
+            # authoritative and are never smoothed; 0.0 here simply skips
+            # the coarsening code path for this step entirely.
+            coarsen_sigma_km = (
+                _coarsen_sigma_km(
+                    step, max_blend_steps, settings.nowcast_coarsen_max_km,
+                )
+                if settings.nowcast_coarsen_enabled
+                and settings.nowcast_coarsen_max_km > 0
+                else 0.0
+            )
+
             results = list(_nowcast_pool().map(
                 lambda r: _extrapolate_region_step(
                     r, nowcast_ts, step,
                     external_by_region.get(r),
                     warp_flows, latest_regions, coord_grids, flow_clamps,
+                    coarsen_sigma_km=coarsen_sigma_km,
                 ),
                 sorted(forecast_regions),
             ))
@@ -1280,16 +1337,21 @@ def _extrapolate_region_step(
     latest_regions: dict[str, np.ndarray],
     coord_grids: dict[str, tuple[np.ndarray, np.ndarray]],
     flow_clamps: dict[str, float],
+    coarsen_sigma_km: float = 0.0,
 ) -> tuple[str, np.ndarray] | None:
     """Phase B per-(step, region) extrapolation task (runs on the pool).
 
     External ``NowcastContribution`` frames take precedence for the
     validtime and are returned as-is; otherwise the latest radar is
     inverse-warped forward along the precomputed flow using the
-    prebuilt coordinate grids.  Returns ``None`` when neither applies —
-    the no-region marker; the renderer falls back to NWP fill, which is
-    the correct behaviour for an uncovered region.  Reads shared dicts
-    only — never mutates them.
+    prebuilt coordinate grids.  ``coarsen_sigma_km`` (default 0.0 =
+    off) Gaussian-smooths the internal extrapolation with a lead-time-
+    ramped sigma (km) so late frames lose the high-frequency warping
+    artifacts of long extrapolation; external frames pass through
+    unsmoothed.  Returns ``None`` when neither applies — the no-region
+    marker; the renderer falls back to NWP fill, which is the correct
+    behaviour for an uncovered region.  Reads shared dicts only — never
+    mutates them.
     """
     external_frame = external.get(nowcast_ts) if external else None
     # No per-pixel boundary feathering: the internal
@@ -1311,11 +1373,26 @@ def _extrapolate_region_step(
         from librewxr.data.regions import REGIONS as _ALL_REGIONS
         region_def = _ALL_REGIONS.get(region_name)
         wrap = bool(region_def is not None and region_def.is_global)
-        return region_name, _extrapolate_forward(
+        warped = _extrapolate_forward(
             data, flow, step, xs=xs, ys=ys,
             max_px=flow_clamps.get(region_name),
             wrap=wrap,
         )
+        # Lead-time coarsening of the internal extrapolation only (the
+        # external-frame early return above already skipped it).  The
+        # region's latitude pixel size (km ≈ deg × 111) converts the
+        # requested sigma from km to pixels; skip the smoothing when the
+        # region has no usable pixel size.
+        if coarsen_sigma_km > 0 and region_def is not None:
+            ps_y = (
+                region_def.pixel_size_y
+                if region_def.pixel_size_y > 0
+                else region_def.pixel_size
+            )
+            if ps_y > 0:
+                sigma_px = coarsen_sigma_km / (ps_y * 111.0)
+                warped = _coarsen_frame(warped, sigma_px, wrap)
+        return region_name, warped
     # No external for this step, no internal flow — skip this region
     # for this step.  Renderer falls back to NWP fill which is the
     # correct behaviour for an uncovered region.

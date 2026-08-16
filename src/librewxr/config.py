@@ -444,6 +444,8 @@ class Settings(BaseSettings):
     nowcast_enabled: bool = True  # Generate precipitation nowcast via radar extrapolation + IFS
     nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
     nowcast_blend_mode: str = "blended"  # "radar", "blended", or "model"
+    nowcast_coarsen_enabled: bool = True  # Progressive smoothing of extrapolated radar with lead time
+    nowcast_coarsen_max_km: float = 4.0  # Effective resolution floor reached at the last blend step
     # Separate optical-flow computation used by the /v2/radar motion-arrow
     # overlay.  Arrows key off per-region Farneback flow between the two
     # most recent radar frames; that flow is otherwise computed only as a

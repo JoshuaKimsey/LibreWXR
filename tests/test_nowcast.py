@@ -19,6 +19,8 @@ from librewxr.data.nowcast import (
     NowcastGenerator,
     NowcastStore,
     _clamp_flow,
+    _coarsen_frame,
+    _coarsen_sigma_km,
     _compute_flow,
     _coverage_degraded,
     _extrapolate_forward,
@@ -296,6 +298,126 @@ class TestExtrapolateForward:
         com1 = np.average(np.arange(W), weights=result1.sum(axis=0).astype(float) + 1e-9)
         com2 = np.average(np.arange(W), weights=result2.sum(axis=0).astype(float) + 1e-9)
         assert com2 > com1
+
+
+# ---------------------------------------------------------------------------
+# Lead-time coarsening (progressive Gaussian smoothing of extrapolation)
+# ---------------------------------------------------------------------------
+# As forecast lead time grows, the internally extrapolated field is
+# smoothed with a Gaussian whose sigma ramps quadratically in km, so by
+# T+60 the effective resolution has coarsened from native (~1 km) to
+# ~4 km.  This low-passes the high-frequency melt/filament artifacts of
+# long optical-flow extrapolation and honestly encodes the growing
+# positional uncertainty.  External contribution frames are never
+# smoothed.
+
+
+class TestCoarsen:
+    """Lead-time coarsening: sigma ramp, frame smoothing, seam wrap."""
+
+    def test_sigma_quadratic_ramp(self):
+        """Quadratic ramp: negligible at T+10, full max_km at the last
+        blend step, clamped beyond it (t is clamped to 1)."""
+        assert _coarsen_sigma_km(1, 6, 4.0) == pytest.approx(4.0 / 36.0)  # ≈ 0.111
+        assert _coarsen_sigma_km(3, 6, 4.0) == pytest.approx(1.0)
+        assert _coarsen_sigma_km(6, 6, 4.0) == pytest.approx(4.0)
+        # Step beyond the last blend step clamps t to 1 → stays at max_km.
+        assert _coarsen_sigma_km(9, 6, 4.0) == pytest.approx(4.0)
+
+    def test_coarsen_frame_noop_below_threshold(self):
+        """Sigma < 0.4 px is invisible — return the input unchanged."""
+        blob = _make_blob(60, 120, radius=5, value=150)
+        out = _coarsen_frame(blob, 0.0, wrap=False)
+        assert out is blob
+        assert np.array_equal(out, blob)
+        out_wrap = _coarsen_frame(blob, 0.3, wrap=True)
+        assert out_wrap is blob
+        assert np.array_equal(out_wrap, blob)
+
+    def test_coarsen_frame_smooths_blob(self):
+        """Blur preserves shape/dtype, reduces the peak, approximately
+        conserves mass, and spreads the nonzero footprint outward."""
+        blob = _make_blob(60, 120, radius=5, value=150)
+        out = _coarsen_frame(blob, 3.0, wrap=False)
+        assert out.shape == blob.shape
+        assert out.dtype == np.uint8
+        assert out.max() < blob.max()  # peak reduced
+        total_in = int(np.sum(blob, dtype=np.int64))
+        total_out = int(np.sum(out, dtype=np.int64))
+        # rint/clip losses are within a few percent.
+        assert 0.95 * total_in <= total_out <= 1.05 * total_in
+        assert np.count_nonzero(out) > np.count_nonzero(blob)
+
+    def test_coarsen_frame_wrap_seam_continuity(self):
+        """wrap=True blurs mass across the ±180° seam (both sides gain
+        nonzero values); wrap=False leaves the far side at zero."""
+        h, w = 60, 100
+        blob = _disk(h, w, 30, 0, 8, value=150)  # straddles column 0
+        sigma_px = 3.0
+        out_wrap = _coarsen_frame(blob, sigma_px, wrap=True)
+        out_nowrap = _coarsen_frame(blob, sigma_px, wrap=False)
+        assert out_wrap.shape == blob.shape
+        assert out_wrap.dtype == np.uint8
+        # Seam continuity: blurred mass on BOTH sides of the seam.
+        assert out_wrap[:, :8].any(), "east side of the seam must carry mass"
+        assert out_wrap[:, w - 8 :].any(), "west side of the seam must carry mass"
+        # Without wrap, the far side stays zero — no mass teleports.
+        assert not out_nowrap[:, w - 8 :].any()
+
+    def test_generate_sync_coarsens_late_frames(self):
+        """Zero-flow stationary blob: the T+60 frame is Gaussian-smoothed
+        (peak strictly lower than T+10), shapes/dtypes unchanged."""
+        blob = _make_blob(60, 120, radius=5, value=150)
+        frames, flows = NowcastGenerator._generate_sync(
+            {"USCOMP": blob}, {"USCOMP": blob},
+            latest_ts=1000, n_steps=6, interval=600,
+        )
+        assert "USCOMP" in flows
+        step1 = frames[0].regions["USCOMP"]
+        step6 = frames[-1].regions["USCOMP"]
+        assert step1.shape == step6.shape == (H, W)
+        assert step1.dtype == np.uint8 and step6.dtype == np.uint8
+        assert step6.max() < step1.max()
+
+    def test_generate_sync_coarsen_disabled_matches_raw_warp(self, monkeypatch):
+        """With coarsening disabled, the step-6 frame is bit-identical to
+        the raw (un-coarsened) zero-flow warp."""
+        from librewxr.config import settings
+
+        blob = _make_blob(60, 120, radius=5, value=150)
+        monkeypatch.setattr(settings, "nowcast_coarsen_enabled", False)
+        frames, flows = NowcastGenerator._generate_sync(
+            {"USCOMP": blob}, {"USCOMP": blob},
+            latest_ts=1000, n_steps=6, interval=600,
+        )
+        # Stationary blob → no clamp fires, so the stored flow is the
+        # exact field the warp path used; recomputing the warp directly
+        # reproduces the un-coarsened step-6 frame bit-for-bit.
+        raw = _extrapolate_forward(blob, flows["USCOMP"], steps=6)
+        assert np.array_equal(frames[-1].regions["USCOMP"], raw)
+
+    def test_external_frames_not_coarsened(self, monkeypatch):
+        """External contribution frames pass through _generate_sync
+        unchanged even with coarsening enabled at a late step."""
+        from librewxr.config import settings
+
+        blob = _make_blob(60, 100, radius=20, value=150)
+        external_frame = np.full((H, W), 200, dtype=np.uint8)  # sentinel
+        # Step 3 (ts 1000 + 3*600 = 2800) is served by the external frame.
+        external_by_region = {"USCOMP": {2800: external_frame}}
+
+        monkeypatch.setattr(settings, "nowcast_coarsen_enabled", True)
+        monkeypatch.setattr(settings, "nowcast_coarsen_max_km", 4.0)
+        frames, flows = NowcastGenerator._generate_sync(
+            {"USCOMP": blob}, {"USCOMP": blob},
+            latest_ts=1000, n_steps=3, interval=600,
+            external_by_region=external_by_region,
+        )
+        assert len(frames) == 3
+        frame = frames[2].regions["USCOMP"]
+        assert frame.dtype == np.uint8
+        assert frame.shape == (H, W)
+        np.testing.assert_array_equal(frame, external_frame)
 
 
 # ---------------------------------------------------------------------------

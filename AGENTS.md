@@ -162,6 +162,8 @@ All config via `LIBREWXR_*` env vars or `.env` file. Settings defined in `src/li
 - `LIBREWXR_NOWCAST_ENABLED`: default true
 - `LIBREWXR_NOWCAST_FRAMES`: default 6 (10-min forecast frames)
 - `LIBREWXR_NOWCAST_BLEND_MODE`: `radar`, `blended` (default), or `model` — radar extrapolation only, radar+IFS blend, or IFS-only nowcast composition
+- `LIBREWXR_NOWCAST_COARSEN_ENABLED`: lead-time-ramped Gaussian coarsening of extrapolated radar (default true)
+- `LIBREWXR_NOWCAST_COARSEN_MAX_KM`: effective resolution floor at the last blend step (default 4.0)
 - `LIBREWXR_ARROW_FLOW_ENABLED`: render motion-arrow overlay on nowcast tiles (default true)
 
 **Alerts:**

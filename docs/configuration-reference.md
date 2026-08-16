@@ -1203,6 +1203,28 @@ The model side is taken from the active NWP chain — **HRRR over CONUS, HRDPS o
 
 (Value renamed from `ifs` to `model` after the regional NWP chain shipped — the model side is no longer IFS-only.)
 
+### `LIBREWXR_NOWCAST_COARSEN_ENABLED`
+
+Progressive spatial coarsening of the optical-flow-extrapolated radar fields in the nowcast pipeline.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+When enabled, each extrapolated forecast frame is Gaussian-smoothed with a sigma that ramps quadratically with lead time — negligible at T+10, the full `LIBREWXR_NOWCAST_COARSEN_MAX_KM` effective-resolution floor at the last blend step. Farneback optical flow produces melted/filamented high-spatial-frequency warping artifacts at long lead times; the lead-time-ramped low-pass attenuates exactly those artifacts and honestly encodes the growing positional uncertainty of the extrapolation. Early frames stay crisp; only the internal optical-flow path is smoothed — external nowcast contribution frames (e.g. JMA HRPN for JPCOMP) pass through untouched.
+
+### `LIBREWXR_NOWCAST_COARSEN_MAX_KM`
+
+Effective resolution floor reached at the last blend step, in kilometres.
+
+| | |
+|---|---|
+| **Default** | `4.0` |
+| **Type** | float |
+
+The Gaussian sigma at forecast step `t` (normalized to the blend window) is `max_km * t²` in kilometres — so at the default 4.0 km and 10-minute cadence the T+60 field is smoothed to roughly the resolution of a 4 km NWP grid while the T+10 field is left effectively untouched. Setting this to `0` (or disabling `LIBREWXR_NOWCAST_COARSEN_ENABLED`) disables the smoothing entirely.
+
 ### `LIBREWXR_ARROW_FLOW_ENABLED`
 
 The `/v2/radar/...` tile endpoint accepts an `?arrows=` query param that overlays semi-transparent precipitation-direction arrows on areas with active precipitation. Arrows key off per-region optical flow computed between the two most recent radar frames; outside radar coverage, a single **composite NWP flow raster** (built from `NWPChain.sample()` at T and T−1) drives the arrows — reflecting whichever regional NWP source is active at each point (HRRR over CONUS, ICON-EU over Europe, JMA MSM over Japan, IFS elsewhere) rather than IFS alone.
