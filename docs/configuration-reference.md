@@ -638,6 +638,25 @@ Seconds for render workers to wait for the first `state.json` on cold start befo
 | **Type** | float |
 | **Unit** | seconds |
 
+### `LIBREWXR_WORKER_HEALTHCHECK_TIMEOUT`
+
+Seconds uvicorn's master process waits for a worker healthcheck ping before killing and respawning the worker (applies whenever `LIBREWXR_WORKERS` > 1, i.e. multi mode). Render workers can stall well past the default when they page-fault freshly written memmap frame files off a slow backing disk while holding the GIL; raising this to 30 s lets a stalled worker recover instead of being SIGKILLed. `0` = uvicorn's built-in default (5 s).
+
+| | |
+|---|---|
+| **Default** | `30` |
+| **Type** | integer |
+| **Unit** | seconds |
+
+### `LIBREWXR_PAGECACHE_PRIME_ENABLED`
+
+When `true` (default), the data pipeline primes freshly written memmap frame files (radar, NWP, satellite, nowcast, precip-mask) into the host page cache after each fetch cycle via `posix_fadvise(WILLNEED)`. The host page cache is shared between the pipeline and renderer containers, so render workers serve those frames without cold page faults on slow backing disks. Consumed only by the multi-mode pipeline process; single mode never runs it.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
 ---
 
 ## ECMWF IFS Global Coverage

@@ -1306,6 +1306,7 @@ def main():
         host=settings.host,
         port=settings.port,
         workers=settings.workers,
+        timeout_worker_healthcheck=settings.worker_healthcheck_timeout,
         log_level="info",
         access_log=False,
         # Don't let uvicorn install its own handlers/format — its loggers

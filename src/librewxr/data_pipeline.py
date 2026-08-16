@@ -41,6 +41,7 @@ from librewxr.data.master_state import snapshot_state, write_state_snapshot
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.storm_cells import StormCellGenerator, StormCellStore
 from librewxr.data.nwp_source import NWPChain
+from librewxr.data.pagecache import prime_fresh_memmaps
 from librewxr.data.precip_mask import PrecipMaskStore
 from librewxr.data.radar_cache import RadarFrameCache
 from librewxr.data.regions import REGIONS
@@ -243,6 +244,19 @@ async def run_pipeline() -> None:
             await asyncio.to_thread(write_state_snapshot, payload, cache_dir)
         except Exception:
             logger.exception("Failed to dump master state snapshot")
+        # Prime freshly written memmap frames into the host page cache so
+        # render workers don't cold-fault on a slow backing disk (the host
+        # page cache is shared between the pipeline and renderer
+        # containers).  Best-effort — a failure must never break the cycle.
+        if settings.pagecache_prime_enabled:
+            try:
+                primed = await asyncio.to_thread(
+                    prime_fresh_memmaps, payload, cache_dir
+                )
+                if primed:
+                    logger.info("Primed page cache for %d bytes of frame files", primed)
+            except Exception:
+                logger.exception("Failed to prime page cache")
         # The pipeline owns coord-store maintenance in multi mode (render
         # workers never prune).  Guard-free: _get_store()'s gate covers
         # enabled/cache_dir and the helper never raises.  The directory

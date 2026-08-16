@@ -498,6 +498,18 @@ class Settings(BaseSettings):
     # Seconds to wait for the data pipeline to write its first state.json
     # before failing loudly.  0 = wait forever.
     state_wait_timeout: float = 300.0
+    # Seconds uvicorn's master waits for a worker healthcheck ping before
+    # killing + respawning the worker.  Render workers can stall past the
+    # 5 s default when they page-fault freshly written memmap frames off a
+    # slow backing disk while holding the GIL; 30 s lets a stalled worker
+    # recover instead of being SIGKILLed.  0 = uvicorn's built-in default.
+    worker_healthcheck_timeout: int = 30  # seconds; 0 = uvicorn default (5)
+    # Pipeline-only (multi mode): after each fetch cycle, preload freshly
+    # written memmap frame files into the host page cache via
+    # posix_fadvise(WILLNEED) so render workers don't cold-fault on slow
+    # disks (the host page cache is shared between the pipeline and
+    # renderer containers).
+    pagecache_prime_enabled: bool = True
 
     # WMO CAP Weather Alerts
     alerts_enabled: bool = True
