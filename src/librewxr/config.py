@@ -347,7 +347,7 @@ class Settings(BaseSettings):
     # the brightest part of the storm column and tends to read 5-10
     # dBZ higher than the surface rate would predict.  Tune up to make
     # convective cells closer in colour to OPERA radar.
-    icon_eu_dbz_offset: float = 6.0
+    icon_eu_dbz_offset: float = 12.0
     # DMI HARMONIE-AROME DINI is published anonymously on AWS Open Data
     # (s3://dmi-opendata in eu-north-1).  Each (run, lead) is a single
     # ~600 MB GRIB2 file; we fetch only the tp message (~9 MB) per leadtime
@@ -357,7 +357,7 @@ class Settings(BaseSettings):
     dmi_dini_publish_delay_minutes: int = 180  # files publish ~3 h after run init
     # Same Marshall-Palmer caveat as ICON-EU.  HARMONIE has no native
     # composite reflectivity output so we derive dBZ from accumulated tp.
-    dmi_dini_dbz_offset: float = 6.0
+    dmi_dini_dbz_offset: float = 12.0
     # ECCC HRDPS continental: 2.5 km native rotated lat/lon, 4 cycles/day
     # (00/06/12/18 UTC), 48 h horizon, 1-hour APCP accumulation.  Anonymous
     # HTTPS via dd.weather.gc.ca — no auth, no API key.  Independent toggle
@@ -445,7 +445,7 @@ class Settings(BaseSettings):
     nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
     nowcast_blend_mode: str = "blended"  # "radar", "blended", or "model"
     nowcast_coarsen_enabled: bool = True  # Progressive smoothing of extrapolated radar with lead time
-    nowcast_coarsen_max_km: float = 4.0  # Effective resolution floor reached at the last blend step
+    nowcast_coarsen_max_km: float = 3.0  # Effective resolution floor reached at the last blend step
     # Separate optical-flow computation used by the /v2/radar motion-arrow
     # overlay.  Arrows key off per-region Farneback flow between the two
     # most recent radar frames; that flow is otherwise computed only as a

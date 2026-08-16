@@ -306,7 +306,8 @@ class TestExtrapolateForward:
 # As forecast lead time grows, the internally extrapolated field is
 # smoothed with a Gaussian whose sigma ramps quadratically in km, so by
 # T+60 the effective resolution has coarsened from native (~1 km) to
-# ~4 km.  This low-passes the high-frequency melt/filament artifacts of
+# ~3 km (at the default max_km; these unit tests pass explicit values).
+# This low-passes the high-frequency melt/filament artifacts of
 # long optical-flow extrapolation and honestly encodes the growing
 # positional uncertainty.  External contribution frames are never
 # smoothed.

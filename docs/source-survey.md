@@ -442,7 +442,7 @@ Outside the DINI domain: Iberia, southern Italy, Greece, Balkans, Belarus / Ukra
 
 ### ICON-EU (priority 35)
 
-7 km lat/lon, 3-hourly cycles. DWD opendata at `opendata.dwd.de/weather/nwp/icon-eu/`. `tot_prec` accumulated; difference consecutive steps for hourly rate; Marshall-Palmer Z-R with +6 dBZ calibration offset against OPERA radar.
+7 km lat/lon, 3-hourly cycles. DWD opendata at `opendata.dwd.de/weather/nwp/icon-eu/`. `tot_prec` accumulated; difference consecutive steps for hourly rate; Marshall-Palmer Z-R with +12 dBZ default calibration offset against OPERA radar.
 
 ### WRF-SMN Argentina (priority 40)
 

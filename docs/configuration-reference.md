@@ -922,7 +922,7 @@ DWD main runs typically publish ~3-4 h after init.
 
 | | |
 |---|---|
-| **Default** | `6.0` |
+| **Default** | `12.0` |
 | **Type** | float |
 | **Unit** | dBZ |
 
@@ -954,7 +954,7 @@ DMI files publish ~3 h after run init.
 
 | | |
 |---|---|
-| **Default** | `6.0` |
+| **Default** | `12.0` |
 | **Type** | float |
 | **Unit** | dBZ |
 
@@ -1220,10 +1220,10 @@ Effective resolution floor reached at the last blend step, in kilometres.
 
 | | |
 |---|---|
-| **Default** | `4.0` |
+| **Default** | `3.0` |
 | **Type** | float |
 
-The Gaussian sigma at forecast step `t` (normalized to the blend window) is `max_km * t²` in kilometres — so at the default 4.0 km and 10-minute cadence the T+60 field is smoothed to roughly the resolution of a 4 km NWP grid while the T+10 field is left effectively untouched. Setting this to `0` (or disabling `LIBREWXR_NOWCAST_COARSEN_ENABLED`) disables the smoothing entirely.
+The Gaussian sigma at forecast step `t` (normalized to the blend window) is `max_km * t²` in kilometres — so at the default 3.0 km and 10-minute cadence the T+60 field is smoothed to roughly the resolution of a 3 km NWP grid while the T+10 field is left effectively untouched. Setting this to `0` (or disabling `LIBREWXR_NOWCAST_COARSEN_ENABLED`) disables the smoothing entirely.
 
 ### `LIBREWXR_ARROW_FLOW_ENABLED`
 
