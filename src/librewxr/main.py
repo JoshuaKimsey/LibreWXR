@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import random
+import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -1211,6 +1212,20 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     )
 
 
+def _describe_worker_exit(exitcode: int) -> str:
+    """Human-readable reason for a render worker exit code."""
+    if exitcode < 0:
+        signum = -exitcode
+        try:
+            signame = signal.Signals(signum).name
+        except ValueError:
+            signame = f"signal {signum}"
+        if signum == signal.SIGKILL:
+            return f"killed by {signame} (exit code {exitcode}) - OOM-killed or externally killed"
+        return f"killed by {signame} (exit code {exitcode})"
+    return f"exit status {exitcode}"
+
+
 def main():
     import uvicorn
     # Optional direct TLS: only enabled when both cert and key are set.
@@ -1221,6 +1236,44 @@ def main():
             "ssl_certfile": settings.ssl_certfile,
             "ssl_keyfile": settings.ssl_keyfile,
         }
+    if settings.workers > 1:
+        # uvicorn logs worker deaths at INFO without the exit code, and the
+        # rotating file handler only records WARNING+, so nothing durable
+        # captures why a render worker died. Swap in a supervisor subclass
+        # that logs the reaped worker's exit code/signal at WARNING.
+        # Guarded for uvicorn versions whose supervisor lacks this method.
+        # NOTE: ``import uvicorn.main`` binds the click Command (uvicorn's
+        # __init__ re-exports ``main``), so the module - and its
+        # call-time ``Multiprocess`` global - is reached via importlib.
+        import importlib
+
+        uvicorn_main = importlib.import_module("uvicorn.main")
+        base_supervisor = uvicorn_main.Multiprocess
+        if hasattr(base_supervisor, "keep_subprocess_alive"):
+
+            class _DeathLoggingMultiprocess(base_supervisor):
+                """Multiprocess supervisor that logs worker death reasons."""
+
+                def keep_subprocess_alive(self) -> None:
+                    before = [
+                        (p, p.process.pid, p.exitcode) for p in self.processes
+                    ]
+                    super().keep_subprocess_alive()
+                    for process, pid, prior_exitcode in before:
+                        if prior_exitcode is not None:
+                            continue
+                        exitcode = process.exitcode
+                        if exitcode is None or exitcode == 3:
+                            # Still alive this tick, or a STARTUP_FAILURE that
+                            # uvicorn already reports at ERROR before stopping.
+                            continue
+                        logger.warning(
+                            "Render worker [pid=%d] died: %s; respawning a replacement",
+                            pid,
+                            _describe_worker_exit(exitcode),
+                        )
+
+            uvicorn_main.Multiprocess = _DeathLoggingMultiprocess
     uvicorn.run(
         "librewxr.main:app",
         host=settings.host,

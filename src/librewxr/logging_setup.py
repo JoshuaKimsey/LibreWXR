@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
+import faulthandler
 import logging
 import os
 from logging.handlers import RotatingFileHandler
@@ -87,6 +88,10 @@ def setup_logging(level: str | None = None, log_file: str | None = None) -> None
     disables the file entirely.  Only httpx/httpcore are additionally
     quieted; every other logger propagates to the root handler.
     """
+    # Dump Python tracebacks to stderr if a render worker dies from a fatal
+    # signal (SIGSEGV/SIGABRT/SIGFPE/SIGBUS), so native crashes leave a record
+    # alongside the supervisor's exit-code log line.
+    faulthandler.enable(all_threads=True)
     # Imported here, not at module top: pydantic-settings validates
     # defaults at instantiation, so importing config at module load runs
     # Settings() -> the log_level validator -> back into this module
