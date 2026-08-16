@@ -720,10 +720,11 @@ def _blend_nowcast(
     The effective per-pixel radar weight is ``blend_weight × feather``.
     Outside radar coverage, NWP is used directly (same as past frames).
 
-    Where the (blurred) model is below the display noise floor it is
-    treated as "no opinion": the blended value is pinned up to the
-    floor wherever the radar itself carries a live echo, so an empty
-    model pixel can't dilute real radar echoes away (issue #24).
+    Where the (blurred) model is below the display noise floor and the
+    radar itself carries a live echo, the dry model term is raised to
+    the floor: echoes asymptote toward the faintest visible shade as
+    the radar weight decays instead of being diluted away, and the
+    scaled intensity gradient survives (issue #24).
     """
     if pad > 0:
         lat_grid, lon_grid = tile_pixel_latlons_padded(z, x, y, tile_size, pad)
@@ -755,32 +756,35 @@ def _blend_nowcast(
     # Per-pixel effective radar weight
     effective_w = blend_weight * feather
 
-    # Blend: extrapolated radar × weight + model × (1 − weight)
-    radar_f = radar_values.astype(np.float32)
-    blended = effective_w * radar_f + (1.0 - effective_w) * model_f
-
     # Pixels where the model is dry must not drag real radar echoes
     # below the display noise floor.  Model pixel value 0 encodes
     # -32 dBZ — the bottom of the scale, NOT "no data" — so blending
     # toward an empty model pixel pulls ``w * radar`` under the floor
     # and the post-blend thresholding zeroes the echo entirely
-    # (issue #24).  Where the model has no opinion, pin the blended
-    # value up to the floor so live echoes survive as the faintest
-    # visible shade; intensity above the floor still fades with the
-    # radar weight.  The dry-model gate tests the BLURRED field actually
-    # being blended (not the raw model): the Gaussian blur leaves faint
-    # non-zero fringes around real model echoes, and a raw zero test
-    # would misfire on those.  The live-radar gate (radar >= floor)
-    # prevents promoting sub-floor radar noise into a painted echo.
+    # (issue #24).  Where the radar itself carries a live echo, raise
+    # the dry model term to the floor so the blend asymptotes toward
+    # the faintest visible shade instead of -32 dBZ: the result is
+    # ``floor + w * (radar - floor)``, which never erases the echo but
+    # still fades with the radar weight AND preserves the scaled
+    # intensity gradient (a hard clamp at the floor — the previous
+    # approach — flattened every echo to one flat color by T+40).
+    # The dry-model gate tests the BLURRED field actually being blended
+    # (the Gaussian blur leaves faint non-zero fringes around real
+    # model echoes, and a raw zero test would misfire on those); the
+    # live-radar gate (radar >= floor) keeps sub-floor radar noise and
+    # model Gaussian fringes from being promoted into painted echoes.
     # Skipped when ``blend_weight == 0`` — "model" blend mode (or steps
     # past the blend window) intends pure model output — and when the
-    # noise floor is disabled there is nothing to pin to.
+    # noise floor is disabled there is nothing to fade toward.
     if blend_weight > 0 and settings.noise_floor_dbz > -32:
         pixel_threshold = int((settings.noise_floor_dbz + 32) * 2)
         dry_model = model_f < pixel_threshold
         live_radar = radar_values >= pixel_threshold
-        pin = dry_model & live_radar
-        blended = np.where(pin, np.maximum(blended, pixel_threshold), blended)
+        model_f = np.where(dry_model & live_radar, pixel_threshold, model_f)
+
+    # Blend: extrapolated radar × weight + model × (1 − weight)
+    radar_f = radar_values.astype(np.float32)
+    blended = effective_w * radar_f + (1.0 - effective_w) * model_f
 
     # Don't hallucinate precipitation where neither source has any
     both_zero = (radar_values == 0) & (model_values == 0)
