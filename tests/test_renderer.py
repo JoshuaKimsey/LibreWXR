@@ -781,3 +781,133 @@ class TestRegionsWithDataGating:
         )
         assert geom.is_transparent is False  # pre-fix: tier1_post_blend
         assert (geom.values == 150).all()
+
+
+class TestNowcastFloorPin:
+    """The nowcast blend must not let a dry model pixel erase real radar.
+
+    Model pixel value 0 encodes -32 dBZ, the bottom of the encoding, NOT
+    "no data" — so blending toward it drags real radar echoes below the
+    display noise floor and the post-blend thresholding zeroes them
+    (issue #24).  ``_blend_nowcast`` pins the blended value up to the
+    noise floor wherever the (blurred) model is below the floor and the
+    radar itself carries a live echo, so empty-model pixels can't dilute
+    real radar echoes away: the echo survives as the faintest visible
+    shade while intensity above the floor still fades with the radar
+    weight.
+    """
+
+    # Tile (z=4, x=3, y=5) sits over empty composite space (same tile as
+    # TestEmptyTileFastPath).  The exact location doesn't drive results
+    # here — sample_feather is patched — but keeping it consistent makes
+    # the fixtures deterministic.
+    _Z, _X, _Y, _TILE = 4, 3, 5, 256
+
+    @staticmethod
+    def _chain(model_arr: np.ndarray) -> MagicMock:
+        chain = MagicMock()
+        chain.has_data.return_value = True
+        chain.sample.return_value = model_arr
+        return chain
+
+    @pytest.fixture(autouse=True)
+    def _pin_noise_floor(self, monkeypatch):
+        from librewxr.config import settings
+        monkeypatch.setattr(settings, "noise_floor_dbz", 10.0)  # threshold 84
+
+    @staticmethod
+    def _feather_all_ones() -> callable:
+        return lambda name, lat, lon: np.ones(lat.shape, dtype=np.float32)
+
+    def _blend(self, radar, model, blend_weight, monkeypatch):
+        """Call _blend_nowcast with feather=1 everywhere, floor=10.0."""
+        from librewxr.tiles import renderer as renderer_mod
+
+        monkeypatch.setattr(renderer_mod, "sample_feather", self._feather_all_ones())
+        return renderer_mod._blend_nowcast(
+            radar, [REGIONS["USCOMP"]], self._Z, self._X, self._Y,
+            self._TILE, 0, self._chain(model), blend_weight=blend_weight,
+        )
+
+    def test_dry_model_pins_radar_to_floor(self, monkeypatch):
+        """(1) Dry model (all 0) must not halve the radar value."""
+        radar = np.full((256, 256), 104, dtype=np.uint8)
+        model = np.zeros((256, 256), dtype=np.uint8)
+        result = self._blend(radar, model, 0.5, monkeypatch)
+        assert (result == 84).all()  # pre-fix: 52 (erased below the floor)
+
+    def test_model_above_floor_blends_normally(self, monkeypatch):
+        """(2) Model with real precip still blends exactly as before."""
+        radar = np.full((256, 256), 104, dtype=np.uint8)
+        model = np.full((256, 256), 200, dtype=np.uint8)
+        result = self._blend(radar, model, 0.5, monkeypatch)
+        assert (result == 152).all()  # clip(0.5*104 + 0.5*200 + 0.5)
+
+    def test_blur_fringe_pins_to_floor(self, monkeypatch):
+        """(3) Gaussian fringe around a model echo must not eat radar.
+
+        The 3x3 Gaussian leaves a ~32 fringe on the orthogonal neighbours
+        of a single 255 model pixel — below the 84 floor, so the blend
+        must pin them to 84 rather than dilute radar to 68.
+        """
+        radar = np.full((256, 256), 104, dtype=np.uint8)
+        model = np.zeros((256, 256), dtype=np.uint8)
+        model[128, 128] = 255
+        result = self._blend(radar, model, 0.5, monkeypatch)
+        for r, c in ((128, 127), (128, 129), (127, 128), (129, 128)):
+            assert result[r, c] == 84  # pre-fix: 68
+
+    def test_floor_disabled_keeps_old_behavior(self, monkeypatch):
+        """(4) Noise floor disabled (-33) -> the pin is a no-op."""
+        from librewxr.config import settings
+
+        monkeypatch.setattr(settings, "noise_floor_dbz", -33.0)
+        radar = np.full((256, 256), 104, dtype=np.uint8)
+        model = np.zeros((256, 256), dtype=np.uint8)
+        result = self._blend(radar, model, 0.5, monkeypatch)
+        assert (result == 52).all()  # clip(0.5*104 + 0.5)
+
+    def test_zero_blend_weight_is_pure_model(self, monkeypatch):
+        """(5) blend_weight=0 -> pure model output, pin skipped."""
+        radar = np.full((256, 256), 104, dtype=np.uint8)
+        model = np.zeros((256, 256), dtype=np.uint8)
+        result = self._blend(radar, model, 0.0, monkeypatch)
+        assert (result == 0).all()
+
+    def test_both_empty_no_hallucination(self, monkeypatch):
+        """(6) Neither source has anything -> still nothing."""
+        radar = np.zeros((256, 256), dtype=np.uint8)
+        model = np.zeros((256, 256), dtype=np.uint8)
+        result = self._blend(radar, model, 0.5, monkeypatch)
+        assert (result == 0).all()
+
+    def test_dry_model_fades_but_never_erases(self, monkeypatch):
+        """(7) Over dry model, radar fades with lead time but stays alive.
+
+        Floor pinned at 10.0 -> threshold 84; radar echo 104.  Pixels
+        below the floor are pinned to 84; pixels above it keep their
+        blend: 0.82*104 = 85.28 -> 85.  Every result is >= 84 (survives
+        the post-blend noise-floor cut, so the painted area is never
+        erased) and <= 104 (never brighter than pure radar).
+        """
+        radar = np.full((256, 256), 104, dtype=np.uint8)
+        model = np.zeros((256, 256), dtype=np.uint8)
+        for weight, expected in ((0.82, 85), (0.5, 84), (0.32, 84), (0.2, 84)):
+            result = self._blend(radar, model, weight, monkeypatch)
+            assert (result == expected).all()
+            assert (result >= 84).all()
+            assert (result <= 104).all()
+
+    def test_subfloor_radar_is_not_promoted(self, monkeypatch):
+        """(8) Sub-floor radar must NOT be promoted into a painted echo."""
+        radar = np.full((256, 256), 60, dtype=np.uint8)
+        model = np.zeros((256, 256), dtype=np.uint8)
+        result = self._blend(radar, model, 0.5, monkeypatch)
+        assert (result == 30).all()  # live_radar gate fails -> no pin
+
+    def test_strong_echo_keeps_intensity(self, monkeypatch):
+        """(9) Strong echoes keep their fade: 0.5*200 = 100 > 84."""
+        radar = np.full((256, 256), 200, dtype=np.uint8)
+        model = np.zeros((256, 256), dtype=np.uint8)
+        result = self._blend(radar, model, 0.5, monkeypatch)
+        assert (result == 100).all()  # pin no-op above the floor
