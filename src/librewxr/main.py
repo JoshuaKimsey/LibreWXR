@@ -49,7 +49,11 @@ from librewxr.sources import (
 )
 from librewxr.data.alerts_store import AlertsStore
 from librewxr.data.alerts_fetcher import WMOAlertsFetcher
-from librewxr.memory import MemoryMonitor, detect_memory_limit_mb
+from librewxr.memory import (
+    MemoryMonitor,
+    describe_cgroup_memory,
+    detect_memory_limit_mb,
+)
 from librewxr.logging_setup import setup_logging
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import (
@@ -1254,23 +1258,46 @@ def main():
             class _DeathLoggingMultiprocess(base_supervisor):
                 """Multiprocess supervisor that logs worker death reasons."""
 
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self._last_mem_ctx = describe_cgroup_memory()
+
                 def keep_subprocess_alive(self) -> None:
+                    # Fresh memory context each tick so the death line
+                    # reflects the cgroup state just before the kill.
+                    self._last_mem_ctx = describe_cgroup_memory()
+                    # Snapshot liveness BEFORE the reap: uvicorn replaces the
+                    # wrapper in self.processes the same tick it reaps, so each
+                    # snapshot entry is processed exactly once and needs no
+                    # prior-exitcode gate (exitcode is a polling property and
+                    # would otherwise self-swallow genuine deaths).
                     before = [
-                        (p, p.process.pid, p.exitcode) for p in self.processes
+                        (p, p.process.pid, p.process.is_alive())
+                        for p in self.processes
                     ]
                     super().keep_subprocess_alive()
-                    for process, pid, prior_exitcode in before:
-                        if prior_exitcode is not None:
-                            continue
+                    for process, pid, was_alive in before:
                         exitcode = process.exitcode
                         if exitcode is None or exitcode == 3:
                             # Still alive this tick, or a STARTUP_FAILURE that
                             # uvicorn already reports at ERROR before stopping.
                             continue
+                        if was_alive and exitcode == -signal.SIGKILL:
+                            # Alive but unresponsive: uvicorn's master sent the
+                            # SIGKILL itself (healthcheck ping timeout), so the
+                            # kernel log shows no OOM entry.
+                            reason = (
+                                "unresponsive to healthcheck; "
+                                "killed by supervisor (SIGKILL)"
+                            )
+                        else:
+                            reason = _describe_worker_exit(exitcode)
+                        suffix = f" ({self._last_mem_ctx})" if self._last_mem_ctx else ""
                         logger.warning(
-                            "Render worker [pid=%d] died: %s; respawning a replacement",
+                            "Render worker [pid=%d] died: %s; respawning a replacement%s",
                             pid,
-                            _describe_worker_exit(exitcode),
+                            reason,
+                            suffix,
                         )
 
             uvicorn_main.Multiprocess = _DeathLoggingMultiprocess

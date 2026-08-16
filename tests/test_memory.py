@@ -8,9 +8,12 @@ from librewxr.memory import (
     CgroupUsage,
     MemoryMonitor,
     _jittered_thresholds,
+    _read_cgroup_memory_limit_bytes,
     _read_cgroup_memory_usage,
     _read_stat_fields,
     _read_stat_sum,
+    cgroup_memory_snapshot,
+    describe_cgroup_memory,
 )
 
 
@@ -403,3 +406,77 @@ class TestHysteresis:
         monitor._check()
         # decision == 500 MB, raw cgroup total == decision + 17 MB
         assert monitor.cgroup_total_mb == 517
+
+
+# ---------------------------------------------------------------------------
+# Worker-death logging: cgroup memory snapshot + human-readable description
+# ---------------------------------------------------------------------------
+
+
+class TestCgroupMemorySnapshot:
+    def test_snapshot_v2_usage_with_numeric_limit(self, monkeypatch):
+        """v2 usage + a real numeric memory.max -> (used, limit)."""
+        used = 9 * 1024**3
+        limit = 16 * 1024**3
+        monkeypatch.setattr(
+            "librewxr.memory._read_cgroup_memory_usage",
+            lambda: CgroupUsage(used, used, "anon+shmem", True),
+        )
+        monkeypatch.setattr(
+            "librewxr.memory._read_int",
+            lambda path: limit if str(path) == "/sys/fs/cgroup/memory.max" else None,
+        )
+        assert cgroup_memory_snapshot() == (used, limit)
+
+    def test_snapshot_unlimited_limit(self, monkeypatch):
+        """v2 'max' (unparsable) + missing v1 limit -> (used, None)."""
+        used = 9 * 1024**3
+        monkeypatch.setattr(
+            "librewxr.memory._read_cgroup_memory_usage",
+            lambda: CgroupUsage(used, used, "anon+shmem", True),
+        )
+        monkeypatch.setattr("librewxr.memory._read_int", lambda path: None)
+        assert cgroup_memory_snapshot() == (used, None)
+
+    def test_snapshot_outside_container(self, monkeypatch):
+        """No cgroup usage -> (None, None)."""
+        monkeypatch.setattr("librewxr.memory._read_cgroup_memory_usage", lambda: None)
+        assert cgroup_memory_snapshot() == (None, None)
+
+    def test_limit_discards_v1_unlimited_sentinel(self, monkeypatch):
+        """v1 huge sentinel beats system RAM -> None (unlimited)."""
+        monkeypatch.setattr(
+            "psutil.virtual_memory",
+            lambda: SimpleNamespace(total=8 * 1024**3),
+        )
+
+        def fake_read_int(path):
+            if str(path) == "/sys/fs/cgroup/memory.max":
+                return None  # v2 path absent/unreadable
+            return 10**18  # v1 unlimited sentinel
+
+        monkeypatch.setattr("librewxr.memory._read_int", fake_read_int)
+        assert _read_cgroup_memory_limit_bytes() is None
+
+    def test_describe_with_used_and_limit(self, monkeypatch):
+        monkeypatch.setattr(
+            "librewxr.memory._read_cgroup_memory_usage",
+            lambda: CgroupUsage(2**30, 2**30, "anon+shmem", True),
+        )
+        monkeypatch.setattr(
+            "librewxr.memory._read_int",
+            lambda path: 4 * 2**30 if str(path) == "/sys/fs/cgroup/memory.max" else None,
+        )
+        assert describe_cgroup_memory() == "cgroup mem 1.0 GiB / 4.0 GiB"
+
+    def test_describe_used_unlimited_limit(self, monkeypatch):
+        monkeypatch.setattr(
+            "librewxr.memory._read_cgroup_memory_usage",
+            lambda: CgroupUsage(2**30, 2**30, "anon+shmem", True),
+        )
+        monkeypatch.setattr("librewxr.memory._read_int", lambda path: None)
+        assert describe_cgroup_memory() == "cgroup mem 1.0 GiB / unlimited"
+
+    def test_describe_outside_container(self, monkeypatch):
+        monkeypatch.setattr("librewxr.memory._read_cgroup_memory_usage", lambda: None)
+        assert describe_cgroup_memory() == ""

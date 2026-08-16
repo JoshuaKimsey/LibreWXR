@@ -79,6 +79,52 @@ def detect_memory_limit_mb(override_mb: int = 0) -> int:
     return psutil.virtual_memory().total // (1024 * 1024)
 
 
+def _read_cgroup_memory_limit_bytes() -> int | None:
+    """Container cgroup memory limit in bytes; None when unlimited/unknown.
+
+    cgroup v2: ``memory.max`` holds the literal "max" (non-numeric, so
+    ``_read_int`` yields None) when unlimited.
+    cgroup v1: ``memory.limit_in_bytes`` reports a huge sentinel value
+    when unlimited, which we discard by comparing to system RAM.
+    """
+    limit = _read_int(Path("/sys/fs/cgroup/memory.max"))
+    if limit is not None:
+        return limit
+    limit = _read_int(Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+    if limit is not None:
+        try:
+            if limit < psutil.virtual_memory().total * 2:
+                return limit
+        except Exception:
+            return None
+    return None
+
+
+def cgroup_memory_snapshot() -> tuple[int | None, int | None]:
+    """One-shot (used_bytes, limit_bytes) from the container cgroup.
+
+    Returns (None, None) outside a container or when reads fail.
+    """
+    try:
+        usage = _read_cgroup_memory_usage()
+        used = usage.total_bytes if usage is not None else None
+        limit = _read_cgroup_memory_limit_bytes()
+    except Exception:
+        return None, None
+    return used, limit
+
+
+def describe_cgroup_memory() -> str:
+    """Human-readable cgroup memory for log lines; '' outside containers."""
+    used, limit = cgroup_memory_snapshot()
+    if used is None:
+        return ""
+    used_gib = used / (1024**3)
+    if limit is None:
+        return f"cgroup mem {used_gib:.1f} GiB / unlimited"
+    return f"cgroup mem {used_gib:.1f} GiB / {limit / (1024**3):.1f} GiB"
+
+
 @dataclass(frozen=True)
 class CgroupUsage:
     """Reclaimable-aware container usage snapshot.
