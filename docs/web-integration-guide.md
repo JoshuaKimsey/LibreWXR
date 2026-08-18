@@ -1097,7 +1097,7 @@ The `examples/` directory contains generated HTML files, built from the modular 
 
 - **`examples/leaflet.html`** — Full Leaflet integration
 - **`examples/maplibre.html`** — Full MapLibre GL JS integration
-- **`examples/widget.html`** — Single-location radar widget (no map library)
+- **`examples/widget.html`** — Single-location radar widget (no map library, with a toggleable OSM basemap layer built from plain raster tiles)
 
 The two map examples include:
 - **Source selector** — switch between your local server and the public instance (`api.librewxr.net`) without editing code. Auto-detects the best default based on how the file is opened.

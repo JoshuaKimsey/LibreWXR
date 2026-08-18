@@ -207,6 +207,44 @@
             -webkit-backdrop-filter: var(--backdrop-blur);
         }
 
+        /* Optional OSM basemap: plain raster <img> tiles covering the same
+           point-tile window the server renders (toggled by the Map pill). */
+        .map-layer {
+            position: absolute;
+            inset: 0;
+            z-index: 0;
+            display: none;
+            overflow: hidden;
+            border-radius: inherit;
+        }
+        .radar-frame.has-map .map-layer {
+            display: block;
+        }
+        .map-tile {
+            position: absolute;
+            display: block;
+        }
+        .map-attribution {
+            position: absolute;
+            right: 4px;
+            bottom: 4px;
+            z-index: 3;
+            display: none;
+            font-size: 10px;
+            line-height: 1.4;
+            padding: 1px 4px;
+            border-radius: 3px;
+            background: rgba(255, 255, 255, 0.75);
+            color: #333;
+            text-decoration: none;
+        }
+        .radar-frame.has-map .map-attribution {
+            display: block;
+        }
+        .radar-frame.has-map .lw-img {
+            mix-blend-mode: normal;   /* plus-lighter washes precip out on a light map */
+        }
+
         /* === CONTROLS (wraps into rows on narrow screens) === */
         .controls {
             width: 100%;
@@ -382,7 +420,8 @@
 <main class="widget-page">
     <header class="widget-header">
         <h1>LibreWXR Radar Widget</h1>
-        <p>An animated radar snapshot for any location - no map library. Powered by the lat/lon point-tile
+        <p>An animated radar snapshot for any location - no map library, with an optional
+           OpenStreetMap background. Powered by the lat/lon point-tile
            endpoint <code>.../{size}/{z}/{lat}/{lon}/{color}/{options}.png</code>.</p>
     </header>
 
@@ -395,12 +434,15 @@
     <!-- Radar card: one square image, crosshair behind it, age badge on top -->
     <section class="widget-card" aria-label="Radar display">
         <div class="radar-frame" id="lw-frame" data-size="256">
+            <div class="map-layer" id="lw-map-layer" aria-hidden="true"></div>
             <div class="radar-grid" aria-hidden="true">
                 <span class="grid-dot"></span>
             </div>
             <img id="lw-img-a" class="lw-img" alt="Radar">
             <img id="lw-img-b" class="lw-img" alt="Radar">
             <div class="lw-badge" id="lw-badge" role="status">loading...</div>
+            <a class="map-attribution" id="lw-map-attribution"
+               href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">&copy; OpenStreetMap contributors</a>
         </div>
     </section>
 
@@ -447,6 +489,7 @@
         </label>
         <label class="wb-field check"><input type="checkbox" id="lw-smooth" checked> Smooth</label>
         <label class="wb-field check"><input type="checkbox" id="lw-snow" checked> Snow</label>
+        <label class="wb-field check"><input type="checkbox" id="lw-map" checked> Map</label>
     </section>
 
     <!-- URL preview: always shows the exact URL of the image on screen -->
@@ -477,7 +520,9 @@
        {apiBase}{frame.path}/{size}/{z}/{lat}/{lon}/{color}/{smooth}_{snow}.{ext}
 
    No map library, no tile grid, no external dependencies: the radar image is a
-   plain <img> whose src the server renders centered on your coordinates. This
+   plain <img> whose src the server renders centered on your coordinates. The
+   optional basemap is the same idea - plain OpenStreetMap raster <img> tiles
+   aligned to that point-tile window, still no library or dependencies. This
    whole file is MIT-licensed drop-in code - change the CONFIG block, copy the
    markup plus this script into your page, and you have a RainViewer-style
    widget image.
@@ -524,6 +569,12 @@ var COLOR_SCHEME = 10;              // matches the viewer-core.js default scheme
 var DEFAULT_SMOOTH = true;          // URL options segment: 1_1 when both on
 var DEFAULT_SNOW = true;
 
+// Optional OpenStreetMap raster basemap (the "Map" checkbox pill). OSM tiles
+// are plain 256px <img> elements, so this stays zero-dependency.
+var MAP_TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+var MAP_DEFAULT_ON = true;
+var WEBMERC_MAX_LAT = 85.05112878;  // Web Mercator latitude clamp (matches the server)
+
 var FRAME_DWELL_MS = 500;           // dwell per frame (same as the map engine)
 var PRELOAD_AHEAD = 3;              // frames preloaded ahead of playback
 var CATALOG_POLL_MS = 300000;       // re-fetch the catalog every 5 minutes
@@ -550,6 +601,8 @@ var sizeSelect = document.getElementById('lw-size');
 var formatSelect = document.getElementById('lw-format');
 var smoothInput = document.getElementById('lw-smooth');
 var snowInput = document.getElementById('lw-snow');
+var mapInput = document.getElementById('lw-map');
+var mapLayer = document.getElementById('lw-map-layer');
 var urlInput = document.getElementById('lw-url');
 var statusEl = document.getElementById('lw-status');
 
@@ -700,6 +753,52 @@ function frameUrl(frame) {
         '/' + COLOR_SCHEME +
         '/' + (smoothInput.checked ? 1 : 0) + '_' + (snowInput.checked ? 1 : 0) +
         '.' + formatSelect.value;
+}
+
+// Build the optional OSM basemap under the radar image. The server's point-tile
+// window {size}x{size} px centered on (lat, lon) at zoom z is exactly the
+// standard Web Mercator slippy-map window of the same pixel size at zoom z, so
+// plain 256px OSM raster tiles at that zoom line up pixel-for-pixel with the
+// radar image. Percentage positions let the tiles scale with the responsive
+// frame (no resize handler), and the +1px on each tile plus row-major DOM order
+// hide the sub-pixel seams between adjacent tiles.
+function buildMapTiles() {
+    var frame = frameEl;
+    if (!mapInput.checked) {
+        frame.classList.remove('has-map');
+        mapLayer.innerHTML = '';
+        return;
+    }
+    frame.classList.add('has-map');
+    var z = parseInt(zoomSelect.value, 10);
+    var size = parseInt(sizeSelect.value, 10);
+    var lat = Math.max(-WEBMERC_MAX_LAT, Math.min(WEBMERC_MAX_LAT, currentLat()));
+    var lon = currentLon();
+    lon = ((lon + 180) % 360 + 360) % 360 - 180;   // wrap to [-180, 180)
+    var n = Math.pow(2, z);
+    var scale = 256 * n;
+    var px = (lon + 180) / 360 * scale;
+    var latRad = lat * Math.PI / 180;
+    var py = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * scale;
+    px = Math.round(px);  // server snaps the window center to the nearest pixel
+    py = Math.round(py);
+    var left = px - size / 2, top = py - size / 2;
+    var x0 = Math.floor(left / 256), x1 = Math.floor((left + size - 1) / 256);
+    var y0 = Math.floor(top / 256), y1 = Math.floor((top + size - 1) / 256);
+    var html = '';
+    for (var ty = y0; ty <= y1; ty++) {
+        if (ty < 0 || ty >= n) continue;   // beyond the poles: no tile, matches server's empty fill
+        for (var tx = x0; tx <= x1; tx++) {
+            var wx = ((tx % n) + n) % n;   // antimeridian wrap
+            var tileLeft = (tx * 256 - left) / size * 100;
+            var tileTop = (ty * 256 - top) / size * 100;
+            var url = MAP_TILE_URL.replace('{z}', z).replace('{x}', wx).replace('{y}', ty);
+            html += '<img class="map-tile" alt="" src="' + url + '" style="left:' + tileLeft +
+                '%;top:' + tileTop + '%;width:calc(' + (256 / size * 100) + '% + 1px);height:calc(' +
+                (256 / size * 100) + '% + 1px);">';
+        }
+    }
+    mapLayer.innerHTML = html;
 }
 
 // ----------------------------------------------------------------------------
@@ -862,6 +961,7 @@ function applyControls() {
         setStatus('Enter a valid latitude (-90..90) and longitude.');
         return;
     }
+    buildMapTiles();                // basemap follows zoom/size/location too
     invalidatePreloads();           // URLs changed - rebuild the pool
     if (frames.length > 0) {
         displayFrame(position);     // re-render the same frame at the new URL
@@ -994,6 +1094,7 @@ function boot() {
     formatSelect.value = DEFAULT_FORMAT;
     smoothInput.checked = DEFAULT_SMOOTH;
     snowInput.checked = DEFAULT_SNOW;
+    mapInput.checked = MAP_DEFAULT_ON;
     var def = LOCATION_PRESETS.find(function (p) { return p.name === DEFAULT_PRESET; }) || LOCATION_PRESETS[0];
     presetSelect.value = def.name;
     latInput.value = String(def.lat);
@@ -1024,6 +1125,7 @@ function boot() {
     formatSelect.addEventListener('change', applyControls);
     smoothInput.addEventListener('change', applyControls);
     snowInput.addEventListener('change', applyControls);
+    mapInput.addEventListener('change', buildMapTiles);  // map toggle alone must not touch the radar pool
     urlInput.addEventListener('click', function () { urlInput.select(); copyUrl(); });
     urlInput.addEventListener('focus', function () { urlInput.select(); });
     retryBtn.addEventListener('click', function () {
@@ -1035,6 +1137,7 @@ function boot() {
 
     syncPlayUI();
     applyFrameSize();
+    buildMapTiles();                            // draw the basemap once up front
     loadCatalog();                          // first fetch
     setInterval(loadCatalog, CATALOG_POLL_MS);  // then poll for new frames
 
