@@ -733,12 +733,13 @@ Layered ahead of IFS via specificity-first dispatch (see the [Regional NWP chain
 
 ## Examples
 
-The `examples/` directory contains two self-contained HTML files showcasing the full LibreWXR feature set. Each file is a single, liftable artifact — copy it into your own project and it runs standalone, no build step required:
+The `examples/` directory contains three self-contained HTML files showcasing the LibreWXR feature set. Each file is a single, liftable artifact — copy it into your own project and it runs standalone, no build step required:
 
 - **`leaflet.html`** — Leaflet-based weather map
 - **`maplibre.html`** — MapLibre GL JS-based weather map
+- **`widget.html`** — dependency-free radar widget built on the lat/lon-centered point-tile API
 
-Both examples include:
+`hero.html` is a compact, config-locked variant of the Leaflet example used on the marketing site. The two map pages include:
 - **Source selector** — switch between local (`localhost:8080`) and the public instance (`api.librewxr.net`) with auto-detection
 - **Layer modes** — Radar, Satellite, or Radar + Satellite (satellite as background under radar)
 - **Light/dark theme** — toggles both the base map and UI styling
@@ -753,18 +754,20 @@ Both examples include:
 - **Locate Me** — geolocate and zoom to your position
 - **Auto-refresh** — metadata refreshes every 5 minutes to stay current
 
+The `widget.html` page is different by design: no map library, no tile grid. It fetches the same `weather-maps.json` catalog, then asks the server for a single image rendered *centered on a chosen location* via the point-tile endpoint (`.../{size}/{z}/{lat}/{lon}/{color}/{smooth}_{snow}.png`). It animates past and nowcast frames with play/pause, preloads ahead, and shows the exact image URL in a click-to-copy box — the drop-in snippet for a RainViewer-style weather card, email, or iframe. Everything configurable sits in one commented block at the top of the script.
+
 ### Building / editing
 
 The HTML files are generated — do not hand-edit them. Edit the modular sources in `examples/src/` and rebuild:
 
 ```bash
-python3 examples/src/build.py           # regenerate leaflet.html and maplibre.html
+python3 examples/src/build.py           # regenerate all example pages
 python3 examples/src/build.py --site    # also regenerate the published site variants
 ```
 
 Each generated file carries a `GENERATED ... do not edit` header comment.
 
-Open either file in a browser — it auto-detects whether to use your local server or the public instance based on how the file is loaded.
+The map examples auto-detect whether to use your local server or the public instance based on how the file is opened. The widget instead ships an API-source selector in its controls, defaulting to the public instance.
 
 ## License
 

@@ -1093,12 +1093,13 @@ setInterval(function () {
 
 ## Complete Working Examples
 
-The `examples/` directory contains generated HTML files, built from the modular sources in `examples/src/` by `python3 examples/src/build.py` — edit the sources there, not the built HTML. Two full variants, plus a minimal generated `hero.html`, demonstrate every feature covered in this guide:
+The `examples/` directory contains generated HTML files, built from the modular sources in `examples/src/` by `python3 examples/src/build.py` — edit the sources there, not the built HTML. Two full map variants, plus a minimal generated `hero.html` and a dependency-free `widget.html`, demonstrate every feature covered in this guide:
 
 - **`examples/leaflet.html`** — Full Leaflet integration
 - **`examples/maplibre.html`** — Full MapLibre GL JS integration
+- **`examples/widget.html`** — Single-location radar widget (no map library)
 
-Both examples include:
+The two map examples include:
 - **Source selector** — switch between your local server and the public instance (`api.librewxr.net`) without editing code. Auto-detects the best default based on how the file is opened.
 - **Layer modes** — Radar, Satellite, or Radar + Satellite (satellite as a cloud background under animated radar)
 - **Light/dark theme** — toggles both the base map style and UI colors
@@ -1119,3 +1120,5 @@ To use them:
 2. To use your local server, start LibreWXR and select "Local (localhost:8080)" from the source dropdown
 
 These examples serve as reference implementations for production web integrations.
+
+The widget page (`examples/widget.html`) demonstrates the single-location image endpoint from [Widgets and Single-Location Images](#widgets-and-single-location-images) in its purest form: one `<img>` centered on a chosen point, no tile grid and no map library. It fetches the same `weather-maps.json` catalog, cycles past and nowcast frames with play/pause and a small preload pool, and always shows the exact point-tile URL of the image on screen in a click-to-copy box — the drop-in snippet for a weather card, email, or `iframe`. Its API-source selector defaults to the public instance (switch to `Local (localhost:8080)` to target your own server). All configuration lives in one commented block at the top of its script, and it degrades gracefully (auto-retry with backoff, geolocation failures, image load errors).

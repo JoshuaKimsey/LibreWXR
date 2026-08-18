@@ -4,17 +4,23 @@
 """Build the self-contained LibreWXR example pages.
 
 Reads examples/src/viewer.css and viewer-core.js plus each per-library shell
-(leaflet.html.js / maplibre.html.js / hero.html.js), inlines the shared
-assets at the placeholder tokens, and writes single-file pages to examples/:
+(leaflet.html.js / maplibre.html.js / hero.html.js / widget.html.js), inlines
+the shared assets at the placeholder tokens, and writes single-file pages to
+examples/:
 
     /*__VIEWER_CSS__*/   -> viewer.css contents (token lives inside a <style>)
     //__VIEWER_CORE__    -> viewer-core.js contents (token lives inside a <script>)
 
+The CSS token is required for every shell; the core token is optional and is
+simply skipped when absent - the widget shell is deliberately standalone and
+does not use the shared 1900-line map engine.
+
 With --site it additionally writes SEO-enriched variants to
-librewxr-site/examples/leaflet.html and maplibre.html: the API base pinned to
-https://api.librewxr.net, the #lv-source selector markup removed, and the
-site's meta head (description/canonical/OG/twitter/favicon) injected - the
-same pattern the hand-maintained site examples already use.
+librewxr-site/examples/ for whichever pages have SITE_PAGES metadata (leaflet,
+maplibre, widget): the API base pinned to https://api.librewxr.net, the
+#lv-source selector markup removed when present, and the site's meta head
+(description/canonical/OG/twitter/favicon) injected - the same pattern the
+hand-maintained site examples already use.
 
 --site also regenerates the shared-engine hero embedded in the marketing
 front page librewxr-site/index.html. Three regions of that page live between
@@ -89,6 +95,18 @@ SITE_PAGES = {
         "twitter_description": (
             "WebGL-accelerated weather radar tiles rendered with MapLibre GL JS, "
             "powered by the LibreWXR API."
+        ),
+    },
+    "widget": {
+        "page": "widget",
+        "title": "LibreWXR - Radar Widget Example",
+        "description": (
+            "A drop-in animated radar image for any location, rendered with the "
+            "LibreWXR lat/lon point-tile API. No map library required."
+        ),
+        "twitter_description": (
+            "A self-contained animated radar widget for any location, powered "
+            "by the LibreWXR lat/lon-centered point-tile API."
         ),
     },
 }
@@ -190,14 +208,19 @@ def build_marker():
 
 
 def inline_assets(html):
-    """Replace the placeholder tokens with the shared CSS and core JS."""
+    """Replace the placeholder tokens with the shared CSS and core JS.
+
+    The CSS token is required for every shell. The core token is optional:
+    shells without it (the standalone widget page) simply skip core inlining.
+    """
     css = read_file(os.path.join(SRC_DIR, "viewer.css"))
-    core = read_file(os.path.join(SRC_DIR, "viewer-core.js"))
     if CSS_TOKEN not in html:
         raise SystemExit("error: shell missing CSS token %r" % CSS_TOKEN)
-    if CORE_TOKEN not in html:
-        raise SystemExit("error: shell missing core token %r" % CORE_TOKEN)
-    return html.replace(CSS_TOKEN, css).replace(CORE_TOKEN, core)
+    html = html.replace(CSS_TOKEN, css)
+    if CORE_TOKEN in html:
+        core = read_file(os.path.join(SRC_DIR, "viewer-core.js"))
+        html = html.replace(CORE_TOKEN, core)
+    return html
 
 
 def make_site_variant(html, meta):
@@ -207,15 +230,14 @@ def make_site_variant(html, meta):
     html = html.replace(API_FIXED_NULL, API_FIXED_PIN)
 
     # Remove the #lv-source selector markup, markers inclusive, whole lines.
+    # Shells without the selector (hero, widget) keep their markup untouched.
     start = html.find(SOURCE_BLOCK_START)
     end = html.find(SOURCE_BLOCK_END)
-    if start == -1 or end == -1:
-        raise SystemExit("error: source-selector markers not found for --site")
-    line_start = html.rfind("\n", 0, start) + 1
-    line_end = html.find("\n", end)
-    if line_end == -1:
-        line_end = len(html)
-    html = html[:line_start] + html[line_end + 1 :]
+    if start != -1 and end != -1:
+        line_start = html.rfind("\n", 0, start) + 1
+        line_end = html.find("\n", end)
+        if line_end != -1:
+            html = html[:line_start] + html[line_end + 1 :]
 
     html = html.replace("<html>", '<html lang="en">', 1)
 
@@ -319,6 +341,7 @@ def build_pages(args):
         ("leaflet.html.js", "leaflet.html"),
         ("maplibre.html.js", "maplibre.html"),
         ("hero.html.js", "hero.html"),
+        ("widget.html.js", "widget.html"),
     ]
     for shell, out in pages:
         html = GENERATED_COMMENT + "\n" + marker + "\n" + inline_assets(read_file(os.path.join(SRC_DIR, shell)))
@@ -330,9 +353,11 @@ def build_pages(args):
         if not os.path.isdir(os.path.dirname(SITE_EXAMPLES_DIR)):
             print("notice: librewxr-site/ not found, skipping --site output")
             return
-        for shell, out in pages[:2]:
+        for shell, out in pages:
+            key = out[: -len(".html")]  # 'leaflet' / 'maplibre' / 'widget' / 'hero'
+            if key not in SITE_PAGES:
+                continue  # no site metadata for this page (hero)
             html = GENERATED_COMMENT + "\n" + marker + "\n" + inline_assets(read_file(os.path.join(SRC_DIR, shell)))
-            key = out[: -len(".html")]  # 'leaflet' / 'maplibre'
             html = make_site_variant(html, SITE_META.format(**SITE_PAGES[key]))
             dest = os.path.join(SITE_EXAMPLES_DIR, out)
             write_file(dest, html)
