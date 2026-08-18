@@ -19,10 +19,12 @@ from librewxr.tiles.coordinates import (
     SOUTH,
     WEST,
     _reset_coord_store,
+    latlon_to_global_pixel,
     tile_bounds,
     tile_overlaps_composite,
     tile_pixel_indices,
     warm_coordinate_caches,
+    window_origin,
 )
 
 
@@ -76,6 +78,89 @@ class TestTileBounds:
         # Should be in western hemisphere, northern mid-latitudes
         assert w < 0
         assert n > 0
+
+
+class TestWebMercatorWindowHelpers:
+    """Forward Web Mercator + window-origin helpers for lat/lon-centered tiles."""
+
+    def test_origin_at_world_center(self):
+        """(0, 0) maps to the middle of the global pixel space (px=py=world/2)."""
+        for z in (1, 3):
+            world = (2**z) * 256
+            px, py = latlon_to_global_pixel(0.0, 0.0, z, 256)
+            assert px == pytest.approx(world / 2)
+            assert py == pytest.approx(world / 2)
+
+    def test_lon_seam_equivalence(self):
+        """-180 and +180 both normalize to the same seam: px == 0."""
+        for z in (1, 3):
+            px_neg = latlon_to_global_pixel(0.0, -180.0, z, 256)[0]
+            px_pos = latlon_to_global_pixel(0.0, 180.0, z, 256)[0]
+            assert px_neg == 0.0
+            assert px_pos == 0.0
+
+    def test_lon_normalization(self):
+        """lon=190 normalizes to -170 (identical px)."""
+        px_190 = latlon_to_global_pixel(0.0, 190.0, 2, 256)[0]
+        px_neg170 = latlon_to_global_pixel(0.0, -170.0, 2, 256)[0]
+        assert px_190 == px_neg170
+        assert px_190 == pytest.approx(28.4444444444)
+
+    def test_lat_pole_clamping(self):
+        """lat=+/-90 clamps to the Mercator limit: py=0 at the north pole,
+        py=world at the south pole."""
+        world = (2**1) * 256
+        py_north = latlon_to_global_pixel(90.0, 0.0, 1, 256)[1]
+        py_south = latlon_to_global_pixel(-90.0, 0.0, 1, 256)[1]
+        assert py_north == pytest.approx(0.0, abs=1e-6)
+        assert py_south == pytest.approx(world, abs=1e-6)
+
+    def test_window_origin_center(self):
+        """z=2 -> world=1024; a window centered on (0, 0) starts at (384, 384)."""
+        assert window_origin(0.0, 0.0, 2, 256) == (384, 384)
+
+    def test_window_origin_pole_clamping(self):
+        """Windows near the poles clamp to the world edge: py0=0 / world-256."""
+        world = (2**1) * 256
+        assert window_origin(85.0, 0.0, 1, 256)[1] == 0
+        assert window_origin(-85.0, 0.0, 1, 256)[1] == world - 256
+
+    def test_window_origin_east_seam_wrap(self):
+        """Lon just west of +180 wraps the origin to the east seam (px0=896)."""
+        px0, py0 = window_origin(0.0, 179.999, 2, 256)
+        assert px0 == 896
+        assert py0 == 384
+
+    def test_window_origin_west_seam_wrap(self):
+        """Lon just east of -180 wraps the origin past the west seam (px0=902)."""
+        px0, _ = window_origin(0.0, -178.0, 2, 256)
+        assert px0 == 902
+
+    def test_window_origin_random_lons_in_world(self):
+        """Wrap-aware origins stay inside [0, world) for arbitrary lon."""
+        world = (2**2) * 256  # z=2
+        for lon in (-179.5, -90.25, -31.75, 7.125, 66.5, 133.9, 177.2):
+            px0, _ = window_origin(0.0, lon, 2, 256)
+            assert 0 <= px0 < world
+
+    def test_round_trip_vs_tile_pixel_latlons(self):
+        """Forward math inverts against the existing inverse: the lat/lon of
+        the snapped pixel center reproduces the input (loose tolerance)."""
+        ts = 256
+        for lat, lon, z in (
+            (37.7749, -122.4194, 6),
+            (52.52, 13.405, 5),
+            (-33.8688, 151.2093, 6),
+        ):
+            px, py = latlon_to_global_pixel(lat, lon, z, ts)
+            world = (2**z) * ts
+            k = round(px - 0.5)
+            m = round(py - 0.5)
+            x, y = k // ts, m // ts
+            j, i = k % ts, m % ts
+            lat_grid, lon_grid = coord.tile_pixel_latlons(z, x, y, ts)
+            assert lat_grid[i, j] == pytest.approx(lat, abs=0.1)
+            assert lon_grid[i, j] == pytest.approx(lon, abs=0.1)
 
 
 class TestTileOverlapsComposite:

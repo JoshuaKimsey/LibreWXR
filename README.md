@@ -356,6 +356,21 @@ https://api.librewxr.net/v2/radar/{timestamp}/256/{z}/{x}/{y}/10/1_1.png?arrows=
 | 11 | MRMS CREF |
 | 255 | Raw (grayscale) |
 
+#### Radar Point Tiles (Lat/Lon Windows)
+
+A fixed-location variant of the radar tile endpoint, centered on an EPSG:4326 coordinate instead of a tile index:
+
+```
+GET /v2/radar/{timestamp}/{size}/{z}/{lat}/{lon}/{color}/{smooth}_{snow}.{ext}
+```
+
+| Parameter | Values | Description |
+|---|---|---|
+| `lat`, `lon` | decimal degrees | Image center; path segments containing a dot are treated as lat/lon, plain integer segments as x/y tile indices |
+| `size` | `256`, `512` | Image size (intermediate values quantize: `< 512` becomes `256`) |
+
+The center is snapped to the nearest pixel at that zoom; longitude wraps across the antimeridian and latitude clamps to the Web Mercator limit (+/-85.0511 deg). Unknown timestamps return 404, and areas with no data return a transparent 200 PNG. The `?arrows=` and `?cells=` query parameters are tile-mode only and are silently ignored on lat/lon window URLs; the coverage variant is `/v2/coverage/0/{size}/{z}/{lat}/{lon}/0/0_0.png`.
+
 #### Satellite Tiles
 
 ```

@@ -87,6 +87,7 @@ src/librewxr/
     retry.py         # Backoff helper
   tiles/
     renderer.py      # On-demand tile rendering (compute / present split)
+    window.py        # Lat/lon-centered window stitching (RainViewer point-tile API)
     satellite_renderer.py  # GMGSI VIS-over-LW composite tiles
     cache.py         # Byte-capped LRU tile cache (stores TileGeometry)
     coordinates.py   # Tile/region coordinate transforms

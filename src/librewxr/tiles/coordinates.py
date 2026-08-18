@@ -789,6 +789,59 @@ def tile_overlaps_composite(z: int, x: int, y: int) -> bool:
     return tile_overlaps_region(_USCOMP, z, x, y)
 
 
+# ── Web Mercator lat/lon-centered window helpers ─────────────────────
+# Forward Web Mercator + window-origin helpers for lat/lon-centered
+# tiles.  Cheap pure-scalar stdlib math only (no numpy); no lru_cache
+# either — float keys would grow the cache unboundedly.
+
+MERCATOR_MAX_LAT = 85.05112878
+
+
+def latlon_to_global_pixel(
+    lat: float, lon: float, z: int, tile_size: int
+) -> tuple[float, float]:
+    """Forward Web Mercator: returns fractional global pixel coords (px, py) at zoom z.
+
+    Clamp lat to +-MERCATOR_MAX_LAT.  Normalize lon to [-180, 180) via
+    ((lon + 180.0) % 360.0) - 180.0.
+
+    n = 2**z; world = n * tile_size
+    px = (lon + 180.0) / 360.0 * world
+    py = (1.0 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2.0 * world
+
+    Reference for the same math:
+    sources/regional/east_asia/japan/radar/jma/decoder.py:116-122.
+    """
+    n = 2**z
+    world = n * tile_size
+    lon = ((lon + 180.0) % 360.0) - 180.0
+    lat = min(max(lat, -MERCATOR_MAX_LAT), MERCATOR_MAX_LAT)
+    px = (lon + 180.0) / 360.0 * world
+    py = (1.0 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2.0 * world
+    return px, py
+
+
+def window_origin(
+    lat: float, lon: float, z: int, tile_size: int
+) -> tuple[int, int]:
+    """Return (px0, py0): the global-pixel origin of the tile_size x tile_size
+    window centered (to the nearest integer pixel) on lat/lon.
+
+    raw_x = round(px - tile_size / 2); px0 = raw_x % world (wrap-aware,
+    lands in [0, world)).  raw_y = round(py - tile_size / 2);
+    py0 = min(max(raw_y, 0), world - tile_size) (clamped; world >=
+    tile_size always since z >= 0).
+    """
+    px, py = latlon_to_global_pixel(lat, lon, z, tile_size)
+    n = 2**z
+    world = n * tile_size
+    raw_x = round(px - tile_size / 2)
+    px0 = raw_x % world
+    raw_y = round(py - tile_size / 2)
+    py0 = min(max(raw_y, 0), world - tile_size)
+    return px0, py0
+
+
 # ---------------------------------------------------------------------------
 # Cache pre-warming
 # ---------------------------------------------------------------------------

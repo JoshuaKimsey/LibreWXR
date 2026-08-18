@@ -619,6 +619,38 @@ def _composite_regions(
     return values
 
 
+def compute_coverage_rgba(
+    frame_regions: dict[str, np.ndarray],
+    z: int,
+    x: int,
+    y: int,
+    tile_size: int = 256,
+    enabled_regions: list[str] | None = None,
+) -> np.ndarray:
+    """Compute the RGBA uint8 array for a coverage tile (white
+    semi-transparent where radar data exists; all-zeros when nothing is
+    covered).  The array-producing half of ``render_coverage_tile``;
+    encoding is the caller's job.
+    """
+    regions = overlapping_regions(z, x, y, enabled_regions)
+    regions_with_data = [r for r in regions if r.name in frame_regions]
+
+    # Composite coverage from all regions
+    values = np.zeros((tile_size, tile_size), dtype=np.uint8)
+    for region in regions_with_data:
+        data = frame_regions[region.name]
+        row_idx, col_idx = region_pixel_indices(region, z, x, y, tile_size)
+        region_values = _gather_clipped(data, row_idx, col_idx)
+        fill_mask = (values == 0) & (region_values > 0)
+        values[fill_mask] = region_values[fill_mask]
+
+    # Coverage: non-zero = white semi-transparent
+    rgba = np.zeros((*values.shape, 4), dtype=np.uint8)
+    mask = values > 0
+    rgba[mask] = [255, 255, 255, 128]
+    return rgba
+
+
 def render_coverage_tile(
     frame_regions: dict[str, np.ndarray],
     z: int,
@@ -634,20 +666,7 @@ def render_coverage_tile(
     if not regions_with_data:
         return _transparent_tile(tile_size, "png")
 
-    # Composite coverage from all regions
-    values = np.zeros((tile_size, tile_size), dtype=np.uint8)
-    for region in regions_with_data:
-        data = frame_regions[region.name]
-        row_idx, col_idx = region_pixel_indices(region, z, x, y, tile_size)
-        region_values = _gather_clipped(data, row_idx, col_idx)
-        fill_mask = (values == 0) & (region_values > 0)
-        values[fill_mask] = region_values[fill_mask]
-
-    # Coverage: non-zero = white semi-transparent
-    rgba = np.zeros((*values.shape, 4), dtype=np.uint8)
-    mask = values > 0
-    rgba[mask] = [255, 255, 255, 128]
-
+    rgba = compute_coverage_rgba(frame_regions, z, x, y, tile_size, enabled_regions)
     img = Image.fromarray(rgba, "RGBA")
     return _encode_image(img, "png")
 

@@ -15,6 +15,7 @@ LibreWXR is a drop-in replacement for the Rain Viewer v2 API. If you have an exi
   - [Metadata Endpoint](#metadata-endpoint)
   - [Tile URL Format](#tile-url-format)
   - [Coverage Tiles](#coverage-tiles)
+  - [Lat/Lon Window URLs (Point-Tile API)](#latlon-window-urls-point-tile-api)
 - [Feature Comparison](#feature-comparison)
 - [What's Different in LibreWXR](#whats-different-in-librewxr)
 - [What's Not Supported](#whats-not-supported)
@@ -155,6 +156,28 @@ Every parameter works the same way:
 |---|---|---|
 | **URL** | `/v2/coverage/0/{size}/{z}/{x}/{y}/0/0_0.png` | Identical |
 | **Response** | PNG tile showing radar coverage | Identical |
+
+### Lat/Lon Window URLs (Point-Tile API)
+
+Rain Viewer's lat/lon single-location image endpoint is supported:
+
+```
+{host}/v2/radar/{timestamp}/{size}/{z}/{lat}/{lon}/{color}/{smooth}_{snow}.{ext}
+```
+
+| | Rain Viewer | LibreWXR |
+|---|---|---|
+| **URL** | `/v2/radar/{timestamp}/{size}/{z}/{lat}/{lon}/{color}/{smooth}_{snow}.{ext}` | Identical |
+| **Coverage** | `/v2/coverage/0/{size}/{z}/{lat}/{lon}/0/0_0.png` | Identical |
+| **Response** | `size` x `size` image centered on the EPSG:4326 coordinate | Identical |
+
+Returns a `size` x `size` PNG or WebP centered on the coordinate, for past radar frames and nowcast timestamps alike. `size` is `256` or `512` (values in between quantize: `< 512` becomes `256`, matching the tile route), and `{smooth}_{snow}` behaves exactly as on the tile route. Unknown timestamps return 404; areas with no data return a transparent 200 PNG. The coverage layer has the same variant: `/v2/coverage/0/{size}/{z}/{lat}/{lon}/0/0_0.png`.
+
+Path segments containing a dot are treated as lat/lon; plain integer segments are x/y tile indices (a coordinate without a dot is an integer index, even if it names a latitude). The center is snapped to the nearest pixel at that zoom. Longitude wraps across the antimeridian (a window centered near +/-180 deg shows content from both sides of the seam, center preserved). Latitude is clamped to the Web Mercator limit (+/-85.0511 deg); lat beyond +/-90 deg is a 400, and windows at the poles clamp to the world edge. The `?arrows=` and `?cells=` query parameters are tile-mode only and are silently ignored on lat/lon window URLs.
+
+Repeated requests for the same location hit the tile cache (the snapped origin is the cache key), so widgets polling a fixed location are cheap after the first render.
+
+**Contract change:** the `x`/`y` path parameters are now string-typed in OpenAPI (previously integer). Malformed non-numeric values now return 400 instead of 422; negative integers still return 400, and out-of-range tile indices still return 400.
 
 ---
 

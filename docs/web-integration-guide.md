@@ -11,6 +11,7 @@ A tutorial for adding live weather radar to a website using LibreWXR. No prior e
   - [Tile URL Format](#tile-url-format)
   - [Satellite Tile URL Format](#satellite-tile-url-format)
   - [Coverage Tile Endpoint](#coverage-tile-endpoint)
+  - [Widgets and Single-Location Images](#widgets-and-single-location-images)
   - [Alerts Endpoint](#alerts-endpoint)
   - [Health Endpoint](#health-endpoint)
 - [Step-by-Step: Leaflet Integration](#step-by-step-leaflet-integration)
@@ -203,6 +204,16 @@ GET /v2/coverage/0/{size}/{z}/{x}/{y}/0/0_0.png
 ```
 
 Returns a tile showing where radar data exists (useful for debugging or displaying coverage boundaries). The coverage tile is always PNG format.
+
+### Widgets and Single-Location Images
+
+For widgets that poll a fixed location, request a single image centered on the coordinate instead of managing a tile grid:
+
+```
+GET /v2/radar/{timestamp}/256/7/52.52/13.405/2/1_1.png
+```
+
+This returns a 256x256 (or 512x512) PNG/WebP centered on the EPSG:4326 coordinate at the given zoom - the center snaps to the nearest pixel, longitude wraps across the antimeridian, and latitude clamps to the Web Mercator limit (+/-85.0511 deg). Path segments containing a dot are treated as lat/lon and plain integer segments as x/y tile indices - use the `{timestamp}` from the metadata response exactly as you would for tiles. The coverage variant is `/v2/coverage/0/{size}/{z}/{lat}/{lon}/0/0_0.png`, and the `?arrows=` / `?cells=` query parameters are silently ignored on lat/lon window URLs.
 
 ### Alerts Endpoint
 

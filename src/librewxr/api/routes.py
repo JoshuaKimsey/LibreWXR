@@ -4,11 +4,14 @@ import asyncio
 import functools
 import json
 import logging
+import math
 import os
 import pathlib
+import re
 import time
 
 import psutil
+from PIL import Image
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 
@@ -31,10 +34,17 @@ from librewxr.data.store import FrameStore
 from librewxr.data.worker_pulse import read_worker_pulses
 from librewxr.mcp.discovery import build_ai_catalog
 from librewxr.memory import detect_memory_limit_mb
+from librewxr.tiles import window
 from librewxr.tiles.cache import CachedRender, TileCache
-from librewxr.tiles.coordinates import coord_cache_bytes, coord_cache_stats
+from librewxr.tiles.coordinates import (
+    coord_cache_bytes,
+    coord_cache_stats,
+    window_origin,
+)
 from librewxr.tiles.renderer import (
+    _encode_image,
     _transparent_tile,
+    compute_coverage_rgba,
     compute_tile_geometry,
     present_tile,
     render_coverage_tile,
@@ -503,19 +513,22 @@ async def health():
         "other_mb": round(other_bytes / (1024 * 1024), 1),
     })
 
-    # Split the tile cache into its four entry kinds: satellite render
+    # Split the tile cache into its five entry kinds: satellite render
     # entries (``"sat"``-prefixed keys), geometry entries (int timestamp +
     # 6-element viewport key), present render entries (int timestamp +
-    # 9-element viewport/visual key), and overlay present entries (int
+    # 9-element viewport/visual key), overlay present entries (int
     # timestamp + 9-element viewport/visual key + 2-element style suffix,
-    # nowcast frames only).  Each kind is reported with its own count and
-    # byte total.
+    # nowcast frames only), and lat/lon-centered window present entries
+    # (int timestamp + "win" + 9-element window/visual key).  Each kind is
+    # reported with its own count and byte total.
     cache_kind_geometry = 0
     cache_kind_geometry_bytes = 0
     cache_kind_present = 0
     cache_kind_present_bytes = 0
     cache_kind_overlay = 0
     cache_kind_overlay_bytes = 0
+    cache_kind_window = 0
+    cache_kind_window_bytes = 0
     cache_kind_satellite = 0
     cache_kind_satellite_bytes = 0
     for key, size in tile_cache.entries():
@@ -531,6 +544,9 @@ async def health():
         elif key and isinstance(key[0], int) and len(key) == 12:
             cache_kind_overlay += 1
             cache_kind_overlay_bytes += size
+        elif key and isinstance(key[0], int) and len(key) == 11 and key[1] == "win":
+            cache_kind_window += 1
+            cache_kind_window_bytes += size
 
     # Cluster-wide aggregation: lock-free scan of the tiny per-worker pulse
     # files under the shared cache dir, unioned with this worker's live
@@ -569,6 +585,8 @@ async def health():
             "present_bytes": cache_kind_present_bytes,
             "overlay_entries": cache_kind_overlay,
             "overlay_bytes": cache_kind_overlay_bytes,
+            "window_entries": cache_kind_window,
+            "window_bytes": cache_kind_window_bytes,
             "satellite_entries": cache_kind_satellite,
             "satellite_bytes": cache_kind_satellite_bytes,
         },
@@ -756,6 +774,47 @@ def _shared_overlay_key(timestamp, frame_version, flow_version, cells_version, z
     )
 
 
+_INT_RE = re.compile(r"^-?\d+$")
+
+
+def _parse_tile_or_window_coords(x: str, y: str) -> tuple[str, int, int, float, float]:
+    """RainViewer-style tile/window coordinate discrimination.
+
+    Both strings containing a dot -> ("window", 0, 0, lat, lon) with
+    float(x)/float(y) as (lat, lon); both must be finite and the latitude
+    must lie within [-90.0, 90.0] (the longitude may be any finite value,
+    it is normalized downstream).  Both matching a plain integer
+    (``_INT_RE``) -> ("tile", int(x), int(y), 0.0, 0.0); either negative
+    is rejected, restoring the lower bound the old ``Path(ge=0)`` typing
+    enforced.  Anything else (mixed dot/int, unparseable, non-finite) is
+    invalid.
+
+    NOTE: RainViewer parity - a coordinate without a dot is an integer
+    tile index even if it names a latitude ("55" is tile x=55, not lat
+    55).
+    """
+    if "." in x and "." in y:
+        try:
+            lat = float(x)
+            lon = float(y)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid tile coordinates")
+        if not math.isfinite(lat) or not math.isfinite(lon):
+            raise HTTPException(status_code=400, detail="Invalid tile coordinates")
+        if not -90.0 <= lat <= 90.0:
+            raise HTTPException(status_code=400, detail="Latitude out of range")
+        return "window", 0, 0, lat, lon
+    if _INT_RE.match(x) and _INT_RE.match(y):
+        xi = int(x)
+        yi = int(y)
+        if xi < 0 or yi < 0:
+            raise HTTPException(
+                status_code=400, detail="Tile coordinates out of range",
+            )
+        return "tile", xi, yi, 0.0, 0.0
+    raise HTTPException(status_code=400, detail="Invalid tile coordinates")
+
+
 def _shared_get_and_hash(store, key: str):
     """Read a shared tile and hash it off the event loop; None on miss."""
     data = store.get(key)
@@ -782,14 +841,144 @@ async def _present_tile_async(geom, **kwargs) -> tuple[bytes, str]:
     return await asyncio.to_thread(_present_and_hash, geom, **kwargs)
 
 
+async def _radar_window(
+    request: Request,
+    timestamp: int,
+    size: int,
+    z: int,
+    lat: float,
+    lon: float,
+    color: int,
+    smooth_snow: str,
+    ext: str,
+) -> Response:
+    """Lat/lon-centered window mode for the radar tile route.
+
+    Triggered when both ``/v2/radar`` ``x``/``y`` path segments contain a
+    dot: the request names a (lat, lon) point and the response is a
+    ``tile_size`` x ``tile_size`` canvas centered on that point (see
+    ``coordinates.window_origin`` / ``window.compute_window_geometry``),
+    stitched from ordinary integer-tile geometry at the same zoom.
+
+    Deliberate differences from tile mode: overlay query params are
+    silently ignored, and the shared tile store, tile warmer, and the
+    request tracker's per-tile counters are never touched.
+    """
+    t0 = time.perf_counter_ns()
+
+    parts = smooth_snow.split("_")
+    smooth = parts[0] == "1"
+    snow = parts[1] == "1" if len(parts) > 1 else False
+
+    tile_size = 512 if size >= 512 else 256
+    px0, py0 = window_origin(lat, lon, z, tile_size)
+
+    present_key = (
+        timestamp, "win", z, px0, py0, tile_size, smooth, snow,
+        color, ext, settings.webp_quality,
+    )
+    cached = tile_cache.get(present_key)
+    if isinstance(cached, CachedRender):
+        tile_bytes = cached.data
+        etag = cached.etag
+    else:
+        # Frame resolution identical to tile mode: radar store first,
+        # nowcast store fallback, 404 when neither has the timestamp.
+        frame = await frame_store.get_frame(timestamp)
+        nowcast_blend = None
+        if frame is None and nowcast_store is not None:
+            nc_frame, nowcast_blend = await nowcast_store.get_frame(timestamp)
+            if nc_frame is not None:
+                frame = nc_frame
+        if frame is None:
+            raise HTTPException(status_code=404, detail="Frame not found")
+
+        async def get_component(tx: int, ty: int) -> TileGeometry:
+            geom_key = (timestamp, z, tx, ty, tile_size, smooth, snow)
+            geom = tile_cache.get(geom_key)
+            if geom is not None:
+                return geom
+            label = transparent_fast_path_label(
+                frame.regions, z, tx, ty, enabled_regions, nwp_chain,
+                precip_mask, timestamp, nowcast_blend,
+            )
+            if label is not None:
+                geom = TileGeometry.transparent(tile_size, fast_path=label)
+            else:
+                geom = await asyncio.to_thread(
+                    compute_tile_geometry,
+                    frame_regions=frame.regions,
+                    z=z, x=tx, y=ty,
+                    tile_size=tile_size,
+                    smooth=smooth,
+                    snow=snow,
+                    nwp_chain=nwp_chain,
+                    enabled_regions=enabled_regions,
+                    frame_timestamp=timestamp,
+                    nowcast_blend=nowcast_blend,
+                    precip_mask=precip_mask,
+                )
+            tile_cache.put(geom_key, geom)
+            return geom
+
+        geom = await window.compute_window_geometry(
+            get_component, z, px0, py0, tile_size,
+        )
+
+        if geom.is_transparent:
+            # Same inline constant serve as tile mode: the transparent
+            # window's encoded bytes are a process constant per
+            # (tile_size, ext); the present entry is primed so repeats
+            # hit the present cache.
+            memo_key = (tile_size, ext)
+            memoized = _TRANSPARENT_RENDER_MEMO.get(memo_key)
+            if memoized is None:
+                tile_bytes = _transparent_tile(tile_size, ext)
+                etag = compute_etag(tile_bytes)
+                _TRANSPARENT_RENDER_MEMO[memo_key] = (tile_bytes, etag)
+            else:
+                tile_bytes, etag = memoized
+            tile_cache.put(present_key, CachedRender(data=tile_bytes, etag=etag))
+        else:
+            tile_bytes, etag = await _present_tile_async(
+                geom,
+                color_scheme=color,
+                fmt=ext,
+                arrow_style="",
+            )
+            tile_cache.put(present_key, CachedRender(data=tile_bytes, etag=etag))
+
+    # Historical frames are immutable once backfill is complete - cache
+    # them for their full 2-hour lifetime.  Latest and nowcast frames
+    # still evolve (mirror of the tile-mode tail).
+    timestamps = await _latest_timestamps_cached()
+    latest_ts = max(timestamps) if timestamps else None
+    max_age = 7200 if (latest_ts is not None and timestamp < latest_ts) else 300
+
+    # Request latency: request-total-only form (no compute/present stages
+    # are tracked separately in window mode).
+    if tile_request_tracker is not None:
+        tile_request_tracker.record_latency(
+            time.perf_counter_ns() - t0, None, None,
+        )
+
+    return conditional_response(
+        request=request,
+        body=tile_bytes,
+        etag=etag,
+        content_type=_content_type(ext),
+        max_age=max_age,
+    )
+
+
 @router.get("/v2/radar/{timestamp}/{size}/{z}/{x}/{y}/{color}/{smooth_snow}.{ext}")
 async def radar_tile(
     request: Request,
     timestamp: int,
     size: int = Path(ge=256, le=512),
     z: int = Path(ge=0),
-    x: int = Path(ge=0),
-    y: int = Path(ge=0),
+    x: str = Path(...),
+    y: str = Path(...),
     color: int = Path(ge=0, le=255),
     smooth_snow: str = Path(pattern=r"^\d+_\d+$"),
     ext: str = Path(pattern=r"^(png|webp)$"),
@@ -798,12 +987,18 @@ async def radar_tile(
 ) -> Response:
     """Rain Viewer-compatible tile endpoint."""
     t0 = time.perf_counter_ns()
-    logger.debug("Tile request: z=%d x=%d y=%d color=%d smooth_snow=%s ext=%s", z, x, y, color, smooth_snow, ext)
+    logger.debug("Tile request: z=%d x=%s y=%s color=%d smooth_snow=%s ext=%s", z, x, y, color, smooth_snow, ext)
     if z > settings.max_zoom:
         raise HTTPException(status_code=400, detail=f"Zoom {z} exceeds max {settings.max_zoom}")
 
+    mode, xi, yi, lat, lon = _parse_tile_or_window_coords(x, y)
+    if mode == "window":
+        return await _radar_window(
+            request, timestamp, size, z, lat, lon, color, smooth_snow, ext,
+        )
+
     max_tiles = 2**z
-    if x >= max_tiles or y >= max_tiles:
+    if xi >= max_tiles or yi >= max_tiles:
         raise HTTPException(status_code=400, detail="Tile coordinates out of range")
 
     parts = smooth_snow.split("_")
@@ -834,7 +1029,7 @@ async def radar_tile(
     # scheme, output format, and arrow style apply per-request in
     # ``present_tile`` so a single cached entry serves every visual
     # variant of the same viewport.
-    geom_key = (timestamp, z, x, y, tile_size, smooth, snow)
+    geom_key = (timestamp, z, xi, yi, tile_size, smooth, snow)
     geom = tile_cache.get(geom_key)
 
     # Present-stage cache key: one entry per visual variant of the same
@@ -843,7 +1038,7 @@ async def radar_tile(
     # here (before the shared-store lookup) so the early-serve fast path
     # below can use it without recomputing the tuple.
     present_key = (
-        timestamp, z, x, y, tile_size, smooth, snow,
+        timestamp, z, xi, yi, tile_size, smooth, snow,
         color, ext, settings.webp_quality,
     )
 
@@ -851,7 +1046,7 @@ async def radar_tile(
     # "is the fast path helping".  Batched with the (z, x, y) counter so
     # one lock acquisition covers both.
     if tile_request_tracker is not None:
-        tile_request_tracker.record_request(z, x, y, cache_hit=geom is not None)
+        tile_request_tracker.record_request(z, xi, yi, cache_hit=geom is not None)
 
     # Early-serve fast path: a plain request whose geometry is already in
     # memory and whose encoded bytes are present-cached skips the shared-
@@ -885,7 +1080,7 @@ async def radar_tile(
         if shared_tile_store is not None and is_plain and frame_store is not None:
             version = frame_store.frame_version(timestamp)
             if version is not None:  # past frames only; nowcast ts has no version
-                shared_key = _shared_tile_key(timestamp, version, z, x, y, tile_size, smooth, snow, color, ext)
+                shared_key = _shared_tile_key(timestamp, version, z, xi, yi, tile_size, smooth, snow, color, ext)
                 if io_executor is not None:
                     loop = asyncio.get_running_loop()
                     shared_hit = await loop.run_in_executor(
@@ -930,7 +1125,7 @@ async def radar_tile(
                 # any()), safe on the event loop, and keeps the compute
                 # pool clear of no-op ocean tiles.
                 label = transparent_fast_path_label(
-                    frame.regions, z, x, y, enabled_regions, nwp_chain,
+                    frame.regions, z, xi, yi, enabled_regions, nwp_chain,
                     precip_mask, timestamp, nowcast_blend,
                 )
                 if label is not None:
@@ -946,7 +1141,7 @@ async def radar_tile(
                     geom = await asyncio.to_thread(
                         compute_tile_geometry,
                         frame_regions=frame.regions,
-                        z=z, x=x, y=y,
+                        z=z, x=xi, y=yi,
                         tile_size=tile_size,
                         smooth=smooth,
                         snow=snow,
@@ -1038,7 +1233,7 @@ async def radar_tile(
                             nwp_flow=nwp_flow,
                             nwp_chain=nwp_chain,
                             frame_timestamp=timestamp,
-                            z=z, x=x, y=y,
+                            z=z, x=xi, y=yi,
                             cell_style=eff_cells,
                             cells_by_region=cells_by_region,
                             cell_counts=cell_counts,
@@ -1059,7 +1254,7 @@ async def radar_tile(
                         if shared_tile_store is not None and frame_store is not None:
                             version = frame_store.frame_version(timestamp)
                             if version is not None:
-                                key = _shared_tile_key(timestamp, version, z, x, y, tile_size, smooth, snow, color, ext)
+                                key = _shared_tile_key(timestamp, version, z, xi, yi, tile_size, smooth, snow, color, ext)
                                 if io_executor is not None:
                                     loop = asyncio.get_running_loop()
                                     task = asyncio.ensure_future(
@@ -1096,7 +1291,7 @@ async def radar_tile(
                         version = frame_store.frame_version(timestamp)
                         if version is not None:
                             ov_key = _shared_overlay_key(
-                                timestamp, version, flow_v, cells_v, z, x, y,
+                                timestamp, version, flow_v, cells_v, z, xi, yi,
                                 tile_size, smooth, snow, color, ext,
                                 eff_arrow, eff_cells,
                             )
@@ -1123,7 +1318,7 @@ async def radar_tile(
                             nwp_flow=nwp_flow,
                             nwp_chain=nwp_chain,
                             frame_timestamp=timestamp,
-                            z=z, x=x, y=y,
+                            z=z, x=xi, y=yi,
                             cell_style=eff_cells,
                             cells_by_region=cells_by_region,
                             cell_counts=cell_counts,
@@ -1143,7 +1338,7 @@ async def radar_tile(
                             version = frame_store.frame_version(timestamp)
                             if version is not None:
                                 ov_key = _shared_overlay_key(
-                                    timestamp, version, flow_v, cells_v, z, x, y,
+                                    timestamp, version, flow_v, cells_v, z, xi, yi,
                                     tile_size, smooth, snow, color, ext,
                                     eff_arrow, eff_cells,
                                 )
@@ -1169,7 +1364,7 @@ async def radar_tile(
         asyncio.ensure_future(
             tile_warmer.warm(
                 triggered_timestamp=timestamp,
-                z=z, x=x, y=y,
+                z=z, x=xi, y=yi,
                 tile_size=tile_size,
                 smooth=smooth,
                 snow=snow,
@@ -1199,20 +1394,93 @@ async def radar_tile(
     )
 
 
+async def _coverage_window(
+    request: Request, size: int, z: int, lat: float, lon: float,
+) -> Response:
+    """Lat/lon-centered window variant of the coverage route.
+
+    Stitches per-tile coverage RGBA arrays (``compute_coverage_rgba``)
+    onto a ``tile_size`` x ``tile_size`` canvas centered on the given
+    lat/lon point.  No component-level caching in v1 - the window is
+    recomputed per unique origin and cached whole under a ``"cov"``
+    namespaced key.
+    """
+    tile_size = 512 if size >= 512 else 256
+    px0, py0 = window_origin(lat, lon, z, tile_size)
+
+    frame = await frame_store.get_latest_frame()
+    if frame is None:
+        raise HTTPException(status_code=503, detail="No radar data available")
+
+    cache_key = ("cov", frame.timestamp, "win", z, px0, py0, tile_size)
+    cached = tile_cache.get(cache_key)
+    if cached is not None:
+        if isinstance(cached, CachedRender):
+            tile_bytes = cached.data
+            etag = cached.etag
+        else:
+            # Legacy raw-bytes entry (pre-ETag cache format).
+            tile_bytes = cached
+            etag = compute_etag(cached)
+        return conditional_response(
+            request=request,
+            body=tile_bytes,
+            etag=etag,
+            content_type="image/png",
+            max_age=300,
+        )
+
+    keys: list[tuple[int, int]] = list(dict.fromkeys(
+        (s.tx, s.ty)
+        for s in window.covered_tiles(z, px0, py0, tile_size, tile_size)
+    ))
+    rgbas = await asyncio.gather(*[
+        asyncio.to_thread(
+            compute_coverage_rgba,
+            frame_regions=frame.regions,
+            z=z, x=tx, y=ty,
+            tile_size=tile_size,
+            enabled_regions=enabled_regions,
+        )
+        for tx, ty in keys
+    ])
+    canvas = window.stitch_coverage(dict(zip(keys, rgbas)), z, px0, py0, tile_size)
+
+    if not canvas.any():
+        tile_bytes = _transparent_tile(tile_size, "png")
+    else:
+        img = Image.fromarray(canvas, "RGBA")
+        tile_bytes = _encode_image(img, "png")
+    etag = compute_etag(tile_bytes)
+    tile_cache.put(cache_key, CachedRender(data=tile_bytes, etag=etag))
+
+    return conditional_response(
+        request=request,
+        body=tile_bytes,
+        etag=etag,
+        content_type="image/png",
+        max_age=300,
+    )
+
+
 @router.get("/v2/coverage/0/{size}/{z}/{x}/{y}/0/0_0.png")
 async def coverage_tile(
     request: Request,
     size: int = Path(ge=256, le=512),
     z: int = Path(ge=0),
-    x: int = Path(ge=0),
-    y: int = Path(ge=0),
+    x: str = Path(...),
+    y: str = Path(...),
 ) -> Response:
     """Coverage tile showing where radar data exists."""
     if z > settings.max_zoom:
         raise HTTPException(status_code=400, detail=f"Zoom {z} exceeds max {settings.max_zoom}")
 
+    mode, xi, yi, lat, lon = _parse_tile_or_window_coords(x, y)
+    if mode == "window":
+        return await _coverage_window(request, size, z, lat, lon)
+
     max_tiles = 2**z
-    if x >= max_tiles or y >= max_tiles:
+    if xi >= max_tiles or yi >= max_tiles:
         raise HTTPException(status_code=400, detail="Tile coordinates out of range")
 
     tile_size = 512 if size >= 512 else 256
@@ -1233,7 +1501,7 @@ async def coverage_tile(
     # the LRU, same as satellite.  ``enabled_regions`` is fixed at
     # startup, so it's not in the key (the radar geometry path treats it
     # the same way).
-    cache_key = ("cov", frame.timestamp, z, x, y, tile_size)
+    cache_key = ("cov", frame.timestamp, z, xi, yi, tile_size)
     cached = tile_cache.get(cache_key)
     if cached is not None:
         if isinstance(cached, CachedRender):
@@ -1254,7 +1522,7 @@ async def coverage_tile(
     tile_bytes = await asyncio.to_thread(
         render_coverage_tile,
         frame_regions=frame.regions,
-        z=z, x=x, y=y,
+        z=z, x=xi, y=yi,
         tile_size=tile_size,
         enabled_regions=enabled_regions,
     )
