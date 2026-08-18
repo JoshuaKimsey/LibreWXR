@@ -422,7 +422,7 @@ Maximum tile cache size in megabytes, **per worker**. The cache stores pre-prese
 
 Higher values mean faster tile serving for repeat requests; lower values save RAM. The default tracks `LIBREWXR_MODE`: 200 MB total in single mode, 128 MB per worker in multi mode (where many workers share the rack). At a 512² tile size each geometry entry is ~256 KB, so 200 MB holds ~800 viewport geometries.
 
-The tile cache holds two kinds of entries: computed `TileGeometry` records (the expensive per-tile compositing result) and cached encoded tile bytes (rendered tiles kept for HTTP ETag reuse so repeat requests skip re-encoding). Both share this single byte budget, and the half that overflows the byte cap is evicted via LRU when the cache is full. There is no separate config knob for the encoded-byte cache.
+The tile cache holds two kinds of entries: computed `TileGeometry` records (the expensive per-tile compositing result) and cached encoded tile bytes (rendered tiles kept for HTTP ETag reuse so repeat requests skip re-encoding — covering present, overlay, and lat/lon-window renders, with `/health` reporting each kind's count and bytes separately via `geometry_entries`, `present_entries`, `overlay_entries`, `window_entries`, and `satellite_entries`). Both share this single byte budget, and the half that overflows the byte cap is evicted via LRU when the cache is full. There is no separate config knob for the encoded-byte cache.
 
 | | |
 |---|---|

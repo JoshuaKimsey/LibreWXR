@@ -312,7 +312,8 @@ GET /v2/radar/{timestamp}/{size}/{z}/{x}/{y}/{color}/{smooth}_{snow}.{ext}
 |---|---|---|
 | `timestamp` | Unix timestamp | From the metadata endpoint |
 | `size` | `256`, `512` | Tile size in pixels |
-| `z`, `x`, `y` | integers | Standard slippy map tile coordinates |
+| `z` | integer | Zoom level |
+| `x`, `y` | integer-valued strings | Standard slippy map tile coordinates — segments containing a dot are interpreted as lat/lon (see the Radar Point Tiles section) |
 | `color` | `0`-`9`, `255` | Color scheme (see below) |
 | `smooth` | `0`, `1` | Enable smoothing |
 | `snow` | `0`, `1` | Enable snow precipitation colors |
@@ -392,7 +393,7 @@ Returns real satellite imagery tiles backed by NOAA GMGSI. The endpoint serves a
 GET /v2/coverage/0/{size}/{z}/{x}/{y}/0/0_0.png
 ```
 
-Returns tiles showing where radar data exists (white semi-transparent overlay).
+Returns tiles showing where radar data exists (white semi-transparent overlay). A lat/lon window variant is also available at `/v2/coverage/0/{size}/{z}/{lat}/{lon}/0/0_0.png` — see the Radar Point Tiles section for the dot rule and semantics.
 
 #### Weather Alerts (LibreWXR extension)
 

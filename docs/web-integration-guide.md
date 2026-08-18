@@ -75,7 +75,7 @@ If you want to experiment before setting up your own server, you can use the pub
 https://api.librewxr.net
 ```
 
-Just use this URL wherever you see `http://localhost:8080` in the examples below. The `examples/` directory in the repository contains ready-to-open HTML files that auto-detect whether to use a local or public API endpoint — no setup needed.
+Just use this URL wherever you see `http://localhost:8080` in the examples below. The `examples/` directory in the repository contains ready-to-open HTML files — the map examples auto-detect whether to use a local or public API endpoint, and the widget defaults to the public instance via its API-source selector — no setup needed.
 
 When you're ready to self-host, swap the URL to your own server and everything works the same way.
 
@@ -203,7 +203,7 @@ The satellite layer renders real imagery from NOAA's GMGSI mosaic. The day side 
 GET /v2/coverage/0/{size}/{z}/{x}/{y}/0/0_0.png
 ```
 
-Returns a tile showing where radar data exists (useful for debugging or displaying coverage boundaries). The coverage tile is always PNG format.
+Returns a tile showing where radar data exists (useful for debugging or displaying coverage boundaries). The coverage tile is always PNG format. A lat/lon window variant also exists at `/v2/coverage/0/{size}/{z}/{lat}/{lon}/0/0_0.png` — see the Widgets and Single-Location Images section for the dot rule and semantics.
 
 ### Widgets and Single-Location Images
 
