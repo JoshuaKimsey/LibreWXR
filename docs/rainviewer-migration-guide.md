@@ -126,7 +126,7 @@ If tiles don't appear, check the browser developer console for CORS errors or fa
 | **`host` field** | `https://tilecache.rainviewer.com` | Your `LIBREWXR_PUBLIC_URL` value |
 | **`radar.past`** | Array of `{time, path}` | Identical |
 | **`radar.nowcast`** | Array of `{time, path}` (paid tier) | Identical (enabled by default) |
-| **`satellite.infrared`** | Array of `{time, path}` | Empty array `[]` |
+| **`satellite.infrared`** | Array of `{time, path}` (discontinued Jan 2026) | Array of `{time, path}` (up to 12 hourly GMGSI frames; empty when the satellite layer is disabled) |
 
 ### Tile URL Format
 
@@ -192,7 +192,7 @@ Repeated requests for the same location hit the tile cache (the snapped origin i
 | Smoothing | No | Yes | Yes |
 | Snow colors | No | Yes | Yes |
 | Nowcast/Forecast | No | ~60 min | Up to 60 min |
-| Satellite IR | No | Yes | Not yet |
+| Satellite | No (discontinued Jan 2026) | Yes (IR, 10-min) | Yes (GMGSI LW+VIS composite, hourly) |
 | Motion arrows | No | No | Yes |
 | Coverage | Global | Global | US, Canada, Europe, El Salvador, Taiwan, SE Asia radar + global RRQPE observed + global ECMWF IFS + regional NWP |
 | Rate limits | Yes | Higher limits | None (self-hosted) |
@@ -208,6 +208,8 @@ These are things to be aware of but generally don't require code changes:
 
 - **Data update cadence**: Both use 10-minute intervals. LibreWXR aligns to clock boundaries (:00, :10, :20, etc.) just like Rain Viewer.
 
+- **Satellite imagery**: LibreWXR serves NOAA GMGSI where Rain Viewer's paid layer was 10-minute infrared-only (discontinued for everyone January 2026): a global (±72.7 deg) hourly LW+VIS composite — infrared at night, visible reflectance by day, with a natural day/night terminator — with up to 12 hourly frames of history. The `satellite.infrared` metadata array works the same way and tile URLs use fixed `0`/`0_0` color/options segments: `/v2/satellite/{timestamp}/{size}/{z}/{x}/{y}/0/0_0.{ext}` (png or webp). `LIBREWXR_SATELLITE_ENABLED=false` empties the catalog array and makes tile requests return 503.
+
 - **Color scheme rendering**: LibreWXR reproduces all 9 Rain Viewer color schemes from the same color lookup tables. The visual output should be identical for a given scheme ID.
 
 - **Tile caching headers**: LibreWXR serves tiles with `Cache-Control: public, max-age=300` (5 minutes). This is compatible with any CDN or caching proxy.
@@ -215,8 +217,6 @@ These are things to be aware of but generally don't require code changes:
 ---
 
 ## What's Not Supported
-
-- **Satellite infrared imagery** — The `satellite.infrared` array is always empty. If your code depends on satellite tiles, those requests will return empty/404 responses. Radar tiles are unaffected.
 
 - **Rain Viewer API key authentication** — LibreWXR has no authentication. If your code sends a Rain Viewer API key, it will be ignored harmlessly.
 
