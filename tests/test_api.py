@@ -224,6 +224,36 @@ class TestRadarTileEndpoint:
         assert "cache-control" in resp.headers
         assert "max-age=7200" in resp.headers["cache-control"]
 
+    def test_timestamp_zero_serves_latest(self, client):
+        c, ts, ts_prev = client
+        resp = c.get("/v2/radar/0/256/4/3/5/2/0_0.png")
+        assert resp.status_code == 200
+        assert resp.headers["x-frame-timestamp"] == str(ts)
+        assert resp.content == c.get(f"/v2/radar/{ts}/256/4/3/5/2/0_0.png").content
+
+    def test_timestamp_zero_cache_header(self, client):
+        """The resolved latest frame must NOT get the 7200 historical bucket."""
+        c, ts, ts_prev = client
+        resp = c.get("/v2/radar/0/256/4/3/5/2/0_0.png")
+        assert resp.status_code == 200
+        assert "max-age=300" in resp.headers["cache-control"]
+
+    def test_canonical_url_has_frame_timestamp_header(self, client):
+        c, ts, ts_prev = client
+        resp = c.get(f"/v2/radar/{ts}/256/4/3/5/2/0_0.png")
+        assert resp.status_code == 200
+        assert resp.headers["x-frame-timestamp"] == str(ts)
+
+    def test_timestamp_zero_304_keeps_header(self, client):
+        c, ts, ts_prev = client
+        url = "/v2/radar/0/256/4/3/5/2/0_0.png"
+        first = c.get(url)
+        assert first.status_code == 200
+        etag = first.headers["etag"]
+        resp = c.get(url, headers={"If-None-Match": etag})
+        assert resp.status_code == 304
+        assert resp.headers["x-frame-timestamp"] == str(ts)
+
     def test_radar_tile_has_etag(self, client):
         c, ts, _ = client
         resp = c.get(f"/v2/radar/{ts}/256/4/3/5/2/0_0.png")
@@ -430,6 +460,14 @@ class TestSatelliteTileEndpoint:
         assert resp.content == b""
         assert resp.headers.get("etag") == etag
         assert resp.headers.get("cache-control", "").startswith("public, max-age=")
+
+    def test_satellite_timestamp_zero_serves_latest(self, client):
+        c, ts, _ = client
+        resp = c.get("/v2/satellite/0/256/4/3/5/0/0_0.png")
+        assert resp.status_code == 200
+        assert resp.headers["x-frame-timestamp"] == str(ts)
+        assert "max-age=300" in resp.headers["cache-control"]
+        assert resp.content == c.get(f"/v2/satellite/{ts}/256/4/3/5/0/0_0.png").content
 
 
 class TestHealthEndpoint:

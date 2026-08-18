@@ -734,6 +734,27 @@ async def _latest_timestamps_cached() -> list[int]:
     return timestamps
 
 
+async def _resolve_radar_timestamp(timestamp: int) -> int:
+    """Resolve the ``0`` = "latest past frame" alias to a real timestamp.
+
+    The coverage endpoint already hardcodes ``0`` in the timestamp slot
+    to mean "latest" (RainViewer's own convention); this extends the same
+    convention to the radar tile/window routes.  Resolution happens at
+    route entry so every downstream consumer (cache keys, shared-store
+    keys, the max-age bucket, NWP/snow sampling) sees the resolved
+    timestamp.  Raises 404 when the store holds no frames, matching the
+    endpoint's unknown-timestamp behaviour.
+    """
+    if timestamp != 0:
+        return timestamp
+    if frame_store is None:
+        raise HTTPException(status_code=404, detail="Frame not found")
+    latest = await frame_store.get_latest_frame()
+    if latest is None:
+        raise HTTPException(status_code=404, detail="Frame not found")
+    return latest.timestamp
+
+
 def _present_and_hash(geom, **kwargs) -> tuple[bytes, str]:
     """Run ``present_tile`` and hash the result into an ETag.
 
@@ -968,6 +989,7 @@ async def _radar_window(
         etag=etag,
         content_type=_content_type(ext),
         max_age=max_age,
+        extra_headers={"X-Frame-Timestamp": str(timestamp)},
     )
 
 
@@ -990,6 +1012,8 @@ async def radar_tile(
     logger.debug("Tile request: z=%d x=%s y=%s color=%d smooth_snow=%s ext=%s", z, x, y, color, smooth_snow, ext)
     if z > settings.max_zoom:
         raise HTTPException(status_code=400, detail=f"Zoom {z} exceeds max {settings.max_zoom}")
+
+    timestamp = await _resolve_radar_timestamp(timestamp)
 
     mode, xi, yi, lat, lon = _parse_tile_or_window_coords(x, y)
     if mode == "window":
@@ -1391,6 +1415,7 @@ async def radar_tile(
         etag=etag,
         content_type=_content_type(ext),
         max_age=max_age,
+        extra_headers={"X-Frame-Timestamp": str(timestamp)},
     )
 
 
@@ -1580,6 +1605,12 @@ async def satellite_tile(
     else:
         raise HTTPException(status_code=503, detail="Satellite data not available")
 
+    if timestamp == 0:
+        # Same "0 = latest" alias as the radar route: resolve before the
+        # cache-key construction and max-age bucket below so alias
+        # requests key and cache exactly like the canonical URL.
+        timestamp = max(gmgsi_lw.timestamps)
+
     # Older-than-latest frames are immutable; give them a long max-age.
     # Computed before the lookup so cache hits get the same semantics.
     sat_timestamps = gmgsi_lw.timestamps
@@ -1604,6 +1635,7 @@ async def satellite_tile(
             etag=etag,
             content_type=_content_type(ext),
             max_age=max_age,
+            extra_headers={"X-Frame-Timestamp": str(timestamp)},
         )
 
     if backing == "gmgsi_composite":
@@ -1635,6 +1667,7 @@ async def satellite_tile(
         etag=etag,
         content_type=_content_type(ext),
         max_age=max_age,
+        extra_headers={"X-Frame-Timestamp": str(timestamp)},
     )
 
 

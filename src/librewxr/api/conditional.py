@@ -49,15 +49,20 @@ def conditional_response(
     etag: str,
     content_type: str,
     max_age: int,
+    extra_headers: dict[str, str] | None = None,
 ) -> Response:
     """Build a 304 or 200 response honoring If-None-Match.
 
     When the request's If-None-Match header matches ``etag`` a bodyless
     304 is returned; otherwise the full ``body`` is served with the ETag.
+    ``extra_headers``, when given, are merged into the response headers
+    and apply to both the 304 and the 200 branch.
     """
     inm_header = request.headers.get("if-none-match")
     inm = parse_if_none_match(inm_header)
     headers = {"ETag": etag, "Cache-Control": f"public, max-age={max_age}"}
+    if extra_headers:
+        headers.update(extra_headers)
     if etag_matches(etag, inm):
         return Response(status_code=304, headers=headers)
     return Response(content=body, media_type=content_type, headers=headers)

@@ -198,6 +198,13 @@ class TestRadarWindow:
         assert resp.status_code == 404
         assert resp.json()["detail"] == "Frame not found"
 
+    def test_window_timestamp_zero_serves_latest(self, client):
+        c, ts, _ = client
+        resp = c.get("/v2/radar/0/256/5/37.0/-95.5/2/0_0.png")
+        assert resp.status_code == 200
+        assert _png_size(resp.content) == (256, 256)
+        assert resp.headers["x-frame-timestamp"] == str(ts)
+
     def test_lat_out_of_range_400(self, client):
         c, ts, _ = client
         resp = c.get(f"/v2/radar/{ts}/256/5/95.0/-95.5/2/0_0.png")

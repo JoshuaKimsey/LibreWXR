@@ -170,6 +170,8 @@ http://localhost:8080/v2/radar/1700000400/256/5/8/12/7/1_0.png
 
 This requests a 256px PNG tile at zoom 5, column 8, row 12, using color scheme 7 (Rainbow @ Selex SI), with smoothing enabled and snow coloring disabled.
 
+**Latest-frame alias:** timestamp `0` is accepted in the `{timestamp}` slot as an alias for the newest frame - radar resolves it to the latest past radar frame and the satellite endpoint to the latest GMGSI timestamp, before any caching, so alias URLs key and cache exactly like the canonical ones. Every response (200 or 304) carries the resolved timestamp in the `X-Frame-Timestamp` response header: request e.g. `http://localhost:8080/v2/radar/0/256/5/8/12/7/1_0.png` and read the canonical timestamp from the header instead of polling the metadata endpoint. The alias works on radar tile URLs, lat/lon window URLs (e.g. `http://localhost:8080/v2/radar/0/256/7/52.52/13.405/2/1_1.png`), and satellite tiles.
+
 ### Satellite Tile URL Format
 
 ```
