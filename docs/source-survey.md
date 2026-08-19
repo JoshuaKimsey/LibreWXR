@@ -119,6 +119,8 @@ What it would take to revisit: per-station ranges (the current radar infrastruct
 
 Worth noting the license itself was fine — PAGASA's site-wide public-domain statement covered the radar imagery. The revert was a data-quality call, not a licensing one. An open license is a prerequisite for upstream inclusion, but the data also has to be usable in practice.
 
+**Reinstated 2026-08-19.** A re-examination (live probe of six typhoon-season frames plus pixel-level analysis) found the revert's empirical basis mostly didn't reproduce: the ~2065-pixel frame was a dry-season artifact — August frames carry 22–24k precip pixels with 100% exact palette matches, so the decoder was never dropping data — and the 80 km range claim is refuted for every station testable today (uniform ~240 km cap; no range constants exist in the app JS). Kabacan and Panabo remain untested (no rain over Mindanao during the probe window); if they ever prove short-range, `range_overrides` in the source package is the fix. What held: the mosaic is a union of ~240 km station circles, inherent to the source. The network gained a ninth station (Davao) since May. One license nuance now recorded: RA 8293 §176 puts government works in the public domain but requires PAGASA approval for for-profit exploitation — fine for self-hosted AGPL, a caveat for paid hosting. Re-added as a self-discovered package at `sources/regional/southeast_asia/philippines/radar/pagasa/`; the low-zoom max-pool question above remains open but is cosmetic, not structural.
+
 ## Radar — Tier 1
 
 Validated against the upstream endpoints. License and access path are clear. Implementation is queued behind whatever else is in flight.

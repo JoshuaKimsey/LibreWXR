@@ -45,6 +45,7 @@ box that would have implied coverage where none exists.
 | MARN El Salvador | S-band (1, San Andrés) | 120 km | 5 min | ~0.009° (~1 km) |
 | CWA Taiwan QPESUMS | S/C-band (7) | 240 km | 10 min | ~0.0125° (~1.4 km) |
 | MET Malaysia | S-band (12, national network) | 240 km | 10 min | ~0.022° lon / 0.019° lat (~2.5 km) |
+| PAGASA Philippines | S-band (9, national mosaic) | 240 km | 15 min | ~0.0069° lon / 0.0091° lat (~770 m) |
 | JMA HRPN (Japan) | C-band (20) + XRAIN X-band + AMeDAS gauges | 240 km | 5 min | ~0.0125° (~1.4 km) |
 | NOAA RRQPE (observed) | geostationary IR blend (no radar stations) | — | 10 min | 0.04° stored (0.02° native) |
 
@@ -154,8 +155,8 @@ fringe:
 ### East Asia
 
 Radar — MET Malaysia (Peninsular Malaysia and East Malaysia / Borneo),
-CWA / QPESUMS Taiwan, and JMA HRPN Japan, with MRMS Guam clipping in
-from the Western Pacific:
+PAGASA Philippines (Luzon, Visayas, and Mindanao), CWA / QPESUMS Taiwan,
+and JMA HRPN Japan, with MRMS Guam clipping in from the Western Pacific:
 
 ![East Asia radar coverage](coverage-map-east-asia-radar.png)
 

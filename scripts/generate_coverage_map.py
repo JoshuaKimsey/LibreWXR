@@ -94,6 +94,7 @@ DPC_COVERAGE_POLYGONS = _dpc.COVERAGE_POLYGONS
 _msc   = _load_data_module(_SRC / "north_america/canada/radar/msc_canada/stations.py")
 _usa   = _load_data_module(_SRC / "north_america/usa/radar/stations.py")
 _mmd   = _load_data_module(_SRC / "southeast_asia/malaysia/radar/mmd/stations.py")
+_pagasa = _load_data_module(_SRC / "southeast_asia/philippines/radar/pagasa/stations.py")
 
 MARN_RANGES = _marn.RANGE_OVERRIDES
 SNET_STATIONS = _marn.STATIONS
@@ -112,6 +113,8 @@ NEXRAD_PUERTO_RICO = _usa.NEXRAD_PUERTO_RICO
 MMD_EAST_STATIONS = _mmd.EAST_STATIONS
 MMD_PENINSULAR_STATIONS = _mmd.PENINSULAR_STATIONS
 MMD_RANGES = _mmd.RANGE_OVERRIDES
+PHCOMP_STATIONS = _pagasa.PHCOMP_STATIONS
+PAGASA_RANGES = _pagasa.RANGE_OVERRIDES
 JMA_STATIONS = _jma.STATIONS
 JMA_RANGES = _jma.RANGE_OVERRIDES
 JMA_COVERAGE_POLYGONS = _jma.COVERAGE_POLYGONS
@@ -125,6 +128,7 @@ REGION_RADAR_RANGE: dict[str, float] = {
     **OPERA_RANGES,
     **DPC_RANGES,
     **MMD_RANGES,
+    **PAGASA_RANGES,
     **JMA_RANGES,
 }
 
@@ -424,6 +428,16 @@ def build_radar_sources() -> list[Source]:
         MMD_EAST_STATIONS, range_for("MYEAST"),
     ):
         radar.append(Source("MET Malaysia (East / Borneo)", mmd_color, poly))
+
+    # PAGASA Philippines — nine-station PAGASA PANAHON national mosaic
+    # covering Luzon, Visayas, Mindanao, and the surrounding seas.  All
+    # stations carry a uniform ~240 km range (see stations.py — no
+    # per-station overrides), matching the runtime coverage mask default.
+    pagasa_color = "#8c564b"
+    for poly in union_of_radar_circles(
+        PHCOMP_STATIONS, range_for("PHCOMP"),
+    ):
+        radar.append(Source("PAGASA (Philippines)", pagasa_color, poly))
 
     return radar
 
@@ -809,7 +823,7 @@ if __name__ == "__main__":
         sources=build_radar_sources(),
         output_path=RADAR_OUTPUT,
         title="LibreWXR — Radar Composite Coverage",
-        subtitle="NOAA RRQPE · NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe · DPC Italy · CWA / QPESUMS Taiwan · JMA HRPN Japan · MET Malaysia",
+        subtitle="NOAA RRQPE · NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe · DPC Italy · CWA / QPESUMS Taiwan · JMA HRPN Japan · MET Malaysia · PAGASA Philippines",
         legend_title="Radar composites",
         alpha_fill=0.40,
         hatch="//",
@@ -901,7 +915,7 @@ if __name__ == "__main__":
         sources=_filter_sources_to_bounds(build_radar_sources(), ea_bounds),
         output_path=EAST_ASIA_RADAR_OUTPUT,
         title="LibreWXR — Radar Composite Coverage (East Asia)",
-        subtitle="MET Malaysia + CWA / QPESUMS Taiwan + JMA HRPN Japan + MRMS Guam (Western Pacific)",
+        subtitle="MET Malaysia + PAGASA Philippines + CWA / QPESUMS Taiwan + JMA HRPN Japan + MRMS Guam (Western Pacific)",
         legend_title="Radar composites",
         alpha_fill=0.40,
         hatch="//",

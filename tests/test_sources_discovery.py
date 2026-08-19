@@ -42,13 +42,16 @@ def test_mmd_provider_is_registered():
     from librewxr.sources._base import RadarSourceContribution
 
     contribs = [p(settings) for p in RADAR_PROVIDERS]
-    mmd = [
+    sea = [
         c for c in contribs
         if isinstance(c, RadarSourceContribution) and c.group == "SOUTHEAST_ASIA"
     ]
-    assert len(mmd) == 1, "expected exactly one SOUTHEAST_ASIA contribution"
-    region_names = {r.name for r in mmd[0].regions}
-    assert region_names == {"MYPENINSULAR", "MYEAST"}
+    # Both MET Malaysia and PAGASA contribute to SOUTHEAST_ASIA.
+    assert len(sea) == 2, "expected two SOUTHEAST_ASIA contributions"
+    mmd = [c for c in sea if {r.name for r in c.regions} == {"MYPENINSULAR", "MYEAST"}]
+    assert len(mmd) == 1
+    pagasa = [c for c in sea if {r.name for r in c.regions} == {"PHCOMP"}]
+    assert len(pagasa) == 1
 
 
 def test_protocols_and_contribution_dataclasses_importable():
@@ -93,6 +96,7 @@ def test_regions_module_imports_cleanly_with_discovery_wired():
     assert "USCOMP" in regions.REGIONS
     assert "OPERA" in regions.REGIONS
     assert "MYPENINSULAR" in regions.REGIONS
+    assert "PHCOMP" in regions.REGIONS
 
 
 def test_fetcher_sees_registry_providers():
@@ -202,6 +206,7 @@ def test_radar_disabled_returns_empty_contributions(monkeypatch):
     settings.mmd_enabled = False
     settings.cwa_enabled = False
     settings.marn_enabled = False
+    settings.pagasa_enabled = False
     settings.iem_base_url = "https://example.com"
     settings.msc_canada_base_url = "https://example.com"
     contribs = collect_radar_contributions(settings)

@@ -83,14 +83,14 @@ class TestMalaysiaRegions:
             assert r.pixel_size_y != 0.0
             assert r.pixel_size_y != r.pixel_size
 
-    def test_southeast_asia_group_is_just_malaysia(self):
-        # MET Malaysia is the sole source in this group after the MSS
-        # Singapore removal.  Sources-refactor discovery sorts regions
-        # alphabetically within each group, so MYEAST precedes
-        # MYPENINSULAR in the resolved list.
+    def test_southeast_asia_group_includes_phcomp(self):
+        # MET Malaysia + PAGASA Philippines both feed the SOUTHEAST_ASIA
+        # group.  Sources-refactor discovery sorts regions alphabetically
+        # within each group, so MYEAST precedes MYPENINSULAR, which
+        # precedes PHCOMP in the resolved list.
         names = resolve_regions("SOUTHEAST_ASIA")
-        assert sorted(names) == ["MYEAST", "MYPENINSULAR"]
-        assert set(names) == {"MYEAST", "MYPENINSULAR"}
+        assert sorted(names) == ["MYEAST", "MYPENINSULAR", "PHCOMP"]
+        assert set(names) == {"MYEAST", "MYPENINSULAR", "PHCOMP"}
 
     def test_all_includes_malaysia(self):
         names = resolve_regions("ALL")
