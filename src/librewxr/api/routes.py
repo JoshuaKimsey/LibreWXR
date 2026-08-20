@@ -682,9 +682,15 @@ async def weather_maps() -> WeatherMapsResponse:
     nowcast = []
     if nowcast_store is not None:
         nc_timestamps = await nowcast_store.get_timestamps()
+        # Drop nowcast slots that duplicate the newest past frame: during
+        # the nowcast-regeneration window the store is still anchored to
+        # the previous cycle, so its first slot repeats the latest past
+        # timestamp.
+        latest_past = max(timestamps) if timestamps else None
         nowcast = [
             RadarTimestamp(time=ts, path=f"/v2/radar/{ts}")
             for ts in nc_timestamps
+            if latest_past is None or ts > latest_past
         ]
 
     infrared = []

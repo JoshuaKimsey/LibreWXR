@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
+import asyncio
 import time
 
 import numpy as np
@@ -11,6 +12,7 @@ pytestmark = pytest.mark.api
 
 from librewxr.api import routes
 from librewxr.config import settings
+from librewxr.data.nowcast import NowcastFrame, NowcastStore
 from librewxr.data.store import FrameStore, RadarFrame
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
@@ -189,6 +191,48 @@ class TestWeatherMapsEndpoint:
         # past is sorted oldest-first; ts_prev was added first (earlier)
         assert past[0]["time"] == ts_prev
         assert past[0]["path"] == f"/v2/radar/{ts_prev}"
+
+    def test_nowcast_excludes_overlapping_past_timestamp(self, client, monkeypatch):
+        """Regression: during the nowcast-regeneration window the store is
+        still anchored to the previous cycle, so a nowcast slot equal to the
+        newest past frame must not be advertised as both past and nowcast."""
+        c, ts, _ = client
+        store = NowcastStore()
+        asyncio.run(store.replace_all([
+            NowcastFrame(timestamp=ts),
+            NowcastFrame(timestamp=ts + 600),
+            NowcastFrame(timestamp=ts + 1200),
+        ]))
+        monkeypatch.setattr(routes, "nowcast_store", store)
+        resp = c.get("/public/weather-maps.json")
+        data = resp.json()
+        nowcast = data["radar"]["nowcast"]
+        assert all(entry["time"] > ts for entry in nowcast)
+        assert nowcast[0]["time"] == ts + 600
+        assert len(nowcast) == 2
+        assert [entry["path"] for entry in nowcast] == [
+            f"/v2/radar/{ts + 600}",
+            f"/v2/radar/{ts + 1200}",
+        ]
+
+    def test_nowcast_future_timestamps_untouched(self, client, monkeypatch):
+        """Nowcast slots strictly newer than the newest past frame survive
+        unchanged and in order."""
+        c, ts, _ = client
+        store = NowcastStore()
+        asyncio.run(store.replace_all([
+            NowcastFrame(timestamp=ts + 600),
+            NowcastFrame(timestamp=ts + 1200),
+        ]))
+        monkeypatch.setattr(routes, "nowcast_store", store)
+        resp = c.get("/public/weather-maps.json")
+        data = resp.json()
+        nowcast = data["radar"]["nowcast"]
+        assert [entry["time"] for entry in nowcast] == [ts + 600, ts + 1200]
+        assert [entry["path"] for entry in nowcast] == [
+            f"/v2/radar/{ts + 600}",
+            f"/v2/radar/{ts + 1200}",
+        ]
 
 
 class TestRadarTileEndpoint:
