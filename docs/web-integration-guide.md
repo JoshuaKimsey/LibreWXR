@@ -238,6 +238,16 @@ Returns active weather alerts as a GeoJSON `FeatureCollection`. Each feature car
 
 Returns `503 Service Unavailable` if `LIBREWXR_ALERTS_ENABLED=false` on the server.
 
+**Using `simplify`:** the tolerance (meters) controls how aggressively the returned polygons are thinned (topology-preserving Douglas-Peucker). Larger values drop more vertices and shrink the payload; the geometry stays valid either way. Practical values:
+
+- `simplify=1000` (the default) — good for viewport-sized fetches on zoomed-out maps
+- `simplify=0` — full-resolution polygons; use when drawing a single alert boundary up close
+- `simplify=10000` or more — aggressive trimming for a whole-world overview
+
+Example: `GET /v2/alerts?bbox=-125,24,-66,50&simplify=2000`
+
+Simplification only affects the geometry in the response — point/bbox filtering always runs against full-resolution polygons. The meters-to-degrees conversion is latitude-independent, so the effective tolerance shrinks slightly at high latitudes.
+
 **Example response:**
 
 ```json
@@ -251,25 +261,20 @@ Returns `503 Service Unavailable` if `LIBREWXR_ALERTS_ENABLED=false` on the serv
         "coordinates": [[[-95.0, 30.0], [-94.0, 30.0], [-94.0, 31.0], [-95.0, 31.0], [-95.0, 30.0]]]
       },
       "properties": {
-        "identifier": "NWS-LCH-1234",
-        "sender": "w-nws.webmaster@noaa.gov",
-        "sent": "2026-05-13T14:00:00Z",
-        "expires": "2026-05-13T22:00:00Z",
-        "event": "Severe Thunderstorm Warning",
-        "headline": "Severe Thunderstorm Warning issued May 13 at 2:00PM CDT",
-        "description": "...",
+        "title": "Severe Thunderstorm Warning",
         "severity": "Severe",
-        "urgency": "Immediate",
-        "certainty": "Likely",
-        "areaDesc": "Jefferson County",
-        "country": "US"
+        "time": 1778680800,
+        "expires": 1778709600,
+        "description": "...",
+        "regions": ["Jefferson County"],
+        "uri": "https://api.weather.gov/alerts/NWS-IDP-STS-12345678"
       }
     }
   ]
 }
 ```
 
-The `severity` / `urgency` / `certainty` fields follow the CAP 1.2 vocabulary, which is convenient for styling: colour by severity, only animate the `Immediate` ones, etc.
+The `severity` field follows the CAP 1.2 vocabulary (`Extreme` / `Severe` / `Moderate` / `Minor` / `Unknown`), which is convenient for styling — colour polygons by severity and let users filter on it. `time` and `expires` are Unix epochs; `regions` lists the affected area names, and `uri` links to the full alert text.
 
 ### Health Endpoint
 
@@ -674,10 +679,10 @@ async function loadAlerts() {
         onEachFeature: function (feature, layer) {
             var p = feature.properties;
             layer.bindPopup(
-                "<strong>" + (p.event || "Alert") + "</strong><br>" +
-                (p.headline || "") + "<br>" +
-                "<em>" + (p.areaDesc || "") + "</em><br>" +
-                "Severity: " + p.severity + " · Urgency: " + p.urgency
+                "<strong>" + (p.title || "Alert") + "</strong><br>" +
+                "<em>" + (p.regions || []).join(", ") + "</em><br>" +
+                "Severity: " + p.severity + "<br>" +
+                '<a href="' + p.uri + '" target="_blank" rel="noopener">Details</a>'
             );
         }
     }).addTo(map);
