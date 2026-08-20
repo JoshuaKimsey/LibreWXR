@@ -1,6 +1,6 @@
 # Source Survey
 
-A snapshot of the data sources LibreWXR has evaluated for inclusion in the core project: what shipped, what's queued, what was investigated and ruled out, and the reasoning behind each call. Covers both radar composites and regional NWP grids.
+A snapshot of the data sources LibreWXR has evaluated for inclusion in the core project: what shipped, what's queued, what was investigated and ruled out, and the reasoning behind each call. Covers both radar composites and regional NWP grids. The satellite layer (NOAA GMGSI, LW+VIS hourly composite) is covered separately in docs/satellite-implementation-plan.md. WMO CAP weather alerts (severeweather.wmo.int + NWS API) are fetched by src/librewxr/data/alerts_fetcher.py and served at /v2/alerts.
 
 The open-data criteria these decisions apply are documented in [`adding-a-source.md`](adding-a-source.md#upstream-contribution-criteria). Self-hosters running their own LibreWXR instance are not bound by them — this document is the upstream selection record, not a prescription for every deployment.
 
@@ -24,6 +24,7 @@ Sources that shipped and were later removed are recorded in [Reverted and remove
 - [Radar — Tier 1](#radar--tier-1)
 - [Radar — Tier 2](#radar--tier-2)
 - [Radar — Tier 3](#radar--tier-3)
+- [Satellite — Implemented](#satellite--implemented)
 - [NWP — Implemented](#nwp--implemented)
 - [NWP — Tier 2](#nwp--tier-2)
 - [NWP — Tier 3](#nwp--tier-3)
@@ -91,9 +92,29 @@ Region: `RRQPE` — a single coarse global radar region covering the 60°S–70�
 
 License: NOAA Open Data Dissemination (NODD) program. Attribution requested — "Precipitation data from NOAA Enterprise Rain Rate (RRQPE)". No endorsement by NOAA implied; don't present modified data as unaltered NOAA data.
 
+### Japan — JMA HRPN Composite (JPCOMP)
+
+**Shipped 2026-05-30** (commit `dfb97c4`, refined in follow-ups).  Analysis-leg only: the N1 manifest (basetime == validtime) feeds a standard `RadarSourceContribution` for the new `JPCOMP` region under the `JAPAN` group.  Forward prediction comes from LibreWXR's internal optical-flow extrapolation like every other region.
+
+Source: `https://www.jma.go.jp/bosai/jmatile/data/nowc/` — anonymous, no auth, no WAF, S3-backed CDN.
+
+- **Manifest:** `targetTimes_N1.json` — JSON array, 36 frames at 5-minute cadence.  Format: `{"basetime": "YYYYMMDDHHMMSS", "validtime": "YYYYMMDDHHMMSS", "elements": ["hrpns", "hrpns_nd"]}`.  We consume `hrpns` only; `hrpns_nd` returns an HTML 404 page when probed (not a real product variant despite appearing in the elements array).
+- **Tile pattern:** `…/{basetime}/none/{validtime}/surf/hrpns/{z}/{x}/{y}.png` — 256×256 4-bit palette PNG for populated tiles, 8-bit RGBA all-transparent placeholder for empty tiles.
+- **Tile pyramid quirk:** JMA serves real data only at **even zoom levels** (z=4, 6, 8, 10).  Odd zooms (5, 7, 9) return 334-byte transparent placeholders at every coord.  We fetch at z=8 (~420 tiles per frame, ~1.25 km/px), which matches the JPCOMP grid resolution.  z=6 (~30 tiles, ~5 km/px) is the bandwidth-saver fallback.
+- **Cadence:** native 5 min; we sample at LibreWXR's 10 min rhythm.
+- **Coverage:** all of Japan via 20 C-band Doppler radars fused with the AMeDAS rain-gauge network.  High-quality QPE composite, not a single-radar PPI.
+
+License: **JMA Public Data License v1.0** — CC-BY equivalent, explicit commercial-reuse permission, attribution required ("Source: Japan Meteorological Agency website").  Article 17 of Japan's Meteorological Service Act restricts "provision of meteorological services in Japan" — does not apply to LibreWXR redistributing radar imagery globally, but worth noting for any operator running a Japan-domestic service.
+
+**Removed forecast leg.**  An initial implementation also ingested JMA's N2 manifest (their own 60-min nowcast extrapolation) as a `NowcastContribution` that swapped in for internal optical-flow over JPCOMP.  That path was removed: JMA's 5-min validtime cadence didn't line up cleanly with our 10-min sampling rhythm, and the dispatch complexity wasn't worth the win for one region.  The cleaner long-term play — a regional Japanese NWP overlay so optical-flow blends with high-resolution Japan-specific model precip instead of with global IFS — landed 2026-05-30 as **JMA MSM** in the NWP — Implemented section.
+
+### Philippines — PAGASA PANAHON (PHCOMP)
+
+Reinstated 2026-08-19 (see "Reverted and removed" for history). CDN PNG mosaic, 6-frame 15-min timeline, 9 stations, 2048x2048 grid, SOUTHEAST_ASIA group.
+
 ## Radar — Reverted and removed
 
-Two sources shipped and were removed within the same day. Both reverts taught something concrete that informed the upstream-contribution criteria.
+Two sources shipped and were removed within the same day; PAGASA was later reinstated — see its note below. Both reverts taught something concrete that informed the upstream-contribution criteria.
 
 ### Singapore — MSS Changi (shipped and removed 2026-05-15 / 2026-05-16)
 
@@ -138,22 +159,6 @@ License: permissive with attribution. BWS disclaimer explicitly permits redistri
 Open questions before implementation: exact palette / dBZ scale (legend needed — sample a precip frame or correspond with BWS); backfill depth (page exposes only 5 frames; older timestamps return 404); projection confirmation. Adding a new `proj="aeqd"` branch to the `RegionDef` machinery is the largest scoped change relative to the existing source pattern.
 
 **Re-validated 2026-08-19:** URL pattern (including the mixed `dBZ`/`dBz` casing), 5-frame manifest, 6-minute cadence, and the disclaimer license text are all unchanged. Backfill is still ~30 minutes — probes at 1 h / 6 h / 24 h before the newest frame all return 404. New additive products since May: 250 km and 100 km SRI variants (5 frames each, same cadence) plus PARISH MAP / HYDROESTIMATOR / UK KINDEX entries in the graphics sidebar. With Cayman moved to Tier 2, Bermuda is now the only unshipped Tier 1 radar source.
-
-### Japan — JMA HRPN Composite (JPCOMP)
-
-**Shipped 2026-05-30** (commit `dfb97c4`, refined in follow-ups).  Analysis-leg only: the N1 manifest (basetime == validtime) feeds a standard `RadarSourceContribution` for the new `JPCOMP` region under the `JAPAN` group.  Forward prediction comes from LibreWXR's internal optical-flow extrapolation like every other region.
-
-Source: `https://www.jma.go.jp/bosai/jmatile/data/nowc/` — anonymous, no auth, no WAF, S3-backed CDN.
-
-- **Manifest:** `targetTimes_N1.json` — JSON array, 36 frames at 5-minute cadence.  Format: `{"basetime": "YYYYMMDDHHMMSS", "validtime": "YYYYMMDDHHMMSS", "elements": ["hrpns", "hrpns_nd"]}`.  We consume `hrpns` only; `hrpns_nd` returns an HTML 404 page when probed (not a real product variant despite appearing in the elements array).
-- **Tile pattern:** `…/{basetime}/none/{validtime}/surf/hrpns/{z}/{x}/{y}.png` — 256×256 4-bit palette PNG for populated tiles, 8-bit RGBA all-transparent placeholder for empty tiles.
-- **Tile pyramid quirk:** JMA serves real data only at **even zoom levels** (z=4, 6, 8, 10).  Odd zooms (5, 7, 9) return 334-byte transparent placeholders at every coord.  We fetch at z=8 (~420 tiles per frame, ~1.25 km/px), which matches the JPCOMP grid resolution.  z=6 (~30 tiles, ~5 km/px) is the bandwidth-saver fallback.
-- **Cadence:** native 5 min; we sample at LibreWXR's 10 min rhythm.
-- **Coverage:** all of Japan via 20 C-band Doppler radars fused with the AMeDAS rain-gauge network.  High-quality QPE composite, not a single-radar PPI.
-
-License: **JMA Public Data License v1.0** — CC-BY equivalent, explicit commercial-reuse permission, attribution required ("Source: Japan Meteorological Agency website").  Article 17 of Japan's Meteorological Service Act restricts "provision of meteorological services in Japan" — does not apply to LibreWXR redistributing radar imagery globally, but worth noting for any operator running a Japan-domestic service.
-
-**Removed forecast leg.**  An initial implementation also ingested JMA's N2 manifest (their own 60-min nowcast extrapolation) as a `NowcastContribution` that swapped in for internal optical-flow over JPCOMP.  That path was removed: JMA's 5-min validtime cadence didn't line up cleanly with our 10-min sampling rhythm, and the dispatch complexity wasn't worth the win for one region.  The cleaner long-term play — a regional Japanese NWP overlay so optical-flow blends with high-resolution Japan-specific model precip instead of with global IFS — landed 2026-05-30 as **JMA MSM** in the NWP — Implemented section.
 
 ## Radar — Tier 2
 
@@ -460,6 +465,12 @@ No re-evaluation trigger tied to data access, licence, or WIS2 publication. The 
 
 One-line outcomes from the same sweep, recorded so they aren't re-probed blindly: **Kazakhstan** (Kazhydromet) — radar viewer exists at `kazhydromet.kz/vc/radar_viewer/` but states "radar data temporarily unavailable"; all-rights-reserved footer. **Israel** (IMS) — composite radar player exists but is a JS SPA behind a mandatory terms-of-use consent prompt (mirrors the NWP-side ToU friction). **Kenya** (KMD) — `meteo.go.ke` carries satellite imagery but no public radar product. **Unreachable from the research host** (timeouts, bot checks, or redirect loops — unverified, not confirmed-absent): Chile (meteochile.gob.cl), Cuba (insmet.cu), Iran (irimo.ir), Egypt (ema.gov.eg), Pakistan (pmd.gov.pk), Nigeria (nimet.gov.ng), Qatar (qweather.gov.qa).
 
+## Satellite — Implemented
+
+### NOAA GMGSI (LW + VIS) — shipped 2026-05-24
+
+Hourly global mosaic (±72.7 deg), VIS-over-LW composite with day/night terminator, S3 bucket noaa-gmgsi-pds. See docs/satellite-implementation-plan.md for the full record.
+
 ## NWP — Implemented
 
 LibreWXR's NWP chain blends multiple regional models on top of a global base, dispatched per-pixel via feathered hand-off. Lower priority numbers run first.
@@ -546,7 +557,7 @@ The cadence is a real downside: **12-hourly cycles** mean the forecast at "now" 
 
 ### AROME Réunion-Mayotte / French Guiana / New Caledonia / French Polynesia
 
-Etalab-licensed, keyless on data.gouv.fr (same channel as AROME Antilles). 1.3 km native, hourly, 4× daily. Each domain is small and remote: Indian Ocean / Madagascar (Réunion-Mayotte), N. South America corner (French Guiana), SW Pacific (New Caledonia), S. Pacific (French Polynesia). Cheap to add once AROME Antilles is in — same source class with different domain constants. \~50 LOC + tests per added overseas variant.
+**Shipped** — see AROME Indien (Réunion/Mayotte), AROME Guyane, AROME Ncaled, and AROME Polyn under NWP — Implemented. The standalone "Réunion-Mayotte" domain no longer exists as a separate product; AROME Indien covers that area.
 
 ### Canada CAPS (Canadian Arctic Prediction System)
 

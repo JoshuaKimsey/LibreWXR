@@ -15,11 +15,11 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 ## Features
 
 - **Rain Viewer v2 API compatible** — drop-in replacement, no client changes needed
-- **All 12 color schemes** — Black & White, Rainviewer Original, Universal Blue, TITAN, TWC, Meteored, NEXRAD III, Rainbow, Dark Sky, Datameteo Valerio, Viper HD, MRMS CREF, plus raw grayscale
+- **All 13 color schemes** — Black & White, Rainviewer Original, Universal Blue, Titan, The Weather Channel (TWC), Meteored, NEXRAD Level III, Rainbow @ Selex SI, Dark Sky, Datameteo Valerio, Viper HD, MRMS CREF, 33/40 Max Storm, plus raw grayscale
 - **Tile sizes** — 256px and 512px
 - **Image formats** — PNG and WebP (with configurable lossy/lossless quality)
 - **Smoothing** — zoom-adaptive Gaussian blur with seamless tile boundaries
-- **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam) via NOAA MRMS quality-controlled mosaics with IEM fallback, Europe (OPERA pan-European composite, ~155 radars across 24 countries) with the DPC Italian national composite (24 radars) filling Italy where OPERA's neighbour-radar fringe falls short, Canada (MSC GeoMet with MRMS blending), Central America (MARN/SNET El Salvador, 120 km), Taiwan (CWA QPESUMS 7-radar composite, 1.4 km observed dBZ), Japan (JMA HRPN gauge-corrected QPE from 20 C-band radars + AMeDAS), SE Asia (MET Malaysia 12-radar composite covering Peninsular Malaysia, Borneo, Brunei, Singapore, and N. Sumatra; PAGASA PANAHON 9-radar composite covering the Philippines), plus a global always-on observed bottom tier — NOAA RRQPE (Enterprise Rain Rate GLB-5, satellite-derived observed precipitation across the 60S-70N band) that fills past/current frames wherever no finer radar region claims the pixel
+- **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam) via NOAA MRMS quality-controlled mosaics with IEM fallback, Europe (OPERA pan-European composite, 184 radars across 27 countries) with the DPC Italian national composite (24 radars) filling Italy where OPERA's neighbour-radar fringe falls short, Canada (MSC GeoMet with MRMS blending), Central America (MARN/SNET El Salvador, 120 km), Taiwan (CWA QPESUMS 7-radar composite, 1.4 km observed dBZ), Japan (JMA HRPN gauge-corrected QPE from 20 C-band radars + AMeDAS), SE Asia (MET Malaysia 12-radar composite covering Peninsular Malaysia, Borneo, Brunei, Singapore, and N. Sumatra; PAGASA PANAHON 9-radar composite covering the Philippines), plus a global always-on observed bottom tier — NOAA RRQPE (Enterprise Rain Rate GLB-5, satellite-derived observed precipitation across the 60S-70N band) that fills past/current frames wherever no finer radar region claims the pixel
 - **Regional NWP chain** — high-resolution rapid-refresh NWP models layered specificity-first: NOAA HRRR (CONUS + Alaska), ECCC HRDPS (Canada + N. CONUS), DMI HARMONIE-AROME DINI (most of populated Europe), DWD ICON-EU (the European remainder), JMA MSM (Japan + Korean Peninsula + Taiwan + Yellow Sea), SMN WRF-DET (Argentina + S. American Cone), and the full Météo-France AROME Outre-Mer family (Antilles, Guyane, Indien, Nouvelle-Calédonie, Polynésie), all on top of ECMWF IFS for global coverage. Soft-feathering at each domain edge prevents visible seams
 - **Modular toggles** — every radar source, regional NWP, satellite channel, and the alerts feed has its own enable flag; master switches (`LIBREWXR_RADAR_ENABLED`, `LIBREWXR_REGIONAL_NWP_ENABLED`, `LIBREWXR_SATELLITE_ENABLED`) collapse whole layers in one line for satellite-only or nowcast-only deployments
 - **Global observed precipitation animation** — within the 60S-70N band, the global precipitation animation comes from NOAA RRQPE (Enterprise Rain Rate GLB-5), an always-on observed satellite-derived radar region. ECMWF IFS 9 km model data powers the nowcast blend and fills the layer only poleward of the RRQPE band, in the 2-degree fringe excluded by RRQPE's coverage polygon, and when RRQPE declines (missed scans / stale store). Multi-timestep animation auto-scales to match radar history length
@@ -35,8 +35,8 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Persistent disk cache** — radar / NWP / satellite / alerts data are cached to disk with atomic writes, surviving restarts and container recreation without re-downloading from upstream. Configurable via `LIBREWXR_CACHE_DIR` (required in multi mode)
 - **Memory-efficient storage** — radar frames, NWP grids, satellite frames, and nowcast data are all backed by memory-mapped files, letting the OS page cache manage physical RAM instead of pinning data on the heap. Pages are reclaimed under memory pressure and re-faulted on access
 - **Smart fetch optimization** — radar sources skip re-downloading frames already in memory (only ~1 of 12 frames is new each cycle), NWP models skip redundant S3 fetches when the model run hasn't changed, and parallel NWP fetches are concurrency-capped via `LIBREWXR_NWP_FETCH_CONCURRENCY` so peak transient RAM stays bounded
-- **Health endpoint** — `/health` for monitoring uptime, per-component memory breakdown, frame count, NWP chain status, alerts status, MCP mount state, and cache state
-- **MCP server** for AI agents — query precipitation nowcast and active weather alerts via Model Context Protocol. HTTP transport mounted at `/mcp/` for n8n-style automation; stdio transport for local agents like Claude Desktop. See [MCP server](#mcp-server-librewxr-extension) below.
+- **Health endpoint** — `/health` for monitoring uptime, per-component memory breakdown, frame count, NWP chain status, alerts status, MCP mount state, and cache state, plus a `cluster` aggregation of per-worker stats in multi-worker deployments
+- **MCP server** for AI agents — query precipitation nowcast and active weather alerts via Model Context Protocol. HTTP transport mounted at `/mcp` for n8n-style automation; stdio transport for local agents like Claude Desktop. See [MCP server](#mcp-server-librewxr-extension) below.
 - **Storm-cell detection** — convective cells detected on radar frames each cycle via connected-component labeling at a configurable dBZ threshold. Overlay them on tiles with `?cells=light|dark` (parallel to `?arrows=`). See [Storm-Cell Detection](docs/storm-cells.md).
 - **Fully configurable** — all tunable parameters exposed via environment variables
 
@@ -44,7 +44,7 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 
 - **Limited radar coverage outside US / Canada / Europe / Central America / Taiwan / Japan / SE Asia** — real radar composites cover the US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Canada, El Salvador and its neighbours, Europe (via OPERA pan-European composite + DPC for Italy), Taiwan (CWA QPESUMS), Japan (JMA HRPN), Malaysia + Borneo + Brunei + Singapore + N. Sumatra (MET Malaysia), and the Philippines (PAGASA PANAHON). Within the 60S-70N band, the precipitation layer outside these radar domains is satellite-derived OBSERVED data (NOAA RRQPE, Enterprise Rain Rate GLB-5) — an IR-based estimate at 0.04° rather than radar-grade detail. Only poleward of the RRQPE band, in the fringe excluded by RRQPE's coverage polygon, and when RRQPE declines does the regional NWP chain on top of ECMWF IFS fill in — that's a complete picture of global precipitation, but those regions are modelled output, not direct radar observation
 - **Experimental nowcasting** — precipitation nowcast uses optical flow extrapolation blended with whichever regional model is active in the active NWP chain (or ECMWF IFS where none is), which works well for steady, organized precipitation but is less reliable for fast-developing convection, cell initiation/dissipation, or complex terrain effects
-- **Satellite is hourly, not real-time** — GMGSI publishes one composite per hour with ~35 minutes of latency from observation. Native per-satellite feeds (GOES, Himawari, Meteosat) refresh every 5–15 minutes, but at the cost of seam-blending and reprojection work that GMGSI handles upstream. GMGSI also caps at ±72.7° latitude — the deep polar regions are out of frame
+- **Satellite is hourly, not real-time** — GMGSI publishes one composite per hour with tens of minutes of latency from observation. Native per-satellite feeds (GOES, Himawari, Meteosat) refresh every 5–15 minutes, but at the cost of seam-blending and reprojection work that GMGSI handles upstream. GMGSI also caps at ±72.7° latitude — the deep polar regions are out of frame
 
 ## Coverage
 
@@ -82,9 +82,9 @@ documents the throwaway venv recipe).
 | `GUCOMP` | Guam | NCEP MRMS (IEM fallback) | 0.0085° (~850m) | ~1 MB |
 | `CACOMP` | Canada | MSC GeoMet (MRMS blending) | 0.025° (~2.5km) | ~6 MB |
 | `SVCOMP` | El Salvador + neighbours | MARN/SNET (San Andrés, 120 km) | 0.00926° (~1km) | <1 MB |
-| `OPERA` | Europe (24 countries) | EUMETNET OPERA | 1km | ~16 MB |
-| `ITCOMP` | Italy + neighbours | DPC Radar (24-radar national composite) | ~1km (spherical TM) | ~3 MB |
-| `TWCOMP` | Taiwan + W. Pacific buffer | CWA QPESUMS (7-radar composite) | 0.0125° (~1.4km) | ~3 MB |
+| `OPERA` | Europe (27 countries) | EUMETNET OPERA | 1km | ~16 MB |
+| `ITCOMP` | Italy + neighbours | DPC Radar (24-radar national composite) | ~1km (spherical TM) | ~2 MB |
+| `TWCOMP` | Taiwan + W. Pacific buffer | CWA QPESUMS (7-radar composite) | 0.0125° (~1.4km) | ~1 MB |
 | `JPCOMP` | Japan archipelago | JMA HRPN (20 radars + AMeDAS gauge correction) | 0.0125° (~1.4km) | ~4 MB |
 | `MYPENINSULAR` | Peninsular Malaysia + Singapore + N. Sumatra | MET Malaysia (12-radar composite) | 0.022° lon / 0.019° lat (~2.5km) | <1 MB |
 | `MYEAST` | East Malaysia (Borneo) + Brunei | MET Malaysia (12-radar composite) | 0.022° lon / 0.019° lat (~2.5km) | <1 MB |
@@ -203,8 +203,7 @@ cp .env.example .env
 python -m librewxr.main
 ```
 
-The server starts at `http://localhost:8080` by default. It will fetch
-radar data on startup (takes a few seconds), then begin serving tiles.
+The server starts at `http://localhost:8080` by default. It begins serving tiles immediately; radar data loads in the background after startup.
 
 For multi mode without Docker, set `LIBREWXR_MODE=multi` (which picks
 the right per-mode defaults), run the data pipeline as a sidecar, and
@@ -315,7 +314,7 @@ GET /v2/radar/{timestamp}/{size}/{z}/{x}/{y}/{color}/{smooth}_{snow}.{ext}
 | `size` | `256`, `512` | Tile size in pixels |
 | `z` | integer | Zoom level |
 | `x`, `y` | integer-valued strings | Standard slippy map tile coordinates — segments containing a dot are interpreted as lat/lon (see the Radar Point Tiles section) |
-| `color` | `0`-`9`, `255` | Color scheme (see below) |
+| `color` | `0`-`12`, `255` | Color scheme (see below) |
 | `smooth` | `0`, `1` | Enable smoothing |
 | `snow` | `0`, `1` | Enable snow precipitation colors |
 | `ext` | `png`, `webp` | Image format |
@@ -347,15 +346,16 @@ https://api.librewxr.net/v2/radar/{timestamp}/256/{z}/{x}/{y}/10/1_1.png?arrows=
 | 0 | Black and White |
 | 1 | Rainviewer Original |
 | 2 | Universal Blue |
-| 3 | TITAN |
-| 4 | The Weather Channel |
+| 3 | Titan |
+| 4 | The Weather Channel (TWC) |
 | 5 | Meteored |
 | 6 | NEXRAD Level III |
-| 7 | Rainbow |
+| 7 | Rainbow @ Selex SI |
 | 8 | Dark Sky |
 | 9 | Datameteo Valerio |
 | 10 | Viper HD |
 | 11 | MRMS CREF |
+| 12 | 33/40 Max Storm | Stepped 5-dBZ palette by ABC 33/40 Chief Meteorologist James Aydelott (via WxTools); snow variant reuses the Universal Blue gradient |
 | 255 | Raw (grayscale) |
 
 #### Radar Point Tiles (Lat/Lon Windows)
@@ -371,7 +371,7 @@ GET /v2/radar/{timestamp}/{size}/{z}/{lat}/{lon}/{color}/{smooth}_{snow}.{ext}
 | `lat`, `lon` | decimal degrees | Image center; path segments containing a dot are treated as lat/lon, plain integer segments as x/y tile indices |
 | `size` | `256`, `512` | Image size (intermediate values quantize: `< 512` becomes `256`) |
 
-The center is snapped to the nearest pixel at that zoom; longitude wraps across the antimeridian and latitude clamps to the Web Mercator limit (+/-85.0511 deg). Unknown timestamps return 404, and areas with no data return a transparent 200 PNG. The `?arrows=` and `?cells=` query parameters are tile-mode only and are silently ignored on lat/lon window URLs; the coverage variant is `/v2/coverage/0/{size}/{z}/{lat}/{lon}/0/0_0.png`.
+The center is snapped to the nearest pixel at that zoom; longitude wraps across the antimeridian and latitude clamps to the Web Mercator limit (+/-85.0511 deg). Unknown timestamps return 404, and areas with no data return a transparent 200 PNG. A timestamp of `0` is an alias for the latest frame — the resolved timestamp is returned in the `X-Frame-Timestamp` response header. The `?arrows=` and `?cells=` query parameters are tile-mode only and are silently ignored on lat/lon window URLs; the coverage variant is `/v2/coverage/0/{size}/{z}/{lat}/{lon}/0/0_0.png`.
 
 #### Satellite Tiles
 
@@ -425,7 +425,7 @@ Returns `503` if `LIBREWXR_ALERTS_ENABLED=false`.
 GET /health
 ```
 
-Returns server status, frame count, cache usage, NWP chain state, satellite cache state, alerts status, MCP mount state, and per-component memory breakdown.
+Returns server status, frame count, cache usage, NWP chain state, satellite cache state, alerts status, MCP mount state, and per-component memory breakdown, plus a `cluster` aggregation of per-worker stats in multi-worker deployments.
 
 #### MCP Server (LibreWXR extension)
 
@@ -435,11 +435,11 @@ LibreWXR exposes an [MCP (Model Context Protocol)](https://modelcontextprotocol.
 - `get_active_alerts(lat, lon, radius_km=25, severity=None)` — returns a GeoJSON FeatureCollection of alerts within `radius_km` from the merged WMO + NWS store; US zone-based alerts (e.g. Tornado Watches) are resolved to zone polygons at ingest. Returns an empty collection when alerts are disabled or none match; never raises.
 - `get_storm_cells(lat, lon, radius_km=100)` — returns a list of detected storm cells within `radius_km` of the point. Each cell dict: `{lat, lon, area_km2, max_dbz, motion_speed_kmh, motion_heading_deg, region}`. Returns an empty list when detection is disabled or no cells are within range; never raises.
 
-The endpoint is mounted at `LIBREWXR_MCP_PATH` (default `/mcp/`) when the `[mcp]` extra is installed and `LIBREWXR_MCP_ENABLED=true` (the default). Failures (missing extra, build error) are silently skipped so the REST API still boots; the `/health` endpoint surfaces the actual mount state as `mcp: {enabled, mounted, path, tools}`.
+The endpoint is mounted at `LIBREWXR_MCP_PATH` (default `/mcp`) when the `[mcp]` extra is installed and `LIBREWXR_MCP_ENABLED=true` (the default). Failures (missing extra, build error) are silently skipped so the REST API still boots; the `/health` endpoint surfaces the actual mount state as `mcp: {enabled, mounted, path, tools}`.
 
 Two transport modes:
-- **HTTP (primary, default, for n8n / hosted agents):** POST a JSON-RPC `initialize` request to `<public_url>/mcp/` (note the trailing slash), then call tools via JSON-RPC `tools/call`. The HTTP transport is stateless — each request is self-contained, no `Mcp-Session-Id` is required, and any render worker can serve any request (what makes multi-worker deployments behind a load balancer work).
-- **stdio (for local agents like Claude Desktop):** run `python -m librewxr.mcp` (or the `librewxr-mcp` console entry). Requires `LIBREWXR_CACHE_DIR` pointing at the same shared volume a running LibreWXR server (single or multi mode) writes `state.json` into.
+- **HTTP (primary, default, for n8n / hosted agents):** POST a JSON-RPC `initialize` request to `<public_url>/mcp`, then call tools via JSON-RPC `tools/call`. The HTTP transport is stateless — each request is self-contained, no `Mcp-Session-Id` is required, and any render worker can serve any request (what makes multi-worker deployments behind a load balancer work).
+- **stdio (for local agents like Claude Desktop):** run the `librewxr-mcp` console entry. Requires `LIBREWXR_CACHE_DIR` pointing at the same shared volume a running LibreWXR server (single or multi mode) writes `state.json` into.
 
 See [`docs/mcp-server.md`](docs/mcp-server.md) for full install instructions, transport configuration, example client configs (Claude Desktop, n8n), and the tool reference.
 
@@ -490,6 +490,9 @@ the inline comments in [`src/librewxr/config.py`](src/librewxr/config.py).
 | `LIBREWXR_NOWCAST_ENABLED` | `true` | Enable experimental precipitation nowcast |
 | `LIBREWXR_NOWCAST_FRAMES` | `6` | Number of nowcast frames (6 × 10 min = 60 min forecast) |
 | `LIBREWXR_NOWCAST_BLEND_MODE` | `blended` | `radar`, `blended`, or `model`. Beyond 60 min always uses pure model |
+| `LIBREWXR_ARROW_FLOW_ENABLED` | `true` | Toggle for the `?arrows=` motion-arrow overlay |
+| `LIBREWXR_NOWCAST_COARSEN_ENABLED` | `true` | Lead-time-ramped Gaussian coarsening of extrapolated radar |
+| `LIBREWXR_NOWCAST_COARSEN_MAX_KM` | `3.0` | Effective resolution floor at the last nowcast blend step |
 | **Satellite + alerts** | | |
 | `LIBREWXR_SATELLITE_ENABLED` | `true` | Master switch for the GMGSI satellite layer (LW + VIS composite) |
 | `LIBREWXR_GMGSI_LW_ENABLED` | `true` | GMGSI longwave IR channel (24/7 base of the composite) |
@@ -498,9 +501,9 @@ the inline comments in [`src/librewxr/config.py`](src/librewxr/config.py).
 | `LIBREWXR_ALERTS_ENABLED` | `true` | Enable WMO CAP weather alerts |
 | `LIBREWXR_ALERTS_FETCH_INTERVAL` | `300` | Alerts refresh interval in seconds |
 | **Tile rendering** | | |
-| `LIBREWXR_TILE_CACHE_MB` | `200` | Max tile cache size in MB per worker (byte-capped) |
-| `LIBREWXR_COORD_CACHE_SIZE` | `2048` | Coordinate cache entries per cache (lower = less RAM) |
-| `LIBREWXR_SMOOTH_RADIUS` | `2.0` | Gaussian blur radius (0 = disabled) |
+| `LIBREWXR_TILE_CACHE_MB` | `200` (128 in multi mode) | Max tile cache size in MB per worker (byte-capped) |
+| `LIBREWXR_COORD_CACHE_SIZE` | `2048` (512 in multi mode) | Coordinate cache entries per cache (lower = less RAM) |
+| `LIBREWXR_SMOOTH_RADIUS` | `1.0` | Gaussian blur radius (0 = disabled) |
 | `LIBREWXR_NOISE_FLOOR_DBZ` | `10.0` | Min dBZ to display (-32 = disabled) |
 | `LIBREWXR_DESPECKLE_MIN_NEIGHBORS` | `3` | Speckle filter strength (0 = disabled) |
 | `LIBREWXR_WEBP_QUALITY` | `100` | WebP quality (100 = lossless default, 1-99 = lossy) |
@@ -518,8 +521,8 @@ the inline comments in [`src/librewxr/config.py`](src/librewxr/config.py).
 | `LIBREWXR_STATE_POLL_INTERVAL` | `1.0` | Seconds between state.json mtime polls in render-only mode |
 | `LIBREWXR_STATE_WAIT_TIMEOUT` | `300` | Seconds to wait for the first state.json on cold start (0 = forever) |
 | **MCP server** | | |
-| `LIBREWXR_MCP_ENABLED` | `true` | Master switch for the MCP HTTP transport (mounted inside the FastAPI app). When `false`, no `/mcp` route is mounted. The standalone stdio entry (`python -m librewxr.mcp`) is unaffected. |
-| `LIBREWXR_MCP_PATH` | `/mcp` | URL path where the MCP HTTP transport is mounted. See the trailing-slash note in [MCP server](#mcp-server-librewxr-extension). |
+| `LIBREWXR_MCP_ENABLED` | `true` | Master switch for the MCP HTTP transport (mounted inside the FastAPI app). When `false`, no `/mcp` route is mounted. The standalone stdio entry (`librewxr-mcp`) is unaffected. |
+| `LIBREWXR_MCP_PATH` | `/mcp` | URL path where the MCP HTTP transport is mounted. See [MCP server](#mcp-server-librewxr-extension). |
 | **Storm-cell detection** | | |
 | `LIBREWXR_STORM_CELLS_ENABLED` | `true` | Master switch for storm-cell detection. When `false`, no detection runs and `?cells=` has no effect. |
 | `LIBREWXR_STORM_CELLS_MIN_DBZ` | `40` | Minimum dBZ for a pixel to be part of a detected cell. |
@@ -698,7 +701,7 @@ GDAL, rasterio, or system geo libraries needed.
 - **[Iowa Environmental Mesonet (IEM)](https://mesonet.agron.iastate.edu/)** — NEXRAD N0Q composite radar imagery (US regions, legacy fallback for MRMS).
 - **[ECCC MSC GeoMet](https://eccc-msc.github.io/open-data/msc-geomet/readme_en/)** — Canadian weather radar composite (RADAR_1KM_RRAI via WMS) — pre-colored PNG decoded via palette reverse-engineering back to dBZ. MRMS blending fills gaps in northern Canada and the Atlantic coast.
 - **[MARN / SNET](https://www.snet.gob.sv/)** — Servicio Nacional de Estudios Territoriales (Ministerio de Medio Ambiente y Recursos Naturales, El Salvador), San Andrés 120 km radar product via anonymous Google Cloud Storage. 5-min cadence, covering all of El Salvador + western Honduras + southern Guatemala + offshore Pacific. Continuous HSV hue gradient decoded back to dBZ. Reproduced with attribution per MARN's open-data permission.
-- **[EUMETNET OPERA](https://www.eumetnet.eu/activities/observations-programme/current-activities/opera/)** — Pan-European CIRRUS radar composite via [MeteoGate](https://meteogate.eu/) S3. ODIM HDF5, 3800×4400 at 1 km (LAEA), ~155 radars across 24 countries.
+- **[EUMETNET OPERA](https://www.eumetnet.eu/activities/observations-programme/current-activities/opera/)** — Pan-European CIRRUS radar composite via [MeteoGate](https://meteogate.eu/) S3. ODIM HDF5, 3800×4400 at 1 km (LAEA), 184 radars across 27 countries.
 - **[DPC Radar (Italy)](https://radar-api.protezionecivile.it/)** — Dipartimento della Protezione Civile national VMI composite via the open Radar-DPC v2 REST API. Cloud-Optimized GeoTIFF, 1200×1400 at 1 km (spherical Transverse Mercator), 24 radars (11 DPC-direct + 13 partner), 5-min cadence. Wins precedence over OPERA wherever it covers, because Italy is not in the EUMETNET OPERA station list. Licensed under [CC-BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) — attribution-share-alike (derivative tiles inherit the share-alike clause). Source: Dipartimento della Protezione Civile — Presidenza del Consiglio dei Ministri.
 - **[CWA QPESUMS](https://www.cwa.gov.tw/)** — Central Weather Administration of Taiwan, 7-radar composite reflectivity product `O-A0059-001` via the `cwaopendata` AWS bucket. UTF-8 XML with raw dBZ at 1.4 km / 10-min cadence, covering Taiwan + a substantial western Pacific buffer for typhoon tracking. Filename timestamps are Taipei local time (UTC+8); data uses TWD67 datum (sub-pixel offset vs WGS84 at this resolution). Licensed under the [Open Government Data License v1.0](https://data.gov.tw/license) (資料來源：中央氣象署 / Source: Central Weather Administration, Taiwan).
 - **[MET Malaysia](https://www.met.gov.my/)** — Jabatan Meteorologi Malaysia, 12-radar national composite (CAPPI 1 km, Rainbow 5 / LEONARDO Germany GmbH processing) via anonymous HTTPS at `api.met.gov.my`. 1352×570 animated GIF carrying 6 frames at 10-min cadence (~60 min of backfill per fetch), decoded via 18-stop palette → dBZ table. Split into `MYPENINSULAR` and `MYEAST` covering Peninsular Malaysia + N. Sumatra and East Malaysia (Borneo) + Brunei respectively. Singapore sits within `MYPENINSULAR`'s KLIA-radar coverage. Licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) (Radar data © Jabatan Meteorologi Malaysia / METMalaysia).

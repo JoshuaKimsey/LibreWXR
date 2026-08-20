@@ -34,17 +34,17 @@ box that would have implied coverage where none exists.
 
 | Source | Stations | Per-station range | Composite cadence | Composite resolution |
 |---|---|---|---|---|
-| NOAA MRMS — CONUS | NEXRAD WSR-88D (~160) | 240 km | 2 min | ~0.005° (~500 m) |
+| NOAA MRMS — CONUS | NEXRAD WSR-88D (146) | 240 km | 2 min | ~0.005° (~500 m) |
 | NOAA MRMS — Alaska | NEXRAD WSR-88D (7) | 240 km | 2 min | ~0.01° |
 | NOAA MRMS — Hawaii | NEXRAD WSR-88D (4) | 240 km | 2 min | ~0.005° |
 | NOAA MRMS — Puerto Rico | NEXRAD WSR-88D (1) | 240 km | 2 min | ~0.01° |
 | NOAA MRMS — Guam | NEXRAD WSR-88D (1) | 240 km | 2 min | ~0.0085° |
-| ECCC MSC Canada | S-band dual-pol (32) | 240 km | 6 min | ~0.025° |
-| EUMETNET OPERA | C-band (~155, 24 countries) | 300 km | 5 min | 1 km LAEA |
+| ECCC MSC Canada | S-band dual-pol (33) | 240 km | 6 min | ~0.025° |
+| EUMETNET OPERA | C-band (184, 27 countries) | 300 km | 5 min | 1 km LAEA |
 | DPC Italy (VMI) | C-band + X-band (24: 11 DPC + 13 partner) | 150 km | 5 min | 1 km tmerc |
 | MARN El Salvador | S-band (1, San Andrés) | 120 km | 5 min | ~0.009° (~1 km) |
-| CWA Taiwan QPESUMS | S/C-band (7) | 240 km | 10 min | ~0.0125° (~1.4 km) |
-| MET Malaysia | S-band (12, national network) | 240 km | 10 min | ~0.022° lon / 0.019° lat (~2.5 km) |
+| CWA Taiwan QPESUMS | S/C-band (7) | 450 km | 10 min | ~0.0125° (~1.4 km) |
+| MET Malaysia | S-band (12, national network) | 350-375 km | 10 min | ~0.022° lon / 0.019° lat (~2.5 km) |
 | PAGASA Philippines | S-band (9, national mosaic) | 240 km | 15 min | ~0.0069° lon / 0.0091° lat (~770 m) |
 | JMA HRPN (Japan) | C-band (20) + XRAIN X-band + AMeDAS gauges | 240 km | 5 min | ~0.0125° (~1.4 km) |
 | NOAA RRQPE (observed) | geostationary IR blend (no radar stations) | — | 10 min | 0.04° stored (0.02° native) |
@@ -174,8 +174,8 @@ outside the rectangle:
 The PNGs are committed to the repository so they appear in the README
 and on GitHub without any rendering pipeline. Regenerate them with
 [`scripts/generate_coverage_map.py`](../scripts/generate_coverage_map.py)
-after adding or changing a radar source or NWP grid. The script header
-documents the throwaway-venv recipe; in short:
+after adding or changing a radar source or NWP grid. Use a throwaway venv for map regeneration (the script's only dependencies
+are matplotlib, pyproj, and shapely):
 
 ```bash
 python3 -m venv /tmp/coverage-map-venv

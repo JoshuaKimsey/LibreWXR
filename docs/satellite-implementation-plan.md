@@ -21,10 +21,10 @@ This document was the active plan for shipping real-satellite imagery as a Libre
 
 ## What we're shipping
 
-- **One satellite source** covering the populated globe (±73° latitude, all longitudes), composited by NESDIS from GOES-East, GOES-West, Meteosat-10, Meteosat-9, and Himawari-9.
+- **One satellite source** covering the populated globe (±72.7° latitude, all longitudes), composited by NESDIS from GOES-East, GOES-West, Meteosat-10, Meteosat-9, and Himawari-9.
 - **Two channels ingested**: longwave IR (`LW`) and visible (`VIS`).
 - **One user-facing tile endpoint**: the existing Rain Viewer-compatible `/v2/satellite/{timestamp}/{size}/{z}/{x}/{y}/0/0_0.{ext}`, now backed by a **VIS-over-LW composite** with reflectance-driven alpha. The URL pattern, the catalog field (`satellite.infrared`), and downstream Rain Viewer client compatibility all stay identical to what's already shipping.
-- **Apparent 10-min cadence** via optical-flow interpolation on a 1-hour native cadence.
+- **Apparent 10-min cadence** via optical-flow interpolation on a 1-hour native cadence (not shipped — Phase 3 declined; the layer remains hourly).
 - **Hour-fresh** data: ~35 min from observation to publication, then ingested next fetch cycle.
 
 What we're explicitly **not** shipping:
@@ -45,7 +45,7 @@ LibreWXR currently backs `/v2/satellite/...` with an IFS-derived synthetic cloud
 2. **Phase 1.5** (small cleanup commit after Phase 1 live-verification) deletes the synthetic satellite code: `data/cloud_grid.py`, `data/cloud_cache.py`, the IFS-derived rendering path in `tiles/satellite_renderer.py`, and any cloud-cover-only config keys. Verify no other consumers depend on the IFS cloud-cover data before deletion (IFS *precipitation* stays — that's a separate IFS data product and remains the global base layer of the NWP chain).
 3. **From Phase 2 onwards** the renderer is GMGSI-only.
 
-When `LIBREWXR_GMGSI_ENABLED=false`, the satellite endpoint returns 503 and the catalog `satellite.infrared` array is empty `[]` — same pattern as `LIBREWXR_RADAR_ENABLED=false`. No fallback to synthetic data. If you want satellite, turn GMGSI on.
+When `LIBREWXR_SATELLITE_ENABLED=false`, the satellite endpoint returns 503 and the catalog `satellite.infrared` array is empty `[]` — same pattern as `LIBREWXR_RADAR_ENABLED=false`. No fallback to synthetic data. If you want satellite, turn GMGSI on.
 
 ## GMGSI channel reference
 
@@ -160,11 +160,9 @@ What we **keep** from the existing project shape:
 src/librewxr/sources/satellite/
 └── gmgsi/
     ├── __init__.py        # satellite_provider(settings, cache_dir) → list[SatelliteContribution]
-    ├── source.py          # GMGSISource base + GMGSILWSource + GMGSIVISSource
-    └── frames.py          # GMGSIFrame dataclass + GMGSIFrameStore (memmap ring buffer)
+    └── source.py          # GMGSISource base + GMGSILWSource + GMGSIVISSource
 src/librewxr/tiles/
-└── satellite_renderer.py  # MODIFIED: composite path (VIS-over-LW with reflectance alpha);
-                           # IFS-derived path kept as fallback when GMGSI disabled
+└── satellite_renderer.py  # MODIFIED: GMGSI-only VIS-over-LW composite path — the IFS-derived synthetic path was deleted (Phase 1.5)
 src/librewxr/sources/
 └── _base.py               # NEW: SatelliteContribution dataclass + SatelliteSource Protocol
 ```
@@ -200,20 +198,20 @@ When LW is available but VIS isn't (e.g. VIS channel disabled or ingest lag), re
 ### Config keys
 
 ```bash
-# Master switch for GMGSI as the backing source for /v2/satellite/...
-# When false, the endpoint falls back to the existing IFS-derived synthetic path.
-LIBREWXR_GMGSI_ENABLED=true
+# Master switch for the satellite layer as the backing source for /v2/satellite/...
+# (boolean, default true)
+LIBREWXR_SATELLITE_ENABLED=true
 
 # Per-channel ingest toggles. Disabling VIS while LW stays on
 # degrades the composite to LW-only.
 LIBREWXR_GMGSI_LW_ENABLED=true
 LIBREWXR_GMGSI_VIS_ENABLED=true
 
-# Frame retention (hours) — defaults sized for ~12 h smooth animation
-LIBREWXR_GMGSI_RETENTION_HOURS=12
+# Frame retention — defaults sized for ~12 h smooth animation
+LIBREWXR_SATELLITE_MAX_FRAMES=12
 
-# Toggle optical-flow interpolation (hourly → 10-min); leave true unless debugging
-LIBREWXR_GMGSI_INTERPOLATION=true
+# No interpolation toggle exists — the optical-flow interpolation phase (Phase 3)
+# was declined and never shipped; the layer remains hourly.
 ```
 
 All toggles default to enabled per the project's "new sources ship turned on" convention.
@@ -359,8 +357,10 @@ Goal: production-quality output on the rack.
 5. **Live-verification checklist**:
    - Composite renders smoothly across the terminator at all zoom levels
    - LW night-side detail visible behind transparent VIS
-   - The ±73° polar gaps are clean (no visual artefacts at the boundary)
+   - The ±72.7° polar gaps are clean (no visual artefacts at the boundary)
    - High-zoom (z≥10) tiles are smoothed but not over-blurred
+
+Note: only the disk-edge feathering from Phase 4 shipped — the high-zoom blur and the satellite coverage map were not implemented.
 
 **Ship criteria:**
 

@@ -67,14 +67,20 @@ Reach out to the operator before doing the implementation work. Ask plainly whet
 
 ## How discovery works
 
-At startup, `librewxr.sources.__init__` calls `pkgutil.walk_packages()` over the `sources/` tree, imports every subpackage, and collects two kinds of provider functions defined at the package level:
+At startup, `librewxr.sources.__init__` calls `pkgutil.walk_packages()` over the `sources/` tree, imports every subpackage, and collects four kinds of provider functions defined at the package level:
 
 - `radar_provider(settings) -> RadarSourceContribution | None`
 - `nwp_provider(settings, cache_dir) -> NWPContribution | None`
+- `satellite_provider(settings, cache_dir) -> SatelliteContribution | None`
+- `nowcast_provider(settings) -> NowcastContribution | None`
+
+Satellite sources like GMGSI use `satellite_provider` and nowcast sources use `nowcast_provider` — same discovery rules.
 
 A provider returns `None` when its config flag is off — that's how a source opts out cleanly. The fetcher loops over `RADAR_PROVIDERS` and `NWP_PROVIDERS`, calls each one, and wires up only the contributions that returned non-`None`.
 
 Side-effect: **adding a directory under `sources/` with a `radar_provider` or `nwp_provider` in its `__init__.py` is the entire registration step.** No central list to update.
+
+Pitfall: import `librewxr.sources._base` inside the provider function body, not at module top level — a top-level `_base` import can fail during the discovery walker's REGIONS-merge pass and silently drop your REGIONS contribution (see RRQPE's `__init__.py` for the working pattern).
 
 ## Directory layout
 
@@ -87,7 +93,7 @@ sources/
       __init__.py                     # provider
       grid.py                         # implementation
       interpolation.py                # source-specific helpers
-      README.md                       # operator notes
+      README.md                       # operator notes (optional; radar packages only)
   regional/
     <continent>/
       <country>/                      # only when the data is dominantly one country's
@@ -96,11 +102,11 @@ sources/
           source.py
           regions.py
           stations.py
-          README.md
+          README.md                   # radar packages only (NWP packages generally omit it)
         nwp/<source_name>/
           __init__.py
           grid.py
-          README.md
+          README.md                   # (optional; NWP packages generally omit it)
 ```
 
 `__init__.py` is the only mandatory file the discovery walker looks at; everything else is convention so contributors land in predictable places.
@@ -142,7 +148,7 @@ ZQRCOMP = RegionDef(
 REGIONS = [ZQRCOMP]
 ```
 
-`RegionDef` supports `proj="latlon"` (default), `proj="lcc"`, `proj="stere"`, and `proj="laea"`. When you need a projected grid, populate the relevant `grid_*` / `laea_*` / projection fields — see `OPERA` in `sources/regional/europe/radar/opera/regions.py` for an LAEA worked example.
+`RegionDef` supports `proj="latlon"` (default), `proj="laea"`, and `proj="tmerc"`. When you need a projected grid, populate the relevant `grid_*` / `laea_*` / projection fields — see `OPERA` in `sources/regional/europe/radar/opera/regions.py` for an LAEA worked example; `DPC` (`sources/regional/europe/italy/radar/dpc/regions.py`) is a tmerc example.
 
 ### `stations.py`
 
@@ -164,9 +170,11 @@ RANGE_OVERRIDES = {"ZQRCOMP": 150.0}  # operator publishes 150 km product
 
 A range override is justified when the upstream publishes a non-standard footprint (OPERA's C-band at 300 km, El Salvador's 120 km product, CWA Taiwan's 450 km typhoon buffer, MET Malaysia's 350-375 km CAPPI). Drop the entry if 240 km is correct — don't repeat the default.
 
+Note: export names vary per package — the coverage-map script reads whatever each `stations.py` defines (`STATION_MAP`/`RANGE_OVERRIDES` by convention, but bespoke names like `NEXRAD_CONUS`, `PENINSULAR_STATIONS`, or `COVERAGE_POLYGONS` exist).
+
 ### `source.py`
 
-The source class implements an async `fetch_frame(region) -> (datetime, np.ndarray) | None`, an `fetch_archive_frame(region, when)`, and a `close()`. The returned ndarray is `uint8` dBZ-encoded — use the canonical encoder in `librewxr.sources._helpers`:
+The source class implements an async `fetch_frame(region, minutes_ago) -> np.ndarray | None` and a `close()`. The fetcher always calls `fetch_frame` with two arguments — an int `minutes_ago` for live backfill slots, or a `datetime` when replaying an archive slot. The returned ndarray is `uint8` dBZ-encoded — use the canonical encoder in `librewxr.sources._helpers`:
 
 ```python
 # sources/regional/.../zorbia/radar/zqr/source.py
@@ -176,12 +184,9 @@ class ZQRSource:
     def __init__(self, base_url: str):
         self._client = httpx.AsyncClient(base_url=base_url)
 
-    async def fetch_frame(self, region):
+    async def fetch_frame(self, region, minutes_ago):
         ...  # fetch + decode native format → float32 dBZ
-        return timestamp, _dbz_float_to_uint8(dbz_floats)
-
-    async def fetch_archive_frame(self, region, when):
-        ...
+        return _dbz_float_to_uint8(dbz_floats)
 
     async def close(self):
         await self._client.aclose()
@@ -225,13 +230,15 @@ A few things to note:
 - `RadarSourceContribution.preempts` exists for cross-source policy hints, currently unused — MRMS-vs-IEM dispatch lives in `data/fetcher.py` rather than being expressed declaratively. If you're adding a source that contests a region with an existing source, talk to the maintainer.
 - The `regions=` field is the list of `RegionDef` objects the source can fetch frames for. The fetcher only wires the source to regions the user actually enabled via `LIBREWXR_ENABLED_REGIONS`.
 
+Optional fields: `coverage_polygons` supplies explicit coverage polygons for the coverage-mask builder when the product is not a simple station-circle union (JMA HRPN, DPC, and RRQPE all use it); `always_enabled` forces the region on even under narrow `LIBREWXR_ENABLED_REGIONS` values (RRQPE, the always-on global observed tier).
+
 ## Adding a regional NWP grid
 
 NWP sources are simpler — single file (`grid.py`) plus the provider in `__init__.py`. No regions, no stations.
 
 ### `grid.py`
 
-Your `*Grid` class must satisfy the `NWPSource` Protocol in `data/nwp_source.py`:
+Your `*Grid` class must satisfy the `NWPGrid` Protocol in `sources/_base.py` (including `async close()`) plus the sampling members of the `NWPSource` Protocol in `data/nwp_source.py`: `name`, `sample(...)`, `supports_snow`, `get_snow_mask(...)`, `domain_mask(...)`, `feather_mask(...)`, `has_data_at(...)`, `has_data()`.
 
 - `name: str` (used in logs)
 - `sample(lat, lon, timestamp, bilinear) -> uint8 dBZ-encoded ndarray`
@@ -269,7 +276,7 @@ __all__ = ["ZQRWRFGrid", "nwp_provider"]
 
 
 def nwp_provider(settings, cache_dir) -> NWPContribution | None:
-    if not getattr(settings, "zqr_wrf_enabled", False):
+    if not getattr(settings, "zqr_wrf_enabled", True):
         return None
     return NWPContribution(
         instance=ZQRWRFGrid(cache_dir=cache_dir),
@@ -277,6 +284,8 @@ def nwp_provider(settings, cache_dir) -> NWPContribution | None:
         name="ZQR-WRF",
     )
 ```
+
+Set `regional=True` on the contribution so the `LIBREWXR_REGIONAL_NWP_ENABLED` master switch drops your source while keeping IFS (the terminal, non-regional model).
 
 The `name` doubles as the source's identity in `/health` and in the
 cross-process snapshot — it's auto-slugged to a key like
@@ -351,23 +360,17 @@ for poly in union_of_radar_circles(ZQR_STATIONS, range_for("ZQRCOMP")):
     radar.append(Source("ZQR Composite (Zorbia)", "#ff7f0e", poly))
 ```
 
-Import the station list and any range override directly from your new `stations.py`:
+Import the station list and any range override from your new `stations.py`:
 
-```python
-from librewxr.sources.regional.<...>.radar.zqr.stations import (
-    RANGE_OVERRIDES as ZQR_RANGES,
-    STATIONS as ZQR_STATIONS,
-)
-# then merge ZQR_RANGES into REGION_RADAR_RANGE at the top of the script
-```
+The script deliberately avoids importing `librewxr` — it loads your stations module by raw path via its `_load_data_module()` helper and reads the attributes, keeping its dependency set to just matplotlib + pyproj + shapely. Add your source (and any bespoke export names it defines) to the `REGION_RADAR_RANGE` merge at the top of `scripts/generate_coverage_map.py`.
 
-Regenerate the PNGs (the script header documents the throwaway-venv recipe):
+Regenerate the PNGs (use a throwaway venv: `python3 -m venv /tmp/coverage-map-venv` then `pip install matplotlib pyproj shapely` — see `docs/coverage.md` for the full recipe):
 
 ```bash
 python scripts/generate_coverage_map.py
 ```
 
-Commit both updated PNGs (`docs/coverage-map-radar.png` and `docs/coverage-map-models.png`) alongside your code change.
+Commit all eight updated PNGs (`docs/coverage-map-radar.png`, `docs/coverage-map-models.png`, and the Europe / North America / East Asia radar and model zoom variants) alongside your code change.
 
 ## Tests
 
@@ -375,8 +378,10 @@ Add a `tests/test_<source>.py` for your source. Mark it appropriately:
 
 ```python
 import pytest
-pytestmark = pytest.mark.sources  # or pytest.mark.nwp for grids
+pytestmark = pytest.mark.sources
 ```
+
+Grid tests use per-source markers defined in `pyproject.toml` (e.g. `pytest.mark.icon_eu`, `pytest.mark.hrrr`) — there is no generic `nwp` marker.
 
 Look at `tests/test_cwa.py` (smallest radar test) or `tests/test_arome_antilles_grid.py` (smallest NWP test) for the smallest viable shape. Mock HTTP with `httpx.MockTransport` or the project's existing fixtures — don't hit the network in unit tests.
 
@@ -392,7 +397,7 @@ Before opening a PR:
 - [ ] `regions.py` (radar) defines `REGIONS` and `REGION_GROUP`.
 - [ ] `stations.py` (radar) defines `STATION_MAP` and (optionally) `RANGE_OVERRIDES`.
 - [ ] New config knobs added to `config.py` and `.env.example`, defaulting to enabled.
-- [ ] License + attribution documented in the package's `README.md` (every existing source has one — copy the shape).
+- [ ] License + attribution documented in the package's `README.md` (a package `README.md` is common in radar packages (NWP packages generally omit it) — copy the shape).
 - [ ] `scripts/generate_coverage_map.py` updated; both coverage PNGs regenerated.
 - [ ] `pytest` clean.
 - [ ] Smoke-run the server (`python -m librewxr.main`) once and confirm the new source shows up in the startup logs.

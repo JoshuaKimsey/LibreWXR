@@ -123,6 +123,8 @@ This is the starting point for any integration. It returns metadata about all av
 }
 ```
 
+(The real response lists all 13 color schemes in `colorSchemes` — the example above is abbreviated.)
+
 **Fields:**
 
 | Field | Description |
@@ -161,6 +163,7 @@ This is where the actual tile images come from. Your map library will call this 
 | Parameter | Description | Values |
 |-----------|-------------|--------|
 | `arrows` | Precipitation motion arrows | `""` (off), `light`, `dark`, `1`/`true` (alias for light) |
+| `cells` | Storm-cell markers (light/dark shape labels, rendered server-side) | `""` (off), `light`, `dark`, `1`/`true` (alias for light) |
 
 **Example tile URL:**
 
@@ -1008,7 +1011,7 @@ The `{smooth}_{snow}` path segment controls two independent features:
 
 - **Smooth** (`1` = on, `0` = off): Applies a Gaussian blur to soften the pixelated edges of radar data. Especially useful at higher zoom levels. The blur radius is configurable server-side via `LIBREWXR_SMOOTH_RADIUS`.
 
-- **Snow** (`1` = on, `0` = off): When enabled, areas classified as snowfall use an alternate color palette (typically blues/purples instead of greens/yellows). Classification comes from the regional NWP source covering each pixel (HRRR-CONUS / HRRR-Alaska / WRF-SMN / DMI DINI / ICON-EU each classify natively from their own 2-metre temperature field), or from ECMWF IFS snowfall ratio everywhere else.
+- **Snow** (`1` = on, `0` = off): When enabled, areas classified as snowfall use an alternate color palette (typically blues/purples instead of greens/yellows). Classification comes from the regional NWP source covering each pixel (HRRR-CONUS / HRRR-Alaska / JMA MSM / WRF-SMN / DMI DINI / ICON-EU each classify natively from their own 2-metre temperature field), or from ECMWF IFS snowfall ratio everywhere else.
 
 Common combinations:
 - `0_0` — raw, no smoothing, rain colors only

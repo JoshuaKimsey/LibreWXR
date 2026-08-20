@@ -29,7 +29,7 @@ pytest tests/test_renderer.py     # single file
 pytest -k "test_tile_render"      # by name pattern
 ```
 
-Test markers (defined in `pyproject.toml`): `api`, `ecmwf`, `nowcast`, `sources`, `tiles`, `store`, `hrrr`, `hrrr_alaska`, `icon_eu`, `dmi_dini`, `hrdps`, `arome_antilles`, `arome_guyane`, `arome_indien`, `arome_ncaled`, `arome_polyn`, `wrf_smn`, `jma_msm`, `rrqpe`, `alerts`.
+Test markers (defined in `pyproject.toml`): `api`, `ecmwf`, `nowcast`, `sources`, `tiles`, `store`, `hrrr`, `hrrr_alaska`, `icon_eu`, `dmi_dini`, `hrdps`, `arome_antilles`, `arome_guyane`, `arome_indien`, `arome_ncaled`, `arome_polyn`, `wrf_smn`, `jma_msm`, `rrqpe`, `alerts`, `mcp`, `storm_cells`.
 
 All tests are auto-async (`asyncio_mode = "auto"` in pyproject.toml). No explicit `@pytest.mark.asyncio` needed on individual async tests (though some older tests still have it).
 

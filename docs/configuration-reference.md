@@ -65,6 +65,15 @@ The port the server listens on.
 | **Default** | `8080` |
 | **Type** | integer |
 
+### `LIBREWXR_SSL_CERTFILE` / `LIBREWXR_SSL_KEYFILE`
+
+Paths to a TLS certificate and key for direct uvicorn termination. Both must be set for TLS to activate; setting only one has no effect. Leave unset to serve plain HTTP behind a reverse proxy.
+
+| | |
+|---|---|
+| **Default** | unset (both) |
+| **Type** | string (both) |
+
 ### `LIBREWXR_PUBLIC_URL`
 
 The public-facing URL of your LibreWXR instance. This value is returned in the `host` field of `/public/weather-maps.json` responses. Clients use it to construct full tile URLs.
@@ -127,6 +136,15 @@ LIBREWXR_LOG_FILE=logs/librewxr.log
 ---
 
 ## Radar Data
+
+### `LIBREWXR_RADAR_ENABLED`
+
+Master toggle for all radar sources. When false, every radar provider is skipped (MRMS/IEM/MSC/OPERA/DPC/MARN/CWA/JMA/MMD/PAGASA/RRQPE), coverage masks come up empty, and radar tiles return no data. NWP and satellite are unaffected.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
 
 ### `LIBREWXR_FETCH_INTERVAL`
 
@@ -244,6 +262,35 @@ Base URL for the Taiwan CWA QPESUMS composite bucket on AWS S3 (`cwaopendata` in
 | **Default** | `https://cwaopendata.s3.ap-northeast-1.amazonaws.com` |
 | **Type** | string |
 
+### Japan: JMA HRPN
+
+#### `LIBREWXR_JMA_ENABLED`
+
+JMA HRPN radar toggle; false drops JPCOMP from the ALL and JAPAN groups.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+#### `LIBREWXR_JMA_BASE_URL`
+
+Base URL for the JMA HRPN public tile pyramid. The source fetches and stitches the 10-stop-palette PNG tiles under the `nowc` data tree anonymously (JMA Public Data License v1.0; attribution required).
+
+| | |
+|---|---|
+| **Default** | `https://www.jma.go.jp/bosai/jmatile/data/nowc` |
+| **Type** | string |
+
+#### `LIBREWXR_JMA_ZOOM`
+
+HRPN tile zoom; even values only (z=8 matches JPCOMP's ~1.4 km grid; z=7 or z=9 produce all-empty frames).
+
+| | |
+|---|---|
+| **Default** | `8` |
+| **Type** | integer |
+
 ### `LIBREWXR_MMD_BASE_URL`
 
 Base URL for the MET Malaysia radar composite endpoint. The animated GIF at `{base}/static/images/radar-latest.gif` carries 6 frames at 10-min cadence (~60 min of backfill per fetch). CC-BY-4.0 — attribution required. Only used when `MYPENINSULAR`, `MYEAST`, or the `SOUTHEAST_ASIA` group is in `LIBREWXR_ENABLED_REGIONS`.
@@ -264,7 +311,7 @@ Master toggle for the MET Malaysia source. When `false`, drops `MYPENINSULAR` an
 
 ### `LIBREWXR_MMD_PUBLISH_LAG_SEC`
 
-Estimated publication lag (seconds) between a MET Malaysia frame's data time and when the carrying GIF lands at `api.met.gov.my`. The GIF carries no structured per-frame timestamps, so the newest frame's UTC time is derived from `floor(Last-Modified - mmd_publish_lag_sec, 10min)`. The empirically observed lag is ~11 min; 600 s gives a safe rounding margin. Bump if you observe the latest store slot stuck behind by one frame.
+MET publishes each 10-min slot ~11 minutes after its real data time, so the newest frame on the server is up to ~10 min stale. The decoder therefore labels the newest GIF frame at the current wall-clock 10-min slot so the renderer's "current" slot is always populated; `mmd_publish_lag_sec` acts as a stale-content ceiling — a response whose `Last-Modified` is further behind wall clock than this is treated as legitimately old data, not relabelled forward.
 
 | | |
 |---|---|
@@ -331,6 +378,7 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `EUROPE` | `ITCOMP`, `OPERA` | DPC Italian national composite (24 radars) + OPERA pan-European composite (~155 radars, 24 countries). ITCOMP wins precedence over OPERA where it covers — Italy is not in the EUMETNET OPERA station list. |
 | `SOUTHEAST_ASIA` | `MYPENINSULAR`, `MYEAST`, `PHCOMP` | Peninsular Malaysia + N. Sumatra + all of Borneo + Brunei + Singapore (MET Malaysia 12-radar composite) + the Philippines (PAGASA PANAHON 9-radar mosaic) |
 | `TAIWAN` | `TWCOMP` | Taiwan + W. Pacific buffer (CWA QPESUMS 7-radar composite) |
+| `JAPAN` | `JPCOMP` | Japan (JMA HRPN analysis-leg composite) |
 | `ALL` | All of the above | Every available region |
 
 **Individual regions:**
@@ -347,6 +395,7 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `OPERA` | Europe | EUMETNET OPERA (MeteoGate S3) | 3800 x 4400 | 1km (LAEA) | ~16 MB |
 | `ITCOMP` | Italy | DPC (Radar-DPC v2 REST API) | 1200 x 1400 | 1km (tmerc) | ~7 MB |
 | `TWCOMP` | Taiwan + W. Pacific | CWA QPESUMS (cwaopendata S3) | 921 x 881 | 0.0125° (~1.4km) | ~3 MB |
+| `JPCOMP` | Japan (JMA HRPN analysis-leg composite) | JMA HRPN (jmatile nowc tile pyramid) | 2160 x 1920 | 0.0125° (~1.4 km) | ~4 MB |
 | `MYPENINSULAR` | Peninsular Malaysia + N. Sumatra | MET Malaysia (12-radar composite) | 424 x 551 | 0.022° lon / 0.019° lat (~2.5km) | <1 MB |
 | `MYEAST` | East Malaysia (Borneo) + Brunei | MET Malaysia (12-radar composite) | 640 x 570 | 0.022° lon / 0.019° lat (~2.5km) | <1 MB |
 | `PHCOMP` | Philippines (Luzon, Visayas, Mindanao) | PAGASA PANAHON (9-radar mosaic) | 2048 x 2048 | 0.0069° lon / 0.0091° lat (~770m) | ~4 MB |
@@ -374,7 +423,7 @@ Maximum tile zoom level. Higher values allow more detail when zoomed in but use 
 |---|---|
 | **Default** | `12` |
 | **Type** | integer |
-| **Range** | 0 - 12 |
+| **Range** | 0 - 12 (advisory — 12 is the source-data maximum; the API accepts higher values if you raise it, but tiles show no finer detail) |
 
 ### `LIBREWXR_SMOOTH_RADIUS`
 
@@ -833,6 +882,15 @@ Each regional source supports the same set of advanced tuning knobs:
 - `<SOURCE>_PUBLISH_DELAY_MINUTES` — how long after a model run's init time its files become available upstream. The fetcher won't try to read a run published more recently than this.
 - `<SOURCE>_DBZ_OFFSET` — a dBZ calibration shift applied after Marshall-Palmer Z-R conversion (only for sources that derive reflectivity from precipitation rate, not those with native composite reflectivity). Marshall-Palmer is for stratiform rain at the surface; radar reads 5-10 dBZ higher at the brightest part of the storm column, so a positive offset brings model output closer to OPERA / NEXRAD radar in colour.
 - `<SOURCE>_BASE_URL` (HTTPS sources) or `<SOURCE>_S3_BUCKET` + `<SOURCE>_S3_REGION` (AWS Open Data sources) — should rarely need changing; the defaults point at the upstream-provider buckets.
+
+### `LIBREWXR_REGIONAL_NWP_ENABLED`
+
+Master switch for all regional NWP. When false the NWP chain collapses to ECMWF IFS alone. RRQPE is unaffected (it is an observed radar region, not NWP).
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
 
 ### North American: HRRR / HRRR-Alaska
 
@@ -1308,7 +1366,7 @@ Resolution of the global composite NWP flow raster used by the arrow overlay out
 | **Default** | `0.25` |
 | **Type** | float |
 
-At 0.25° the raster is 721×1440 float32 (~8 MB). The 32/48px arrow draw grid can't resolve finer detail at most zooms, so coarser is cheaper for no visible loss. Finer values help only at high zoom inside small convective cells — and inside radar coverage those cells already get the fine per-region radar flow (which wins by construction), so the composite only fills NWP-only regions where sub-0.25° detail doesn't matter. This is an advanced tuning knob not surfaced in `.env.example`.
+At 0.25° the raster is 721×1440 float32 (~4 MB per snapshot; ~8 MB for the two-channel flow output). The 32/48px arrow draw grid can't resolve finer detail at most zooms, so coarser is cheaper for no visible loss. Finer values help only at high zoom inside small convective cells — and inside radar coverage those cells already get the fine per-region radar flow (which wins by construction), so the composite only fills NWP-only regions where sub-0.25° detail doesn't matter. This is an advanced tuning knob not surfaced in `.env.example`.
 
 ---
 
@@ -1394,6 +1452,16 @@ Number of hourly satellite frames retained per channel. GMGSI publishes one fram
 |---|---|
 | **Default** | `12` |
 | **Type** | integer |
+
+### `LIBREWXR_SATELLITE_FETCH_TIMEOUT`
+
+Deadline for one satellite fetch pass (list + download + decode). A hung S3 connection skips the channel for that pass rather than retrying.
+
+| | |
+|---|---|
+| **Default** | `600.0` |
+| **Type** | float |
+| **Unit** | seconds |
 
 ---
 
@@ -1512,7 +1580,7 @@ Both transports require the optional `[mcp]` extra:
 pip install -e ".[mcp]"
 ```
 
-Without the extra, the HTTP transport is silently disabled at startup with a logged warning, and the stdio entry point (`python -m librewxr.mcp` / `librewxr-mcp`) won't import.
+Without the extra, the HTTP transport is silently disabled at startup with a logged error (traceback), and the stdio entry point (`python -m librewxr.mcp` / `librewxr-mcp`) won't import.
 
 ### `LIBREWXR_MCP_ENABLED`
 

@@ -57,16 +57,17 @@ Higher tiers still offer the full functionality but require a paid subscription.
 LibreWXR provides everything the pre-restriction Rain Viewer API offered, self-hosted with no usage limits:
 
 - All zoom levels up to 12
-- All 9 color schemes + raw grayscale
+- All 13 color schemes + raw grayscale
 - 256px and 512px tiles
 - PNG and WebP formats
 - Nowcast/forecast frames (up to 60 minutes)
 - Smoothing and snow color options
+- WMO CAP weather alerts as a GeoJSON feed (`/v2/alerts` with point, bounding-box, and polygon-simplification query params)
 
 Plus additional features Rain Viewer didn't offer:
 - Precipitation motion arrows (`?arrows=light` or `?arrows=dark`)
 - Configurable noise filtering and speckle removal
-- ECMWF IFS 9km global model layer + NOAA RRQPE global observed precipitation (60S-70N) + regional NWP layers (HRRR, HRDPS, DMI DINI, ICON-EU, AROME Antilles, WRF-SMN)
+- ECMWF IFS 9km global model layer + NOAA RRQPE global observed precipitation (60S-70N) + regional NWP layers (HRRR, HRRR-Alaska, HRDPS, JMA MSM, AROME Antilles, AROME Guyane, AROME Indien, AROME Ncaled, AROME Polyn, DMI DINI, ICON-EU, WRF-SMN)
 - Optical flow interpolation for smooth global animation
 - Fully configurable via environment variables
 
@@ -143,7 +144,7 @@ Every parameter works the same way:
 | `timestamp` | Unix timestamp from metadata | Identical |
 | `size` | `256` or `512` | Identical |
 | `z`, `x`, `y` | Slippy map tile coordinates | Identical |
-| `color` | `0`-`8` | `0`-`8` + `255` (raw grayscale) |
+| `color` | `0`-`8` | `0`-`12` + `255` (raw grayscale) |
 | `smooth` | `0` or `1` | Identical |
 | `snow` | `0` or `1` | Identical |
 | `ext` | `png` (free) / `webp` (paid) | `png` or `webp` (both always available) |
@@ -171,7 +172,7 @@ Rain Viewer's lat/lon single-location image endpoint is supported:
 | **Coverage** | `/v2/coverage/0/{size}/{z}/{lat}/{lon}/0/0_0.png` | Identical |
 | **Response** | `size` x `size` image centered on the EPSG:4326 coordinate | Identical |
 
-Returns a `size` x `size` PNG or WebP centered on the coordinate, for past radar frames and nowcast timestamps alike. `size` is `256` or `512` (values in between quantize: `< 512` becomes `256`, matching the tile route), and `{smooth}_{snow}` behaves exactly as on the tile route. Unknown timestamps return 404; areas with no data return a transparent 200 PNG. The coverage layer has the same variant: `/v2/coverage/0/{size}/{z}/{lat}/{lon}/0/0_0.png`.
+Returns a `size` x `size` PNG or WebP centered on the coordinate, for past radar frames and nowcast timestamps alike. `size` is `256` or `512` (values in between quantize: `< 512` becomes `256`, matching the tile route), and `{smooth}_{snow}` behaves exactly as on the tile route. Unknown timestamps return 404; areas with no data return a transparent 200 response in the requested format (PNG or WebP). The coverage layer has the same variant: `/v2/coverage/0/{size}/{z}/{lat}/{lon}/0/0_0.png`.
 
 **LibreWXR addition:** timestamp `0` in the `{timestamp}` slot is an alias for the latest frame - radar resolves it to the newest past radar frame and the satellite endpoint to the latest GMGSI timestamp (RainViewer itself reserves `0` this way only on the coverage endpoint). Resolution happens before any caching, so alias URLs key and cache exactly like the canonical ones, and the resolved timestamp is returned in the `X-Frame-Timestamp` response header on both 200 and 304 responses. Any other unknown timestamp still returns 404.
 
@@ -188,7 +189,7 @@ Repeated requests for the same location hit the tile cache (the snapped origin i
 | Feature | Rain Viewer (Free, Post-2026) | Rain Viewer (Paid) | LibreWXR |
 |---|---|---|---|
 | Max zoom | 7 | 12 | 12 |
-| Color schemes | 1 | 9 | 9 + raw grayscale |
+| Color schemes | 1 | 9 | 13 + raw grayscale |
 | Tile sizes | 256px | 256px, 512px | 256px, 512px |
 | Image formats | PNG | PNG, WebP | PNG, WebP |
 | Smoothing | No | Yes | Yes |
@@ -196,7 +197,7 @@ Repeated requests for the same location hit the tile cache (the snapped origin i
 | Nowcast/Forecast | No | ~60 min | Up to 60 min |
 | Satellite | No (discontinued Jan 2026) | Yes (IR, 10-min) | Yes (GMGSI LW+VIS composite, hourly) |
 | Motion arrows | No | No | Yes |
-| Coverage | Global | Global | US, Canada, Europe, El Salvador, Taiwan, SE Asia radar + global RRQPE observed + global ECMWF IFS + regional NWP |
+| Coverage | Global | Global | US, Canada, Europe, El Salvador, Japan (JMA HRPN), Taiwan, SE Asia radar + global RRQPE observed + global ECMWF IFS + regional NWP |
 | Rate limits | Yes | Higher limits | None (self-hosted) |
 | Cost | Free | Subscription | Free (self-hosted) |
 
@@ -206,15 +207,15 @@ Repeated requests for the same location hit the tile cache (the snapped origin i
 
 These are things to be aware of but generally don't require code changes:
 
-- **Coverage area**: Rain Viewer sourced radar data globally from many countries. LibreWXR has high-resolution radar composites for the US, Canada, Europe, El Salvador (MARN/SNET), Taiwan (CWA QPESUMS), Peninsular Malaysia + Borneo + Brunei + Singapore + N. Sumatra (MET Malaysia), and the Philippines (PAGASA PANAHON), plus NOAA RRQPE — a global observed (satellite-derived) precipitation radar region covering the 60S-70N band — and a chain of regional NWP models (HRRR, HRDPS, DMI DINI, ICON-EU, AROME Antilles, WRF-SMN) layered on top of ECMWF IFS. Outside the radar domains but inside the band, the precipitation layer is observed (RRQPE, satellite-derived); it is modelled only poleward of the band, in the fringe excluded by RRQPE's coverage polygon, and when RRQPE declines — at a few-km resolution where regional NWP applies, and at IFS 9 km elsewhere. If your users are primarily in any of these radar regions, the experience is equivalent or better.
+- **Coverage area**: Rain Viewer sourced radar data globally from many countries. LibreWXR has high-resolution radar composites for the US, Canada, Europe, El Salvador (MARN/SNET), Japan (JMA HRPN), Taiwan (CWA QPESUMS), Peninsular Malaysia + Borneo + Brunei + Singapore + N. Sumatra (MET Malaysia), and the Philippines (PAGASA PANAHON), plus NOAA RRQPE — a global observed (satellite-derived) precipitation radar region covering the 60S-70N band — and a chain of regional NWP models (HRRR, HRRR-Alaska, HRDPS, JMA MSM, AROME Antilles, AROME Guyane, AROME Indien, AROME Ncaled, AROME Polyn, DMI DINI, ICON-EU, WRF-SMN) layered on top of ECMWF IFS. Outside the radar domains but inside the band, the precipitation layer is observed (RRQPE, satellite-derived); it is modelled only poleward of the band, in the fringe excluded by RRQPE's coverage polygon, and when RRQPE declines — at a few-km resolution where regional NWP applies, and at IFS 9 km elsewhere. If your users are primarily in any of these radar regions, the experience is equivalent or better.
 
 - **Data update cadence**: Both use 10-minute intervals. LibreWXR aligns to clock boundaries (:00, :10, :20, etc.) just like Rain Viewer.
 
 - **Satellite imagery**: LibreWXR serves NOAA GMGSI where Rain Viewer's paid layer was 10-minute infrared-only (discontinued for everyone January 2026): a global (±72.7 deg) hourly LW+VIS composite — infrared at night, visible reflectance by day, with a natural day/night terminator — with up to 12 hourly frames of history. The `satellite.infrared` metadata array works the same way and tile URLs use fixed `0`/`0_0` color/options segments: `/v2/satellite/{timestamp}/{size}/{z}/{x}/{y}/0/0_0.{ext}` (png or webp). `LIBREWXR_SATELLITE_ENABLED=false` empties the catalog array and makes tile requests return 503.
 
-- **Color scheme rendering**: LibreWXR reproduces all 9 Rain Viewer color schemes from the same color lookup tables. The visual output should be identical for a given scheme ID.
+- **Color scheme rendering**: LibreWXR reproduces all 9 original Rain Viewer color schemes from the same color lookup tables, plus four contributed schemes (13 named total) and a raw grayscale mode (255). The visual output should be identical for a given scheme ID.
 
-- **Tile caching headers**: LibreWXR serves tiles with `Cache-Control: public, max-age=300` (5 minutes). This is compatible with any CDN or caching proxy.
+- **Tile caching headers**: LibreWXR serves tiles with `Cache-Control: public` — `max-age=300` (5 minutes) for the latest and nowcast frames, and `max-age=7200` (2 hours) for historical frames, which are immutable once backfill is complete. This is compatible with any CDN or caching proxy.
 
 ---
 
