@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Joshua Kimsey
 """ECCC Canadian weather radar network.
 
-32 S-band dual-pol stations (METEOR 1700S) operated by Environment and
+33 S-band dual-pol stations (METEOR 1700S) operated by Environment and
 Climate Change Canada after the 2023 network modernization.  Coordinates
 from the Canadian Weather Radar Network Wikipedia article,
 cross-referenced with ECCC station pages.

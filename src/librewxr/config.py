@@ -197,8 +197,8 @@ class Settings(BaseSettings):
     # anonymous HTTPS at ``api.met.gov.my``.  10-min native cadence — one
     # animated GIF per fetch carries 6 frames (~60 min of backfill).
     # Decoded via 18-stop palette → dBZ table, sub-rectangle split into
-    # MYPENINSULAR + MYEAST regions.  CC-BY-4.0 licensed.  Sole source in
-    # the SOUTHEAST_ASIA region group.
+    # MYPENINSULAR + MYEAST regions.  CC-BY-4.0 licensed.  Shares the
+    # SOUTHEAST_ASIA region group with PAGASA (PHCOMP).
     mmd_base_url: str = "https://api.met.gov.my"
     mmd_enabled: bool = True
     # Publication lag (seconds) used as a ceiling when labelling frame
@@ -259,13 +259,13 @@ class Settings(BaseSettings):
     # sources that don't carry a native snow-ratio field.  Each source
     # computes snow = (T_2m < threshold).  1.5 °C matches Open-Meteo's
     # softer threshold and captures wet-snow at ground level without
-    # painting cold rain as snow.  Used by HRRR, HRRR-Alaska, HRDPS,
-    # DMI DINI, ICON-EU, and WRF-SMN.  IFS uses its native snowfall
+    # painting cold rain as snow.  Used by HRRR, HRRR-Alaska, JMA MSM,
+    # WRF-SMN, DMI DINI, and ICON-EU.  IFS uses its native snowfall
     # ratio (``ecmwf_snow_ratio_threshold`` above) instead.
     regional_snow_temp_threshold: float = 1.5
     # Apply the same Farneback optical-flow temporal interpolation we use
     # on hourly IFS frames to regional NWP sources whose native cadence
-    # is also hourly (WRF-SMN, DMI DINI — others coming).  Without this,
+    # is also hourly (WRF-SMN, DMI DINI, ICON-EU, JMA MSM).  Without this,
     # a moving precip cell appears to cross-fade between hourly bracket
     # frames at intermediate query times, producing a visible "two faint
     # copies" ghost.  With this on, the cell translates smoothly along
@@ -426,7 +426,7 @@ class Settings(BaseSettings):
     # SMN Argentina WRF-DET: 4 km LCC over Argentina + Chile + Uruguay
     # + Bolivia + Paraguay + S. Brazil — first regional NWP for the
     # South American Cone.  Anonymous AWS Open Data S3 (smn-ar-wrf in
-    # us-east-1), 4 cycles/day (00/06/12/18 UTC), 72 h horizon, NetCDF4
+    # us-west-2), 4 cycles/day (00/06/12/18 UTC), 72 h horizon, NetCDF4
     # files (~34 MB each).  Independent toggle since this is the only
     # source covering the South American chain slot.
     wrf_smn_enabled: bool = True
@@ -477,7 +477,7 @@ class Settings(BaseSettings):
     arrow_flow_target_dim: int = 500
     # Resolution of the global composite NWP flow raster used by the
     # arrow overlay outside radar coverage, in degrees.  0.25 (default)
-    # gives a 720×360 float32 grid (~2 MB, <1s Farneback/cycle).  The
+    # gives a 721×1440 float32 grid (~4 MB, <1s Farneback/cycle).  The
     # 32/48px arrow draw grid can't resolve finer detail at most zooms,
     # so coarser is cheaper for no visible loss.  Finer values help
     # only at high zoom inside small convective cells — which inside

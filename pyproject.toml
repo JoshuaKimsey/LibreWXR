@@ -54,11 +54,12 @@ dev = [
 # Coverage-map authoring deps.  Not needed at runtime — only when
 # regenerating the PNGs under ``docs/coverage-map-*.png`` via
 # ``scripts/generate_coverage_map.py``.  Kept as an optional extra so
-# the main runtime install isn't bloated by matplotlib / pyproj for
-# operators who never touch the authoring path.
+# the main runtime install isn't bloated by matplotlib / pyproj / shapely
+# for operators who never touch the authoring path.
 maps = [
     "matplotlib>=3.8",
     "pyproj>=3.6",
+    "shapely>=2.0",
 ]
 
 # MCP (Model Context Protocol) server.  Optional so the base install

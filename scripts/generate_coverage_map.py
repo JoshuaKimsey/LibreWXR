@@ -368,7 +368,7 @@ def build_radar_sources() -> list[Source]:
     for poly in union_of_radar_circles(SNET_STATIONS, range_for("SVCOMP")):
         radar.append(Source("MARN/SNET (El Salvador)", "#bcbd22", poly))
 
-    # OPERA — ~155 European stations at 300 km each (C-band).  The
+    # OPERA — 184 European stations at 300 km each (C-band).  The
     # union naturally splits into a continental piece, Iceland,
     # Ireland-and-Britain, etc. where station gaps exceed range.
     for poly in union_of_radar_circles(OPERA_STATIONS, range_for("OPERA")):

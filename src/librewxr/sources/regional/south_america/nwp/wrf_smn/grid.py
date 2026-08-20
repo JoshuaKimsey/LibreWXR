@@ -15,7 +15,7 @@ applying the same Marshall-Palmer Z-R conversion ECMWFGrid /
 ICONEUGrid / DMIDiniGrid / HRDPS / AROMEAntillesGrid use.
 
 Distribution: anonymous AWS Open Data S3 (``s3://smn-ar-wrf`` in
-``us-east-1``), no auth, plain HTTPS.  Each (run, leadtime) is a
+``us-west-2``), no auth, plain HTTPS.  Each (run, leadtime) is a
 single NetCDF4/HDF5 file ~32-36 MB containing about 17 surface fields;
 we download the whole file and extract only the ``PP`` variable
 (~5 MB after decode).  Range-fetching individual HDF5 chunks would
