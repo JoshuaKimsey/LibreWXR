@@ -306,7 +306,7 @@ Start with a basic HTML page with Leaflet and a full-screen map:
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
     <style>
         body { margin: 0; }
-        #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
+        #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: #0f1117; }
     </style>
 </head>
 <body>
@@ -321,6 +321,8 @@ Start with a basic HTML page with Leaflet and a full-screen map:
 </body>
 </html>
 ```
+
+The dark `background` on `#map` shows through the transparent radar tiles where there is no precipitation and prevents Leaflet's default light-grey flash while tiles load; pick any color that matches your page theme.
 
 This gives you a base map centered on the US. You can change the `setView` coordinates and zoom to center on any region — for example, `[50.0, 10.0]` for Europe, `[56.0, -96.0]` for Canada, `[23.7, 121.0]` for Taiwan, `[13.7, -88.9]` for El Salvador, `[4.0, 109.0]` for the MET Malaysia / Borneo composite, or `[13.0, 122.5]` for the PAGASA Philippines composite.
 

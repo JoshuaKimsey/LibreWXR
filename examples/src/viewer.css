@@ -322,6 +322,12 @@ body {
     z-index: var(--z-map);
 }
 
+/* Match the Leaflet container to the page background so areas without
+   loaded tiles do not flash Leaflet's default light grey (#ddd). */
+.leaflet-container {
+    background: var(--bg) !important;
+}
+
 /* Leaflet seam fix: radar tiles blend additively so adjacent tiles do not
    show dark seams on transparent gaps. */
 .leaflet-container img.leaflet-tile {
