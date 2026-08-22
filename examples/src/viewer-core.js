@@ -66,7 +66,12 @@
         nowMarker: false,        // red wall-clock 'now' marker on the scrubber?
         nowMarkerLabel: true,    // show current time above the now marker?
         alertsFillAlpha: null,   // null = read --alert-fill-alpha from CSS
-        refreshMs: 5 * 60 * 1000 // auto-refresh cadence (300s)
+        refreshMs: 5 * 60 * 1000, // auto-refresh cadence (300s)
+        strings: null,
+        locale: null,
+        hour12: null,
+        onThemeChange: null,
+        locateMode: null
     };
 
     /* === TIMING / TUNING CONSTANTS === */
@@ -88,6 +93,10 @@
         for (var dk in DEFAULTS) config[dk] = DEFAULTS[dk];
         if (userConfig) {
             for (var uk in userConfig) config[uk] = userConfig[uk];
+        }
+
+        function tr(key, fallback) {
+            return (config.strings && config.strings[key]) || fallback;
         }
 
         /* === STATE === */
@@ -210,9 +219,9 @@
         }
 
         function noDataMessage() {
-            if (!state.apiData || !state.apiData.radar) return 'No data';
-            if (state.layerMode === 'satellite') return 'No satellite data';
-            return 'No radar data';
+            if (!state.apiData || !state.apiData.radar) return tr('noData', 'No data');
+            if (state.layerMode === 'satellite') return tr('noSatData', 'No satellite data');
+            return tr('noRadarData', 'No radar data');
         }
 
         function frameKind() {
@@ -313,7 +322,11 @@
         }
 
         function formatTime(timestamp) {
-            return new Date(timestamp * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+            return new Date(timestamp * 1000).toLocaleTimeString(config.locale || [], {
+                hour: 'numeric',
+                minute: '2-digit',
+                hour12: config.hour12 === null ? undefined : config.hour12
+            });
         }
 
         function isNowcastFrame(position) {
@@ -350,7 +363,7 @@
             // flex row; toggling visibility (instead of adding/removing the span)
             // keeps the scrubber track from resizing when the label appears.
             var labelCls = isNowcastFrame(position) ? 'forecast-label' : 'forecast-label forecast-label--off';
-            el.innerHTML = timeStr + '<span class="' + labelCls + '">Forecast</span>';
+            el.innerHTML = timeStr + '<span class="' + labelCls + '">' + tr('forecast', 'Forecast') + '</span>';
         }
 
         /* === FRAME DISPLAY ===
@@ -606,7 +619,7 @@
             if (state.preloadIndicatorVisible) return; // bulk preload owns the indicator
             var el = byId('lv-preload');
             if (!el) return;
-            byId('lv-preload-text').textContent = 'Loading frame...';
+            byId('lv-preload-text').textContent = tr('loadingFrame', 'Loading frame...');
             setPreloadFill(0);
             el.classList.add('visible');
         }
@@ -622,7 +635,7 @@
             state.preloadIndicatorVisible = true;
             var el = byId('lv-preload');
             if (!el) return;
-            byId('lv-preload-text').textContent = 'Loading frames ' + done + '/' + total;
+            byId('lv-preload-text').textContent = tr('loadingFrames', 'Loading frames ') + done + '/' + total;
             setPreloadFill(total > 0 ? (done / total) * 100 : 0);
             el.classList.add('visible');
         }
@@ -895,6 +908,7 @@
             state.theme = theme;
             document.body.setAttribute('data-theme', theme);
             adapter.setBasemap(theme);
+            if (config.onThemeChange) config.onThemeChange(theme);
             updateThemeButton();
             // Rebuild the overlay from the cached catalog so popup styling
             // stays consistent with the new theme.
@@ -1377,12 +1391,13 @@
         function formatAlertTime(v) {
             var d = (typeof v === 'number') ? new Date(v * 1000) : new Date(v);
             if (isNaN(d.getTime())) return String(v);
-            return d.toLocaleString(undefined, {
+            return d.toLocaleString((config.locale || undefined), {
                 weekday: 'short',
                 month: 'short',
                 day: 'numeric',
                 hour: 'numeric',
-                minute: '2-digit'
+                minute: '2-digit',
+                hour12: config.hour12 === null ? undefined : config.hour12
             });
         }
 
@@ -1417,6 +1432,7 @@
             if ((c = byId('lv-scheme'))) c.style.display = isSatOnly ? 'none' : '';
             if ((c = byId('lv-arrows'))) c.style.display = isSatOnly ? 'none' : '';
             if ((c = byId('lv-cells'))) c.style.display = isSatOnly ? 'none' : '';
+            document.dispatchEvent(new CustomEvent('lvselect:sync'));
         }
 
         /* === CATALOG LOAD (initial / source change) ===
@@ -1424,7 +1440,7 @@
            then hand over to the manual Retry button. */
         function loadCatalog() {
             stopAnimation();
-            setTimestampText('Loading...');
+            setTimestampText(tr('loading', 'Loading...'));
 
             var xhr = new XMLHttpRequest();
             xhr.open('GET', catalogUrl(), true);
@@ -1436,11 +1452,11 @@
                         onCatalogError('Invalid catalog response');
                     }
                 } else {
-                    onCatalogError('API error (HTTP ' + xhr.status + ')');
+                    onCatalogError(tr('apiError', 'API error (HTTP ' + xhr.status + ')'));
                 }
             };
             xhr.onerror = function () {
-                onCatalogError('Connection failed');
+                onCatalogError(tr('connFailed', 'Connection failed'));
             };
             xhr.send();
         }
@@ -1784,6 +1800,10 @@
 
         /* === LOCATE === */
         function onLocate() {
+            if (config.locateMode === 'view') {
+                adapter.flyTo(config.view.lat, config.view.lon, null);
+                return;
+            }
             if (!navigator.geolocation) return;
             navigator.geolocation.getCurrentPosition(function (pos) {
                 adapter.flyTo(pos.coords.latitude, pos.coords.longitude, 10);

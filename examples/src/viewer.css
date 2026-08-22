@@ -344,6 +344,35 @@ body {
     height: 256px !important;
 }
 
+/* === LEAFLET ZOOM CONTROL === */
+/* Leaflet ships its zoom buttons with hardcoded light styling; theme them
+   with the map's button tokens so they are not white on dark themes. */
+.leaflet-control-zoom {
+    border: none !important;
+    box-shadow: none !important;
+}
+.leaflet-control-zoom a {
+    background: var(--btn-bg) !important;
+    color: var(--text-secondary) !important;
+    border: 1px solid var(--btn-border) !important;
+}
+.leaflet-control-zoom a:hover {
+    background: var(--btn-hover) !important;
+    color: var(--text) !important;
+}
+.leaflet-control-zoom-in {
+    border-radius: var(--radius-sm) var(--radius-sm) 0 0 !important;
+}
+.leaflet-control-zoom-out {
+    border-radius: 0 0 var(--radius-sm) var(--radius-sm) !important;
+    border-top: none !important;
+}
+.leaflet-control-zoom a.leaflet-disabled,
+.leaflet-control-zoom a.leaflet-disabled:hover {
+    color: var(--text-dim) !important;
+    background: var(--btn-bg) !important;
+}
+
 /* === PRELOAD INDICATOR === */
 .preload-indicator {
     position: absolute;

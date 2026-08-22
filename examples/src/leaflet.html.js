@@ -40,6 +40,15 @@
         <option value="light">Cells: Light</option>
         <option value="dark">Cells: Dark</option>
     </select>
+    <select id="lv-basemap" aria-label="Base map">
+        <option value="auto">Map: Auto</option>
+        <option value="osm-standard">Map: OSM Standard</option>
+        <option value="osm-humanitarian">Map: OSM Humanitarian</option>
+        <option value="cyclosm">Map: CyclOSM</option>
+        <option value="opentopomap">Map: OpenTopoMap</option>
+        <option value="carto-positron">Map: CARTO Positron</option>
+        <option value="carto-darkmatter">Map: CARTO Dark Matter</option>
+    </select>
     <button type="button" class="icon-btn" id="lv-alerts" aria-pressed="false" aria-label="Toggle weather alerts" title="Weather alerts">
         <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M12 3 L20 19 H4 Z"/><line x1="12" y1="10" x2="12" y2="15"/><circle cx="12" cy="17.5" r="1"/></svg></span>
         Alerts
@@ -126,14 +135,46 @@ var LeafletAdapter = function () {
     var map = null;
     var lvTileErrors = 0; // module-level tile-load failure counter (browser diagnostics)
     var maxZoom = 12;
-    var baseMaps = {
-        dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>'
-        }),
-        light: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors'
-        })
+    // === BASE MAPS ===
+    // Explicit choices for the base-map selector; "auto" follows the theme
+    // (dark maps get Dark Matter, light maps get OSM Standard).
+    var BASEMAPS = {
+        'osm-standard': {
+            url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors',
+            maxZoom: 19
+        },
+        'osm-humanitarian': {
+            url: 'https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png',
+            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors <a href="https://www.hotosm.org/">Humanitarian OSM Team</a>',
+            maxZoom: 20
+        },
+        'cyclosm': {
+            url: 'https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png',
+            attribution: '<a href="https://github.com/cyclosm/cyclosm-cartocss-style/releases">CyclOSM</a> | <a href="https://openstreetmap.org">OpenStreetMap</a> contributors',
+            maxZoom: 20
+        },
+        'opentopomap': {
+            url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+            attribution: '<a href="https://opentopomap.org">OpenTopoMap</a> (<a href="https://creativecommons.org/licenses/by-sa/3.0/">CC-BY-SA</a>)',
+            maxZoom: 17
+        },
+        'carto-positron': {
+            url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>',
+            maxZoom: 20
+        },
+        'carto-darkmatter': {
+            url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>',
+            maxZoom: 20
+        }
     };
+    var AUTO_BASEMAPS = {
+        dark: BASEMAPS['carto-darkmatter'],
+        light: BASEMAPS['osm-standard']
+    };
+    var basemapChoice = 'auto';
     var currentBaseMap = null;
     var alertLayers = [];
     var alertClickCb = null;
@@ -166,9 +207,20 @@ var LeafletAdapter = function () {
 
         setBasemap: function (theme) {
             if (currentBaseMap) map.removeLayer(currentBaseMap);
-            currentBaseMap = baseMaps[theme] || baseMaps.dark;
+            var entry = (basemapChoice !== 'auto' && BASEMAPS[basemapChoice])
+                || AUTO_BASEMAPS[theme]
+                || AUTO_BASEMAPS.dark;
+            currentBaseMap = L.tileLayer(entry.url, {
+                attribution: entry.attribution,
+                maxNativeZoom: entry.maxZoom || 19,
+                maxZoom: 19
+            });
             currentBaseMap.addTo(map);
             currentBaseMap.bringToBack();
+        },
+        // Shell-side extension: choose an explicit base map ('auto' follows the theme).
+        setBasemapChoice: function (id) {
+            if (id === 'auto' || BASEMAPS[id]) basemapChoice = id;
         },
 
         createFrameLayer: function (url, kind) {
@@ -375,13 +427,26 @@ var LeafletAdapter = function () {
 };
 
 // === VIEWER ===
+var adapter = new LeafletAdapter();
 LibreWXR.createViewer({
     apiSources: LVR_API_SOURCES,
     apiFixed: LVR_API_FIXED,
     view: { lat: 39.8283, lon: -98.5795, zoom: 5, maxZoom: 12 },
     nowMarker: true,        // red line on the scrubber marking the current wall-clock time
     nowMarkerLabel: true    // small current-time label above the marker
-}, new LeafletAdapter());
+}, adapter);
+
+// === BASE MAP SELECTOR ===
+// Engine theme switches call adapter.setBasemap(theme), which re-resolves the
+// current choice, so only user picks need handling here.
+(function () {
+    var sel = document.getElementById('lv-basemap');
+    if (!sel) return;
+    sel.addEventListener('change', function () {
+        adapter.setBasemapChoice(this.value);
+        adapter.setBasemap(document.body.getAttribute('data-theme') === 'light' ? 'light' : 'dark');
+    });
+})();
 </script>
 
 </body>
