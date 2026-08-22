@@ -53,6 +53,8 @@ SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 EXAMPLES_DIR = os.path.dirname(SRC_DIR)
 PROJECT_ROOT = os.path.dirname(EXAMPLES_DIR)
 SITE_EXAMPLES_DIR = os.path.join(PROJECT_ROOT, "librewxr-site", "examples")
+WIDGET_SRC_DIR = os.path.join(SRC_DIR, "kde-widget")
+WIDGET_OUT_DIR = os.path.join(EXAMPLES_DIR, "kde-widget")
 
 GENERATED_COMMENT = (
     "<!-- SPDX-License-Identifier: MIT -->\n"
@@ -64,6 +66,10 @@ GENERATED_COMMENT = (
 
 CSS_TOKEN = "/*__VIEWER_CSS__*/"
 CORE_TOKEN = "//__VIEWER_CORE__"
+OVERRIDES_TOKEN = "/*__WIDGET_OVERRIDES_CSS__*/"
+GLUE_CONFIG_TOKEN = "/*@__WIDGET_GLUE_CONFIG__*/"
+GLUE_ADAPTER_TOKEN = "/*@__WIDGET_GLUE_ADAPTER__*/"
+GLUE_CONTROLS_TOKEN = "/*@__WIDGET_GLUE_CONTROLS__*/"
 
 # --site rewrites
 API_FIXED_NULL = "var LVR_API_FIXED = null;"
@@ -365,6 +371,52 @@ def build_pages(args):
         rebuild_site_index_hero()
 
 
+def build_kde_widget(args):
+    """Build the KDE Plasma widget map page (examples/kde-widget/librewxr-map.html)
+    from the examples/src/kde-widget/ source fragments.
+
+    The shell carries one token per region: the style block holds the shared
+    viewer.css plus the widget's compact overrides, script 1 holds the widget
+    config glue and the shared engine, and script 2 holds the Leaflet adapter
+    and the controls glue. Every token is required; a missing one fails loudly.
+    """
+    marker = build_marker()  # same stamp used by build_pages
+    html = read_file(os.path.join(WIDGET_SRC_DIR, "shell.html"))
+
+    css = read_file(os.path.join(SRC_DIR, "viewer.css"))
+    if CSS_TOKEN not in html:
+        raise SystemExit("error: widget shell missing CSS token %r" % CSS_TOKEN)
+    html = html.replace(CSS_TOKEN, css)
+
+    overrides = read_file(os.path.join(WIDGET_SRC_DIR, "overrides.css"))
+    if OVERRIDES_TOKEN not in html:
+        raise SystemExit("error: widget shell missing overrides token %r" % OVERRIDES_TOKEN)
+    html = html.replace(OVERRIDES_TOKEN, overrides)
+
+    core = read_file(os.path.join(SRC_DIR, "viewer-core.js"))
+    if CORE_TOKEN not in html:
+        raise SystemExit("error: widget shell missing core token %r" % CORE_TOKEN)
+    html = html.replace(CORE_TOKEN, core)
+
+    for token, name in (
+        (GLUE_CONFIG_TOKEN, "glue-config.js"),
+        (GLUE_ADAPTER_TOKEN, "glue-adapter.js"),
+        (GLUE_CONTROLS_TOKEN, "glue-controls.js"),
+    ):
+        if token not in html:
+            raise SystemExit("error: widget shell missing glue token %r" % token)
+        html = html.replace(token, read_file(os.path.join(WIDGET_SRC_DIR, name)))
+
+    html = GENERATED_COMMENT + "\n" + marker + "\n" + html
+    os.makedirs(WIDGET_OUT_DIR, exist_ok=True)
+    dest = os.path.join(WIDGET_OUT_DIR, "librewxr-map.html")
+    write_file(dest, html)
+    print(
+        "wrote %s (%d bytes, --kde-widget)"
+        % (os.path.join("examples", "kde-widget", "librewxr-map.html"), os.path.getsize(dest))
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Build self-contained LibreWXR example pages from examples/src shells."
@@ -375,8 +427,15 @@ def main():
         help="also write pinned API-base site variants to librewxr-site/examples/ "
              "and regenerate the shared-engine hero in librewxr-site/index.html",
     )
+    parser.add_argument(
+        "--kde-widget",
+        action="store_true",
+        help="also write the KDE Plasma widget map page to examples/kde-widget/",
+    )
     args = parser.parse_args()
     build_pages(args)
+    if args.kde_widget:
+        build_kde_widget(args)
     return 0
 
 
