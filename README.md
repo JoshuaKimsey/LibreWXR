@@ -777,6 +777,40 @@ Each generated file carries a `GENERATED ... do not edit` header comment.
 
 The map examples auto-detect whether to use your local server or the public instance based on how the file is opened. The widget instead ships an API-source selector in its controls, defaulting to the public instance.
 
+## Supporters
+
+LibreWXR is developed and maintained for free. If it has been useful to you, please consider supporting development via [Ko-Fi](https://ko-fi.com/librewxr), [Liberapay](https://liberapay.com/librewxr), or [PayPal](https://paypal.me/jkimsey95) - every bit helps keep development and hosting going.
+
+With many thanks to those who have supported the project:
+
+- [Dolphin Island Sea Lab - ARCOS](https://www.disl.edu/arcos)
+- [Weather Gods](https://apps.apple.com/app/weather-gods/id1041512978)
+- To the anonymous Ko-Fi donators: thank you!
+
+## Who's Using LibreWXR
+
+A sample of the projects and deployments built on the LibreWXR API:
+
+| Project | Description |
+|---|---|
+| [Advanced Weather Widget](https://github.com/pnedyalkov91/advanced-weather-widget) | A modern, highly customizable weather widget built specifically for KDE Plasma 6. |
+| [Aether](https://github.com/iamthegreatdestroyer/aether) | One app instead of four subscriptions: Windy-class weather, live aircraft, tides & buoys, trails, and forecast receipts that score themselves. |
+| [Cirrus](https://github.com/woheller69/omweather) | Weather and rain radar for any location - worldwide. |
+| [Dolphin Island Sea Lab - ARCOS](https://www.disl.edu/arcos) | An educational initiative focused on collecting real-time environmental monitoring data for Mobile Bay. |
+| [Lea Hill Weather](https://lhwx.org) ([GitHub](https://github.com/johlym/leahillwx)) | Rails 8.1 app for lhwx.org: a live personal weather-station dashboard (home, reports, graphs, records, trends, almanac, radar). |
+| [Linecast](https://github.com/ashuttl/linecast) | Weather, tides, the sun, the moon, and maps, drawn for the terminal. The Old Farmer's Almanac meets Minitel. |
+| [LocalSky](https://github.com/silenthooligan/localsky) | Hyperlocal weather on your hardware. Smart irrigation when you want it. |
+| [Merry Sky](https://merrysky.net) | A lightweight forecasting website providing an all-in-one hourly summary of the upcoming temperature, precipitations and more. |
+| [PiClock](https://github.com/n0bel/PiClock) ([updated fork](https://github.com/SerBrynden/PiClock)) | A Fancy Clock built around a monitor and a Raspberry Pi. |
+| [Presura](https://presura.eu) | A multi-language weather viewer for the European Union. |
+| [Silver Skies (Desktop)](https://github.com/poliberry/silverskies-desktop) | A desktop weather radar, forecast, and severe alert dashboard (Electron + Next.js). |
+| [South Alabama Mesonet](https://mesonet.southalabama.edu) | A network of weather stations monitoring conditions across Southern Alabama. |
+| [StormView Rewrite](https://github.com/arc360alt/StormView-Rewrite) | A rewritten version of stormview to be faster, lighter. |
+| [Variable Weather](https://variablewx.librewxr.net) ([GitHub](https://github.com/JoshuaKimsey/variable-weather)) | Inspired by Breezy Weather, Variable Weather makes it easy and fun to get the weather information you need. |
+| [ZeusWatch](https://github.com/SysAdminDoc/ZeusWatch) | A free, open-source Android weather app with a premium dark UI. No API keys required. |
+
+Built something with LibreWXR? Head over to our [Discussions post](https://github.com/JoshuaKimsey/LibreWXR/discussions/29) to get listed.
+
 ## License
 
 LibreWXR is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-or-later). It is free to use, self-host, modify, and redistribute under those terms, and it always will be. Note that the AGPL's network-use clause (section 13) means that if you run a *modified* version of LibreWXR as a network service, you must make your modified source available to that service's users.
