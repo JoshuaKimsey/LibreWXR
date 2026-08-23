@@ -7,12 +7,12 @@
       .toolbar {
         flex-wrap: nowrap;
         overflow-x: auto;
-        scrollbar-width: thin;
+        overflow-y: hidden;
+        scrollbar-width: none;
         padding: var(--space-1) var(--space-2);
         gap: var(--space-1);
       }
-      .toolbar::-webkit-scrollbar { height: 3px; }
-      .toolbar::-webkit-scrollbar-thumb { background: var(--scrubber-rail); border-radius: 2px; }
+      .toolbar::-webkit-scrollbar { display: none; }
       .toolbar-title {
         font-size: var(--font-size-md);
         margin-right: 0;

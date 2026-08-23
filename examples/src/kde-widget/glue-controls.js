@@ -10,7 +10,9 @@ var config = {
   view: { lat: LAT, lon: LON, zoom: INIT_ZOOM, maxZoom: 12 },
   layerMode: ACTIVE_LAYER,                      // 'radar' | 'satellite' | 'both'
   colorScheme: CURRENT_COLOR,                   // clamped 0..12
+  cells: CELLS_INIT,                            // 'light' | 'dark' | '' (URL)
   arrows: (ARROWS_ON ? (ACTIVE_THEME === 'dark' ? 'light' : 'dark') : ''),
+  alerts: ALERTS_INIT,                          // fetch + overlay alerts at boot
   theme: ACTIVE_THEME,                          // 'dark' | 'light'
   locateMode: 'view',
   nowMarker: true,
@@ -393,6 +395,40 @@ window.addEventListener('load', function () {
   setTimeout(window.fixViewport, 250);
   setTimeout(window.fixViewport, 1200);
 });
+
+// === STATE PERSISTENCE ===
+// Report user-relevant session state to the QML side via document.title
+// ("state:key=value,..."), so choices survive tab switches and page reloads.
+(function () {
+    function val(id) {
+        var el = document.getElementById(id);
+        return el ? el.value : null;
+    }
+    function reportState() {
+        var parts = [];
+        var layer = val('lv-layermode');
+        if (layer === 'radar' || layer === 'satellite' || layer === 'both') parts.push('layer=' + layer);
+        var scheme = parseInt(val('lv-scheme'), 10);
+        if (!isNaN(scheme)) parts.push('scheme=' + scheme);
+        var arrows = val('lv-arrows');
+        if (arrows !== null) parts.push('arrows=' + arrows);
+        var cells = val('lv-cells');
+        if (cells !== null) parts.push('cells=' + cells);
+        var alertsBtn = document.getElementById('lv-alerts');
+        if (alertsBtn) parts.push('alerts=' + (alertsBtn.getAttribute('aria-pressed') === 'true' ? 'true' : 'false'));
+        if (parts.length) document.title = 'state:' + parts.join(',');
+    }
+    // 'change' covers the six selects (native + shim-driven picks). Bubble phase
+    // so engine/shim handlers have finished updating state first.
+    document.addEventListener('change', function (e) {
+        var t = e.target;
+        if (t && t.id && { 'lv-layermode': 1, 'lv-scheme': 1, 'lv-arrows': 1, 'lv-cells': 1 }[t.id]) reportState();
+    });
+    // Alerts is a button; read its aria-pressed after its own handler ran.
+    document.addEventListener('click', function (e) {
+        if (e.target && e.target.closest && e.target.closest('#lv-alerts')) reportState();
+    });
+})();
 
 // === BUILD PROVENANCE ===
 // Generated content - rebuild with: python examples/src/build.py --kde-widget (LibreWRX examples sources).

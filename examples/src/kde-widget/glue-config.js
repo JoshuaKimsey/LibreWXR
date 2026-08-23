@@ -59,6 +59,8 @@ function resolveBg(id, theme) {
 
 var ARROWS_ON = PARAMS.get('arrows') === '1';
 var ACTIVE_LAYER = PARAMS.get('layer') || 'radar';   // 'radar' | 'satellite' | 'both'
+var CELLS_INIT = PARAMS.get('cells') || '';
+var ALERTS_INIT = PARAMS.get('alerts') === '1';
 var CURRENT_COLOR = Math.max(0, Math.min(12, Math.round(paramNum('color', 10))));
 var ACTIVE_THEME = PARAMS.get('theme') === 'light' ? 'light' : 'dark';
 var BG_CURRENT = PARAMS.get('bg') || 'auto';
