@@ -6,6 +6,23 @@
 
 A self-hostable, drop-in replacement for the [Rain Viewer](https://www.rainviewer.com/) API. LibreWXR serves weather radar tiles using freely available radar composite data from multiple sources, with full compatibility for any client built against the Rain Viewer v2 API.
 
+## Contents
+
+- [Why?](#why)
+- [Features](#features)
+- [Current Limitations](#current-limitations)
+- [Coverage](#coverage)
+- [Quick Start](#quick-start)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Deployment](#deployment)
+- [Architecture](#architecture)
+- [Data Sources](#data-sources)
+- [Examples](#examples)
+- [Supporters](#supporters)
+- [Who's Using LibreWXR](#whos-using-librewxr)
+- [License](#license)
+
 ## Why?
 
 Rain Viewer recently (as of January 1st, 2026) restricted their free API tier: maximum zoom 7, single color scheme, no satellite, no forecast, PNG only. LibreWXR restores the full pre-restriction functionality as a self-hosted service.
