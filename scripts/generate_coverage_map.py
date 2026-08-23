@@ -42,6 +42,7 @@ from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, PathPatch
 from matplotlib.path import Path as MplPath
 from pyproj import CRS, Transformer
@@ -144,6 +145,7 @@ class Source:
     polygon: np.ndarray  # shape (N, 2), [lon, lat]
     alpha: float | None = None  # per-source fill alpha override (None = render()'s alpha_fill)
     legend_alpha: float | None = None  # per-source legend swatch override (None = derived from alpha)
+    outline_only: bool = False  # draw only the band's N/S boundary lines, no fill
 
 
 def project_grid_perimeter(
@@ -327,19 +329,18 @@ def build_radar_sources() -> list[Source]:
     # antimeridian unwrap.  The two pieces share one label so the legend
     # shows a single entry.  Both pieces are appended first, and list
     # order is draw order here (uniform zorder=2, no sorting), so the
-    # band always renders beneath every radar polygon.  Its low fill
-    # alpha keeps it a muted backdrop tier — darkening open-ocean
-    # regions just enough to read as the always-on global band without
-    # overpowering the regional sources drawn on top; the legend swatch
-    # keeps a separate, readable alpha.
+    # band always renders beneath every radar polygon.  Rendered as
+    # outline only — dashed boundary lines at the band's N/S edges — so
+    # the always-on global band is demarcated without shading over the
+    # regional sources drawn on top.
     rrqpe_color = "#7f7f7f"
     radar.append(Source(
         "NOAA RRQPE", rrqpe_color, latlon_box(-180, 0, -60, 70),
-        alpha=0.20, legend_alpha=0.50,
+        alpha=0.20, legend_alpha=0.50, outline_only=True,
     ))
     radar.append(Source(
         "NOAA RRQPE", rrqpe_color, latlon_box(0, 180, -60, 70),
-        alpha=0.20, legend_alpha=0.50,
+        alpha=0.20, legend_alpha=0.50, outline_only=True,
     ))
 
     # MRMS — five composites sharing one upstream operator (NOAA) and
@@ -696,6 +697,11 @@ def _draw_polygon(ax, src: Source, alpha_fill: float, hatch: str | None) -> None
 
     A source with its own ``alpha`` override (e.g. the muted RRQPE
     backdrop band) is drawn at that alpha instead of ``alpha_fill``.
+
+    An ``outline_only`` source (the RRQPE half-world boxes) contributes
+    no fill at all — only dashed horizontal boundary lines at the
+    band's north/south latitudes, so the band is demarcated without
+    shading over the regional polygons.
     """
     poly = src.polygon
     if poly.shape[0] < 3:
@@ -707,13 +713,52 @@ def _draw_polygon(ax, src: Source, alpha_fill: float, hatch: str | None) -> None
         # Skip copies that can't possibly overlap the visible window.
         if shifted_lon.max() < -180 or shifted_lon.min() > 180:
             continue
-        ax.fill(
-            shifted_lon, lat,
-            facecolor=src.color, edgecolor=src.color,
-            alpha=src.alpha if src.alpha is not None else alpha_fill,
-            linewidth=1.2,
-            hatch=hatch, zorder=2,
-        )
+        if src.outline_only:
+            # Outline-only sources render a rectangular band's N/S
+            # boundaries only — no fill.  Side edges are deliberately
+            # omitted: the two RRQPE half-world boxes meet at lon 0 /
+            # the antimeridian, and full outlines would draw spurious
+            # meridian lines straight through continents.
+            eps = 1e-9
+            n = len(lat)
+            for target_lat in (float(lat.max()), float(lat.min())):
+                run: list[float] = []
+                for i in range(n):
+                    j = (i + 1) % n
+                    # Ring-closing duplicate vertex, not an edge.
+                    if (
+                        abs(lat[i] - lat[j]) < eps
+                        and abs(shifted_lon[i] - shifted_lon[j]) < eps
+                    ):
+                        continue
+                    if (
+                        abs(lat[i] - target_lat) < eps
+                        and abs(lat[j] - target_lat) < eps
+                    ):
+                        if not run:
+                            run.append(float(shifted_lon[i]))
+                        run.append(float(shifted_lon[j]))
+                    elif run:
+                        ax.plot(
+                            run, [target_lat] * len(run),
+                            color=src.color, linestyle="--", linewidth=1.4,
+                            zorder=2, solid_capstyle="butt",
+                        )
+                        run = []
+                if run:
+                    ax.plot(
+                        run, [target_lat] * len(run),
+                        color=src.color, linestyle="--", linewidth=1.4,
+                        zorder=2, solid_capstyle="butt",
+                    )
+        else:
+            ax.fill(
+                shifted_lon, lat,
+                facecolor=src.color, edgecolor=src.color,
+                alpha=src.alpha if src.alpha is not None else alpha_fill,
+                linewidth=1.2,
+                hatch=hatch, zorder=2,
+            )
 
 
 def render(
@@ -769,7 +814,7 @@ def render(
 
     # Legend
     seen: set[str] = set()
-    handles: list[Patch] = []
+    handles: list[Patch | Line2D] = []
     for s in sources:
         key = s.label
         if dedupe_label_prefix and s.label.startswith(dedupe_label_prefix):
@@ -787,16 +832,25 @@ def render(
                 if x.label.startswith(dedupe_label_prefix)
             }
             label = f"{key} ({len(distinct)} composites)"
-        handles.append(Patch(
-            facecolor=s.color, edgecolor=s.color,
-            alpha=(
-                s.legend_alpha
-                if s.legend_alpha is not None
-                else min(0.95, (s.alpha if s.alpha is not None else alpha_fill) + 0.10)
-            ),
-            hatch=hatch,
-            label=label,
-        ))
+        if s.outline_only:
+            # Outline-only sources get a dashed-line legend handle
+            # instead of a filled swatch (no fill to swatch).
+            handles.append(Line2D(
+                [0.1, 0.9], [0, 0],
+                color=s.color, linestyle="--", linewidth=1.4,
+                label=label,
+            ))
+        else:
+            handles.append(Patch(
+                facecolor=s.color, edgecolor=s.color,
+                alpha=(
+                    s.legend_alpha
+                    if s.legend_alpha is not None
+                    else min(0.95, (s.alpha if s.alpha is not None else alpha_fill) + 0.10)
+                ),
+                hatch=hatch,
+                label=label,
+            ))
     ax.legend(
         handles=handles, loc=legend_loc,
         title=legend_title, fontsize=9, title_fontsize=10,
