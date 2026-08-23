@@ -814,6 +814,7 @@ A sample of the projects and deployments built on the LibreWXR API:
 | [Aether](https://github.com/iamthegreatdestroyer/aether) | One app instead of four subscriptions: Windy-class weather, live aircraft, tides & buoys, trails, and forecast receipts that score themselves. |
 | [Cirrus](https://github.com/woheller69/omweather) | Weather and rain radar for any location - worldwide. |
 | [Dolphin Island Sea Lab - ARCOS](https://www.disl.edu/arcos) | An educational initiative focused on collecting real-time environmental monitoring data for Mobile Bay. |
+| [FlightScnr Pi](https://github.com/yashmulgaonkar/FlightScnr_Pi) | A round 4″ touch display flight and marine tracker for Raspberry Pi. |
 | [Lea Hill Weather](https://lhwx.org) ([GitHub](https://github.com/johlym/leahillwx)) | Rails 8.1 app for lhwx.org: a live personal weather-station dashboard (home, reports, graphs, records, trends, almanac, radar). |
 | [Linecast](https://github.com/ashuttl/linecast) | Weather, tides, the sun, the moon, and maps, drawn for the terminal. The Old Farmer's Almanac meets Minitel. |
 | [LocalSky](https://github.com/silenthooligan/localsky) | Hyperlocal weather on your hardware. Smart irrigation when you want it. |
