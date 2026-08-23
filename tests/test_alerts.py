@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from shapely.geometry import Polygon
+from shapely.geometry import Point, Polygon, shape
 
 from librewxr.api import routes
 from librewxr.data.alerts_fetcher import (
@@ -268,6 +268,125 @@ class TestAlertsEndpoint:
         assert data["alerts"]["enabled"] is True
         assert data["alerts"]["count"] == 3
         assert data["alerts"]["ingest_ok"] is True
+
+
+@pytest.mark.alerts
+class TestMultiAreaAlertGrouping:
+    """CAP alerts covering many regions (Bulgaria, Romania, France, ...) arrive
+    as several AlertEntry objects sharing one url. The endpoint must merge each
+    group into a single feature carrying the full polygon footprint."""
+
+    @staticmethod
+    def _make_multi_area_entries():
+        poly_a = Polygon([
+            (20.0, 41.0), (22.0, 41.0), (22.0, 43.0), (20.0, 43.0), (20.0, 41.0),
+        ])
+        poly_b = Polygon([
+            (26.0, 43.0), (28.0, 43.0), (28.0, 45.0), (26.0, 45.0), (26.0, 43.0),
+        ])
+        return [
+            AlertEntry(
+                source_id="bg-plovdiv-xx",
+                event="Heat Wave",
+                description="Extreme heat across Bulgaria",
+                severity="Severe",
+                effective="2026-05-07T00:00:00+03:00",
+                expires="2099-05-07T23:00:00+03:00",
+                area_desc="Region A",
+                url="https://example.com/multi",
+                polygon=poly_a,
+            ),
+            AlertEntry(
+                source_id="bg-plovdiv-xx",
+                event="Heat Wave",
+                description="Extreme heat across Bulgaria",
+                severity="Severe",
+                effective="2026-05-07T00:00:00+03:00",
+                expires="2099-05-07T23:00:00+03:00",
+                area_desc="Region B",
+                url="https://example.com/multi",
+                polygon=poly_b,
+            ),
+        ]
+
+    async def _get(self, entries, path):
+        store = AlertsStore()
+        store.replace_all(entries)
+        app = FastAPI()
+        app.include_router(routes.router)
+        routes.alerts_store = store
+        routes.alerts_enabled = True
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            return await ac.get(path)
+
+    async def test_global_groups_by_url_and_unions_polygons(self):
+        resp = await self._get(self._make_multi_area_entries(), "/v2/alerts")
+        assert resp.status_code == 200
+        data = resp.json()
+        # Two regions sharing one url -> exactly one feature
+        assert len(data["features"]) == 1
+        feature = data["features"][0]
+        props = feature["properties"]
+        assert props["uri"] == "https://example.com/multi"
+        assert props["title"] == "Heat Wave"
+        assert props["regions"] == ["Region A", "Region B"]
+        # Disjoint polygons union to a MultiPolygon covering both regions
+        assert feature["geometry"] is not None
+        assert feature["geometry"]["type"] == "MultiPolygon"
+        merged = shape(feature["geometry"])
+        assert merged.contains(Point(21.0, 42.0))  # inside Region A
+        assert merged.contains(Point(27.0, 44.0))  # inside Region B
+
+    async def test_point_lookup_returns_only_matching_region(self):
+        resp = await self._get(
+            self._make_multi_area_entries(), "/v2/alerts?lat=42.0&lon=21.0"
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        # Point hits only Region A -> single feature, single region
+        assert len(data["features"]) == 1
+        feature = data["features"][0]
+        props = feature["properties"]
+        assert props["uri"] == "https://example.com/multi"
+        assert props["regions"] == ["Region A"]
+        # 1-element group unions to the polygon itself
+        assert feature["geometry"] is not None
+        assert feature["geometry"]["type"] == "Polygon"
+
+    async def test_null_polygon_group_collapses_to_one_null_feature(self):
+        entries = [
+            AlertEntry(
+                source_id="fr-meteofrance-xx",
+                event="Heavy Rain",
+                description="Heavy rain expected",
+                severity="Moderate",
+                effective="2026-05-07T06:00:00+02:00",
+                expires="2099-05-07T12:00:00+02:00",
+                area_desc="Region A",
+                url="https://example.com/nullgeom",
+                polygon=None,
+            ),
+            AlertEntry(
+                source_id="fr-meteofrance-xx",
+                event="Heavy Rain",
+                description="Heavy rain expected",
+                severity="Moderate",
+                effective="2026-05-07T06:00:00+02:00",
+                expires="2099-05-07T12:00:00+02:00",
+                area_desc="Region B",
+                url="https://example.com/nullgeom",
+                polygon=None,
+            ),
+        ]
+        resp = await self._get(entries, "/v2/alerts")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["features"]) == 1
+        feature = data["features"][0]
+        assert feature["properties"]["uri"] == "https://example.com/nullgeom"
+        assert feature["properties"]["regions"] == ["Region A", "Region B"]
+        assert feature["geometry"] is None
 
 
 @pytest.mark.alerts

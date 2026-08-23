@@ -1744,30 +1744,40 @@ async def get_alerts(
     # Build GeoJSON features from WMO alerts
     deg_per_meter = simplify / 111_000.0 if simplify > 0 else 0.0
     from shapely.geometry import mapping
+    from shapely.ops import unary_union
     features: list[GeoJSONFeature] = []
-    seen_uris: set[str] = set()
 
+    # Multi-area CAP alerts (Bulgaria, Romania, France, ...) arrive as many
+    # AlertEntry objects sharing one url, each with its own region polygon.
+    # Group by url and union the group's polygons so one feature carries the
+    # full footprint instead of only the first region's polygon.
+    by_uri: dict[str, list] = {}
     for alert in alerts:
-        geom = alert.polygon
+        by_uri.setdefault(alert.url, []).append(alert)
+
+    for group in by_uri.values():
+        first = group[0]
+        polygons = [a.polygon for a in group if a.polygon is not None]
+        geom = unary_union(polygons) if polygons else None
         if deg_per_meter > 0 and geom is not None:
             geom = geom.simplify(deg_per_meter, preserve_topology=True)
 
-        uri = alert.url
-        if uri in seen_uris:
-            continue
-        seen_uris.add(uri)
+        regions: list[str] = []
+        for a in group:
+            if a.area_desc and a.area_desc not in regions:
+                regions.append(a.area_desc)
 
         features.append(
             GeoJSONFeature(
                 type="Feature",
                 properties=AlertProperties(
-                    title=alert.event,
-                    severity=alert.severity,
-                    time=_parse_cap_time(alert.effective),
-                    expires=_parse_cap_time(alert.expires),
-                    description=alert.description,
-                    regions=[alert.area_desc] if alert.area_desc else [],
-                    uri=uri,
+                    title=first.event,
+                    severity=first.severity,
+                    time=_parse_cap_time(first.effective),
+                    expires=_parse_cap_time(first.expires),
+                    description=first.description,
+                    regions=regions,
+                    uri=first.url,
                 ),
                 geometry=mapping(geom) if geom is not None else None,
             )
