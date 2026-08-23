@@ -431,4 +431,4 @@ window.addEventListener('load', function () {
 })();
 
 // === BUILD PROVENANCE ===
-// Generated content - rebuild with: python examples/src/build.py --kde-widget (LibreWRX examples sources).
+// Assembled by the advanced-weather-widget's scripts/build_librewxr_map.py.
