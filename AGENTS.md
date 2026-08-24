@@ -198,5 +198,7 @@ The discovery walker picks up the new package automatically — no per-source pl
 
 - **File headers:** `# SPDX-License-Identifier: AGPL-3.0-or-later` + `# Copyright (C) 2026 Joshua Kimsey` on every source file
 - **Commit style:** imperative mood, concise (e.g., "Add precipitation motion arrows")
+- **Commit sign-off:** every commit must carry a `Signed-off-by:` trailer (`git commit -s`) whose name and email match the commit author identity; enforced on pull requests by `.github/workflows/dco.yml`.
+- **Contribution licensing:** LibreWXR is dual-licensed (AGPL-3.0-or-later plus a separate commercial license offered by the maintainer). Contributions are governed by the license grant in CONTRIBUTING.md, restated as required checkboxes in `.github/PULL_REQUEST_TEMPLATE.md`; do not weaken or bypass those terms.
 - **Docker:** `docker compose up --build` with `COMPOSE_PROFILES=single` (default) or `COMPOSE_PROFILES=multi`. Exposes port 8080 (configurable via `LIBREWXR_PORT`). Use `docker compose run --rm clear-cache` to wipe caches.
 - **Docs:** `docs/adding-a-source.md`, `docs/configuration-reference.md`, `docs/satellite-implementation-plan.md`, `docs/coverage.md`, `docs/rainviewer-migration-guide.md`, `docs/web-integration-guide.md`, `docs/source-survey.md`, `docs/self-host-sizing.md`
