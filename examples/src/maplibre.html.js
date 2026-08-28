@@ -149,24 +149,32 @@ var MaplibreAdapter = function () {
     var frameSeq = 0;
     var popupHandler = null;
 
-    var baseMapDefs = {
-        dark: {
-            tiles: [
-                'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
-                'https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
-                'https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'
-            ],
-            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>'
-        },
-        light: {
-            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors'
-        }
+    var baseMapStyleUrls = {
+        // Keyless OpenFreeMap hosted styles (vector, MapLibre-native). The
+        // style JSON carries its own source attribution, rendered by
+        // MapLibre's default attribution control.
+        dark: 'https://tiles.openfreemap.org/styles/dark',
+        light: 'https://tiles.openfreemap.org/styles/positron'
     };
+
+    // Runtime-layer registry: the adapter's single source of truth for every
+    // non-basemap source/layer. map.setStyle(url) wipes all runtime-added
+    // sources and layers, so after a basemap swap restoreRuntimeStyle()
+    // re-materializes them from here with their ids intact - engine handles
+    // stay valid, and the stacking order is reproduced.
+    var frameRegistry = [];   // runtime frame entries, creation order:
+    // { sourceId, layerId, kind: 'radar'|'satellite', url, maxZoom, opacity }
+    var alertsEntry = null;   // { geojson: <FeatureCollection> } when the alerts overlay is active
+    var appliedStyleUrl = baseMapStyleUrls.dark;
+    var desiredStyleUrl = appliedStyleUrl;
+    var swapInProgress = false;
 
     // Layer-ID prefixes are kind-aware ('lv-layer-radar-*' vs
     // 'lv-layer-sat-*') so stacking helpers can target the right family.
-    // Target order is: basemap < satellite < alerts < radar.
+    // Target order is: basemap < satellite < alerts < radar. Basemap theme
+    // changes swap the whole style via setStyle(url); restoreRuntimeStyle()
+    // re-materializes the runtime layers from the registry, preserving their
+    // ids and this order.
     function firstRadarFrameLayerId() {
         var layers = map.getStyle().layers;
         for (var i = 0; i < layers.length; i++) {
@@ -178,7 +186,7 @@ var MaplibreAdapter = function () {
     function firstNonBasemapLayerId() {
         var layers = map.getStyle().layers;
         for (var i = 0; i < layers.length; i++) {
-            if (layers[i].id !== 'basemap-layer') return layers[i].id;
+            if (layers[i].id.indexOf('lv-') === 0) return layers[i].id;
         }
         return undefined;
     }
@@ -212,6 +220,156 @@ var MaplibreAdapter = function () {
         }
     }
 
+    // Re-materialize one frame entry on the current style. Mirrors
+    // createFrameLayer's addToMap mutations, except the initial raster-opacity
+    // is the engine's last-set value from the registry (0 for new frames).
+    // Idempotent: skips sources/layers that already exist, so it can run after
+    // a style swap (or twice, belt-and-braces) without duplicate-source errors.
+    function addFrameEntry(entry) {
+        if (!map.getSource(entry.sourceId)) {
+            map.addSource(entry.sourceId, {
+                type: 'raster',
+                tiles: [entry.url],
+                tileSize: 256,
+                maxzoom: entry.maxZoom
+            });
+        }
+        if (map.getLayer(entry.layerId)) return;
+        // beforeId keeps satellite frames below radar frames: satellite
+        // inserts above the basemap/alerts, radar appends at the top.
+        var beforeId = entry.kind === 'satellite' ? firstNonBasemapLayerId() : undefined;
+        map.addLayer({
+            id: entry.layerId,
+            type: 'raster',
+            source: entry.sourceId,
+            paint: {
+                'raster-opacity': entry.opacity, // restored at the engine's last-set opacity
+                'raster-opacity-transition': { duration: 0, delay: 0 },
+                'raster-fade-duration': 0
+            }
+        }, beforeId);
+        // A radar frame added later lands on top of everything; pull
+        // the alerts back up directly beneath it so they never end up
+        // hidden under a raster layer. Satellite frames stay below
+        // alerts, so only radar-kind frames re-assert.
+        if (entry.kind !== 'satellite') assertAlertsPosition();
+    }
+
+    // Materialize the alerts overlay (source + fill + line) on the current
+    // style. Idempotent, so it serves both the normal setAlertsOverlay path
+    // and post-swap restoreRuntimeStyle() - the source is re-added from the
+    // registry when a freshly swapped-in style has no 'lv-alerts' source yet.
+    function addAlertsLayers() {
+        if (map.getLayer('lv-alerts-fill')) return;
+        if (!map.getSource('lv-alerts') && alertsEntry) {
+            map.addSource('lv-alerts', {
+                type: 'geojson',
+                data: alertsEntry.geojson
+            });
+        }
+        // Above satellite frames, below radar frames. Must anchor on the
+        // first RADAR layer - anchoring on any frame layer would put the
+        // alerts under the satellite stack in satellite-only mode.
+        var beforeId = firstRadarFrameLayerId();
+        map.addLayer({
+            id: 'lv-alerts-fill',
+            type: 'fill',
+            source: 'lv-alerts',
+            paint: {
+                // Colors mirror the CSS --alert-* tokens in viewer.css.
+                'fill-color': ['match', ['get', 'severity'], 'Extreme', '#d50000', 'Severe', '#ff6d00', 'Moderate', '#ffb300', 'Minor', '#8e24aa', '#546e7a'],
+                'fill-opacity': 0.18,
+                // Higher severity sorts on top within the single fill
+                // layer (MapLibre v6 fill-sort-key; Emergency > Extreme,
+                // etc.). Unknown severities fall through to 0.
+                'fill-sort-key': ['match', ['get', 'severity'],
+                    'Emergency', 5,
+                    'Extreme', 4,
+                    'Severe', 3,
+                    'Moderate', 2,
+                    'Minor', 1,
+                    0
+                ]
+            }
+        }, beforeId);
+        map.addLayer({
+            id: 'lv-alerts-line',
+            type: 'line',
+            source: 'lv-alerts',
+            paint: {
+                // Colors mirror the CSS --alert-* tokens in viewer.css.
+                'line-color': ['match', ['get', 'severity'], 'Extreme', '#d50000', 'Severe', '#ff6d00', 'Moderate', '#ffb300', 'Minor', '#8e24aa', '#546e7a'],
+                'line-width': 2
+            }
+        }, beforeId);
+    }
+
+    // Register (once) the alerts click-popup handler. Safe to call repeatedly:
+    // no-ops when a handler exists or the overlay is absent. Survives style
+    // swaps only if registered after the swap - restoreRuntimeStyle calls
+    // this to cover overlay adds that happened mid-swap.
+    function registerAlertsPopup() {
+        if (popupHandler || !alertsEntry) return;
+        popupHandler = function (e) {
+            var hits = map.queryRenderedFeatures(e.point, { layers: ['lv-alerts-fill'] });
+            var feature = hits && hits[0];
+            if (!feature || !feature.properties || !feature.properties.__popup) return;
+            new maplibregl.Popup({ closeButton: true, maxWidth: '300px' })
+                .setLngLat(e.lngLat)
+                .setHTML(feature.properties.__popup)
+                .addTo(map);
+        };
+        map.on('click', popupHandler);
+    }
+
+    // Swap the whole style to `url` (a keyless OpenFreeMap style URL). A style
+    // swap wipes every runtime-added source/layer, so the registry restore
+    // happens once the swapped-in style is usable.
+    function swapToStyle(url) {
+        swapInProgress = true;
+        var finished = false;
+        var finish = function () {
+            if (finished) return;
+            try {
+                restoreRuntimeStyle(url);
+                finished = true;
+            } catch (e) {
+                // The restore can only throw if the style is still loading
+                // (e.g. the fallback timer fired early). Retry; every add in
+                // the restore is idempotent.
+                setTimeout(finish, 2000);
+            }
+        };
+        // MapLibre re-fires 'load' once the swapped-in style is usable.
+        map.once('load', finish);
+        // Belt-and-braces: if 'load' never arrives (stalled style fetch),
+        // attempt the restore anyway - every add is idempotent.
+        setTimeout(finish, 10000);
+        map.setStyle(url);
+    }
+
+    // Re-materialize every runtime layer on the freshly swapped-in style.
+    // Ids are preserved, so engine-side handles stay valid. Canonical stack
+    // order (basemap < satellite < alerts < radar) is reproduced by adding
+    // satellites, then alerts, then radar frames, in creation order each.
+    function restoreRuntimeStyle(url) {
+        appliedStyleUrl = url;
+        var i, entry;
+        for (i = 0; i < frameRegistry.length; i++) {
+            entry = frameRegistry[i];
+            if (entry.kind === 'satellite') addFrameEntry(entry);
+        }
+        if (alertsEntry) { addAlertsLayers(); registerAlertsPopup(); }
+        for (i = 0; i < frameRegistry.length; i++) {
+            entry = frameRegistry[i];
+            if (entry.kind !== 'satellite') addFrameEntry(entry);
+        }
+        assertAlertsPosition();
+        swapInProgress = false;
+        console.log('LibreWXR maplibre: basemap style swapped,', frameRegistry.length, 'runtime layer(s) restored');
+        if (desiredStyleUrl !== appliedStyleUrl) swapToStyle(desiredStyleUrl);
+    }
+
     // The adapter object is assigned to a var so methods can re-invoke
     // themselves from deferred ('load'-event) callbacks - a bare-name call
     // inside an object-literal method would be a ReferenceError.
@@ -236,18 +394,7 @@ var MaplibreAdapter = function () {
             maxZoom = view.maxZoom;
             map = new maplibregl.Map({
                 container: containerId,
-                style: {
-                    version: 8,
-                    sources: {
-                        basemap: {
-                            type: 'raster',
-                            tiles: baseMapDefs.dark.tiles,
-                            tileSize: 256,
-                            attribution: baseMapDefs.dark.attribution
-                        }
-                    },
-                    layers: [{ id: 'basemap-layer', type: 'raster', source: 'basemap' }]
-                },
+                style: baseMapStyleUrls.dark,
                 center: [view.lon, view.lat],
                 zoom: view.zoom,
                 maxZoom: view.maxZoom,
@@ -265,33 +412,23 @@ var MaplibreAdapter = function () {
         },
 
         setBasemap: function (theme) {
-            // The theme can be toggled before the style has finished loading
-            // (addSource/addLayer would throw "Style is not done loading").
+            desiredStyleUrl = baseMapStyleUrls[theme] || baseMapStyleUrls.dark;
             if (!styleReady) {
+                // Pre-first-load: defer exactly like the other adapter methods.
                 map.once('load', function () { adapter.setBasemap(theme); });
                 return;
             }
-            var def = baseMapDefs[theme] || baseMapDefs.dark;
-            if (map.getLayer('basemap-layer')) map.removeLayer('basemap-layer');
-            if (map.getSource('basemap')) map.removeSource('basemap');
-            map.addSource('basemap', {
-                type: 'raster',
-                tiles: def.tiles,
-                tileSize: 256,
-                attribution: def.attribution
-            });
-            // Basemap always sits at the very bottom of the layer stack.
-            map.addLayer({
-                id: 'basemap-layer',
-                type: 'raster',
-                source: 'basemap'
-            }, firstNonBasemapLayerId());
+            if (desiredStyleUrl === appliedStyleUrl && !swapInProgress) return;
+            if (swapInProgress) return; // in-flight swap completion chains to desiredStyleUrl
+            swapToStyle(desiredStyleUrl);
         },
 
         createFrameLayer: function (url, kind) {
             var id = 'lv-frame-' + (frameSeq++);
             var sourceId = 'lv-src-' + id;
             var layerId = kind === 'satellite' ? 'lv-layer-sat-' + id : 'lv-layer-radar-' + id;
+            var entry = { sourceId: sourceId, layerId: layerId, kind: kind, url: url, maxZoom: maxZoom, opacity: 0 };
+            frameRegistry.push(entry);
             // The engine defers frame creation until the style has loaded, but
             // guard anyway: addSource/addLayer would throw "Style is not done
             // loading" if this ever runs early. The handle (ids) must still be
@@ -301,9 +438,9 @@ var MaplibreAdapter = function () {
             var addToMap = function () {
                 map.addSource(sourceId, {
                     type: 'raster',
-                    tiles: [url],
+                    tiles: [entry.url],
                     tileSize: 256,
-                    maxzoom: maxZoom
+                    maxzoom: entry.maxZoom
                 });
                 // beforeId keeps satellite frames below radar frames: satellite
                 // inserts above the basemap/alerts, radar appends at the top.
@@ -313,7 +450,7 @@ var MaplibreAdapter = function () {
                     type: 'raster',
                     source: sourceId,
                     paint: {
-                        'raster-opacity': 0, // created hidden; the engine fades in on ready
+                        'raster-opacity': entry.opacity, // created hidden; the engine fades in on ready
                         'raster-opacity-transition': { duration: 0, delay: 0 },
                         'raster-fade-duration': 0
                     }
@@ -325,7 +462,9 @@ var MaplibreAdapter = function () {
                 if (kind !== 'satellite') assertAlertsPosition();
             };
             if (!styleReady) map.once('load', addToMap);
-            else addToMap();
+            else if (!swapInProgress) addToMap();
+            // While a style swap is in flight the map takes no mutations;
+            // restoreRuntimeStyle() materializes this entry from the registry.
             return { sourceId: sourceId, layerId: layerId };
         },
 
@@ -372,6 +511,9 @@ var MaplibreAdapter = function () {
         },
 
         setFrameOpacity: function (handle, v) {
+            for (var i = 0; i < frameRegistry.length; i++) {
+                if (frameRegistry[i].layerId === handle.layerId) frameRegistry[i].opacity = v;
+            }
             if (map.getLayer(handle.layerId)) {
                 map.setPaintProperty(handle.layerId, 'raster-opacity', v);
             }
@@ -379,6 +521,9 @@ var MaplibreAdapter = function () {
 
         destroyFrameLayer: function (handle) {
             if (!handle) return;
+            for (var i = 0; i < frameRegistry.length; i++) {
+                if (frameRegistry[i].layerId === handle.layerId) { frameRegistry.splice(i, 1); break; }
+            }
             if (map.getLayer(handle.layerId)) map.removeLayer(handle.layerId);
             if (map.getSource(handle.sourceId)) map.removeSource(handle.sourceId);
         },
@@ -412,7 +557,10 @@ var MaplibreAdapter = function () {
                     map.off('click', popupHandler);
                     popupHandler = null;
                 }
-                if (!geojsonOrNull) return;
+                if (!geojsonOrNull) {
+                    alertsEntry = null;
+                    return;
+                }
 
                 var features = [];
                 var list = geojsonOrNull.features || [];
@@ -422,46 +570,17 @@ var MaplibreAdapter = function () {
                     features.push({ type: 'Feature', geometry: f.geometry, properties: f.properties });
                 }
 
+                alertsEntry = { geojson: { type: 'FeatureCollection', features: features } };
+                // A style swap is in flight: the map takes no mutations now;
+                // restoreRuntimeStyle() materializes the overlay afterwards.
+                if (swapInProgress) return;
+
                 map.addSource('lv-alerts', {
                     type: 'geojson',
                     data: { type: 'FeatureCollection', features: features }
                 });
 
-                // Above satellite frames, below radar frames. Must anchor on the
-                // first RADAR layer - anchoring on any frame layer would put the
-                // alerts under the satellite stack in satellite-only mode.
-                var beforeId = firstRadarFrameLayerId();
-                map.addLayer({
-                    id: 'lv-alerts-fill',
-                    type: 'fill',
-                    source: 'lv-alerts',
-                    paint: {
-                        // Colors mirror the CSS --alert-* tokens in viewer.css.
-                        'fill-color': ['match', ['get', 'severity'], 'Extreme', '#d50000', 'Severe', '#ff6d00', 'Moderate', '#ffb300', 'Minor', '#8e24aa', '#546e7a'],
-                        'fill-opacity': 0.18,
-                        // Higher severity sorts on top within the single fill
-                        // layer (MapLibre v6 fill-sort-key; Emergency > Extreme,
-                        // etc.). Unknown severities fall through to 0.
-                        'fill-sort-key': ['match', ['get', 'severity'],
-                            'Emergency', 5,
-                            'Extreme', 4,
-                            'Severe', 3,
-                            'Moderate', 2,
-                            'Minor', 1,
-                            0
-                        ]
-                    }
-                }, beforeId);
-                map.addLayer({
-                    id: 'lv-alerts-line',
-                    type: 'line',
-                    source: 'lv-alerts',
-                    paint: {
-                        // Colors mirror the CSS --alert-* tokens in viewer.css.
-                        'line-color': ['match', ['get', 'severity'], 'Extreme', '#d50000', 'Severe', '#ff6d00', 'Moderate', '#ffb300', 'Minor', '#8e24aa', '#546e7a'],
-                        'line-width': 2
-                    }
-                }, beforeId);
+                addAlertsLayers();
                 // Two addLayer calls anchored on the same beforeId reverse their
                 // relative order (line ends up below fill), so re-assert the
                 // intended stack: fill directly below line, both directly below
@@ -483,16 +602,7 @@ var MaplibreAdapter = function () {
 
                 // Click popup: the engine pre-bakes popup HTML into
                 // properties.__popup before the overlay is handed over.
-                popupHandler = function (e) {
-                    var hits = map.queryRenderedFeatures(e.point, { layers: ['lv-alerts-fill'] });
-                    var feature = hits && hits[0];
-                    if (!feature || !feature.properties || !feature.properties.__popup) return;
-                    new maplibregl.Popup({ closeButton: true, maxWidth: '300px' })
-                        .setLngLat(e.lngLat)
-                        .setHTML(feature.properties.__popup)
-                        .addTo(map);
-                };
-                map.on('click', popupHandler);
+                registerAlertsPopup();
             } catch (e) {
                 console.warn('LibreWXR alerts: setAlertsOverlay threw at some step', e);
                 throw e;

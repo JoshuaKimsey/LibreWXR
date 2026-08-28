@@ -328,6 +328,13 @@ body {
     background: var(--bg) !important;
 }
 
+/* Keyless dark basemap: OSM Standard raster recolored via CSS. The filter
+   targets only the default tile pane (the basemap); radar, satellite and
+   alerts render in dedicated panes and stay unfiltered. */
+.lv-basemap-dark .leaflet-tile-pane {
+    filter: invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.9) saturate(0.8);
+}
+
 /* Leaflet seam fix: radar tiles blend additively so adjacent tiles do not
    show dark seams on transparent gaps. */
 .leaflet-container img.leaflet-tile {

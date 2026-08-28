@@ -46,8 +46,7 @@
         <option value="osm-humanitarian">Map: OSM Humanitarian</option>
         <option value="cyclosm">Map: CyclOSM</option>
         <option value="opentopomap">Map: OpenTopoMap</option>
-        <option value="carto-positron">Map: CARTO Positron</option>
-        <option value="carto-darkmatter">Map: CARTO Dark Matter</option>
+        <option value="osm-dark">Map: OSM Dark</option>
     </select>
     <button type="button" class="icon-btn" id="lv-alerts" aria-pressed="false" aria-label="Toggle weather alerts" title="Weather alerts">
         <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M12 3 L20 19 H4 Z"/><line x1="12" y1="10" x2="12" y2="15"/><circle cx="12" cy="17.5" r="1"/></svg></span>
@@ -137,7 +136,7 @@ var LeafletAdapter = function () {
     var maxZoom = 12;
     // === BASE MAPS ===
     // Explicit choices for the base-map selector; "auto" follows the theme
-    // (dark maps get Dark Matter, light maps get OSM Standard).
+    // (dark maps get OSM Dark, a CSS-inverted OSM Standard; light maps get OSM Standard).
     var BASEMAPS = {
         'osm-standard': {
             url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
@@ -159,19 +158,15 @@ var LeafletAdapter = function () {
             attribution: '<a href="https://opentopomap.org">OpenTopoMap</a> (<a href="https://creativecommons.org/licenses/by-sa/3.0/">CC-BY-SA</a>)',
             maxZoom: 17
         },
-        'carto-positron': {
-            url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>',
-            maxZoom: 20
-        },
-        'carto-darkmatter': {
-            url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>',
-            maxZoom: 20
+        'osm-dark': {
+            url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors',
+            maxZoom: 19,
+            dark: true
         }
     };
     var AUTO_BASEMAPS = {
-        dark: BASEMAPS['carto-darkmatter'],
+        dark: BASEMAPS['osm-dark'],
         light: BASEMAPS['osm-standard']
     };
     var basemapChoice = 'auto';
@@ -210,6 +205,8 @@ var LeafletAdapter = function () {
             var entry = (basemapChoice !== 'auto' && BASEMAPS[basemapChoice])
                 || AUTO_BASEMAPS[theme]
                 || AUTO_BASEMAPS.dark;
+            // OSM Dark is the same raster as OSM Standard; the dark look is CSS (see viewer.css).
+            map.getContainer().classList.toggle('lv-basemap-dark', !!entry.dark);
             currentBaseMap = L.tileLayer(entry.url, {
                 attribution: entry.attribution,
                 maxNativeZoom: entry.maxZoom || 19,

@@ -70,8 +70,8 @@ var LeafletAdapter = function () {
     var map = null;
     var maxZoom = 12;
     var baseMaps = {
-        dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>'
+        dark: L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors'
         }),
         light: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors'
@@ -104,6 +104,8 @@ var LeafletAdapter = function () {
         setBasemap: function (theme) {
             if (currentBaseMap) map.removeLayer(currentBaseMap);
             currentBaseMap = baseMaps[theme] || baseMaps.dark;
+            // OSM Dark is CSS-inverted OSM Standard (see viewer.css).
+            map.getContainer().classList.toggle('lv-basemap-dark', currentBaseMap === baseMaps.dark);
             currentBaseMap.addTo(map);
             currentBaseMap.bringToBack();
         },
@@ -236,7 +238,7 @@ LibreWXR.createViewer({
     snow: true,
     format: 'webp',
     tileSize: 512,        // fixed hi-res tiles
-    theme: 'dark',        // CARTO dark basemap
+    theme: 'dark',        // OSM dark basemap (CSS-inverted)
     alerts: true,         // alerts overlay on by default (subtle styling below)
     alertsFillAlpha: 0.10, // hero keeps alerts visually quieter
     autoplay: false,      // don't auto-play; user presses play to start the frame animation
