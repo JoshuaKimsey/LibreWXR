@@ -7,6 +7,9 @@
    IDs of the control markup (defined in the HTML shells), and reads/writes
    them directly - the shells and this engine must agree on those IDs.
 
+   PROGRAMMATIC API: createViewer() returns a set* API object so
+   embedders (kiosks, widgets) can drive the viewer without DOM controls.
+
    ADAPTER INTERFACE (implement per map library, ~120-160 lines):
      createMap(containerId, view)          -> map handle
        view = { lat, lon, zoom, maxZoom }
@@ -1683,6 +1686,64 @@
             if (overlay) overlay.classList.remove('visible');
         }
 
+        /* === PROGRAMMATIC API (embedders) === */
+        function applyLayerMode(mode) {
+            if (mode !== 'radar' && mode !== 'satellite' && mode !== 'both') return;
+            if (state.layerMode === mode) return;
+            state.layerMode = mode;
+            updateRadarControlVisibility();
+            reinitialize();
+        }
+
+        function applyColorScheme(n) {
+            n = parseInt(n, 10);
+            if (isNaN(n) || n === state.colorScheme) return;
+            state.colorScheme = n;
+            invalidateFrameLayers();
+        }
+
+        function applyArrows(v) {
+            v = v || '';
+            if (v === state.arrows) return;
+            state.arrows = v;
+            invalidateFrameLayers();
+        }
+
+        function applyCells(v) {
+            v = v || '';
+            if (v === state.cells) return;
+            state.cells = v;
+            invalidateFrameLayers();
+        }
+
+        function applySmooth(b) {
+            b = !!b;
+            if (b === state.smooth) return;
+            state.smooth = b;
+            invalidateFrameLayers();
+        }
+
+        function applySnow(b) {
+            b = !!b;
+            if (b === state.snow) return;
+            state.snow = b;
+            invalidateFrameLayers();
+        }
+
+        function applyFormat(v) {
+            v = v || 'webp';
+            if (v === state.format) return;
+            state.format = v;
+            invalidateFrameLayers();
+        }
+
+        function applyTileSize(v) {
+            v = v || 'auto';
+            if (v === state.tileSize) return;
+            state.tileSize = v;
+            invalidateFrameLayers();
+        }
+
         /* === CONTROL WIRING ===
            Every control lookup is null-guarded so the hero variant (which has no
            toolbar or options panel) can share the same engine. Changing any
@@ -1696,27 +1757,22 @@
             }
             if ((c = byId('lv-layermode'))) {
                 c.addEventListener('change', function () {
-                    state.layerMode = this.value;
-                    updateRadarControlVisibility();
-                    reinitialize();
+                    applyLayerMode(this.value);
                 });
             }
             if ((c = byId('lv-scheme'))) {
                 c.addEventListener('change', function () {
-                    state.colorScheme = parseInt(this.value, 10);
-                    invalidateFrameLayers();
+                    applyColorScheme(this.value);
                 });
             }
             if ((c = byId('lv-arrows'))) {
                 c.addEventListener('change', function () {
-                    state.arrows = this.value;
-                    invalidateFrameLayers();
+                    applyArrows(this.value);
                 });
             }
             if ((c = byId('lv-cells'))) {
                 c.addEventListener('change', function () {
-                    state.cells = this.value;
-                    invalidateFrameLayers();
+                    applyCells(this.value);
                 });
             }
             if ((c = byId('lv-alerts'))) {
@@ -1743,26 +1799,22 @@
             }
             if ((c = byId('lv-smooth'))) {
                 c.addEventListener('change', function () {
-                    state.smooth = this.checked;
-                    invalidateFrameLayers();
+                    applySmooth(this.checked);
                 });
             }
             if ((c = byId('lv-snow'))) {
                 c.addEventListener('change', function () {
-                    state.snow = this.checked;
-                    invalidateFrameLayers();
+                    applySnow(this.checked);
                 });
             }
             if ((c = byId('lv-format'))) {
                 c.addEventListener('change', function () {
-                    state.format = this.value;
-                    invalidateFrameLayers();
+                    applyFormat(this.value);
                 });
             }
             if ((c = byId('lv-tilesize'))) {
                 c.addEventListener('change', function () {
-                    state.tileSize = this.value;
-                    invalidateFrameLayers();
+                    applyTileSize(this.value);
                 });
             }
             if ((c = byId('lv-play'))) {
@@ -1916,6 +1968,19 @@
         }
 
         init();
+
+        return {
+            setLayerMode: applyLayerMode,
+            setColorScheme: applyColorScheme,
+            setArrows: applyArrows,
+            setCells: applyCells,
+            setSmooth: applySmooth,
+            setSnow: applySnow,
+            setFormat: applyFormat,
+            setTileSize: applyTileSize,
+            setAlertsEnabled: setAlertsEnabled,
+            setTheme: setTheme
+        };
     }
 
     global.LibreWXR = { createViewer: createViewer };
