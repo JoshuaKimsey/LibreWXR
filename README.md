@@ -803,6 +803,7 @@ With many thanks to those who have supported the project:
 
 - [Dolphin Island Sea Lab - ARCOS](https://www.disl.edu/arcos)
 - [Weather Gods](https://apps.apple.com/app/weather-gods/id1041512978)
+- [Linecast](https://github.com/ashuttl/linecast)
 - To the anonymous Ko-Fi donators: thank you!
 
 ## Who's Using LibreWXR
@@ -814,6 +815,7 @@ A sample of the projects and deployments built on the LibreWXR API:
 | [Advanced Weather Widget](https://github.com/pnedyalkov91/advanced-weather-widget) | A modern, highly customizable weather widget built specifically for KDE Plasma 6. |
 | [Aether](https://github.com/iamthegreatdestroyer/aether) | One app instead of four subscriptions: Windy-class weather, live aircraft, tides & buoys, trails, and forecast receipts that score themselves. |
 | [Cirrus](https://github.com/woheller69/omweather) | Weather and rain radar for any location - worldwide. |
+| [DailyWX](https://dailywx.com) | A daily weather game inside a fully featured weather app. |
 | [Dolphin Island Sea Lab - ARCOS](https://www.disl.edu/arcos) | An educational initiative focused on collecting real-time environmental monitoring data for Mobile Bay. |
 | [FlightScnr Pi](https://github.com/yashmulgaonkar/FlightScnr_Pi) | A round 4″ touch display flight and marine tracker for Raspberry Pi. |
 | [Lea Hill Weather](https://lhwx.org) ([GitHub](https://github.com/johlym/leahillwx)) | Rails 8.1 app for lhwx.org: a live personal weather-station dashboard (home, reports, graphs, records, trends, almanac, radar). |
@@ -822,6 +824,7 @@ A sample of the projects and deployments built on the LibreWXR API:
 | [Merry Sky](https://merrysky.net) | A lightweight forecasting website providing an all-in-one hourly summary of the upcoming temperature, precipitations and more. |
 | [PiClock](https://github.com/n0bel/PiClock) ([updated fork](https://github.com/SerBrynden/PiClock)) | A Fancy Clock built around a monitor and a Raspberry Pi. |
 | [Presura](https://presura.eu) | A multi-language weather viewer for the European Union. |
+| [RidePilot](https://apps.apple.com/us/app/ridepilot-smart-bike-computer/id6790916720) | A cycling tracking app. |
 | [Silver Skies (Desktop)](https://github.com/poliberry/silverskies-desktop) | A desktop weather radar, forecast, and severe alert dashboard (Electron + Next.js). |
 | [South Alabama Mesonet](https://mesonet.southalabama.edu) | A network of weather stations monitoring conditions across Southern Alabama. |
 | [StormView Rewrite](https://github.com/arc360alt/StormView-Rewrite) | A rewritten version of stormview to be faster, lighter. |
