@@ -123,7 +123,7 @@ This is the starting point for any integration. It returns metadata about all av
 }
 ```
 
-(The real response lists all 13 color schemes in `colorSchemes` — the example above is abbreviated.)
+(The real response lists all 14 color schemes in `colorSchemes` — the example above is abbreviated.)
 
 **Fields:**
 
@@ -154,7 +154,7 @@ This is where the actual tile images come from. Your map library will call this 
 | `z` | Zoom level | `0` to `12` (configurable max) |
 | `x` | Tile column | `0` to `2^z - 1` |
 | `y` | Tile row | `0` to `2^z - 1` |
-| `color` | Color scheme ID | `0` to `12`, or `255` (see [Color Schemes](#color-schemes)) |
+| `color` | Color scheme ID | `0` to `13`, or `255` (see [Color Schemes](#color-schemes)) |
 | `smooth_snow` | Smoothing and snow flags, joined with `_` | `{0 or 1}_{0 or 1}` |
 | `ext` | Image format | `png` or `webp` |
 
@@ -993,6 +993,7 @@ LibreWXR supports the 9 original Rain Viewer color schemes, a contributed scheme
 | 10 | Viper HD | High-resolution palette by Ben Mitchell (WxTools.org); cyan-blue through smooth greens into yellow / orange / red, with a magenta band at 55–60 dBZ and a grayscale tail for extreme reflectivity. Also used by RadarScope, Supercell Wx, and others |
 | 11 | MRMS CREF | Stepped 5-dBZ operational palette used by NOAA/NSSL's MRMS Product Viewer for composite reflectivity. Cyan through blue / green / yellow / orange / red into a magenta band at 70 dBZ, with light-tan and purple swatches for sub-zero / clear-air returns |
 | 12 | 33/40 Max Storm | Stepped 5-dBZ palette designed by ABC 33/40 Chief Meteorologist James Aydelott, published via Ben Mitchell's WxTools (WxTools.org). Green ramp for light precip (10–30 dBZ) stepping through yellow / orange / red for moderate-to-heavy, into a pink / magenta convective band at 55+ dBZ. Snow variant reuses the Universal Blue gradient. Also used by RadarScope, Supercell Wx, and others |
+| 13 | MetService NZ (Dark) | MetService New Zealand-inspired palette (dark-basemap variant), contributed by ashuttl via GitHub discussion #4 |
 | 255 | Raw | Grayscale proportional to dBZ — useful for custom client-side coloring |
 
 Use the scheme ID as the `{color}` path parameter. If an invalid ID is provided, the server falls back to Rainbow @ Selex SI (7).
@@ -1115,7 +1116,7 @@ The two map examples include:
 - **Source selector** — switch between your local server and the public instance (`api.librewxr.net`) without editing code. Auto-detects the best default based on how the file is opened.
 - **Layer modes** — Radar, Satellite, or Radar + Satellite (satellite as a cloud background under animated radar)
 - **Light/dark theme** — toggles both the base map style and UI colors
-- **Color scheme selector** — 13 color schemes plus a raw grayscale (255) option
+- **Color scheme selector** — 14 color schemes plus a raw grayscale (255) option
 - **Motion arrows and nowcast** — with full animation support
 - **Draggable scrubber** — timeline with past/nowcast visual distinction and tick labels
 - **Weather-alerts overlay** — severity-styled WMO alert polygons (toggleable)

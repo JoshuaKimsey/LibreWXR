@@ -32,7 +32,7 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 ## Features
 
 - **Rain Viewer v2 API compatible** — drop-in replacement, no client changes needed
-- **All 13 color schemes** — Black & White, Rainviewer Original, Universal Blue, Titan, The Weather Channel (TWC), Meteored, NEXRAD Level III, Rainbow @ Selex SI, Dark Sky, Datameteo Valerio, Viper HD, MRMS CREF, 33/40 Max Storm, plus raw grayscale
+- **All 14 color schemes** — Black & White, Rainviewer Original, Universal Blue, Titan, The Weather Channel (TWC), Meteored, NEXRAD Level III, Rainbow @ Selex SI, Dark Sky, Datameteo Valerio, Viper HD, MRMS CREF, 33/40 Max Storm, MetService NZ (Dark), plus raw grayscale
 - **Tile sizes** — 256px and 512px
 - **Image formats** — PNG and WebP (with configurable lossy/lossless quality)
 - **Smoothing** — zoom-adaptive Gaussian blur with seamless tile boundaries
@@ -331,7 +331,7 @@ GET /v2/radar/{timestamp}/{size}/{z}/{x}/{y}/{color}/{smooth}_{snow}.{ext}
 | `size` | `256`, `512` | Tile size in pixels |
 | `z` | integer | Zoom level |
 | `x`, `y` | integer-valued strings | Standard slippy map tile coordinates — segments containing a dot are interpreted as lat/lon (see the Radar Point Tiles section) |
-| `color` | `0`-`12`, `255` | Color scheme (see below) |
+| `color` | `0`-`13`, `255` | Color scheme (see below) |
 | `smooth` | `0`, `1` | Enable smoothing |
 | `snow` | `0`, `1` | Enable snow precipitation colors |
 | `ext` | `png`, `webp` | Image format |
@@ -373,6 +373,7 @@ https://api.librewxr.net/v2/radar/{timestamp}/256/{z}/{x}/{y}/10/1_1.png?arrows=
 | 10 | Viper HD |
 | 11 | MRMS CREF |
 | 12 | 33/40 Max Storm | Stepped 5-dBZ palette by ABC 33/40 Chief Meteorologist James Aydelott (via WxTools); snow variant reuses the Universal Blue gradient |
+| 13 | MetService NZ (Dark) |
 | 255 | Raw (grayscale) |
 
 #### Radar Point Tiles (Lat/Lon Windows)
@@ -768,7 +769,7 @@ The `examples/` directory contains three self-contained HTML files showcasing th
 - **Source selector** — switch between local (`localhost:8080`) and the public instance (`api.librewxr.net`) with auto-detection
 - **Layer modes** — Radar, Satellite, or Radar + Satellite (satellite as background under radar)
 - **Light/dark theme** — toggles both the base map and UI styling
-- **Color scheme selector** — 13 color schemes plus a raw grayscale (255) option
+- **Color scheme selector** — 14 color schemes plus a raw grayscale (255) option
 - **Weather-alerts overlay** — severity-styled WMO alert polygons
 - **Options panel** — collapsible controls for smoothing, snow mask, PNG/WebP output format, and 256/512px tile size with HiDPI auto-detection
 - **Motion arrows** — off, light, or dark

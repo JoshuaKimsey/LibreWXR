@@ -9,6 +9,7 @@ from PIL import Image
 
 pytestmark = pytest.mark.tiles
 
+from librewxr.colors.schemes import SCHEME_NAMES
 from librewxr.data.regions import REGIONS
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import (
@@ -80,7 +81,7 @@ class TestRenderTile:
     def test_all_color_schemes(self, sample_frame_data):
         """All color schemes should produce valid tiles."""
         regions = {"USCOMP": sample_frame_data}
-        for scheme in [0, 1, 2, 3, 4, 5, 6, 7, 8, 255]:
+        for scheme in list(SCHEME_NAMES) + [255]:
             tile = render_tile(
                 regions, z=4, x=3, y=5,
                 tile_size=256, color_scheme=scheme,
@@ -150,7 +151,7 @@ class TestTileGeometryCache:
         )
         assert geom.values.max() > 0, "test fixture has no data at this tile"
         rendered = {}
-        for scheme in (0, 1, 2, 3, 4, 5, 6, 7, 8):
+        for scheme in tuple(SCHEME_NAMES):
             tile = present_tile(geom, color_scheme=scheme, fmt="png")
             assert len(tile) > 0, f"scheme {scheme} produced no bytes"
             img = Image.open(io.BytesIO(tile))
