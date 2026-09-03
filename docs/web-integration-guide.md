@@ -13,6 +13,7 @@ A tutorial for adding live weather radar to a website using LibreWXR. No prior e
   - [Coverage Tile Endpoint](#coverage-tile-endpoint)
   - [Widgets and Single-Location Images](#widgets-and-single-location-images)
   - [Alerts Endpoint](#alerts-endpoint)
+  - [Storm Cells Endpoint](#storm-cells-endpoint)
   - [Health Endpoint](#health-endpoint)
 - [Step-by-Step: Leaflet Integration](#step-by-step-leaflet-integration)
   - [1. Basic Map Setup](#1-basic-map-setup)

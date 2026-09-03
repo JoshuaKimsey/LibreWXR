@@ -63,9 +63,11 @@ LibreWXR provides everything the pre-restriction Rain Viewer API offered, self-h
 - Nowcast/forecast frames (up to 60 minutes)
 - Smoothing and snow color options
 - WMO CAP weather alerts as a GeoJSON feed (`/v2/alerts` with point, bounding-box, and polygon-simplification query params)
+- Detected storm cells with centroid lat/lon and motion vectors as a GeoJSON or JSON feed (`/v2/storm-cells` with point-and-radius query params)
 
 Plus additional features Rain Viewer didn't offer:
 - Precipitation motion arrows (`?arrows=light` or `?arrows=dark`)
+- Storm-cell markers (`?cells=light` or `?cells=dark`)
 - Configurable noise filtering and speckle removal
 - ECMWF IFS 9km global model layer + NOAA RRQPE global observed precipitation (60S-70N) + regional NWP layers (HRRR, HRRR-Alaska, HRDPS, JMA MSM, AROME Antilles, AROME Guyane, AROME Indien, AROME Ncaled, AROME Polyn, DMI DINI, ICON-EU, WRF-SMN)
 - Optical flow interpolation for smooth global animation

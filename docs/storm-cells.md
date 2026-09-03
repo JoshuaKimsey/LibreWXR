@@ -58,6 +58,34 @@ Each detected cell is drawn as:
 | `LIBREWXR_STORM_CELLS_MIN_DBZ` | `40` | Minimum dBZ for a pixel to be part of a detected cell. Lower values detect more cells (including weak/shallow convection); higher values detect only strong cells. |
 | `LIBREWXR_STORM_CELLS_MIN_AREA_KM2` | `25.0` | Minimum cell area in km^2. Filters out small/noise cells. Increase to show only large MCS-type systems; decrease to show individual cells. |
 
+## REST endpoint
+
+Detected cells are also exposed via a JSON API -- the programmatic
+counterpart to the `?cells=` tile overlay:
+
+```
+GET /v2/storm-cells
+GET /v2/storm-cells?lat={lat}&lon={lon}&radius_km={radius}
+GET /v2/storm-cells?format=json
+```
+
+Returns detected storm cells from the latest radar frame. The default
+response is a GeoJSON `FeatureCollection` with one `Point` feature per
+cell (centroid coordinates `[lon, lat]`); `format=json` returns a plain
+`{generated_at, cells}` payload instead. Each cell carries `area_km2`,
+`max_dbz`, `motion_speed_kmh` / `motion_heading_deg` (`null` when no
+motion data) and `region` properties.
+
+| Query parameter | Description |
+|---|---|
+| *(none)* | All detected cells worldwide |
+| `lat` + `lon` | Cells within `radius_km` of the point (both required together) |
+| `radius_km` | Search radius in km (default 100, ignored without lat/lon) |
+| `format` | `geojson` (default) or `json` |
+
+Returns `503 Service Unavailable` when storm-cell detection is disabled
+(`LIBREWXR_STORM_CELLS_ENABLED=false`).
+
 ## Limitations
 
 - **Latest-detection only.** The overlay uses the latest detection result
@@ -69,8 +97,10 @@ Each detected cell is drawn as:
   satellite. Areas without radar coverage show no cells.
 - **Per-region detection.** Cells are detected independently per radar
   region. A storm spanning a region boundary may appear as two adjacent
-  cells. Deduplication is deferred to the MCP `get_storm_cells` tool
-  (Phase 2, not yet shipped).
+  cells. Cells come from the latest radar frame per region, and
+  consumers filter them by radius: the MCP `get_storm_cells` tool and
+  the `GET /v2/storm-cells` REST endpoint both return only the cells
+  within a search radius of a point (no deduplication).
 
 ## Health monitoring
 

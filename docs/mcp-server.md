@@ -1,6 +1,6 @@
 # MCP Server — Model Context Protocol
 
-LibreWXR ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes live weather data to LLM agents and MCP-capable tools. Phase 1 provides two tools: **`get_precip_nowcast`** (point-based precipitation forecast) and **`get_active_alerts`** (WMO CAP weather alerts near a point). Two transports are available: an **HTTP transport** mounted inside the main FastAPI app, and a **stdio transport** for local desktop agents like Claude Desktop.
+LibreWXR ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes live weather data to LLM agents and MCP-capable tools. Phase 1 provides three tools: **`get_precip_nowcast`** (point-based precipitation forecast), **`get_active_alerts`** (WMO CAP weather alerts near a point), and **`get_storm_cells`** (detected convective storm cells near a point). Two transports are available: an **HTTP transport** mounted inside the main FastAPI app, and a **stdio transport** for local desktop agents like Claude Desktop.
 
 ---
 
@@ -158,6 +158,36 @@ Returns weather alerts (WMO CAP format) active within a given radius of a point.
 - Returns an **empty FeatureCollection** (`{"type": "FeatureCollection", "features": []}`) when alerts are disabled by configuration (`LIBREWXR_ALERTS_ENABLED=false`) or when no alerts match the query.
 - Never raises — invalid coordinates, network errors on the upstream API, or missing alert data all result in an empty FeatureCollection.
 
+### `get_storm_cells(lat, lon, radius_km=100)`
+
+Returns a list of detected storm cells within `radius_km` of the point, sourced from the latest radar frame's connected-component detection.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `lat` | float | (required) | Latitude of the centre point (degrees) |
+| `lon` | float | (required) | Longitude of the centre point (degrees) |
+| `radius_km` | float | `100` | Search radius in kilometres |
+
+**Returns:** A list of dicts, one per detected cell within range. Each cell contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `lat` | float | Cell centroid latitude |
+| `lon` | float | Cell centroid longitude |
+| `area_km2` | float | Cell area in square kilometres (approximate) |
+| `max_dbz` | float | Maximum reflectivity within the cell (dBZ) |
+| `motion_speed_kmh` | float or null | Storm motion speed in km/h. `null` when no optical-flow data is available (e.g. nowcast disabled). |
+| `motion_heading_deg` | float or null | Storm motion compass heading in degrees (0=N, 90=E). `null` when no flow data is available. |
+| `region` | string | Name of the radar region the cell was detected in |
+
+**Behaviour:**
+
+- Returns an empty list `[]` when storm-cell detection is disabled by configuration (`LIBREWXR_STORM_CELLS_ENABLED=false`) or when no cells are within the search radius.
+- `motion_speed_kmh` and `motion_heading_deg` are `null` (not missing) when no optical-flow data was available — this is the JSON-safe representation (NaN is not valid JSON).
+- Never raises — invalid coordinates, disabled detection, or empty data all result in `[]`.
+
 ---
 
 ## Discovery
@@ -244,40 +274,6 @@ The server-side configuration determines what data the MCP tools can access:
 The stdio MCP process reads the same `config.py` settings (it re-uses the `Settings` model), so keep the server's `.env` and the MCP process's environment in sync if you run them separately.
 
 ---
-
-### `get_storm_cells(lat, lon, radius_km=100)`
-
-Returns a list of detected storm cells within `radius_km` of the point, sourced from the latest radar frame's connected-component detection.
-
-**Parameters:**
-
-| Name | Type | Default | Description |
-|---|---|---|---|
-| `lat` | float | (required) | Latitude of the centre point (degrees) |
-| `lon` | float | (required) | Longitude of the centre point (degrees) |
-| `radius_km` | float | `100` | Search radius in kilometres |
-
-**Returns:** A list of dicts, one per detected cell within range. Each cell contains:
-
-| Field | Type | Description |
-|---|---|---|
-| `lat` | float | Cell centroid latitude |
-| `lon` | float | Cell centroid longitude |
-| `area_km2` | float | Cell area in square kilometres (approximate) |
-| `max_dbz` | float | Maximum reflectivity within the cell (dBZ) |
-| `motion_speed_kmh` | float or null | Storm motion speed in km/h. `null` when no optical-flow data is available (e.g. nowcast disabled). |
-| `motion_heading_deg` | float or null | Storm motion compass heading in degrees (0=N, 90=E). `null` when no flow data is available. |
-| `region` | string | Name of the radar region the cell was detected in |
-
-**Behaviour:**
-
-- Returns an empty list `[]` when storm-cell detection is disabled by configuration (`LIBREWXR_STORM_CELLS_ENABLED=false`) or when no cells are within the search radius.
-- `motion_speed_kmh` and `motion_heading_deg` are `null` (not missing) when no optical-flow data was available — this is the JSON-safe representation (NaN is not valid JSON).
-- Never raises — invalid coordinates, disabled detection, or empty data all result in `[]`.
-
----
-
-## Deployment Notes
 
 ## See Also
 
