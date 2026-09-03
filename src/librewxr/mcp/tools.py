@@ -196,34 +196,40 @@ async def get_active_alerts(
 
 async def get_storm_cells(
     storm_cell_store,
-    lat: float,
-    lon: float,
+    lat: float | None = None,
+    lon: float | None = None,
     radius_km: float = 100.0,
 ) -> list[dict]:
-    """Query detected storm cells within a radius of a geographic point.
+    """Query detected storm cells, optionally within a radius of a point.
 
     Returns a list of cell dicts, each with lat/lon centroid, area, max
-    dBZ, and motion vector (speed + heading).  Cells are filtered to
-    those within ``radius_km`` of (lat, lon) using the equirectangular
-    cos(lat) approximation.  Returns an empty list when storm-cell
-    detection is disabled or no cells are within range; never raises.
+    dBZ, and motion vector (speed + heading).  When both ``lat`` and
+    ``lon`` are given, cells are filtered to those within ``radius_km``
+    of (lat, lon) using the equirectangular cos(lat) approximation; when
+    either is omitted the filter is skipped and ALL detected cells are
+    returned.  Returns an empty list when storm-cell detection is
+    disabled or no cells are available; never raises.
 
     Parameters
     ----------
     storm_cell_store : StormCellStore | None
         The global storm-cell store (None when detection is disabled).
-    lat : float
-        Query latitude in degrees.
-    lon : float
-        Query longitude in degrees.
+    lat : float | None
+        Query latitude in degrees.  ``None`` (or a ``None`` lon) skips
+        the radius filter and returns all cells.
+    lon : float | None
+        Query longitude in degrees.  ``None`` (or a ``None`` lat) skips
+        the radius filter and returns all cells.
     radius_km : float
         Search radius in kilometres (default 100.0 -- wider than the
         alerts default because storm cells are sparser than alerts).
+        Silently ignored when ``lat`` or ``lon`` is ``None``.
 
     Returns
     -------
     list[dict]
-        One dict per detected cell within radius.  Each dict has:
+        One dict per detected cell (filtered to radius when both ``lat``
+        and ``lon`` are given).  Each dict has:
         ``lat``, ``lon``, ``area_km2``, ``max_dbz``, ``motion_speed_kmh``,
         ``motion_heading_deg``, ``region``.
     """
@@ -235,11 +241,20 @@ async def get_storm_cells(
     if not cells_by_region or not counts:
         return []
 
-    # Equirectangular cos(lat) distance -- same formula as alerts_query.py.
-    cos_lat = math.cos(math.radians(lat))
-    deg_to_km_lat = 111.0
-    deg_to_km_lon = 111.0 * cos_lat
-    radius_km_sq = radius_km * radius_km
+    # Radius filter (only when both lat AND lon are given): equirectangular
+    # cos(lat) distance -- same formula as alerts_query.py.  With either
+    # omitted the filter is skipped and all cells are returned.
+    if lat is None or lon is None:
+        filter_radius = False
+        deg_to_km_lat = 0.0
+        deg_to_km_lon = 0.0
+        radius_km_sq = 0.0
+    else:
+        filter_radius = True
+        cos_lat = math.cos(math.radians(lat))
+        deg_to_km_lat = 111.0
+        deg_to_km_lon = 111.0 * cos_lat
+        radius_km_sq = radius_km * radius_km
 
     results: list[dict] = []
     for region_name, cells in cells_by_region.items():
@@ -259,12 +274,13 @@ async def get_storm_cells(
             # Convert pixel coords to lat/lon.
             cell_lat, cell_lon = cell_pixel_to_latlon(region, cr, cc)
 
-            # Radius filter: equirectangular distance.
-            dlat_km = (cell_lat - lat) * deg_to_km_lat
-            dlon_km = (cell_lon - lon) * deg_to_km_lon
-            d2 = dlat_km * dlat_km + dlon_km * dlon_km
-            if d2 > radius_km_sq:
-                continue
+            if filter_radius:
+                # Radius filter: equirectangular distance.
+                dlat_km = (cell_lat - lat) * deg_to_km_lat
+                dlon_km = (cell_lon - lon) * deg_to_km_lon
+                d2 = dlat_km * dlat_km + dlon_km * dlon_km
+                if d2 > radius_km_sq:
+                    continue
 
             speed = float(cell["motion_speed_kmh"])
             heading = float(cell["motion_heading_deg"])

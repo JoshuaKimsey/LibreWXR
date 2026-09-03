@@ -437,6 +437,30 @@ like Tornado Watches are resolved to zone polygons at ingest.
 
 Returns `503` if `LIBREWXR_ALERTS_ENABLED=false`.
 
+#### Storm Cells (LibreWXR extension)
+
+```
+GET /v2/storm-cells
+GET /v2/storm-cells?lat={lat}&lon={lon}&radius_km={radius}
+GET /v2/storm-cells?format=json
+```
+
+Returns detected storm cells from the latest radar frame. The default
+response is a GeoJSON `FeatureCollection` with one `Point` feature per
+cell (centroid coordinates `[lon, lat]`); `format=json` returns a plain
+`{generated_at, cells}` payload instead. Each cell carries `area_km2`,
+`max_dbz`, `motion_speed_kmh` / `motion_heading_deg` (null when no
+motion data) and `region` properties.
+
+| Query parameter | Description |
+|---|---|
+| *(none)* | All detected cells worldwide |
+| `lat` + `lon` | Cells within `radius_km` of the point (both required together) |
+| `radius_km` | Search radius in km (default 100, ignored without lat/lon) |
+| `format` | `geojson` (default) or `json` |
+
+Returns `503` when storm-cell detection is disabled.
+
 #### Health
 
 ```

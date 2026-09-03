@@ -279,6 +279,27 @@ Simplification only affects the geometry in the response — point/bbox filterin
 
 The `severity` field follows the CAP 1.2 vocabulary (`Extreme` / `Severe` / `Moderate` / `Minor` / `Unknown`), which is convenient for styling — colour polygons by severity and let users filter on it. `time` and `expires` are Unix epochs; `regions` lists the affected area names, and `uri` links to the full alert text.
 
+### Storm Cells Endpoint
+
+```
+GET /v2/storm-cells
+GET /v2/storm-cells?lat={lat}&lon={lon}&radius_km={radius}
+GET /v2/storm-cells?format=json
+```
+
+Returns detected convective storm cells from the latest radar frame. The default response is a GeoJSON `FeatureCollection` of `Point` features at each cell centroid (coordinates `[lon, lat]`); pass `format=json` for a plain `{generated_at, cells}` payload instead.
+
+**Query parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| *(none)* | All detected cells worldwide |
+| `lat`, `lon` | Only cells within `radius_km` of the point — both required together, otherwise `400` |
+| `radius_km` | Search radius in kilometres (default `100`, silently ignored when lat/lon are omitted) |
+| `format` | `geojson` (default) or `json` — anything else is rejected with `422` |
+
+Each GeoJSON feature's `properties` carries `area_km2`, `max_dbz`, `motion_speed_kmh`, `motion_heading_deg` (`null` when no motion data), and `region`; the lat/lon centroid lives in the `geometry`. Returns `503 Service Unavailable` when storm-cell detection is disabled on the server.
+
 ### Health Endpoint
 
 ```

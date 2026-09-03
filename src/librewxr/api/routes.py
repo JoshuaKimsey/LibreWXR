@@ -25,6 +25,10 @@ from librewxr.api.models import (
     RadarData,
     RadarTimestamp,
     SatelliteData,
+    StormCellFeature,
+    StormCellProperties,
+    StormCellsData,
+    StormCellsResponse,
     WeatherMapsResponse,
 )
 from librewxr.api.conditional import compute_etag, conditional_response
@@ -1784,3 +1788,64 @@ async def get_alerts(
         )
 
     return AlertsResponse(type="FeatureCollection", features=features)
+
+
+# ---------------------------------------------------------------------------
+# Storm-cell helpers
+# ---------------------------------------------------------------------------
+
+@router.get("/v2/storm-cells")
+async def get_storm_cells_rest(
+    lat: float | None = Query(None, ge=-90, le=90, description="Latitude for point lookup"),
+    lon: float | None = Query(None, ge=-180, le=180, description="Longitude for point lookup"),
+    radius_km: float = Query(100.0, ge=0, le=2000, description="Search radius in kilometres (used only with lat/lon)"),
+    format: str = Query("geojson", pattern="^(geojson|json)$", description="Response format"),
+):
+    """Detected storm cells as a GeoJSON FeatureCollection (or raw JSON).
+
+    - No lat/lon: all detected cells worldwide.
+    - lat + lon: cells within ``radius_km`` of the point (both must be
+      provided together, otherwise ``400``).
+    - ``format=json``: raw cell dicts plus the store's ``generated_at``.
+
+    Reuses the MCP ``get_storm_cells`` query logic (pixel->lat/lon
+    conversion, NaN motion -> null).  The import is deferred inside the
+    body on purpose: a top-level import would create a cycle
+    (routes -> mcp.tools -> mcp.alerts_query -> routes).
+    """
+    if storm_cell_store is None:
+        raise HTTPException(status_code=503, detail="Storm cells not available")
+
+    if (lat is None) != (lon is None):
+        raise HTTPException(status_code=400, detail="lat and lon must be provided together")
+
+    # Deferred import: routes -> mcp.tools -> mcp.alerts_query -> routes
+    # would be a cycle at module level.
+    from librewxr.mcp.tools import get_storm_cells as query_storm_cells
+
+    cells = await query_storm_cells(storm_cell_store, lat, lon, radius_km)
+
+    if format == "json":
+        return StormCellsData(
+            generated_at=int(storm_cell_store.last_updated),
+            cells=cells,
+        )
+
+    features: list[StormCellFeature] = []
+    for cell in cells:
+        features.append(
+            StormCellFeature(
+                type="Feature",
+                properties=StormCellProperties(**{
+                    key: value
+                    for key, value in cell.items()
+                    if key not in ("lat", "lon")
+                }),
+                geometry={
+                    "type": "Point",
+                    "coordinates": [cell["lon"], cell["lat"]],
+                },
+            )
+        )
+
+    return StormCellsResponse(type="FeatureCollection", features=features)
