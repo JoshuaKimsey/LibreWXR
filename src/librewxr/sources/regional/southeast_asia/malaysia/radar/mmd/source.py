@@ -4,9 +4,16 @@
 
 Fetches the combined Peninsular + East Malaysia animated GIF served
 anonymously from ``api.met.gov.my/static/images/radar-latest.gif`` under
-CC-BY-4.0.  Each fetch returns a 1352×570 GIF89a holding 6 frames at
-10-min cadence (60 min of backfill), with metadata (timestamp, legend,
-range, sensor list) burned into the right-side chrome panel.
+CC-BY-4.0.  Each fetch returns a GIF89a holding 6 frames at 10-min
+cadence (60 min of backfill), with metadata (timestamp, legend, range,
+sensor list) burned into the right-side chrome panel.
+
+Two upstream canvas layouts are accepted: the legacy 1352x570 and the
+current 1352x769.  As of 2026-09 upstream extended the canvas by 199
+rows below the map area (pure white filler in the map column x<1100, a
+text panel in the chrome column x>=1100).  The radar map occupies rows
+0-569 in both layouts with identical pixel scale, so the sub-rectangle
+crops are layout-independent; any other canvas size fails loudly.
 
 The two coverage zones — Peninsular Malaysia + N. Sumatra and East
 Malaysia + Brunei — are sub-rectangles of the radar map area (x∈[0,1100),
@@ -80,20 +87,24 @@ _MMD_PALETTE: tuple[tuple[int, int, int, float], ...] = (
 # the basemap (land brown / sea blue / range circles).
 _MMD_MAX_RGB_DIST2 = 64
 
-# ── Sub-rectangle crops within the combined GIF ─────────────────────
+# -- Sub-rectangle crops within the combined GIF ----------------------
 #
-# Combined GIF: 1352×570.  Radar map area: x∈[0,1100), y∈[0,570).
-# Right side x∈[1100,1352] is the chrome panel (legend + metadata).
-# Within the radar area, peninsular and east coverage are equirectangular
-# sub-rectangles over the union bounding box (96.92°E to 121.19°E,
-# 9.18°N to -1.48°S).  Pixel scales: 45.323 px/° lon, 53.471 px/° lat.
+# Two upstream canvas layouts are accepted: legacy 1352x570 and current
+# 1352x769 (as of 2026-09 upstream extended the canvas by 199 rows below
+# the map - pure white filler in the map column x<1100, a beige text
+# panel in the chrome column x>=1100).  The radar map area is identical
+# in both: x in [0,1100), y in [0,570).  Right side x in [1100,1352] is
+# the chrome panel (legend + metadata).  Within the radar area,
+# peninsular and east coverage are equirectangular sub-rectangles over
+# the union bounding box (96.92E to 121.19E, 9.18N to -1.48S).  Pixel
+# scales: 45.323 px/deg lon, 53.471 px/deg lat.
 #
-#   MYPENINSULAR bounds: 96.92°E..106.28°E, -1.33°S..8.97°N
-#                        → x=[0, 424), y=[11, 562)  → 424×551
-#   MYEAST       bounds: 107.08°E..121.19°E, -1.48°S..9.18°N
-#                        → x=[460, 1100), y=[0, 570) → 640×570
+#   MYPENINSULAR bounds: 96.92E..106.28E, -1.33S..8.97N
+#                        -> x=[0, 424), y=[11, 562)  -> 424x551
+#   MYEAST       bounds: 107.08E..121.19E, -1.48S..9.18N
+#                        -> x=[460, 1100), y=[0, 570) -> 640x570
 #
-# The 36-px gap x∈[424,460] is the South China Sea strip between the
+# The 36-px gap x in [424,460] is the South China Sea strip between the
 # two coverage zones and is discarded.
 _MMD_SUBRECTS: dict[str, tuple[int, int, int, int]] = {
     # (y_top, y_bot, x_left, x_right)
@@ -101,9 +112,16 @@ _MMD_SUBRECTS: dict[str, tuple[int, int, int, int]] = {
     "MYEAST":       (0, 570, 460, 1100),
 }
 
-# Hard caps so a malformed upstream GIF can't blow past expected bounds.
-_MMD_EXPECTED_WIDTH = 1352
-_MMD_EXPECTED_HEIGHT = 570
+# Accepted canvas sizes so a malformed or layout-shifted upstream GIF
+# can't blow past expected bounds.  The 2026-09 canvas extension added
+# 199 rows below the map (rows 0-569 unchanged), hence two heights.
+_MMD_WIDTH = 1352
+_MMD_HEIGHT_LEGACY = 570
+_MMD_HEIGHT_CURRENT = 769
+_MMD_ACCEPTED_SIZES = frozenset({
+    (_MMD_WIDTH, _MMD_HEIGHT_LEGACY),
+    (_MMD_WIDTH, _MMD_HEIGHT_CURRENT),
+})
 _MMD_EXPECTED_FRAMES = 6
 
 # Native cadence (10 min — matches LibreWXR store cadence exactly).
@@ -154,7 +172,12 @@ def _decode_mmd_palette(rgb: np.ndarray) -> np.ndarray:
 
 
 def _extract_region(full_rgb: np.ndarray, region_name: str) -> np.ndarray:
-    """Crop ``full_rgb`` (570×1352×3) to the sub-rectangle for region_name."""
+    """Crop ``full_rgb`` (Hx1352x3) to the sub-rectangle for region_name.
+
+    Works for both accepted canvas heights (570 legacy, 769 current) -
+    the sub-rectangles only touch rows 0-569, which are identical in
+    both layouts.
+    """
     y0, y1, x0, x1 = _MMD_SUBRECTS[region_name]
     return full_rgb[y0:y1, x0:x1]
 
@@ -429,10 +452,10 @@ class MMDSource:
     ) -> dict[int, dict[str, np.ndarray]]:
         """Decode an MMD GIF into a {ts: {region_name: grid}} mapping."""
         img = Image.open(io.BytesIO(gif_bytes))
-        if img.size != (_MMD_EXPECTED_WIDTH, _MMD_EXPECTED_HEIGHT):
+        if img.size not in _MMD_ACCEPTED_SIZES:
             raise ValueError(
                 f"MMD GIF unexpected size {img.size}, "
-                f"expected ({_MMD_EXPECTED_WIDTH}, {_MMD_EXPECTED_HEIGHT})"
+                f"expected one of {sorted(_MMD_ACCEPTED_SIZES)}"
             )
         if getattr(img, "n_frames", 1) != _MMD_EXPECTED_FRAMES:
             logger.warning(

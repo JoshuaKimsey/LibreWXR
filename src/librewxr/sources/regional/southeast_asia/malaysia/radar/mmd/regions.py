@@ -2,9 +2,16 @@
 # Copyright (C) 2026 Joshua Kimsey
 """Region definitions for the MET Malaysia radar composite.
 
-Both regions are sub-rectangles of a single 1352×570 animated GIF served
-under CC-BY-4.0 from ``api.met.gov.my/static/images/radar-latest.gif``
+Both regions are sub-rectangles of a single animated GIF served under
+CC-BY-4.0 from ``api.met.gov.my/static/images/radar-latest.gif``
 (6 frames at 10-min cadence, ~60 min of backfill per fetch).
+
+Two upstream canvas layouts are accepted: the legacy 1352x570 and the
+current 1352x769.  As of 2026-09 upstream extended the canvas by 199
+rows below the map area (pure white filler in the map column, a text
+panel in the chrome column).  The radar map occupies rows 0-569 in both
+layouts with identical pixel scale, so the sub-rectangle crops below are
+layout-independent; any other canvas size fails loudly.
 
 The combined GIF renders both coverage zones in a shared equirectangular
 grid over the union bounding box, with a vertical band of pure sea
@@ -40,6 +47,10 @@ MYEAST = RegionDef(
     pixel_size=1.0 / 45.323,           # 0.02207°/px (lon axis)
     pixel_size_y=1.0 / 53.471,         # 0.01870°/px (lat axis)
     group="SOUTHEAST_ASIA",
+    # grid_height 570 = map-area rows y in [0,570), shared by both the
+    # legacy 1352x570 and current 1352x769 GIF canvases.  The 199 extra
+    # rows of the current canvas sit below the map and are not part of
+    # any region crop.
     grid_width=640, grid_height=570,
 )
 

@@ -23,9 +23,11 @@ from librewxr.sources.regional.southeast_asia.malaysia.radar.mmd.source import (
     _extract_region,
     _fill_boundary_gaps,
     _frame_timestamps,
+    _MMD_ACCEPTED_SIZES,
     _MMD_EXPECTED_FRAMES,
-    _MMD_EXPECTED_HEIGHT,
-    _MMD_EXPECTED_WIDTH,
+    _MMD_HEIGHT_CURRENT,
+    _MMD_HEIGHT_LEGACY,
+    _MMD_WIDTH,
     _MMD_PALETTE,
     _MMD_SUBRECTS,
     _parse_last_modified,
@@ -352,22 +354,32 @@ class TestFrameTimestamps:
 # ─────────────────────────────────────────────────────────────────────
 # GIF decode pipeline
 # ─────────────────────────────────────────────────────────────────────
-def _make_test_gif(per_frame_colors: list[tuple]) -> bytes:
-    """Build an animated GIF of expected MMD dimensions.
+def _make_test_gif(
+    per_frame_colors: list[tuple], height: int | None = None,
+) -> bytes:
+    """Build an animated GIF at an accepted MMD canvas size.
 
     ``per_frame_colors`` is a list of (peninsular_rgb, east_rgb) tuples
-    — one per frame.  Each frame paints those colours into the relevant
+    - one per frame.  Each frame paints those colours into the relevant
     sub-rectangles so the decoder's region routing can be verified.
+
+    ``height`` defaults to the legacy 570-row layout; pass
+    ``_MMD_HEIGHT_CURRENT`` (769) to emulate the 2026-09 upstream canvas
+    extension, which appends 199 pure-white rows below the map area.
 
     A 1-pixel "frame index" marker in the chrome region of each frame
     keeps them byte-distinct so PIL's GIF encoder doesn't dedupe
     identical frames into a single frame on save.
     """
+    if height is None:
+        height = _MMD_HEIGHT_LEGACY
     frames = []
     for i, (pen_color, east_color) in enumerate(per_frame_colors):
-        arr = np.zeros(
-            (_MMD_EXPECTED_HEIGHT, _MMD_EXPECTED_WIDTH, 3), dtype=np.uint8,
-        )
+        arr = np.zeros((height, _MMD_WIDTH, 3), dtype=np.uint8)
+        if height > _MMD_HEIGHT_LEGACY:
+            # Mirror the upstream 2026-09 layout: rows below the map are
+            # pure white filler.  None of the sub-rect crops touch them.
+            arr[_MMD_HEIGHT_LEGACY:, :] = (255, 255, 255)
         py0, py1, px0, px1 = _MMD_SUBRECTS["MYPENINSULAR"]
         ey0, ey1, ex0, ex1 = _MMD_SUBRECTS["MYEAST"]
         arr[py0:py1, px0:px1] = pen_color
@@ -394,9 +406,9 @@ class _FakeResp:
 
 
 class TestGifDecode:
-    """End-to-end through the source's _decode_gif method — verifies
+    """End-to-end through the source's _decode_gif method - verifies
     timestamps, region routing, and palette decoding all hang together
-    on a synthetic 1352×570×6 animated GIF."""
+    on synthetic animated GIFs (legacy 1352x570 and current 1352x769)."""
 
     def test_decode_populates_all_six_frame_timestamps(self):
         pen = _MMD_PALETTE[10][:3]   # green
@@ -436,6 +448,51 @@ class TestGifDecode:
         # A 100×100 GIF must not be decoded silently — that means the
         # upstream endpoint changed.
         frame = Image.fromarray(np.zeros((100, 100, 3), dtype=np.uint8))
+        buf = io.BytesIO()
+        frame.save(buf, format="GIF")
+        src = MMDSource()
+        with pytest.raises(ValueError):
+            src._decode_gif(buf.getvalue(), 0)
+
+    def test_current_769_tall_layout_matches_legacy(self):
+        # The 2026-09 upstream canvas extension (1352x769) appends 199
+        # rows below the map area; the map itself (rows 0-569) is
+        # unchanged, so both accepted layouts must decode to identical
+        # per-region grids.
+        assert (_MMD_WIDTH, _MMD_HEIGHT_CURRENT) in _MMD_ACCEPTED_SIZES
+        assert (_MMD_WIDTH, _MMD_HEIGHT_LEGACY) in _MMD_ACCEPTED_SIZES
+        pen = _MMD_PALETTE[10][:3]   # green
+        east = _MMD_PALETTE[5][:3]   # red-orange
+        legacy_gif = _make_test_gif([(pen, east)] * 6)
+        current_gif = _make_test_gif(
+            [(pen, east)] * 6, height=_MMD_HEIGHT_CURRENT,
+        )
+        src = MMDSource()
+        lm_unix = int(datetime(
+            2026, 5, 16, 6, 21, 5, tzinfo=timezone.utc,
+        ).timestamp())
+        legacy_cache = src._decode_gif(legacy_gif, lm_unix)
+        current_cache = src._decode_gif(current_gif, lm_unix)
+        assert len(current_cache) == 6
+        assert set(legacy_cache) == set(current_cache)
+        for ts in legacy_cache:
+            for region_name in ("MYPENINSULAR", "MYEAST"):
+                assert np.array_equal(
+                    current_cache[ts][region_name],
+                    legacy_cache[ts][region_name],
+                ), (
+                    f"{region_name} grid differs between 1352x570 and "
+                    f"1352x769 layouts at ts {ts}"
+                )
+
+    def test_1352x600_gif_raises(self):
+        # 1352 wide but neither 570 nor 769 tall - a canvas size we have
+        # not seen upstream must stay loud (ValueError -> "MMD decode
+        # failed" in _refresh_gif) rather than being decoded silently.
+        assert (1352, 600) not in _MMD_ACCEPTED_SIZES
+        frame = Image.fromarray(
+            np.zeros((600, _MMD_WIDTH, 3), dtype=np.uint8),
+        )
         buf = io.BytesIO()
         frame.save(buf, format="GIF")
         src = MMDSource()
