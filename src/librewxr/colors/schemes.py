@@ -22,6 +22,7 @@ SCHEME_NAMES = {
     11: "MRMS CREF",
     12: "33/40 Max Storm",
     13: "MetService NZ (Dark)",
+    14: "Windy",
 }
 
 # Rain LUTs: scheme_id -> (256, 4) uint8 array mapping pixel value -> RGBA
