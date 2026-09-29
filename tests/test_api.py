@@ -615,10 +615,15 @@ class TestHealthCluster:
         assert requests["hot_tiles"] >= 0
         assert "hit_rate" in requests
 
-    def test_cluster_survives_reader_failure(self, client, monkeypatch):
+    def test_cluster_survives_reader_failure(self, client, monkeypatch, tmp_path):
         """A failing pulse scan degrades the section to None — /health
         itself must never raise."""
         c, _, _ = client
+
+        # Pin cache_dir so the pulse-scan branch is taken; on a clean
+        # checkout cache_dir is empty and the route skips
+        # read_worker_pulses entirely, so no failure would occur.
+        monkeypatch.setattr(settings, "cache_dir", str(tmp_path))
 
         def boom():
             raise OSError("pulse scan failed")
