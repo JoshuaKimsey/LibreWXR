@@ -13,7 +13,7 @@ This document is the **full** reference for every setting LibreWXR understands. 
 - [Regions](#regions)
 - [Tile Rendering](#tile-rendering)
 - [Workers and Memory](#workers-and-memory)
-- [Multi-mode Tile-Server Split](#multi-mode-tile-server-split)
+- [Deployment Architecture (Pipeline + Render Workers)](#deployment-architecture-pipeline--render-workers)
 - [ECMWF IFS Global Coverage](#ecmwf-ifs-global-coverage)
   - [Global: NOAA RRQPE](#global-noaa-rrqpe)
 - [Regional NWP Sources](#regional-nwp-sources)
@@ -488,13 +488,13 @@ PNG tiles are encoded adaptively and losslessly: when a tile's final pixels cont
 
 Maximum tile cache size in megabytes, **per worker**. The cache stores pre-presentation `TileGeometry` records — uint8 pixel values plus an optional snow mask — keyed on `(timestamp, z, x, y, tile_size, smooth, snow)`. Color scheme, output format, and arrow style are applied per request in the cheap `present_tile` step, so one cached entry serves every variant of a given viewport. Oldest entries are evicted when this byte limit is reached.
 
-Higher values mean faster tile serving for repeat requests; lower values save RAM. The default tracks `LIBREWXR_MODE`: 200 MB total in single mode, 128 MB per worker in multi mode (where many workers share the rack). At a 512² tile size each geometry entry is ~256 KB, so 200 MB holds ~800 viewport geometries.
+Higher values mean faster tile serving for repeat requests; lower values save RAM. The default is 128 MB per worker (200 MB in the legacy-single profile). At a 512² tile size each geometry entry is ~256 KB, so 200 MB holds ~800 viewport geometries.
 
 The tile cache holds two kinds of entries: computed `TileGeometry` records (the expensive per-tile compositing result) and cached encoded tile bytes (rendered tiles kept for HTTP ETag reuse so repeat requests skip re-encoding — covering present, overlay, and lat/lon-window renders, with `/health` reporting each kind's count and bytes separately via `geometry_entries`, `present_entries`, `overlay_entries`, `window_entries`, and `satellite_entries`). Both share this single byte budget, and the half that overflows the byte cap is evicted via LRU when the cache is full. There is no separate config knob for the encoded-byte cache.
 
 | | |
 |---|---|
-| **Default** | `200` (single) / `128` (multi) — set 0 or unset to use the mode default |
+| **Default** | `128` (multi) / `200` (legacy-single) — set 0 or unset to use the profile default |
 | **Type** | integer |
 | **Unit** | megabytes |
 
@@ -502,11 +502,11 @@ The tile cache holds two kinds of entries: computed `TileGeometry` records (the 
 
 Maximum entries per coordinate LRU cache, **per worker**. Controls how many tile-coordinate mappings are kept in memory. There are 6 internal coordinate caches, and each entry is 0.5-2 MB depending on tile size.
 
-These caches are the largest RAM consumer after frame data. Reducing this saves significant RAM at the cost of occasional recomputation (~5-20 ms per cache miss). The default tracks `LIBREWXR_MODE`: 2048 in single mode, 512 per worker in multi mode.
+These caches are the largest RAM consumer after frame data. Reducing this saves significant RAM at the cost of occasional recomputation (~5-20 ms per cache miss). The default is 512 per worker (2048 in the legacy-single profile).
 
 | | |
 |---|---|
-| **Default** | `2048` (single) / `512` (multi) — set 0 or unset to use the mode default |
+| **Default** | `512` (multi) / `2048` (legacy-single) — set 0 or unset to use the profile default |
 | **Type** | integer |
 
 ### `LIBREWXR_COORD_STORE_ENABLED`
@@ -522,26 +522,26 @@ Best-effort: any store failure (unwritable cache dir, corrupt files, version mis
 
 ### `LIBREWXR_COORD_STORE_MB`
 
-Size cap of the shared on-disk coordinate store, in megabytes. The cap is **soft**: the store is pruned once per fetch cycle by whichever process owns store maintenance (the pipeline in multi mode, the main process in single mode — via the ~30 s-debounced cycle hook), so it can briefly overshoot between prunes.
+Size cap of the shared on-disk coordinate store, in megabytes. The cap is **soft**: the store is pruned once per fetch cycle by the pipeline process (via the ~30 s-debounced cycle hook), so it can briefly overshoot between prunes.
 
-The default tracks `LIBREWXR_MODE`: 1024 in single mode, 8192 in multi mode. In multi mode the budget is **shared by ALL render workers** — every worker reads the same on-disk store, so the 8192 MB default covers the combined warm set rather than 8192 MB per worker. Settable via `.env` like any knob; a restart applies the change. Requires `LIBREWXR_CACHE_DIR`; the store disables itself when the cache dir is unset.
+The default is 8192 MB (4096 MB in the legacy-single profile). The budget is **shared by ALL render workers** — every worker reads the same on-disk store, so the 8192 MB default covers the combined warm set rather than 8192 MB per worker. Settable via `.env` like any knob; a restart applies the change. Requires `LIBREWXR_CACHE_DIR`; the store disables itself when the cache dir is unset.
 
 | | |
 |---|---|
-| **Default** | `1024` (single) / `8192` (multi) — set 0 or unset to use the mode default |
+| **Default** | `8192` (multi) / `4096` (legacy-single) — set 0 or unset to use the profile default |
 | **Type** | integer |
 | **Unit** | megabytes |
 
-### `LIBREWXR_WARMER_THREADS`
+### `LIBREWXR_RENDER_THREADS`
 
-Thread pool size for background tile cache warming, **single mode only** — in multi mode no `TileWarmer` is instantiated in render workers, and the 4-thread multi default sizes the request-executor pool used to compute tile geometry, not a warming pool. When a tile is requested, the warmer pre-computes the geometry for that same tile position at all other timestamps in the background, so animation playback is smooth without waiting for each frame to render on demand. Warming covers all color schemes and output formats automatically because the cache stores pre-presentation geometry, not encoded bytes.
+Per-render-worker thread pool size for the geometry compute work: region sampling, multi-region compositing, NWP fill / blend, and blur. Each render worker runs its own pool; too small and cold-tile bursts queue, too large and N workers oversubscribe the host. The legacy `LIBREWXR_WARMER_THREADS` name is still accepted as an alias.
 
 | | |
 |---|---|
-| **Default** | `0` (single: auto = CPU count - 1) / `4` (multi) — set 0 or unset to use the mode default |
+| **Default** | `4` (multi) / `0` = auto, resolved to one fewer than the available cores (legacy-single) — set 0 or unset to use the profile default |
 | **Type** | integer |
 
-The empty-tile fast path (see `tile_requests.fast_path` in `/health`) and per-worker LRU caches cover the cold-render case in multi mode.
+There is no separate tile-warming pool: the `TileWarmer` was removed, and the empty-tile fast path (`tile_requests.fast_path` in `/health`) plus per-worker LRU caches cover the cold-render case.
 
 ### `LIBREWXR_WARM_COORD_ZOOM`
 
@@ -549,42 +549,18 @@ Pre-warm coordinate caches up to this zoom level at startup, as a **background t
 
 | | |
 |---|---|
-| **Default** | `0` (mode default: `6` in single / no eager warm in multi) |
+| **Default** | `0` (profile default: no eager warm in multi / `4` in the legacy-single profile) |
 | **Type** | integer |
 
 Resolution:
 
-- `0` (or unset) — use the per-mode default: **single** warms up to zoom 6 in the background; **multi** render workers do no eager warm at all, building their coordinate caches lazily on first request.
-- Negative (e.g. `-1`) — disable the warm entirely in either mode.
-- Positive — force that zoom in either mode (e.g. `4` in multi re-enables a background warm; `-1` in single turns the warm off).
+- `0` (or unset) — use the profile default: multi render workers do no eager warm at all, building their coordinate caches lazily on first request; the legacy-single profile warms up to zoom 4 in the background.
+- Negative (e.g. `-1`) — disable the warm entirely.
+- Positive — force that zoom regardless of profile (e.g. `4` re-enables a background warm in multi).
 
 Each zoom level adds ~4x the tiles of the previous (zoom 6 = ~5,500 tiles).
 
-> **Note:** this changes the meaning of `0` relative to earlier releases — `0` previously meant "disabled"; it now means "use the mode default". Use a negative value to disable.
-
-### `LIBREWXR_WARM_OVERVIEW_ZOOM`
-
-**Single mode only.** Pre-render overview tiles up to this zoom level after each fetch cycle. Ensures zoomed-out views are served instantly from cache. In multi mode the fetch cycle lives in a separate pipeline process with `warmer=None`, so these settings do nothing; overview tiles in multi mode are served cold on first request and then cached per-worker. The empty-tile fast path (`tile_requests.fast_path` in `/health`) makes cold renders cheap for precip-empty tiles.
-
-| | |
-|---|---|
-| **Default** | `4` |
-| **Type** | integer |
-
-At zoom 4, ~341 tiles per timestamp. Set to `-1` to disable.
-
-### `LIBREWXR_WARM_OVERVIEW_ZOOM_REGIONAL`
-
-**Single mode only.** Pre-render higher-zoom tiles ONLY where they overlap an enabled region's bounding box. Skips ocean / desert / unpopulated tiles that no one would zoom into.
-
-Applies between `LIBREWXR_WARM_OVERVIEW_ZOOM` (exclusive) and this value (inclusive). In multi mode these settings do nothing, as described under `LIBREWXR_WARM_OVERVIEW_ZOOM` above.
-
-| | |
-|---|---|
-| **Default** | `6` |
-| **Type** | integer |
-
-Set to `-1` (or any value `<= warm_overview_zoom`) to disable. At zoom 6 with all regions enabled, the filter typically drops 80-85% of tiles.
+> **Note:** this changes the meaning of `0` relative to earlier releases — `0` previously meant "disabled"; it now means "use the profile default". Use a negative value to disable.
 
 ---
 
@@ -592,29 +568,29 @@ Set to `-1` (or any value `<= warm_overview_zoom`) to disable. At zoom 6 with al
 
 ### `COMPOSE_PROFILES` / `LIBREWXR_MODE`
 
-Picks the deployment shape. Both names resolve to the same `mode` setting; `LIBREWXR_MODE` takes precedence when both are set. Docker Compose reads `COMPOSE_PROFILES` natively to pick which services start, and the app reads it as a fallback so docker users only set one env var.
+The one-process deployment shape was removed; LibreWXR always runs the multi architecture (a data pipeline plus N render workers). Both names resolve to the same `mode` setting, which always resolves to `multi`; `LIBREWXR_MODE` takes precedence when both are set. Docker Compose reads `COMPOSE_PROFILES` natively to pick which services start, and the app reads it as a fallback so docker users only set one env var.
 
 | | |
 |---|---|
-| **Default** | `single` |
-| **Type** | `single` or `multi` |
+| **Default** | `multi` |
+| **Type** | `multi` (or a legacy `single` alias) |
 
-- **`single`**: fetcher + renderer in one process. Personal / small-scale self-hosting.
-- **`multi`**: pipeline sidecar + N renderer workers sharing memmap state. Production deployment that bypasses the Python GIL on the render path.
+A legacy `single` token - `COMPOSE_PROFILES=single` or `LIBREWXR_MODE=single` - selects the "legacy-single" defaults profile (1 render worker + legacy cache sizes) and logs a startup warning. It does not change the architecture. See [docs/single-mode-migration.md](single-mode-migration.md).
 
-`LIBREWXR_WORKERS`, `LIBREWXR_TILE_CACHE_MB`, `LIBREWXR_COORD_CACHE_SIZE`, and `LIBREWXR_WARMER_THREADS` all pick mode-appropriate defaults from this setting when left at `0` (or unset).
+`LIBREWXR_WORKERS`, `LIBREWXR_TILE_CACHE_MB`, `LIBREWXR_COORD_CACHE_SIZE`, `LIBREWXR_COORD_STORE_MB`, `LIBREWXR_WARM_COORD_ZOOM`, and `LIBREWXR_RENDER_THREADS` all pick profile-appropriate defaults from this setting when left at `0` (or unset).
 
 ### `LIBREWXR_WORKERS`
 
-Number of uvicorn worker processes. The default tracks `LIBREWXR_MODE`.
+Number of uvicorn render-worker processes. The default is 16 (sized for a multi-core rack); the legacy-single profile defaults to 1.
 
 | | |
 |---|---|
-| **Default** | `1` (single) / `16` (multi) — set 0 or unset to use the mode default |
+| **Default** | `16` (multi) / `1` (legacy-single) — set 0 or unset to use the profile default |
 | **Type** | integer |
 
-- **single**: each worker is a fully independent copy of LibreWXR with its own frame store, caches, and fetcher. More workers = more concurrency at ~1.3 GB+ RAM each. Recommended: 1 worker per 2 CPU cores; put a caching proxy in front for high traffic.
-- **multi**: renderer workers share radar/NWP/satellite state via memmap snapshots written by a sidecar `pipeline` process. Scale workers across many cores without the per-worker data RAM cost — total RSS ≈ workers × (interpreter ~80 MB + tile cache + coord cache) + a single shared page-cache backing the memmap. Recommended: 8-32 workers depending on rack size.
+Render workers share radar/NWP/satellite state via memmap snapshots written by the pipeline process. Scale workers across many cores without the per-worker data RAM cost — total RSS ≈ workers × (interpreter ~80 MB + tile cache + coord cache) + a single shared page-cache backing the memmap. Recommended: 8-32 workers depending on rack size; 1-2 for a small box.
+
+When `main.py` auto-spawns the pipeline (bare-metal `python -m librewxr.main` without `LIBREWXR_WORKERS` set), it defaults to 1 render worker.
 
 ### `LIBREWXR_MEMORY_LIMIT_MB`
 
@@ -640,46 +616,44 @@ Seconds between memory pressure checks.
 
 ### `LIBREWXR_SHARED_TILE_STORE_MB`
 
-Budget, in megabytes, of the shared on-disk store of **encoded** tile bytes under `LIBREWXR_CACHE_DIR` (`tiles_shared/`). Multi-mode render workers publish their freshly-encoded plain past-frame tiles here and read back bytes published by any other worker — one encode serves the whole fleet — instead of each worker redundantly colorizing and encoding the same viewport. The store is disabled in single mode (one process — the in-memory cache is enough).
+Budget, in megabytes, of the shared on-disk store of **encoded** tile bytes under `LIBREWXR_CACHE_DIR` (`tiles_shared/`). Render workers publish their freshly-encoded plain past-frame tiles here and read back bytes published by any other worker — one encode serves the whole fleet — instead of each worker redundantly colorizing and encoding the same viewport. A lone render worker leaves the store disabled (the in-memory cache is enough).
 
-Semantics: unset (`None`) = auto, which resolves to **2048 MB for render-only workers** and **disabled in single mode**; `0` or any negative value disables the store entirely; a positive value sets the MB budget explicitly. Content-versioned keys (the frame's content version is folded into each key) make stale entries unreachable between fetch cycles, and the render workers' state poller invalidates + prunes the store with the same cadence as the in-memory tile cache. Requires `LIBREWXR_CACHE_DIR` (a shared volume) — render-only mode already requires it.
+Semantics: unset (`None`) = auto, which resolves to **2048 MB for render workers** and **disabled for a lone render worker**; `0` or any negative value disables the store entirely; a positive value sets the MB budget explicitly. Content-versioned keys (the frame's content version is folded into each key) make stale entries unreachable between fetch cycles, and the render workers' state poller invalidates + prunes the store with the same cadence as the in-memory tile cache. Requires `LIBREWXR_CACHE_DIR` (a shared volume).
 
 | | |
 |---|---|
-| **Default** | unset (auto: `2048` in multi / disabled in single) |
+| **Default** | unset (auto: `2048` for render workers / disabled for a lone render worker) |
 | **Type** | integer (or unset) |
 | **Unit** | megabytes |
 
 ### Docker memory limits
 
-The compose file caps each container using these env vars (not LIBREWXR_* settings — they're consumed by `deploy.resources.limits` in the YAML directly). Which one applies depends on which profile is active.
+The compose file caps each container using these env vars (not LIBREWXR_* settings — they're consumed by `deploy.resources.limits` in the YAML directly).
 
-| Var | Default | Profile |
+| Var | Default | Container |
 |---|---|---|
-| `LIBREWXR_MEMORY` | `7G` | `single` (the librewxr container) |
-| `LIBREWXR_PIPELINE_MEMORY` | `12G` | `multi` (the pipeline container) |
-| `LIBREWXR_RENDER_MEMORY` | `18G` | `multi` (the renderer container) |
+| `LIBREWXR_PIPELINE_MEMORY` | `12G` | pipeline |
+| `LIBREWXR_RENDER_MEMORY` | `18G` | renderer |
 
-Production observation on an 80-core / 32 GB rack in multi mode (32 render workers): ~16 GB total RSS settled across both containers under continuous traffic.
+Production observation on an 80-core / 32 GB rack (32 render workers): ~16 GB total RSS settled across both containers under continuous traffic.
 
 ---
 
-## Multi-mode Tile-Server Split
+## Deployment Architecture (Pipeline + Render Workers)
 
-Runs the data pipeline as one process and N tile-server worker processes alongside it, all sharing `LIBREWXR_CACHE_DIR` via memmap files + a single `state.json` snapshot. Bypasses Python's GIL on the tile-render path so the rack's full core count can actually do work.
+This is THE LibreWXR architecture: a data pipeline process plus N tile-server worker processes alongside it, all sharing `LIBREWXR_CACHE_DIR` via memmap files + a single `state.json` snapshot. It bypasses Python's GIL on the tile-render path so a rack's full core count can actually do work, and keeps a fetch crash from taking the tile server down.
 
-To enable:
-1. Set `LIBREWXR_CACHE_DIR` to a shared directory (required).
-2. Set `COMPOSE_PROFILES=multi` in `.env` and run `docker compose up -d`, or run the two processes manually:
+Docker Compose starts both services with `COMPOSE_PROFILES=multi` (`docker compose up -d`). To run the two processes manually:
    ```bash
-   export LIBREWXR_MODE=multi
-   python -m librewxr.data_pipeline                       # sidecar
-   LIBREWXR_RENDER_ONLY=1 python -m librewxr.main         # tile server
+   python -m librewxr.data_pipeline                       # pipeline (fetcher)
+   LIBREWXR_RENDER_ONLY=1 python -m librewxr.main         # dedicated render server
    ```
+
+Bare metal, `python -m librewxr.main` with no `LIBREWXR_RENDER_ONLY` auto-spawns the pipeline as a child process and serves as a render worker, so a single command still works. `LIBREWXR_RENDER_ONLY=1` is only for dedicated render workers that read an already-running pipeline's snapshot (the Docker renderer service sets it).
 
 ### `LIBREWXR_RENDER_ONLY`
 
-When `true` (or `1`), the worker skips fetcher / NWP grid / satellite / nowcast initialization entirely. It only memory-maps the snapshot the pipeline writes and renders tiles from it.
+When `true` (or `1`), the worker skips fetcher / NWP grid / satellite / nowcast initialization entirely. It only memory-maps the snapshot the pipeline writes and renders tiles from it. When unset, `main.py` auto-spawns the pipeline as a child process.
 
 | | |
 |---|---|
@@ -708,7 +682,7 @@ Seconds for render workers to wait for the first `state.json` on cold start befo
 
 ### `LIBREWXR_WORKER_HEALTHCHECK_TIMEOUT`
 
-Seconds uvicorn's master process waits for a worker healthcheck ping before killing and respawning the worker (applies whenever `LIBREWXR_WORKERS` > 1, i.e. multi mode). Render workers can stall well past the default when they page-fault freshly written memmap frame files off a slow backing disk while holding the GIL; raising this to 30 s lets a stalled worker recover instead of being SIGKILLed. `0` = uvicorn's built-in default (5 s).
+Seconds uvicorn's master process waits for a worker healthcheck ping before killing and respawning the worker (applies whenever `LIBREWXR_WORKERS` > 1). Render workers can stall well past the default when they page-fault freshly written memmap frame files off a slow backing disk while holding the GIL; raising this to 30 s lets a stalled worker recover instead of being SIGKILLed. `0` = uvicorn's built-in default (5 s).
 
 | | |
 |---|---|
@@ -718,7 +692,7 @@ Seconds uvicorn's master process waits for a worker healthcheck ping before kill
 
 ### `LIBREWXR_PAGECACHE_PRIME_ENABLED`
 
-When `true` (default), the data pipeline primes freshly written memmap frame files (radar, NWP, satellite, nowcast, precip-mask) into the host page cache after each fetch cycle via `posix_fadvise(WILLNEED)`. The host page cache is shared between the pipeline and renderer containers, so render workers serve those frames without cold page faults on slow backing disks. Consumed only by the multi-mode pipeline process; single mode never runs it.
+When `true` (default), the data pipeline primes freshly written memmap frame files (radar, NWP, satellite, nowcast, precip-mask) into the host page cache after each fetch cycle via `posix_fadvise(WILLNEED)`. The host page cache is shared between the pipeline and renderer containers, so render workers serve those frames without cold page faults on slow backing disks. Consumed only by the pipeline process.
 
 | | |
 |---|---|
@@ -1510,16 +1484,16 @@ Cache directory for the downloaded MeteoAlarm geocode data. Empty = system temp.
 
 ### `LIBREWXR_CACHE_DIR`
 
-Cache directory for processed grids (GMGSI satellite, NWP, alerts geocodes, master state snapshot). When set, data is saved as memory-mapped files that survive restarts, crashes, and container recreation — no need to re-download from upstream on startup.
+Cache directory for processed grids (GMGSI satellite, NWP, alerts geocodes, master state snapshot). When set, data is saved as memory-mapped files that survive restarts, crashes, and container recreation — no need to re-download from upstream on startup. The pipeline and renderers must share this directory.
 
 | | |
 |---|---|
-| **Default** | *(empty — in-memory only)* |
+| **Default** | *(empty — falls back to `<system-temp>/librewxr-cache` with a one-time warning)* |
 | **Type** | string |
 
-**Required** in multi mode. Both the pipeline and renderer containers must share this directory via a named volume.
+When unset, the app uses a stable per-host fallback under the system temp directory and logs a one-time warning. That works, but the cache is not stable across reboots and, in Docker, both services must agree on the path.
 
-- Docker: set automatically via a named volume in `docker-compose.yml` (both modes — only the service layout differs between profiles).
+- Docker: set automatically via a named volume in `docker-compose.yml`; both the pipeline and renderer containers mount it.
 - Local dev: set to a local path like `./cache`.
 
 ---
@@ -1604,21 +1578,20 @@ URL path where the MCP HTTP transport is mounted inside the FastAPI app. Change 
 
 ---
 
-### Single-container mode
+### Small box (1-2 render workers)
 
-Each worker process holds its own copy of radar frames, NWP grids, coordinate caches, and tile caches. RAM grows under real traffic as caches fill up.
+The pipeline holds the shared radar / NWP / satellite / coordinate state; each render worker adds only its tile cache and Python interpreter overhead (~80 MB), so a 1-2 worker deployment tracks the pipeline footprint.
 
-| Configuration | Estimated RAM |
+| Coverage | Estimated RAM |
 |---|---|
 | CONUS + IFS only, 1 worker, 12 frames | ~3-4 GB |
 | CONUS + HRRR + IFS, 1 worker, 12 frames | ~4-5 GB |
 | ALL regions + IFS only, 1 worker, 12 frames | ~7-8 GB |
 | ALL regions + full NWP chain, 1 worker, 12 frames | ~9-10 GB |
-| ALL regions + full NWP chain, 2 workers, 12 frames | ~16-18 GB |
 
 > **Note:** The "ALL regions" rows include the always-on RRQPE global observed region — ~350 MB of frame store (12 × ~29 MB past frames) plus ~175 MB of nowcast-extrapolated frames, per [`self-host-sizing.md`](self-host-sizing.md).
 
-### Multi-worker mode
+### Larger deployments (8+ render workers)
 
 Render workers share radar/NWP/satellite state via memmap, so adding workers doesn't multiply the data RAM — only the per-worker tile cache and Python interpreter overhead (~80 MB).
 
@@ -1634,7 +1607,7 @@ Production observation on an 80-core / 32 GB rack with 32 workers: ~16 GB total 
 
 ## Example Configurations
 
-### Minimal (personal use, US only, single-container)
+### Minimal (personal use, US only)
 
 ```bash
 LIBREWXR_PUBLIC_URL=http://localhost:8080
@@ -1648,10 +1621,11 @@ LIBREWXR_EU_NWP_PROFILE=ifs           # IFS only over Europe (we don't show it)
 
 Docker memory limit: ~5 GB
 
-### Full coverage, personal / small server (single mode)
+### Full coverage, personal / small server (1 worker)
 
 ```bash
-COMPOSE_PROFILES=single               # one container, fetcher + renderer
+COMPOSE_PROFILES=multi                # pipeline + 1 render worker
+LIBREWXR_WORKERS=1                     # small box; override the 16-worker default
 LIBREWXR_PUBLIC_URL=https://radar.example.com
 LIBREWXR_ENABLED_REGIONS=ALL
 LIBREWXR_NA_NWP_SOURCE=hrrr
@@ -1663,7 +1637,7 @@ LIBREWXR_WRF_SMN_ENABLED=true
 
 Docker memory limit: ~10 GB
 
-### Production / multi mode (full coverage, busy public instance)
+### Production (full coverage, busy public instance)
 
 In `.env`:
 ```bash
@@ -1684,7 +1658,7 @@ Then run:
 docker compose up -d
 ```
 
-The mode automatically picks per-worker tile cache, coord cache, and render thread defaults (128 MB / 512 entries / 4 threads per worker). Bump `LIBREWXR_NWP_FETCH_CONCURRENCY` above the default 4 if your pipeline container has the RAM headroom.
+The profile automatically picks per-worker tile cache, coord cache, and render thread defaults (128 MB / 512 entries / 4 threads per worker). Bump `LIBREWXR_NWP_FETCH_CONCURRENCY` above the default 4 if your pipeline container has the RAM headroom.
 
 Defaults: pipeline cap 12 GB, render cap 18 GB, total ~16 GB RSS in practice.
 

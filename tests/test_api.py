@@ -141,7 +141,6 @@ def _make_test_app() -> tuple[FastAPI, FrameStore, TileCache, int, int]:
     routes.frame_store = store
     routes.tile_cache = cache
     routes.ecmwf_grid = None
-    routes.tile_warmer = None
     routes.nowcast_store = None
     routes.start_time = time.time()
     routes.enabled_regions = ["USCOMP"]

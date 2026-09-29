@@ -39,7 +39,6 @@ def _save_restore_routes_state():
         "ecmwf_grid": routes.ecmwf_grid,
         "nwp_grids": dict(routes.nwp_grids),
         "nwp_chain": routes.nwp_chain,
-        "tile_warmer": routes.tile_warmer,
         "nowcast_store": routes.nowcast_store,
         "radar_cache": routes.radar_cache,
         "radar_fetcher": routes.radar_fetcher,
@@ -121,7 +120,6 @@ def test_app(alerts_store):
     routes.icon_eu_grid = None
     routes.dmi_dini_grid = None
     routes.nwp_chain = None
-    routes.tile_warmer = None
     routes.nowcast_store = None
     routes.radar_cache = None
     routes.radar_fetcher = None

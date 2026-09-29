@@ -196,10 +196,8 @@ def _build_fetcher(store, tile_cache, radar_cache, region):
     fetcher._satellite_tasks = {}
     fetcher._carried_regions = {}
     fetcher._nowcast_generator = None
-    fetcher._warmer = None
     fetcher._radar_cache = radar_cache
     fetcher._task = None
-    fetcher._warm_task = None
     fetcher._enabled_regions = [region]
     fetcher._na_source = "iem"
     fetcher._ca_source = "msc"

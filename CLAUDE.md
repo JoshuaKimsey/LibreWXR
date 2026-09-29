@@ -16,20 +16,20 @@ LibreWXR is a self-hostable Rain Viewer API replacement. It fetches radar compos
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-python -m librewxr.main
+python -m librewxr.main   # auto-spawns the data pipeline as a child; render worker
 
 # Docker
 docker compose up --build
 ```
 
-Configuration is via environment variables prefixed `LIBREWXR_` or a `.env` file. See `src/librewxr/config.py` for all settings.
+Configuration is via environment variables prefixed `LIBREWXR_` or a `.env` file. See `src/librewxr/config.py` for all settings. LibreWXR runs as a data pipeline (`python -m librewxr.data_pipeline`) plus render workers (`python -m librewxr.main`). Bare metal, `main.py` auto-spawns the pipeline and runs one render worker unless `LIBREWXR_WORKERS` is set; `LIBREWXR_RENDER_ONLY=1` is only for dedicated render workers on an existing pipeline. See `docs/single-mode-migration.md`.
 
 ## Project Structure
 
 ```
 src/librewxr/
   main.py            # FastAPI app, lifespan, uvicorn entry point
-  data_pipeline.py   # Standalone fetcher process (multi-worker deployment)
+  data_pipeline.py   # Standalone fetcher process (the pipeline; auto-spawned by main.py)
   config.py          # Pydantic Settings (all LIBREWXR_* env vars)
   memory.py          # Memory pressure monitor
   api/
@@ -79,7 +79,6 @@ src/librewxr/
     satellite_renderer.py  # GMGSI VIS-over-LW composite tiles
     cache.py         # Byte-capped LRU tile cache
     coordinates.py   # Tile/region coordinate transforms
-    warmer.py        # Background tile pre-rendering
   colors/
     schemes.py       # Color scheme definitions
 ```
@@ -110,7 +109,7 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"`. Markers are defined in 
 - **Frame cadence:** 10 minutes, clock-aligned to match Rain Viewer
 - **RadarFrame.regions:** `dict[str, np.ndarray]` keyed by region name, uint8 dBZ encoding
 - **Projections:** RegionDef supports latlon, LCC (`proj="lcc"`), polar stereographic (`proj="stere"`), and LAEA
-- **Tile rendering:** Compute / present split — `compute_tile_geometry` runs the expensive part (region sampling, multi-region compositing with RRQPE as the always-on global observed bottom tier within 60S-70N, NWP fill / blend, noise-floor masking, optional snow mask) and returns a `TileGeometry` dataclass (uint8 values + optional snow_mask + blur metadata). `present_tile` runs the cheap per-request tail (LUT colorize, post-colorize Gaussian blur + crop, optional motion-arrow overlay, encode). The byte-capped LRU `TileCache` stores `TileGeometry` records keyed on `(ts, z, x, y, tile_size, smooth, snow)` — color scheme, output format, and arrow style are deliberately *not* in the key, so one cached entry serves every visual variant of a given viewport. The background tile warmer pre-computes geometry only (single mode only — in multi mode the fetcher and renderers are separate processes and no TileWarmer is instantiated; the empty-tile fast path and per-worker LRU caches cover the cold-render case). Gaussian smoothing radius auto-scales from the local Jacobian (`compute_blur_radius` in `librewxr/tiles/coordinates.py`, imported by the renderer) so coarse-grid sources (OPERA LAEA, MRMS, MMD) get more blur at high zoom without over-blurring fine sources at low zoom. Radar sampling under `smooth=1` is bilinear in both padded and unpadded paths
+- **Tile rendering:** Compute / present split — `compute_tile_geometry` runs the expensive part (region sampling, multi-region compositing with RRQPE as the always-on global observed bottom tier within 60S-70N, NWP fill / blend, noise-floor masking, optional snow mask) and returns a `TileGeometry` dataclass (uint8 values + optional snow_mask + blur metadata). `present_tile` runs the cheap per-request tail (LUT colorize, post-colorize Gaussian blur + crop, optional motion-arrow overlay, encode). The byte-capped LRU `TileCache` stores `TileGeometry` records keyed on `(ts, z, x, y, tile_size, smooth, snow)` — color scheme, output format, and arrow style are deliberately *not* in the key, so one cached entry serves every visual variant of a given viewport. There is no tile warmer: fetch and render run in separate processes, and the empty-tile fast path plus per-worker LRU caches cover the cold-render case. Gaussian smoothing radius auto-scales from the local Jacobian (`compute_blur_radius` in `librewxr/tiles/coordinates.py`, imported by the renderer) so coarse-grid sources (OPERA LAEA, MRMS, MMD) get more blur at high zoom without over-blurring fine sources at low zoom. Radar sampling under `smooth=1` is bilinear in both padded and unpadded paths
 - **ECMWF IFS:** 9km global precipitation from Open-Meteo S3; terminal model of the NWP chain (past-frame fill only poleward of the RRQPE band, in the 2-degree fringe excluded by RRQPE's coverage polygon, and when RRQPE declines); optical flow interpolation for 10-min frames; reference_time skip avoids redundant downloads
 - **Nowcasting:** Radar extrapolation + IFS blending with spatial feathering at radar boundaries; RRQPE joins the radar extrapolation like any radar region, and the models drive the nowcast blend tail
 - **Satellite:** NOAA GMGSI hourly global mosaic (LW + VIS), composited at render time as VIS-over-LW with a natural day/night terminator. Latitude grid is Mercator-spaced (`y=atanh(sin(lat))`) — `sample()` inverts Mercator on the queried lat. Disk-edge feathering smooths the ±72.7° cutoff. `LIBREWXR_SATELLITE_ENABLED=false` returns 503 + empty `satellite.infrared` array

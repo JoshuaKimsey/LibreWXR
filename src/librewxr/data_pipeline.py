@@ -15,8 +15,11 @@ Run with::
 
     python -m librewxr.data_pipeline
 
-``LIBREWXR_CACHE_DIR`` is required.  Without it there is nothing to
-share with the render workers and the script exits immediately.
+``librewxr.main`` auto-spawns this process when it is run without
+``LIBREWXR_RENDER_ONLY``.  ``LIBREWXR_CACHE_DIR`` is honoured when set;
+when unset a stable per-host tempdir fallback is used (with a one-time
+warning) so the pipeline and its render workers still agree on where
+``state.json`` lives.
 """
 from __future__ import annotations
 
@@ -28,7 +31,7 @@ from pathlib import Path
 
 import cv2
 
-from librewxr.config import settings
+from librewxr.config import resolve_cache_dir, settings
 from librewxr.data.alerts_fetcher import WMOAlertsFetcher
 from librewxr.data.alerts_store import AlertsStore
 from librewxr.data.coverage import (
@@ -76,12 +79,10 @@ _mask_save_task: asyncio.Task | None = None
 
 async def run_pipeline() -> None:
     """Construct the pipeline, run until signalled, then shut down cleanly."""
-    if not settings.cache_dir:
-        raise SystemExit(
-            "LIBREWXR_CACHE_DIR must be set when running the data pipeline — "
-            "render-only workers need a shared directory to read snapshots from."
-        )
-    cache_dir = Path(settings.cache_dir)
+    # resolve_cache_dir falls back to a stable per-host tempdir (with a
+    # one-time warning) when LIBREWXR_CACHE_DIR is unset, keeping the
+    # pipeline and its render workers on the same snapshot directory.
+    cache_dir = resolve_cache_dir(settings)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     # The enabled set includes every always-on contribution region (the
@@ -274,20 +275,23 @@ async def run_pipeline() -> None:
         satellite_contributions=satellite_contribs,
         nowcast_generator=nowcast_generator,
         storm_cell_generator=storm_cell_generator,
-        warmer=None,  # tile warming is single-mode only; multi mode has no warmer (the empty-tile fast path + per-worker LRU cover it)
         radar_cache=radar_cache,
         on_cycle_complete=on_cycle_complete,
     )
 
     alerts_fetcher = None
     if alerts_store is not None:
+        # An explicit LIBREWXR_ALERTS_CACHE_DIR takes TOP precedence; only
+        # when it is unset do alerts ride the same shared volume the
+        # snapshot does.
         alerts_cache = (
-            cache_dir if settings.cache_dir
-            else (Path(settings.alerts_cache_dir) if settings.alerts_cache_dir else None)
+            Path(settings.alerts_cache_dir)
+            if settings.alerts_cache_dir
+            else cache_dir
         )
         alerts_fetcher = WMOAlertsFetcher(
             store=alerts_store,
-            cache_dir=str(alerts_cache) if alerts_cache else None,
+            cache_dir=str(alerts_cache),
             interval=settings.alerts_fetch_interval,
             concurrency=settings.alerts_concurrency,
         )

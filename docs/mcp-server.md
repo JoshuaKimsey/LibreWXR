@@ -23,7 +23,7 @@ The HTTP transport is mounted inside the main LibreWXR FastAPI app as a sub-appl
 - **`LIBREWXR_MCP_ENABLED`** (default `true`) — master switch. When `false`, no MCP route is mounted and the app boots without any MCP lifespan overhead.
 - **`LIBREWXR_MCP_PATH`** (default `/mcp`) — the URL path where the MCP transport is mounted.
 
-The HTTP transport works in **both single and multi deployment modes** — it reads live data from the server's in-memory stores (single mode) or from the memmap snapshot (multi mode), whichever is active.
+The HTTP transport works in **every deployment** — it reads live data from the render worker's in-memory stores, which are refreshed from the data pipeline's memmap snapshot.
 
 ### Stateless transport
 
@@ -65,9 +65,8 @@ librewxr-mcp
 
 ### Requirements
 
-- **`LIBREWXR_CACHE_DIR`** must point to a directory where a running LibreWXR server (single OR multi mode) is writing `state.json`. The stdio process reads this snapshot and polls its mtime to stay in sync, so it always serves the same data the server just rendered.
-- In **single mode**, the server dumps `state.json` at the end of every fetch cycle via the `on_cycle_complete` hook wired in `main.py`. No extra configuration is needed.
-- In **multi mode**, the data pipeline sidecar owns the `state.json` snapshot — the render workers and the MCP stdio process all read the same file.
+- **`LIBREWXR_CACHE_DIR`** must point to a directory where the data pipeline is writing `state.json`. The stdio process reads this snapshot and polls its mtime to stay in sync, so it always serves the same data the server just rendered.
+- The data pipeline owns the `state.json` snapshot — render workers and the MCP stdio process all read the same file. `python -m librewxr.main` auto-spawns the pipeline as a child process when run without `LIBREWXR_RENDER_ONLY`, so the snapshot is produced automatically.
 
 ### Example Claude Desktop configuration
 
@@ -252,13 +251,13 @@ The catalog returns `404 Not Found` when MCP is disabled (`LIBREWXR_MCP_ENABLED=
 
 ## Deployment Notes
 
-### Single-mode state.json enabler
+### state.json is written by the data pipeline
 
-In single mode, the server writes `state.json` to `LIBREWXR_CACHE_DIR` at the end of each fetch cycle. This is handled by the `on_cycle_complete` hook wired in `main.py`. As long as `LIBREWXR_CACHE_DIR` is set (it is required for the stdio transport), the snapshot is produced automatically — no extra configuration.
+The data pipeline writes `state.json` to `LIBREWXR_CACHE_DIR` at the end of each fetch cycle. `python -m librewxr.main` auto-spawns the pipeline as a child process when run without `LIBREWXR_RENDER_ONLY`, so the snapshot is produced automatically. As long as `LIBREWXR_CACHE_DIR` is set (it is required for the stdio transport), no extra configuration is needed.
 
 ### stdio transport must see the same cache directory
 
-The stdio process (`python -m librewxr.mcp` / `librewxr-mcp`) reads `state.json` from `LIBREWXR_CACHE_DIR`. **This must be the same directory** the running server writes to. In Docker, this means both the server container and the MCP stdio process must use the same volume mount. In a local dev setup, point both at the same path on disk.
+The stdio process (`python -m librewxr.mcp` / `librewxr-mcp`) reads `state.json` from `LIBREWXR_CACHE_DIR`. **This must be the same directory** the data pipeline writes to. In Docker, this means both the pipeline container and the MCP stdio process must use the same volume mount. In a local dev setup, point both at the same path on disk.
 
 ### What the tools can see
 

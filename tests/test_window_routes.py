@@ -60,7 +60,7 @@ def _fixture_synthetic_frame(timestamp: int) -> RadarFrame:
 
 _ROUTE_STATE_NAMES = (
     "frame_store", "tile_cache", "ecmwf_grid", "nwp_chain",
-    "precip_mask", "tile_warmer", "nowcast_store", "shared_tile_store",
+    "precip_mask", "nowcast_store", "shared_tile_store",
     "tile_request_tracker", "storm_cell_store", "satellite_grids",
     "start_time", "enabled_regions", "_latest_ts_cache",
 )
@@ -94,7 +94,6 @@ def client():
         routes.ecmwf_grid = None
         routes.nwp_chain = None
         routes.precip_mask = None
-        routes.tile_warmer = None
         routes.nowcast_store = None
         routes.shared_tile_store = None
         routes.tile_request_tracker = None

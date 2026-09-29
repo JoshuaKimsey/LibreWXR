@@ -35,7 +35,6 @@ _LOG_TAGS = {
     "librewxr.sources.regional.caribbean.nwp.arome_antilles.grid": "arome-ant",
     "librewxr.sources.regional.south_america.nwp.wrf_smn.grid": "wrf-smn",
     "librewxr.data.nowcast": "nowcast",
-    "librewxr.tiles.warmer": "warmer",
     "librewxr.tiles.cache": "tiles",
     "librewxr.tiles.renderer": "tiles",
     "librewxr.tiles.satellite_renderer": "tiles",

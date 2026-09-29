@@ -47,9 +47,8 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Weather alerts (WMO CAP + NWS)** — global weather alerts polled every 5 minutes from severeweather.wmo.int, with MeteoAlarm geocodes for European polygon resolution. US alerts come directly from the NWS API, with zone-based alerts (e.g. Tornado Watches) resolved to zone polygons at ingest. Surfaced through a Rain Viewer-extension alerts API (`/v2/alerts/...`). Configurable via `LIBREWXR_ALERTS_ENABLED`
 - **Snow detection** — per-pixel snow/rain classification. Regional NWP sources classify natively from their own 2-metre temperature field (HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, ICON-EU, JMA MSM); ECMWF IFS snowfall ratio fills everywhere else
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
-- **Tile cache warming (single mode)** — background pre-rendering for smooth animation playback
-- **Multi-worker tile-server split** — optional production deployment splits the data pipeline from a pool of render workers that share state via memmap files. Lets every core actually do work instead of being GIL-bound at one. Pick the mode with `COMPOSE_PROFILES=multi` in `.env` (vs `single`)
-- **Persistent disk cache** — radar / NWP / satellite / alerts data are cached to disk with atomic writes, surviving restarts and container recreation without re-downloading from upstream. Configurable via `LIBREWXR_CACHE_DIR` (required in multi mode)
+- **Pipeline + render-worker architecture** — a data pipeline process fetches all radar / NWP / satellite / alerts data while one or more render workers serve tiles from a shared memmap snapshot. Split across processes so every core can render in parallel instead of being GIL-bound at one. `COMPOSE_PROFILES=multi` is the shipped default; a legacy `single` profile maps to one render worker with the legacy-single defaults
+- **Persistent disk cache** — radar / NWP / satellite / alerts data are cached to disk with atomic writes, surviving restarts and container recreation without re-downloading from upstream. Configurable via `LIBREWXR_CACHE_DIR` (a per-host tempdir fallback is used, with a warning, when unset)
 - **Memory-efficient storage** — radar frames, NWP grids, satellite frames, and nowcast data are all backed by memory-mapped files, letting the OS page cache manage physical RAM instead of pinning data on the heap. Pages are reclaimed under memory pressure and re-faulted on access
 - **Smart fetch optimization** — radar sources skip re-downloading frames already in memory (only ~1 of 12 frames is new each cycle), NWP models skip redundant S3 fetches when the model run hasn't changed, and parallel NWP fetches are concurrency-capped via `LIBREWXR_NWP_FETCH_CONCURRENCY` so peak transient RAM stays bounded
 - **Health endpoint** — `/health` for monitoring uptime, per-component memory breakdown, frame count, NWP chain status, alerts status, MCP mount state, and cache state, plus a `cluster` aggregation of per-worker stats in multi-worker deployments
@@ -173,35 +172,37 @@ surfaced under `/health` for verification.
 
 ## Quick Start
 
-LibreWXR runs in either of two deployment modes — pick the one that
-matches your hardware. See [Deployment](#deployment) for the full
-comparison.
+LibreWXR always runs as a data pipeline plus one or more render workers.
+Docker Compose starts both services for you; the only thing to choose is
+how many render workers to run. See [Deployment](#deployment) for the
+full architecture.
 
 ### Docker
 
-A single `docker-compose.yml` covers both deployment shapes — pick which
-one runs by setting `COMPOSE_PROFILES` in your `.env`:
-
-| Mode | When to use | Set in `.env` |
-|------|-------------|---------------|
-| `single` | Laptops, small VPSes, home servers, anywhere a few GB of RAM is plenty. One process handles everything. | `COMPOSE_PROFILES=single` |
-| `multi`  | Any deployment with 8+ cores and meaningful traffic. The data pipeline and N tile renderers run as separate containers sharing state via memmap files — bypasses the Python GIL so the whole rack can render in parallel. | `COMPOSE_PROFILES=multi` |
+`docker-compose.yml` starts a `pipeline` service (fetches all data and
+writes a shared snapshot) and a `renderer` service (serves tiles). Set
+`COMPOSE_PROFILES=multi` in your `.env`:
 
 ```bash
 git clone https://github.com/JoshuaKimsey/LibreWXR.git
 cd LibreWXR
 cp .env.example .env
-# Edit .env — pick COMPOSE_PROFILES=single or multi (default: single)
+# Edit .env — set COMPOSE_PROFILES=multi and size LIBREWXR_WORKERS to your box
 docker compose up -d
 ```
 
-The app reads the same `COMPOSE_PROFILES` value to pick sensible
-per-mode defaults for worker counts, cache sizes, thread pools, and
-memory limits — so switching modes is a one-line edit. Multi-mode
-defaults target an 80-core / 32 GB rack (16 render workers, 12 GB
-pipeline cap, 18 GB render cap). Tune `LIBREWXR_WORKERS` and the
+The app reads `COMPOSE_PROFILES` to pick sensible defaults for worker
+counts, cache sizes, thread pools, and memory limits. The multi defaults
+target an 80-core / 32 GB rack (16 render workers, 12 GB pipeline cap,
+18 GB render cap). Tune `LIBREWXR_WORKERS` and the
 `LIBREWXR_PIPELINE_MEMORY` / `LIBREWXR_RENDER_MEMORY` env vars in
-`.env` for smaller hardware.
+`.env` for smaller hardware — for a laptop or small VPS,
+`LIBREWXR_WORKERS=1` or `2` is plenty.
+
+`COMPOSE_PROFILES=single` still works as a legacy compatibility alias: it
+starts the same two services with 1 render worker and the legacy-single
+cache defaults, and logs a startup warning. See
+[Single-Mode Migration](docs/single-mode-migration.md).
 
 ### Manual
 
@@ -220,15 +221,18 @@ cp .env.example .env
 python -m librewxr.main
 ```
 
-The server starts at `http://localhost:8080` by default. It begins serving tiles immediately; radar data loads in the background after startup.
+The server starts at `http://localhost:8080` by default. Run with no
+flags, `main.py` auto-spawns the data pipeline as a child process and
+runs this process as a render worker (1 uvicorn worker unless
+`LIBREWXR_WORKERS` is set). It begins serving tiles immediately; radar
+data loads in the background after startup.
 
-For multi mode without Docker, set `LIBREWXR_MODE=multi` (which picks
-the right per-mode defaults), run the data pipeline as a sidecar, and
-start the render workers with `LIBREWXR_RENDER_ONLY=1`:
+For dedicated multi-process operation — an existing pipeline plus
+separate render workers — run the data pipeline as a sidecar and start
+the render workers with `LIBREWXR_RENDER_ONLY=1`:
 
 ```bash
-export LIBREWXR_MODE=multi
-export LIBREWXR_CACHE_DIR=/path/to/shared/cache    # required, shared
+export LIBREWXR_CACHE_DIR=/path/to/shared/cache    # recommended, shared
 
 # Terminal 1 — data pipeline
 python -m librewxr.data_pipeline
@@ -238,7 +242,8 @@ LIBREWXR_RENDER_ONLY=1 python -m librewxr.main
 ```
 
 Both processes need the same `LIBREWXR_CACHE_DIR` pointed at a shared
-directory.
+directory. When it is unset, the app falls back to a per-host tempdir
+(`<tmp>/librewxr-cache`) with a one-time warning.
 
 ### Auto-updating a Docker deployment
 
@@ -484,7 +489,7 @@ The endpoint is mounted at `LIBREWXR_MCP_PATH` (default `/mcp`) when the `[mcp]`
 
 Two transport modes:
 - **HTTP (primary, default, for n8n / hosted agents):** POST a JSON-RPC `initialize` request to `<public_url>/mcp`, then call tools via JSON-RPC `tools/call`. The HTTP transport is stateless — each request is self-contained, no `Mcp-Session-Id` is required, and any render worker can serve any request (what makes multi-worker deployments behind a load balancer work).
-- **stdio (for local agents like Claude Desktop):** run the `librewxr-mcp` console entry. Requires `LIBREWXR_CACHE_DIR` pointing at the same shared volume a running LibreWXR server (single or multi mode) writes `state.json` into.
+- **stdio (for local agents like Claude Desktop):** run the `librewxr-mcp` console entry. Requires `LIBREWXR_CACHE_DIR` pointing at the same shared volume the data pipeline (auto-spawned by `librewxr.main`) writes `state.json` into.
 
 See [`docs/mcp-server.md`](docs/mcp-server.md) for full install instructions, transport configuration, example client configs (Claude Desktop, n8n), and the tool reference.
 
@@ -546,22 +551,21 @@ the inline comments in [`src/librewxr/config.py`](src/librewxr/config.py).
 | `LIBREWXR_ALERTS_ENABLED` | `true` | Enable WMO CAP weather alerts |
 | `LIBREWXR_ALERTS_FETCH_INTERVAL` | `300` | Alerts refresh interval in seconds |
 | **Tile rendering** | | |
-| `LIBREWXR_TILE_CACHE_MB` | `200` (128 in multi mode) | Max tile cache size in MB per worker (byte-capped) |
-| `LIBREWXR_COORD_CACHE_SIZE` | `2048` (512 in multi mode) | Coordinate cache entries per cache (lower = less RAM) |
+| `LIBREWXR_TILE_CACHE_MB` | `128` (200 in the legacy-single profile) | Max tile cache size in MB per worker (byte-capped) |
+| `LIBREWXR_COORD_CACHE_SIZE` | `512` (2048 in the legacy-single profile) | Coordinate cache entries per cache (lower = less RAM) |
 | `LIBREWXR_SMOOTH_RADIUS` | `1.0` | Gaussian blur radius (0 = disabled) |
 | `LIBREWXR_NOISE_FLOOR_DBZ` | `10.0` | Min dBZ to display (-32 = disabled) |
 | `LIBREWXR_DESPECKLE_MIN_NEIGHBORS` | `3` | Speckle filter strength (0 = disabled) |
 | `LIBREWXR_WEBP_QUALITY` | `100` | WebP quality (100 = lossless default, 1-99 = lossy) |
-| `LIBREWXR_WARMER_THREADS` | *mode* | Background tile warming pool size (single: 0 = CPU count - 1; multi: 4 sizes the request-executor pool, not warming — warming is single-mode only) |
-| `LIBREWXR_WARM_COORD_ZOOM` | *mode* | Background pre-warm of coordinate caches up to this zoom at startup (single: 6; multi: no eager warm; 0 = mode default, negative = disabled, positive = force that zoom) |
-| `LIBREWXR_WARM_OVERVIEW_ZOOM` | `4` | Pre-render overview tiles up to this zoom after each fetch (single mode only; -1 = disable) |
+| `LIBREWXR_RENDER_THREADS` | `4` (0 = auto in the legacy-single profile) | Per-render-worker geometry compute pool size. Legacy alias: `LIBREWXR_WARMER_THREADS` |
+| `LIBREWXR_WARM_COORD_ZOOM` | *profile* | Background pre-warm of coordinate caches up to this zoom at startup (multi: no eager warm; legacy-single: 4; 0 = profile default, negative = disabled, positive = force that zoom) |
 | **Deployment mode + workers** | | |
-| `COMPOSE_PROFILES` | `single` | `single` or `multi` — picks compose services AND app-side per-mode defaults |
-| `LIBREWXR_MODE` | *(from `COMPOSE_PROFILES`)* | Override mode when not using docker compose |
-| `LIBREWXR_WORKERS` | *mode* | Uvicorn worker processes (single: 1; multi: 16) |
+| `COMPOSE_PROFILES` | `multi` | The deployment shape. A legacy `single` value maps to 1 render worker with the legacy-single cache defaults and logs a warning |
+| `LIBREWXR_MODE` | *(from `COMPOSE_PROFILES`)* | Override `COMPOSE_PROFILES` when not using docker compose; accepts `multi` (legacy `single` alias) |
+| `LIBREWXR_WORKERS` | *profile* | Uvicorn render workers (multi: 16; legacy-single: 1) |
 | `LIBREWXR_MEMORY_LIMIT_MB` | `0` | Memory limit in MB (0 = auto-detect from Docker/cgroup) |
-| `LIBREWXR_CACHE_DIR` | *(empty)* | Persistent cache directory. **Required** in multi mode. Empty = in-memory only |
-| **Multi-mode tile-server split** (set automatically by compose) | | |
+| `LIBREWXR_CACHE_DIR` | *(empty)* | Persistent cache directory shared by pipeline + renderers. Empty = per-host tempdir fallback with a warning |
+| **Render-only workers** (set automatically by compose) | | |
 | `LIBREWXR_RENDER_ONLY` | `false` | When `1`, skip fetcher / NWP / satellite init and only render tiles from the snapshot |
 | `LIBREWXR_STATE_POLL_INTERVAL` | `1.0` | Seconds between state.json mtime polls in render-only mode |
 | `LIBREWXR_STATE_WAIT_TIMEOUT` | `300` | Seconds to wait for the first state.json on cold start (0 = forever) |
@@ -579,39 +583,18 @@ See `.env.example` for detailed descriptions and tuning guidance for each settin
 
 ## Deployment
 
-LibreWXR supports two deployment modes — pick by setting
-`COMPOSE_PROFILES` in `.env` (Docker) or `LIBREWXR_MODE` (manual).
-
-### Single-container (personal / small-scale)
-
-One process handles everything: fetching, nowcast generation, tile
-rendering, and the HTTP server.
-
-```
-                       ┌────────────────────────────────────────┐
-                       │   librewxr (one asyncio process)       │
-[radar / NWP / sat /   │                                        │
- alerts upstreams]   ──┼──> [Fetchers + memmap stores]          ├──> tiles + API
-                       │            │                           │
-                       │            └──> [Tile Renderer +       │
-                       │                  uvicorn HTTP server]  │
-                       └────────────────────────────────────────┘
-```
-
-Best for laptops, small VPSes, home servers — anywhere a few GB of RAM
-is plenty and you don't need to scale across cores. Run with:
-
-```bash
-docker compose up -d
-```
-
-### Multi-worker (production / multi-core)
-
-The data pipeline and tile renderers run as separate containers,
+LibreWXR runs as a data pipeline plus one or more render workers,
 sharing state via memmap files + a `state.json` snapshot on a shared
-volume. The render side scales to N worker processes that each map the
-same files, so 32 workers don't cost 32× the radar/NWP RAM — just the
-per-worker tile cache and Python interpreter overhead.
+volume. Docker Compose starts both for you; the `pipeline` and
+`renderer` services both belong to the `multi` profile (a legacy
+`single` profile starts the same pair).
+
+### Pipeline + render workers
+
+The data pipeline fetches and stores everything; the render side scales
+to N worker processes that each map the same files, so 32 workers don't
+cost 32× the radar/NWP RAM — just the per-worker tile cache and Python
+interpreter overhead.
 
 ```
 ┌────────────────────────────────────────┐    ┌────────────────────────────────────────┐
@@ -632,11 +615,12 @@ per-worker tile cache and Python interpreter overhead.
                                   (memmap files + state.json)
 ```
 
-This is the right choice for any deployment with 8+ cores and meaningful
-traffic — the single-process renderer gets GIL-bound at one core no
-matter how many threads its pool has, but multi mode hands one core to
-each render process. Production observation on an 80-core / 32 GB rack:
-~16 GB total RSS, all cores active under load. Enable with:
+This is the right architecture for any deployment — the pipeline/render
+split hands one core to each render process instead of serializing the
+render path through a single process's GIL, and a fetch crash in the
+pipeline no longer takes the tile server down. Production observation on
+an 80-core / 32 GB rack: ~16 GB total RSS, all cores active under load.
+Run with:
 
 ```bash
 # In .env
@@ -646,24 +630,19 @@ COMPOSE_PROFILES=multi
 docker compose up -d
 ```
 
+For a laptop, small VPS, or home server, keep the same architecture but
+run fewer render workers (`LIBREWXR_WORKERS=1` or `2`). Bare metal,
+`python -m librewxr.main` auto-spawns the pipeline and runs one render
+worker unless `LIBREWXR_WORKERS` is set.
+
 ### RAM requirements
 
-**Single-container mode** — each worker process holds its own copy of
-radar frames, NWP grids, coordinate caches, and tile caches. RAM usage
-grows under real traffic as caches fill up.
-
-| Configuration | Estimated RAM |
-|---|---|
-| CONUS + IFS only, 1 worker, 12 frames | ~3-4 GB |
-| CONUS + HRRR + IFS, 1 worker, 12 frames | ~4-5 GB |
-| ALL regions + IFS only, 1 worker, 12 frames | ~7-8 GB |
-| ALL regions + full NWP chain, 1 worker, 12 frames | ~9-10 GB |
-| ALL regions + full NWP chain, 2 workers, 12 frames | ~16-18 GB |
-
-**Multi mode** shares the radar / NWP / satellite / alert state across
+The architecture shares the radar / NWP / satellite / alert state across
 all render workers via memmap, so adding workers doesn't multiply the
-data RAM — only the per-worker tile cache (default 128 MB in multi
-mode) and Python interpreter overhead (~80 MB).
+data RAM — only the per-worker tile cache (default 128 MB) and Python
+interpreter overhead (~80 MB). A small-box deployment runs 1-2 render
+workers and lands near the old one-process footprint (pipeline RAM
+plus a little per-worker overhead).
 
 | Configuration | Pipeline RAM | Render RAM | Total |
 |---|---|---|---|
@@ -676,12 +655,12 @@ total RSS across both containers.
 
 ### Scaling
 
-| Users | Mode | Workers | RAM (ALL regions + full NWP) |
-|---|---|---|---|
-| 1-5 (personal) | single | 1 | ~9-10 GB |
-| 5-50 (small community) | single | 1-2 (with CDN) | ~9-18 GB |
-| 50-500 (medium) | multi | 8-16 | ~12-16 GB |
-| 500+ (large) | multi | 24-32+ (with CDN) | ~16-20 GB |
+| Users | Workers | RAM (ALL regions + full NWP) |
+|---|---|---|
+| 1-5 (personal) | 1 | ~9-10 GB |
+| 5-50 (small community) | 1-2 (with CDN) | ~9-18 GB |
+| 50-500 (medium) | 8-16 | ~12-16 GB |
+| 500+ (large) | 24-32+ (with CDN) | ~16-20 GB |
 
 Tiles are served with `Cache-Control: public, max-age=300`, so any caching reverse proxy (nginx, Cloudflare, etc.) will work out of the box for high-traffic deployments. A CDN like Cloudflare (free tier works) absorbs most tile requests at the edge, meaning a single worker can serve far more users than the table above suggests. Using a Cloudflare Tunnel also provides free HTTPS with no certificate management. For most self-hosting scenarios, 1 worker behind Cloudflare is sufficient.
 
@@ -704,7 +683,7 @@ Tiles are served with `Cache-Control: public, max-age=300`, so any caching rever
 [ICON-EU]          ──┼───┤    (per-source feather +   │
 [AROME-OM family]  ──┤   │     specificity-first      │
 [WRF-SMN]          ──┤   │     blending)              ├──> [FastAPI + Tile Renderer]
-[JMA MSM]          ──┤   │                            │      (LRU cache; tile warmer in single mode only)
+[JMA MSM]          ──┤   │                            │      (per-worker LRU cache)
 [ECMWF IFS]        ──┘   │                            │
                           │                            │
                           └─> [Optical Flow Interp] ───┤      [Satellite Tile Renderer]

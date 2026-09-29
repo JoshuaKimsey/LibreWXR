@@ -1,37 +1,46 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
+import logging
 import math
+import tempfile
+from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
+logger = logging.getLogger(__name__)
 
-# Per-mode defaults for settings whose sensible value depends on whether
-# LibreWXR is running as one container (single) or split into a pipeline
-# + N renderer workers (multi).  Anything the user leaves at the sentinel
-# value 0 is filled in from here by ``_apply_mode_defaults`` below.
-# Multi-mode values are PER WORKER — total RAM scales with workers count.
+
+# Per-deployment defaults for settings whose sensible value depends on the
+# deployment shape.  Single mode (one container, fetcher + renderer in the
+# same process) was removed: a legacy ``single`` token now runs the multi
+# architecture with a 1-worker "legacy_single" profile so existing
+# single-mode deployments keep their old resource footprint.  Anything the
+# user leaves at the sentinel value 0 is filled in from here by
+# ``_apply_mode_defaults`` below.  Multi values are PER WORKER — total RAM
+# scales with workers count.
 _MODE_DEFAULTS: dict[str, dict[str, int]] = {
-    "single": {
+    "legacy_single": {
         "workers": 1,
         "tile_cache_mb": 200,
         "coord_cache_size": 2048,
         "coord_store_mb": 4096,
-        "warmer_threads": 0,  # 0 keeps the "auto = CPU-1" behaviour in single mode
         "warm_coord_zoom": 4,
+        "render_threads": 0,
     },
     "multi": {
         "workers": 16,
         "tile_cache_mb": 128,
         "coord_cache_size": 512,
         "coord_store_mb": 8192,
-        "warmer_threads": 4,
         # No eager coordinate warm in render workers: they serve immediately
         # from the on-disk state snapshot and coordinate entries load lazily
         # through the shared coord store.  A negative value here is the
         # "disabled" resolution (see warm_coord_zoom below).
         "warm_coord_zoom": -1,
+        "render_threads": 4,
     },
 }
 
@@ -64,18 +73,24 @@ class Settings(BaseSettings):
     # File capturing WARNING+ records (rotated 5 MB x 3); empty = disabled
     log_file: str = "logs/librewxr.log"
     # Deployment shape.  Drives sensible defaults for workers, tile cache,
-    # coord cache, and warmer threads via ``_apply_mode_defaults``.
-    #   single  - one container, fetcher + renderer in the same process
-    #   multi   - pipeline sidecar + N renderer workers sharing memmap state
-    # Reads LIBREWXR_MODE first, then falls back to Docker Compose's
-    # COMPOSE_PROFILES so docker users only need to set one env var.  Any
-    # token other than "multi" resolves to "single".
+    # coord cache, and warm_coord_zoom via ``_apply_mode_defaults``.
+    #   multi  - pipeline sidecar + N renderer workers sharing memmap state
+    # Single mode was removed; a legacy "single" token now resolves to
+    # "multi" with a 1-worker, single-flavoured defaults profile (flagged
+    # via ``legacy_single`` below).  Reads LIBREWXR_MODE first, then falls
+    # back to Docker Compose's COMPOSE_PROFILES so docker users only need
+    # to set one env var.  Any token other than "single" resolves to
+    # "multi".
     mode: Literal["single", "multi"] = Field(
-        "single",
+        "multi",
         validation_alias=AliasChoices("LIBREWXR_MODE", "COMPOSE_PROFILES"),
     )
-    # All six below use 0 as a "use mode default" sentinel.  Set an
-    # explicit value to override the per-mode default in _MODE_DEFAULTS.
+    # Internal migration flag: set when a removed single-mode value is
+    # detected in LIBREWXR_MODE / COMPOSE_PROFILES.  Not intended for
+    # direct user configuration.
+    legacy_single: bool = False
+    # All five below use 0 as a "use mode default" sentinel.  Set an
+    # explicit value to override the per-deployment default in _MODE_DEFAULTS.
     tile_cache_mb: int = 0  # Max tile cache size in MB (byte-capped); 0 = mode default
     coord_cache_size: int = 0  # LRU entries per coordinate cache; 0 = mode default
     # Shared on-disk coordinate-array store (see data/coord_store.py).  The
@@ -84,15 +99,15 @@ class Settings(BaseSettings):
     # each array once globally instead of once per worker.  Best-effort: any
     # store failure falls back to the in-process compute path.
     coord_store_enabled: bool = True  # Kill switch; False bypasses the store entirely
-    coord_store_mb: int = 0  # Coord-store size cap in MB; 0 = mode default (single 1024, multi 8192)
+    coord_store_mb: int = 0  # Coord-store size cap in MB; 0 = deployment default (legacy_single 4096, multi 8192)
     # Shared on-disk encoded-tile store (see tiles/shared_tile_store.py).
     # Multi-mode only: render workers publish / read encoded tile bytes on
     # the shared cache volume so one worker's encode serves all workers.
     # Content-versioned keys (built by the wiring) make stale entries
     # unreachable between fetch cycles.  Semantics:
     #   None          - auto: render-only workers default to a 2048 MB
-    #                   budget; single-mode deployments leave the store
-    #                   disabled (the wiring decides).
+    #                   budget; legacy 1-worker deployments leave the
+    #                   store disabled (the wiring decides).
     #   0 or negative - disabled.
     #   positive      - explicit MB budget for the shared encoded-tile
     #                   store (multi-mode only).
@@ -103,18 +118,25 @@ class Settings(BaseSettings):
     noise_floor_dbz: float = 10.0  # Minimum dBZ to display; lower values are zeroed out
     despeckle_min_neighbors: int = 3  # Min non-zero neighbors (of 8) to keep a pixel; 0 to disable
     webp_quality: int = 100  # WebP quality: 100 = lossless (default), 1-99 = lossy at that quality
-    workers: int = 0  # Number of uvicorn worker processes; 0 = mode default
-    warmer_threads: int = 0  # Render thread pool size; 0 = mode default (auto in single, 4 in multi) (sizes the request-executor pool in multi mode; the warmer itself is single-mode only)
+    workers: int = 0  # Number of uvicorn worker processes; 0 = deployment default
+    # Per-worker render compute pool size (the thread pool that runs
+    # per-tile geometry computes in a render worker); 0 = mode default
+    # (legacy_single 0 = auto, resolved by the consumer; multi 4).  The
+    # legacy LIBREWXR_WARMER_THREADS name is still accepted as an alias.
+    render_threads: int = Field(
+        0,
+        validation_alias=AliasChoices(
+            "LIBREWXR_RENDER_THREADS", "LIBREWXR_WARMER_THREADS",
+        ),
+    )
     # Pre-warm coordinate caches up to this zoom as a background task at
-    # startup (0 = mode default: single warms to 6, multi does no eager
-    # warm — see _MODE_DEFAULTS).  Any negative value disables the warm
-    # entirely in either mode; any positive value forces that zoom in
-    # either mode.  The warm never blocks the server from accepting
+    # startup (0 = deployment default: legacy_single warms to 4, multi does
+    # no eager warm — see _MODE_DEFAULTS).  Any negative value disables the
+    # warm entirely in either profile; any positive value forces that zoom
+    # in either profile.  The warm never blocks the server from accepting
     # requests, and coordinate wrappers fill unwarmed entries on demand
     # via the shared on-disk store either way.
     warm_coord_zoom: int = 0
-    warm_overview_zoom: int = 4  # Pre-render ALL tiles up to this zoom on each fetch (-1 = disable) (single mode only; no-op in multi mode — the empty-tile fast path covers it)
-    warm_overview_zoom_regional: int = 6  # Pre-render tiles overlapping enabled regions up to this zoom (-1 = disable) (single mode only; no-op in multi mode — the empty-tile fast path covers it)
     enabled_regions: str = "ALL"  # Region spec: CONUS, US, ALL, or comma-separated region names
     # Global radar-layer toggle.  When False, no radar provider gets
     # instantiated — every MRMS / IEM / MSC / OPERA / MARN / CWA / MMD
@@ -548,25 +570,40 @@ class Settings(BaseSettings):
     radar_fetch_concurrency: int = 8
     cors_origins: list[str] = ["*"]
 
-    @field_validator("mode", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _normalize_mode(cls, v):
-        """Parse COMPOSE_PROFILES-style comma lists down to a single mode token.
+    def _resolve_mode(cls, data):
+        """Resolve LIBREWXR_MODE / COMPOSE_PROFILES into the deployment shape.
 
-        COMPOSE_PROFILES is comma-separated (e.g. ``"multi,manual"``); the
-        ``manual`` profile is used for one-off services like clear-cache,
-        so we only care whether ``multi`` is in the list.  Anything else
-        falls back to ``single`` rather than failing Literal validation —
-        unrelated values in COMPOSE_PROFILES shouldn't crash startup.
+        Single mode was removed.  A ``single`` token now selects the multi
+        architecture with the legacy 1-worker defaults profile, flagged via
+        ``legacy_single`` so ``_apply_mode_defaults`` can emit the migration
+        warning.  COMPOSE_PROFILES is comma-separated (e.g. ``"multi,manual"``);
+        the ``manual`` profile is used for one-off services like clear-cache,
+        so we only care whether ``single`` or ``multi`` is in the list.
+        Unknown values resolve to ``multi`` rather than failing Literal
+        validation — unrelated values in COMPOSE_PROFILES shouldn't crash
+        startup.  Pydantic-settings hands this before-validator the raw source
+        dict keyed by the validation alias (``LIBREWXR_MODE``) when sourced
+        from the environment, and by ``mode`` for direct keyword construction,
+        so both are handled.
         """
-        if not isinstance(v, str):
-            return v
-        tokens = {t.strip() for t in v.split(",") if t.strip()}
-        if "multi" in tokens:
-            return "multi"
-        if "single" in tokens:
-            return "single"
-        return "single"
+        if not isinstance(data, dict):
+            return data
+        raw = data.get(
+            "mode",
+            data.get("LIBREWXR_MODE", data.get("COMPOSE_PROFILES")),
+        )
+        data.pop("mode", None)
+        data.pop("LIBREWXR_MODE", None)
+        data.pop("COMPOSE_PROFILES", None)
+        if isinstance(raw, str):
+            tokens = {t.strip() for t in raw.split(",") if t.strip()}
+        else:
+            tokens = set()
+        data["LIBREWXR_MODE"] = "multi"
+        data["legacy_single"] = "multi" not in tokens and "single" in tokens
+        return data
 
     @field_validator("log_level")
     @classmethod
@@ -577,10 +614,19 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _apply_mode_defaults(self):
-        """Fill in mode-appropriate defaults for any setting left at 0."""
-        defaults = _MODE_DEFAULTS[self.mode]
+        """Fill in deployment-appropriate defaults for any setting left at 0."""
+        profile = "legacy_single" if self.legacy_single else "multi"
+        defaults = _MODE_DEFAULTS[profile]
+        if self.legacy_single:
+            logger.warning(
+                "LIBREWXR_MODE/COMPOSE_PROFILES=single: single mode was removed. "
+                "Running the multi-worker architecture with 1 worker and legacy "
+                "single-mode cache defaults. See docs/single-mode-migration.md. "
+                "To keep the old single mode permanently, pin your checkout to "
+                "the git tag 'single-mode-final'."
+            )
         for name, value in defaults.items():
-            if getattr(self, name) == 0:
+            if hasattr(self, name) and getattr(self, name) == 0:
                 setattr(self, name, value)
         return self
 
@@ -610,6 +656,33 @@ class Settings(BaseSettings):
         """Resolve the region spec into individual region names."""
         from librewxr.data.regions import resolve_regions
         return resolve_regions(self.enabled_regions)
+
+
+@lru_cache(maxsize=1)
+def _warn_missing_cache_dir(path: str) -> None:
+    """Emit the missing-LIBREWXR_CACHE_DIR warning exactly once per path."""
+    logger.warning(
+        "LIBREWXR_CACHE_DIR is unset; using %s for the persistent cache. "
+        "Set LIBREWXR_CACHE_DIR explicitly to keep a stable cache across "
+        "restarts.",
+        path,
+    )
+
+
+def resolve_cache_dir(settings) -> Path:
+    """Return the effective persistent cache directory.
+
+    ``settings.cache_dir`` is honoured when set; otherwise a stable
+    per-host fallback under the system temp directory is returned and a
+    one-time warning is logged.  The ``cache_dir`` field itself is left
+    untouched, so callers that rely on its empty-means-in-memory semantics
+    are unaffected.
+    """
+    if settings.cache_dir:
+        return Path(settings.cache_dir)
+    fallback = Path(tempfile.gettempdir()) / "librewxr-cache"
+    _warn_missing_cache_dir(str(fallback))
+    return fallback
 
 
 settings = Settings()

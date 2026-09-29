@@ -21,33 +21,35 @@ complete regional NWP chain plus IFS, GMGSI satellite, nowcast, and
 weather alerts - serving real public traffic at ~15 requests/s average
 (~1.3M requests/day) with a long-tail request distribution.
 
-## Deployment Shape: Single vs Multi
+## Deployment Shape
 
-- **Single mode** is right for personal or small-scope deployments: one
-  or two radar regions, a few NWP sources, behind a caching proxy.
-- **Single mode is not recommended for public-facing instances.** The
-  Python GIL serializes the render path - concurrent cache-miss renders
-  queue behind each other in a single process. The narrow exception is a
-  genuinely small-scope public deployment: a small area, a few features,
-  light traffic.
-- **Public-facing means multi mode:** a pipeline sidecar plus N render
-  workers (`COMPOSE_PROFILES=multi`, `LIBREWXR_RENDER_ONLY=1` on the
-  workers). See [configuration-reference.md](configuration-reference.md)
-  for the exact settings.
+LibreWXR has one shape now: a data pipeline plus N render workers. Size
+the worker count to the box:
+
+- **Small / personal:** the same architecture with 1-2 render workers
+  (`LIBREWXR_WORKERS=1` or `2`), one or two radar regions, a few NWP
+  sources, behind a caching proxy. This covers the old single-process
+  niche without putting fetch and render in the same process.
+- **Public-facing:** a pipeline sidecar plus N render workers, one per
+  physical core. Render workers each map the shared state and bypass the
+  Python GIL on the tile-render path. See
+  [configuration-reference.md](configuration-reference.md) for the exact
+  settings, and [single-mode-migration.md](single-mode-migration.md) if
+  you are coming from the removed one-process deployment.
 
 ## Spec Tiers
 
-| Tier | Shape | vCPU | RAM | Disk | Render workers |
-|---|---|---|---|---|---|
-| Minimum (public) | multi | 8 vCPU | 16 GiB | 50 GiB SSD | 4-8 |
-| Recommended (public production) | multi | 16 vCPU | 32 GiB | 50-100 GiB SSD | 8-12 |
-| Heavy / no CDN | multi | 32 vCPU | 64 GiB | 100 GiB SSD | up to 16 (the c7i.8xlarge's 32 vCPUs are hyperthreaded - 16 physical cores; follow the physical-core rule) |
+| Tier | vCPU | RAM | Disk | Render workers |
+|---|---|---|---|---|
+| Minimum (public) | 8 vCPU | 16 GiB | 50 GiB SSD | 4-8 |
+| Recommended (public production) | 16 vCPU | 32 GiB | 50-100 GiB SSD | 8-12 |
+| Heavy / no CDN | 32 vCPU | 64 GiB | 100 GiB SSD | up to 16 (the c7i.8xlarge's 32 vCPUs are hyperthreaded - 16 physical cores; follow the physical-core rule) |
 
-The **minimum** tier is the floor for public traffic - below it, single
-mode behind a proxy is the honest shape. The **recommended** tier serves
-the reference workload with most render capacity idle; that idle
-capacity is the headroom that absorbs storms, flash crowds, and the cold
-tile long tail. The **heavy** tier is for deployments that must absorb
+The **minimum** tier is the floor for public traffic - below it, 1-2
+render workers behind a proxy is the honest shape. The **recommended**
+tier serves the reference workload with most render capacity idle; that
+idle capacity is the headroom that absorbs storms, flash crowds, and the
+cold tile long tail. The **heavy** tier is for deployments that must absorb
 tile traffic without a CDN in front. Scale vertically: the designed
 shape is one pipeline writer plus N render workers per host - not
 multi-node.
@@ -134,12 +136,11 @@ versus the old NWP-source form is roughly the nowcast half.  Factor 4
 | `LIBREWXR_TILE_CACHE_MB` | Tile cache per worker; the 128 MB multi-mode default is fine for these tiers. |
 | `LIBREWXR_NWP_FETCH_CONCURRENCY` | Parallel NWP grid decodes in the pipeline; drives decode-time RAM bursts. |
 | `LIBREWXR_COORD_STORE_MB` | Disk budget for the shared coordinate store (not RAM). |
-| `LIBREWXR_CACHE_DIR` | Shared cache directory - required for multi mode. Put it on SSD. |
-| `LIBREWXR_MEMORY` | Memory limit for the single-mode container; `compose default`. |
-| `LIBREWXR_PIPELINE_MEMORY` | Memory limit for the pipeline sidecar (multi mode); `12G` compose default. |
-| `LIBREWXR_RENDER_MEMORY` | Memory limit for render workers (multi mode); `18G` compose default. |
+| `LIBREWXR_CACHE_DIR` | Shared cache directory; put it on SSD. Recommended - unset falls back to a per-host tempdir with a warning. |
+| `LIBREWXR_PIPELINE_MEMORY` | Memory limit for the pipeline container; `12G` compose default. |
+| `LIBREWXR_RENDER_MEMORY` | Memory limit for the renderer container; `18G` compose default. |
 
-The compose defaults sum to ~30 GiB of limits in multi mode (12G pipeline + 18G renderers) - scale these down via the three LIBREWXR_*_MEMORY vars on smaller hosts; the 16 GiB minimum tier assumes they have been reduced.
+The compose defaults sum to ~30 GiB of limits (12G pipeline + 18G renderer) - scale these down via the two `LIBREWXR_*_MEMORY` vars on smaller hosts; the 16 GiB minimum tier assumes they have been reduced.
 
 ## Bandwidth
 

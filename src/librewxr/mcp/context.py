@@ -4,7 +4,7 @@
 """Stdio-mode lifespan that builds stores from a state.json snapshot.
 
 Mirrors ``_render_only_lifespan`` from ``main.py`` but drops all
-rendering-only singletons (TileCache, TileWarmer, TileRequestTracker,
+rendering-only singletons (TileCache, TileRequestTracker,
 MemoryMonitor, satellite grids).  Only the data-store + snapshot +
 poller + coverage-mask pieces are kept.
 """
@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from librewxr.config import settings
+from librewxr.config import resolve_cache_dir, settings
 from librewxr.data.coverage import build_coverage_masks, build_feather_masks
 from librewxr.data.master_state import (
     _load_and_apply_state,
@@ -100,18 +100,16 @@ async def build_stdio_lifespan(mcp_instance):
     """FastMCP lifespan that builds stores from the pipeline's state.json.
 
     Mirrors ``_render_only_lifespan`` from ``main.py`` but drops all
-    rendering-only singletons (``TileCache``, ``TileWarmer``,
-    ``TileRequestTracker``, ``MemoryMonitor``, satellite grids).
-    Only the data-store + snapshot + poller + coverage-mask pieces
-    are kept.
+    rendering-only singletons (``TileCache``, ``TileRequestTracker``,
+    ``MemoryMonitor``, satellite grids).  Only the data-store + snapshot
+    + poller + coverage-mask pieces are kept.
     """
-    # ---- cache_dir requirement --------------------------------------------
-    if not settings.cache_dir:
-        raise RuntimeError(
-            "LIBREWXR_MCP stdio transport requires LIBREWXR_CACHE_DIR to be "
-            "set (it's the shared volume the pipeline writes state.json into)."
-        )
-    cache_dir = Path(settings.cache_dir)
+    # ---- Resolve cache dir ------------------------------------------------
+    # resolve_cache_dir falls back to a stable per-host tempdir (with a
+    # one-time warning) when LIBREWXR_CACHE_DIR is unset, so the stdio
+    # transport agrees with an auto-spawned pipeline on the shared
+    # snapshot directory.
+    cache_dir = resolve_cache_dir(settings)
 
     # ---- Wait for state.json to exist ------------------------------------
     await _wait_for_state(cache_dir, settings.state_wait_timeout)
@@ -193,7 +191,6 @@ async def build_stdio_lifespan(mcp_instance):
     routes.ecmwf_grid = nwp_grids_by_slug.get("ecmwf_grid")
     routes.nwp_chain = nwp_chain
     routes.satellite_grids = {}
-    routes.tile_warmer = None
     routes.nowcast_store = nowcast_store
     routes.tile_request_tracker = None
     routes.start_time = time.time()

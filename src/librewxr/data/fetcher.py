@@ -81,7 +81,6 @@ class RadarFetcher:
         satellite_contributions: list[SatelliteContribution] | None = None,
         nowcast_generator=None,
         storm_cell_generator=None,
-        warmer=None,
         radar_cache=None,
         on_cycle_complete: Callable[[], Awaitable[None] | None] | None = None,
     ):
@@ -106,7 +105,6 @@ class RadarFetcher:
         )
         self._nowcast_generator = nowcast_generator
         self._storm_cell_generator = storm_cell_generator
-        self._warmer = warmer
         self._radar_cache = radar_cache
         self._on_cycle_complete = on_cycle_complete
         # Coalescer state for the cycle-complete dump (see
@@ -293,9 +291,6 @@ class RadarFetcher:
             # stalled and the imminent cycle-end trigger folds into this
             # same window.
             asyncio.create_task(self._fire_cycle_complete("initial-backfill"))
-            if self._warmer is not None and settings.warm_overview_zoom >= 0:
-                await self._warmer.warm_latest()
-            self._schedule_warm()
         except Exception:
             logger.exception("Error in initial backfill")
         logger.info(
@@ -330,7 +325,6 @@ class RadarFetcher:
                 # the loop, and any satellite completion inside the window
                 # is folded into the same invocation.
                 asyncio.create_task(self._fire_cycle_complete("end-of-cycle"))
-                self._schedule_warm()
             except Exception:
                 logger.exception("Error in fetch loop")
             logger.info(
@@ -452,17 +446,6 @@ class RadarFetcher:
         self._cycle_complete_task = None
         self._cycle_complete_dirty = False
         self._closed = False
-
-    def _schedule_warm(self) -> None:
-        """Re-trigger overview warming for any previously-requested categories.
-
-        Only starts warm_overview if at least one frame type (past or
-        nowcast) has been triggered by a user request.  Skips if a
-        previous warm pass is still running.
-        """
-        if self._warmer is None or settings.warm_overview_zoom < 0:
-            return
-        self._warmer.schedule_warm()
 
     async def _fetch_initial(self) -> None:
         """Quick startup: fetch auxiliary grids and latest radar frame only."""

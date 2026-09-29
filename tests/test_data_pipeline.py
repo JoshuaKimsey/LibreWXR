@@ -6,8 +6,9 @@ We don't exercise the full fetch loop here — that touches real network
 endpoints and is covered by the per-source integration tests.  The
 goals are:
 
-1. ``run_pipeline`` errors out loudly when ``LIBREWXR_CACHE_DIR`` is
-   unset (the multi-worker split is meaningless without a shared dir).
+1. An unset ``LIBREWXR_CACHE_DIR`` falls back to a stable tempdir via
+   ``resolve_cache_dir`` (covered in test_config.py); a render-only
+   worker still fails loudly when no pipeline ever writes state.json.
 2. The module imports without dragging in FastAPI / uvicorn.
 3. A minimal pipeline can be wired up far enough to dump a state.json
    snapshot and shut down cleanly when SIGTERM arrives.
@@ -40,19 +41,6 @@ def test_module_does_not_import_fastapi():
         assert name not in src, f"data_pipeline must not import {name}"
     assert hasattr(mod, "run_pipeline")
     assert hasattr(mod, "main")
-
-
-def test_run_pipeline_requires_cache_dir(monkeypatch):
-    # No cache_dir → SystemExit with a clear message.  Without this the
-    # pipeline would silently start with no shared snapshot and render
-    # workers would idle forever waiting for state.json.
-    from librewxr.config import settings
-
-    monkeypatch.setattr(settings, "cache_dir", "")
-    from librewxr import data_pipeline
-
-    with pytest.raises(SystemExit, match="LIBREWXR_CACHE_DIR"):
-        asyncio.run(data_pipeline.run_pipeline())
 
 
 def test_pipeline_writes_state_json_via_hook(tmp_path, monkeypatch):
@@ -369,16 +357,31 @@ async def test_render_only_lifespan_yields_before_coord_warm(tmp_path, monkeypat
 
 @pytest.mark.asyncio
 async def test_render_only_requires_cache_dir(monkeypatch):
+    # A missing LIBREWXR_CACHE_DIR no longer hard-fails: resolve_cache_dir
+    # falls back to a stable per-host tempdir.  With no pipeline writing
+    # state.json there, the worker fails on the state wait timeout, and
+    # the error names the fallback path so the operator can see where it
+    # looked.
+    import tempfile
+    from pathlib import Path
+
     from librewxr.config import settings
 
     monkeypatch.setattr(settings, "render_only", True)
     monkeypatch.setattr(settings, "cache_dir", "")
+    monkeypatch.setattr(settings, "state_wait_timeout", 1)
+    monkeypatch.setattr(settings, "state_poll_interval", 0.1)
 
     from librewxr import main as main_module
+
+    fallback = Path(tempfile.gettempdir()) / "librewxr-cache"
 
     class _StubApp:
         pass
 
-    with pytest.raises(RuntimeError, match="LIBREWXR_CACHE_DIR"):
+    with pytest.raises(RuntimeError) as excinfo:
         async with main_module._render_only_lifespan(_StubApp()):
             pass
+    message = str(excinfo.value)
+    assert "Is the data pipeline running?" in message
+    assert str(fallback) in message

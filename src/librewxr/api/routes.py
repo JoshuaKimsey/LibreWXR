@@ -82,7 +82,6 @@ precip_mask = None  # PrecipMaskStore | None — set by main.py (multi mode only
 # Routes index by slug so the /health endpoint and tile dispatcher
 # auto-pick up new channels without per-source plumbing.
 satellite_grids: dict[str, object] = {}
-tile_warmer = None  # TileWarmer | None
 nowcast_store = None  # NowcastStore | None
 storm_cell_store = None  # StormCellStore | None
 radar_cache = None  # RadarFrameCache | None
@@ -189,10 +188,9 @@ def collect_worker_pulse() -> dict:
     """Compact per-process payload for the cluster worker-pulse files.
 
     Every field is derived from the module-level singletons with None
-    guards — render-only mode leaves several unset (``radar_cache``,
-    ``radar_fetcher``, ``alerts_fetcher``, ``tile_warmer``).  The payload
-    is deliberately small (< 2 KB) so a /health scan of 16 tiny JSON
-    files stays cheap.
+    guards — render workers leave several unset (``radar_cache``,
+    ``radar_fetcher``, ``alerts_fetcher``).  The payload is deliberately
+    small (< 2 KB) so a /health scan of 16 tiny JSON files stays cheap.
     """
     payload = {
         "pid": os.getpid(),
@@ -892,8 +890,8 @@ async def _radar_window(
     stitched from ordinary integer-tile geometry at the same zoom.
 
     Deliberate differences from tile mode: overlay query params are
-    silently ignored, and the shared tile store, tile warmer, and the
-    request tracker's per-tile counters are never touched.
+    silently ignored, and the shared tile store and the request tracker's
+    per-tile counters are never touched.
     """
     t0 = time.perf_counter_ns()
 
@@ -1087,8 +1085,7 @@ async def radar_tile(
     # store lookup, frame fetch, geometry compute, and present entirely.
     # The ``geom is not None`` gate is required: it keeps the nowcast-
     # timestamp edge case on the existing path (with a geom hit,
-    # ``need_frame`` is False and the warmer hook below resolves
-    # ``frame_type`` via ``_latest_timestamps_cached``).
+    # ``need_frame`` is False).
     present_cache_hit = False
     if is_plain and geom is not None:
         cached = tile_cache.get(present_key)
@@ -1097,11 +1094,6 @@ async def radar_tile(
             etag = cached.etag
             present_cache_hit = True
 
-    # ``need_frame``/``is_nowcast`` live above the branch because the
-    # warmer hook below runs on every path; on a shared hit (past frames
-    # only) ``is_nowcast`` stays False, which is exactly what a plain
-    # cached-hit request resolves to.
-    is_nowcast = False
     need_frame = geom is None or bool(arrow_style) or bool(cell_style)
     compute_ns = None
     present_ns = None
@@ -1127,10 +1119,7 @@ async def radar_tile(
             # Shared hit: the published bytes (and ETag) are byte-identical to
             # a fresh render, so skip frame fetch, geometry compute, overlays,
             # and present entirely.  Prime the in-memory present cache so
-            # same-worker repeats hit RAM instead of the shared volume.  The
-            # warmer hook below stays reachable from every path; in practice it
-            # never fires here because the shared store is only wired in multi
-            # mode, where ``tile_warmer`` is None.
+            # same-worker repeats hit RAM instead of the shared volume.
             tile_bytes, etag = shared_hit
             tile_cache.put(present_key, CachedRender(data=tile_bytes, etag=etag))
         else:
@@ -1149,7 +1138,6 @@ async def radar_tile(
                     nc_frame, nowcast_blend = await nowcast_store.get_frame(timestamp)
                     if nc_frame is not None:
                         frame = nc_frame
-                        is_nowcast = True
                 if frame is None:
                     raise HTTPException(status_code=404, detail="Frame not found")
 
@@ -1387,24 +1375,6 @@ async def radar_tile(
                                     )
                                 _pending_shared_publishes.add(task)
                                 task.add_done_callback(_pending_shared_publishes.discard)
-
-    if tile_warmer is not None:
-        # When the cache hit short-circuited the frame fetch, we still
-        # need a frame_type for the warmer.  Cheap lookup against the
-        # in-memory timestamp list.
-        if not need_frame:
-            past_timestamps = await _latest_timestamps_cached()
-            is_nowcast = timestamp not in past_timestamps
-        asyncio.ensure_future(
-            tile_warmer.warm(
-                triggered_timestamp=timestamp,
-                z=z, x=xi, y=yi,
-                tile_size=tile_size,
-                smooth=smooth,
-                snow=snow,
-                frame_type="nowcast" if is_nowcast else "past",
-            )
-        )
 
     # Historical frames are immutable once backfill is complete — cache them
     # for their full 2-hour lifetime.  Latest and nowcast frames still evolve.
