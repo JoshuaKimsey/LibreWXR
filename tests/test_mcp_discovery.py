@@ -20,6 +20,8 @@ from importlib.metadata import PackageNotFoundError
 
 import pytest
 
+pytest.importorskip("fastmcp", reason="fastmcp not installed (optional [mcp] extra)")
+
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 

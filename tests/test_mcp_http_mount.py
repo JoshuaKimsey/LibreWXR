@@ -22,6 +22,9 @@ test instead validates the three critical concerns:
 """
 
 import pytest
+
+pytest.importorskip("fastmcp", reason="fastmcp not installed (optional [mcp] extra)")
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI

@@ -23,6 +23,6 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,mcp]"
       - name: Run tests
         run: pytest -q
