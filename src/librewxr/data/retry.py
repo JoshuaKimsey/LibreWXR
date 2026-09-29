@@ -23,7 +23,7 @@ async def retry_get(
     """Retry an async HTTP GET on transient errors.
 
     Retries on ``httpx.TransportError`` (connection refused, timeout,
-    DNS failure) and ``httpx.DecodeError`` (truncated response body).
+    DNS failure) and ``httpx.DecodingError`` (truncated response body).
     Does **not** retry on ``httpx.HTTPStatusError`` — the server
     responded, retrying won't help.
 
@@ -49,7 +49,7 @@ async def retry_get(
                     "%s: transport error after %d retries, giving up",
                     name, retries,
                 )
-        except httpx.DecodeError:
+        except httpx.DecodingError:
             if attempt < retries:
                 name = log_name or url.split("/")[-1]
                 logger.debug(
