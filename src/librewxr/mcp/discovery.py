@@ -55,13 +55,13 @@ _CACHE_CONTROL = "public, max-age=3600"
 def package_version() -> str:
     """Return the installed ``librewxr`` distribution version.
 
-    Falls back to ``0.1.0`` (the pyproject version) when the package
+    Falls back to ``0.1.1`` (the pyproject version) when the package
     metadata is unavailable, e.g. running from a bare source tree.
     """
     try:
         return _distribution_version("librewxr")
     except PackageNotFoundError:
-        return "0.1.0"
+        return "0.1.1"
 
 
 def _supported_protocol_versions() -> list[str] | None:

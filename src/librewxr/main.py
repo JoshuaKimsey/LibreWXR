@@ -839,7 +839,7 @@ if settings.mcp_enabled:
             "Install with `pip install -e '.[mcp]'` to enable."
         )
 
-app = FastAPI(title="LibreWXR", version="0.1.0", lifespan=combined_lifespan)
+app = FastAPI(title="LibreWXR", version="0.1.1", lifespan=combined_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
