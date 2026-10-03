@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 import io
+import json
+from datetime import datetime, timezone
 
 import numpy as np
 import pytest
 from PIL import Image
+
+from librewxr.config import settings
 
 pytestmark = pytest.mark.ecmwf
 
@@ -487,3 +491,235 @@ class TestECMWFFallbackRendering:
 
         # Snow and rain tiles should differ in color
         assert tile_snow != tile_rain
+
+
+class _StubFS:
+    """Offline fsspec stand-in for ``_fetch_sync`` tests.
+
+    ``retry_sync`` is monkeypatched, so ``cat`` is never actually called;
+    it exists only so ``_fetch_sync`` can pass ``fs.cat`` as the callable.
+    """
+
+    def cat(self, *args, **kwargs):  # pragma: no cover - intercepted
+        raise AssertionError("stub fs.cat should be intercepted by patched retry_sync")
+
+
+class TestFetchSyncWindowSlide:
+    """Incremental hourly window-slide behavior of ``ECMWFGrid._fetch_sync``.
+
+    No network: ``ECMWFGrid._get_fs`` returns a stub, the module-level
+    ``retry_sync`` (imported inside ``_fetch_sync``) is patched to return a
+    canned ``latest.json`` payload, and ``_fetch_one_timestep`` is replaced
+    with a recording fake returning tiny arrays.
+    """
+
+    BASE = 1_699_999_200  # 2023-11-14T22:00:00Z, hour-aligned
+    HOUR = 3600
+    STEP = 600
+    SHAPE = (8, 8)
+
+    @staticmethod
+    def _iso(ts: int) -> str:
+        return datetime.fromtimestamp(
+            ts, tz=timezone.utc,
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _patch_settings(self, monkeypatch, max_ts: int = 4) -> None:
+        # max_ts >= len(desired window) makes _select_valid_times return the
+        # whole list without consulting now() - deterministic windows.
+        monkeypatch.setattr(settings, "ecmwf_max_timesteps", max_ts)
+        monkeypatch.setattr(settings, "ecmwf_interpolation", True)
+
+    def _latest(self, ref_time: str, valid_times: list[int]) -> dict:
+        return {
+            "completed": True,
+            "reference_time": ref_time,
+            "valid_times": [self._iso(ts) for ts in valid_times],
+            "variables": ["precipitation", "snowfall_water_equivalent"],
+        }
+
+    def _wire(self, monkeypatch, grid, latest: dict, fake_fetch):
+        """Install offline scaffolding; return the list of fetched VTs."""
+        monkeypatch.setattr(ECMWFGrid, "_get_fs", lambda self: _StubFS())
+        monkeypatch.setattr(
+            "librewxr.data.retry.retry_sync",
+            lambda fn, *args, **kwargs: json.dumps(latest).encode("utf-8"),
+        )
+        calls: list[str] = []
+
+        def fake(fs, run_prefix, vt, has_snow, variables):
+            calls.append(vt)
+            return fake_fetch(vt)
+
+        monkeypatch.setattr(grid, "_fetch_one_timestep", fake)
+        return calls
+
+    def _seed(self, grid, ts: int, value: int) -> None:
+        precip = np.full(self.SHAPE, value, dtype=np.uint8)
+        snow = np.zeros(self.SHAPE, dtype=bool)
+        grid._timesteps[ts] = (
+            grid._to_memmap(f"{ts}_precip", precip),
+            grid._to_memmap(f"{ts}_snow", snow),
+        )
+
+    def _seed_window(self, grid, hourly: list[int]) -> list[int]:
+        """Seed hourly natives plus 10-min synthetics between consecutive hours."""
+        seeded: list[int] = []
+        for ts in hourly:
+            self._seed(grid, ts, 100)
+            seeded.append(ts)
+        for a, b in zip(hourly, hourly[1:]):
+            for k in range(1, 6):
+                s = a + k * self.STEP
+                self._seed(grid, s, 100 + k)
+                seeded.append(s)
+        grid._sorted_timestamps = sorted(grid._timesteps.keys())
+        return seeded
+
+    @staticmethod
+    def _new_frame(vt=None, value: int = 150):
+        # ``vt`` is ignored: ``_wire`` calls the payload builder with the
+        # fetched valid-time string as its sole argument.
+        return (
+            np.full(TestFetchSyncWindowSlide.SHAPE, value, dtype=np.uint8),
+            np.zeros(TestFetchSyncWindowSlide.SHAPE, dtype=bool),
+        )
+
+    async def test_window_slide_fetches_only_missing(self, tmp_path, monkeypatch):
+        self._patch_settings(monkeypatch)
+        grid = ECMWFGrid(cache_dir=tmp_path)
+        ref_iso = self._iso(self.BASE)
+        grid._reference_time = ref_iso
+
+        # Store holds the previous window: hourly H-1..H3 + their synthetics.
+        hourly = [self.BASE + k * self.HOUR for k in range(-1, 4)]
+        seeded = set(self._seed_window(grid, hourly))
+
+        # Desired window slid one hour forward: valid_times[1:] = H1..H4.
+        latest = self._latest(
+            ref_iso, [self.BASE + k * self.HOUR for k in range(0, 5)],
+        )
+        calls = self._wire(monkeypatch, grid, latest, self._new_frame)
+
+        retained_ts = [self.BASE + k * self.HOUR for k in range(0, 4)]  # H0..H3
+        mtimes = {
+            ts: (grid._memmap_dir / f"{ts}_precip.dat").stat().st_mtime_ns
+            for ts in retained_ts
+        }
+
+        result = await grid.fetch()
+
+        assert result is True
+        # Only the single new hourly valid time (H4) was fetched.
+        assert calls == [self._iso(self.BASE + 4 * self.HOUR)]
+
+        # Old entries retained in the store.
+        for ts in retained_ts:
+            assert ts in grid._timesteps
+
+        # Exactly the five new 10-min synthetics for the new H3->H4 bracket.
+        expected_new_syn = {
+            self.BASE + 3 * self.HOUR + k * self.STEP for k in range(1, 6)
+        }
+        new_keys = set(grid._timesteps) - seeded - {self.BASE + 4 * self.HOUR}
+        assert new_keys == expected_new_syn
+        assert sorted(expected_new_syn)[1] - sorted(expected_new_syn)[0] == self.STEP
+
+        # Retained memmap files were not rewritten.
+        for ts in retained_ts:
+            assert (
+                grid._memmap_dir / f"{ts}_precip.dat"
+            ).stat().st_mtime_ns == mtimes[ts]
+
+        # Evicted trailing keys (H-1 + its synthetics) are gone from disk.
+        evicted = [self.BASE - self.HOUR]
+        evicted += [self.BASE - self.HOUR + k * self.STEP for k in range(1, 6)]
+        for ts in evicted:
+            assert ts not in grid._timesteps
+            assert not (grid._memmap_dir / f"{ts}_precip.dat").exists()
+            assert not (grid._memmap_dir / f"{ts}_snow.dat").exists()
+
+    async def test_guard_hit_fetches_nothing(self, tmp_path, monkeypatch):
+        self._patch_settings(monkeypatch)
+        grid = ECMWFGrid(cache_dir=tmp_path)
+        ref_iso = self._iso(self.BASE)
+        grid._reference_time = ref_iso
+
+        # Store already covers the desired window H1..H4.
+        hourly = [self.BASE + k * self.HOUR for k in range(1, 5)]
+        self._seed_window(grid, hourly)
+
+        latest = self._latest(
+            ref_iso, [self.BASE + k * self.HOUR for k in range(0, 5)],
+        )
+
+        def never_fetch(vt):
+            raise AssertionError("guard hit must not call _fetch_one_timestep")
+
+        calls = self._wire(monkeypatch, grid, latest, never_fetch)
+        result = await grid.fetch()
+
+        assert result is True
+        assert calls == []
+
+    async def test_reference_time_flip_resets_wholesale(self, tmp_path, monkeypatch):
+        self._patch_settings(monkeypatch)
+        grid = ECMWFGrid(cache_dir=tmp_path)
+        grid._reference_time = self._iso(self.BASE)
+        old_hourly = [self.BASE + k * self.HOUR for k in range(0, 4)]
+        old_seeded = self._seed_window(grid, old_hourly)
+
+        new_ref = self._iso(self.BASE + 6 * self.HOUR)
+        latest = self._latest(
+            new_ref,
+            [self.BASE + (6 + k) * self.HOUR for k in range(0, 4)],
+        )
+        calls = self._wire(monkeypatch, grid, latest, self._new_frame)
+
+        result = await grid.fetch()
+
+        assert result is True
+        assert grid._reference_time == new_ref
+        # valid_times[1:] = H7, H8, H9 → all three fetched from scratch.
+        assert sorted(calls) == [
+            self._iso(self.BASE + (6 + k) * self.HOUR) for k in range(1, 4)
+        ]
+
+        # Old window's keys and files are gone.
+        for ts in old_seeded:
+            assert ts not in grid._timesteps
+        assert not (grid._memmap_dir / f"{old_hourly[0]}_precip.dat").exists()
+
+        # Only the new window (natives + synthetics) remains.
+        base6 = self.BASE + 6 * self.HOUR
+        expected = {base6 + k * self.HOUR for k in range(1, 4)}
+        for k in range(1, 3):
+            expected |= {base6 + k * self.HOUR + m * self.STEP for m in range(1, 6)}
+        assert set(grid._timesteps) == expected
+
+    async def test_failed_fetch_leaves_state_untouched(self, tmp_path, monkeypatch):
+        self._patch_settings(monkeypatch)
+        grid = ECMWFGrid(cache_dir=tmp_path)
+        ref_iso = self._iso(self.BASE)
+        grid._reference_time = ref_iso
+        hourly = [self.BASE + k * self.HOUR for k in range(-1, 4)]
+        self._seed_window(grid, hourly)
+
+        before_keys = set(grid._timesteps)
+        before_files = {p.name for p in grid._memmap_dir.glob("*.dat")}
+
+        latest = self._latest(
+            ref_iso, [self.BASE + k * self.HOUR for k in range(0, 5)],
+        )
+
+        def boom(vt):
+            raise RuntimeError("simulated S3 failure")
+
+        calls = self._wire(monkeypatch, grid, latest, boom)
+        result = await grid.fetch()
+
+        assert result is False
+        assert calls == [self._iso(self.BASE + 4 * self.HOUR)]
+        assert set(grid._timesteps) == before_keys
+        assert grid._reference_time == ref_iso
+        assert {p.name for p in grid._memmap_dir.glob("*.dat")} == before_files

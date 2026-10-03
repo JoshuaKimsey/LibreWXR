@@ -280,6 +280,12 @@ class ECMWFGrid:
                     ref_time,
                 )
                 return True
+        # Past the guard with a matching reference_time and a populated
+        # store means the hourly window slid forward within one model run:
+        # only the newly-valid hourly times need fetching, the rest of the
+        # store is merged in unchanged.
+        incremental = ref_time == self._reference_time and bool(self._timesteps)
+
         has_snow = "snowfall_water_equivalent" in variables
         ref_dt = datetime.fromisoformat(ref_time.replace("Z", "+00:00"))
         run_prefix = (
@@ -288,30 +294,41 @@ class ECMWFGrid:
             f"/{ref_dt.hour:02d}{ref_dt.minute:02d}Z"
         )
 
+        if incremental:
+            desired_hourly = {self._vt_to_unix(vt) for vt in vt_to_fetch}
+            stored_hourly = {ts for ts in self._timesteps if ts % 3600 == 0}
+            missing_hourly = desired_hourly - stored_hourly
+            fetch_vts = [
+                vt for vt in vt_to_fetch
+                if self._vt_to_unix(vt) in missing_hourly
+            ]
+        else:
+            fetch_vts = list(vt_to_fetch)
+
         logger.info(
             "Fetching ECMWF IFS: %d timesteps from %s to %s (ref=%s, max_ts=%d)",
-            len(vt_to_fetch), vt_to_fetch[0], vt_to_fetch[-1], ref_time, max_ts,
+            len(fetch_vts), fetch_vts[0], fetch_vts[-1], ref_time, max_ts,
         )
 
-        new_timesteps: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        fetched_timesteps: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
         # Fetch timesteps concurrently — each fetch is an independent S3
         # read + regrid, so they parallelize cleanly.  fsspec readers and
         # earthkit interpolate are thread-safe for read-only operations.
-        with ThreadPoolExecutor(max_workers=len(vt_to_fetch)) as executor:
+        with ThreadPoolExecutor(max_workers=len(fetch_vts)) as executor:
             future_to_vt = {
                 executor.submit(
                     self._fetch_one_timestep,
                     fs, run_prefix, vt, has_snow, variables,
                 ): vt
-                for vt in vt_to_fetch
+                for vt in fetch_vts
             }
             for future in as_completed(future_to_vt):
                 vt = future_to_vt[future]
                 try:
                     precip_dbz, snow_mask = future.result()
                     ts_unix = self._vt_to_unix(vt)
-                    new_timesteps[ts_unix] = (precip_dbz, snow_mask)
+                    fetched_timesteps[ts_unix] = (precip_dbz, snow_mask)
                     # The precip array is still on the heap here (the memmap
                     # loop below hasn't run yet).  Per-key dict updates are
                     # atomic under the GIL, so the fetcher thread can write
@@ -319,33 +336,98 @@ class ECMWFGrid:
                 except Exception:
                     logger.warning("Failed to fetch ECMWF timestep %s", vt, exc_info=True)
 
-        if not new_timesteps:
+        if not fetched_timesteps:
             logger.warning("No ECMWF timesteps fetched successfully")
             return False
 
-        # Optionally interpolate between hourly frames to produce 10-min steps
-        if settings.ecmwf_interpolation and len(new_timesteps) >= 2:
+        if not incremental:
+            # COLD PATH — changed reference_time or empty store.  Fetch the
+            # whole window, interpolate, and replace the store wholesale.
+            new_timesteps = fetched_timesteps
+
+            # Optionally interpolate between hourly frames to produce 10-min steps
+            if settings.ecmwf_interpolation and len(new_timesteps) >= 2:
+                from librewxr.sources.world.ifs.interpolation import interpolate_timesteps
+
+                new_timesteps = interpolate_timesteps(new_timesteps)
+
+            # Move all arrays to memory-mapped files so the OS page cache
+            # manages physical RAM instead of pinning ~284 MB on the heap.
+            self._cleanup_memmap_files()
+            for ts, (precip, snow) in list(new_timesteps.items()):
+                new_timesteps[ts] = (
+                    self._to_memmap(f"{ts}_precip", precip),
+                    self._to_memmap(f"{ts}_snow", snow),
+                )
+
+            self._timesteps = new_timesteps
+            self._sorted_timestamps = sorted(new_timesteps.keys())
+            self._reference_time = ref_time
+
+            logger.info(
+                "ECMWF IFS updated: ref=%s, %d timesteps loaded (%s)",
+                ref_time,
+                len(new_timesteps),
+                ", ".join(
+                    datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%MZ")
+                    for ts in self._sorted_timestamps
+                ),
+            )
+            return True
+
+        # INCREMENTAL PATH — merge the newly fetched hourly frames into the
+        # existing store, drop entries that fell out of the window, and only
+        # write memmaps for the frames that aren't already memmapped.
+        merged = dict(self._timesteps)
+        for ts, arrays in fetched_timesteps.items():
+            merged[ts] = arrays
+
+        # Keep one hour of slack on each side so a transiently-failed fetch
+        # is retried on the next cycle instead of being evicted first.
+        lo = min(desired_hourly) - 3600
+        hi = max(desired_hourly) + 3600
+        evicted = 0
+        for ts in list(merged.keys()):
+            if ts < lo or ts > hi:
+                del merged[ts]
+                evicted += 1
+        retained = len(merged) - len(fetched_timesteps)
+
+        # Interpolation is idempotent: already-synthetic brackets are skipped,
+        # so this only synthesizes the newly-sparse bracket.
+        if settings.ecmwf_interpolation and len(merged) >= 2:
             from librewxr.sources.world.ifs.interpolation import interpolate_timesteps
 
-            new_timesteps = interpolate_timesteps(new_timesteps)
+            merged = interpolate_timesteps(merged)
 
-        # Move all arrays to memory-mapped files so the OS page cache
-        # manages physical RAM instead of pinning ~284 MB on the heap.
-        self._cleanup_memmap_files()
-        for ts, (precip, snow) in list(new_timesteps.items()):
-            new_timesteps[ts] = (
+        # Delete orphaned files (evicted keys, crashed-cycle leftovers) before
+        # writing the new frames; retained memmaps keep their files untouched.
+        keep = set()
+        for ts in merged:
+            keep.add(f"{ts}_precip.dat")
+            keep.add(f"{ts}_snow.dat")
+        self._cleanup_memmap_files(keep=keep)
+
+        for ts, (precip, snow) in list(merged.items()):
+            if isinstance(precip, np.memmap) and isinstance(snow, np.memmap):
+                continue
+            merged[ts] = (
                 self._to_memmap(f"{ts}_precip", precip),
                 self._to_memmap(f"{ts}_snow", snow),
             )
 
-        self._timesteps = new_timesteps
-        self._sorted_timestamps = sorted(new_timesteps.keys())
+        self._timesteps = merged
+        self._sorted_timestamps = sorted(merged.keys())
         self._reference_time = ref_time
 
         logger.info(
+            "ECMWF IFS incremental update: ref=%s, fetched=%d, retained=%d, evicted=%d",
+            ref_time, len(fetched_timesteps), retained, evicted,
+        )
+        logger.info(
             "ECMWF IFS updated: ref=%s, %d timesteps loaded (%s)",
             ref_time,
-            len(new_timesteps),
+            len(merged),
             ", ".join(
                 datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%MZ")
                 for ts in self._sorted_timestamps
