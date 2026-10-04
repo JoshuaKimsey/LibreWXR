@@ -24,6 +24,7 @@ pytestmark = pytest.mark.rrqpe
 from librewxr.config import settings
 from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.sources.world.rrqpe.grid import (
+    _REFRESH_THROTTLE_SECONDS,
     GLB5_KEY_RE,
     NATIVE_COLS,
     NATIVE_PIXEL,
@@ -39,6 +40,7 @@ from librewxr.sources.world.rrqpe.grid import (
     precip_rate_to_dbz_encoded,
     scan_ts_from_key,
 )
+from librewxr.sources.world.rrqpe import grid as rrqpe_grid
 from librewxr.sources.world.rrqpe.source import RRQPESource
 
 
@@ -505,6 +507,26 @@ class _S3Transport:
         return httpx.Response(404, text="not found")
 
 
+class _FreshBootClock:
+    """Stand-in for the ``time`` module on a freshly-booted machine.
+
+    ``monotonic()`` reads below the RRQPE refresh throttle window;
+    every other attribute delegates to the real ``time`` module.
+    """
+
+    def __init__(self, monotonic_value: float) -> None:
+        self._monotonic_value = monotonic_value
+
+    def monotonic(self) -> float:
+        return self._monotonic_value
+
+    def __getattr__(self, name: str):
+        return getattr(time, name)
+
+
+_FRESH_BOOT_CLOCK = _FreshBootClock(_REFRESH_THROTTLE_SECONDS / 4)
+
+
 class TestFetch:
     @staticmethod
     def _now():
@@ -593,6 +615,39 @@ class TestFetch:
             await grid.fetch(now_ts=now_ts, history_seconds=3600)
             assert grid.timestep_count == 1
             assert keep_slot in grid._timesteps
+        finally:
+            grid._client.close()
+
+    async def test_first_fetch_not_throttled_on_fresh_boot(self, tmp_path, monkeypatch):
+        """A machine booted moments ago must still fetch on first call.
+
+        ``time.monotonic()`` counts from boot on Linux, so a fresh
+        pipeline (or CI runner) can legitimately see values below the
+        throttle window.  Regression test: ``_last_refresh_monotonic``
+        used 0.0 as the "never refreshed" sentinel, which throttled the
+        very first pass on such machines.
+        """
+        now_ts = self._now()
+        slot = now_ts - 20 * 60
+        grid = RRQPEGrid(cache_dir=tmp_path, downsample=1)
+        nc = _synthetic_nc_bytes(rows=4, cols=4, rate=3.0)
+        grid._client = httpx.Client(transport=httpx.MockTransport(
+            _S3Transport([slot], nc),
+        ))
+        try:
+            monkeypatch.setattr(rrqpe_grid, "time", _FRESH_BOOT_CLOCK)
+            await grid.fetch(now_ts=now_ts, history_seconds=3600)
+            assert slot in grid._timesteps
+            # The gate still collapses a repeat refresh inside the
+            # window: a stale out-of-window frame that a real pass
+            # would evict must survive a second throttled fetch.
+            stale_slot = now_ts - 3 * 3600
+            grid._timesteps[stale_slot] = grid._to_memmap(
+                str(stale_slot),
+                np.full(grid.effective_shape, 100, dtype=np.uint8),
+            )
+            await grid.fetch(now_ts=now_ts, history_seconds=3600)
+            assert stale_slot in grid._timesteps
         finally:
             grid._client.close()
 

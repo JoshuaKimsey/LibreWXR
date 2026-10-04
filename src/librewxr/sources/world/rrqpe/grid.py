@@ -266,9 +266,14 @@ class RRQPEGrid:
         self._sorted_timestamps: list[int] = []
         self._client: httpx.Client | None = None
         self._fetch_lock = asyncio.Lock()
-        # Monotonic timestamp of the last completed refresh pass, for the
-        # ``_REFRESH_THROTTLE_SECONDS`` gate in ``fetch``.
-        self._last_refresh_monotonic = 0.0
+        # Monotonic timestamp of the last completed refresh pass, for
+        # the ``_REFRESH_THROTTLE_SECONDS`` gate in ``fetch``.  ``None``
+        # until the first completed pass: ``time.monotonic()`` is an
+        # arbitrary reference point (seconds since boot on Linux), so
+        # 0.0 cannot serve as a "never refreshed" sentinel — a machine
+        # that booted less than the throttle window ago would wrongly
+        # throttle its first fetch.
+        self._last_refresh_monotonic: float | None = None
 
         if cache_dir is not None:
             self._memmap_dir = Path(cache_dir) / "rrqpe"
@@ -405,14 +410,18 @@ class RRQPEGrid:
         back-to-back, which should collapse into a single S3 pass.
         """
         now = time.monotonic()
-        if now - self._last_refresh_monotonic < _REFRESH_THROTTLE_SECONDS:
+        if (
+            self._last_refresh_monotonic is not None
+            and now - self._last_refresh_monotonic < _REFRESH_THROTTLE_SECONDS
+        ):
             logger.debug("RRQPE: refresh throttled")
             return
         async with self._fetch_lock:
             # Re-check under the lock so two queued callers don't both
             # run the pass back-to-back.
             if (
-                time.monotonic() - self._last_refresh_monotonic
+                self._last_refresh_monotonic is not None
+                and time.monotonic() - self._last_refresh_monotonic
                 < _REFRESH_THROTTLE_SECONDS
             ):
                 return
