@@ -833,7 +833,9 @@ A sample of the projects and deployments built on the LibreWXR API:
 | [Presura](https://presura.eu) | A multi-language weather viewer for the European Union. |
 | [RidePilot](https://apps.apple.com/us/app/ridepilot-smart-bike-computer/id6790916720) | A cycling tracking app. |
 | [Rueckenwind](https://rueckenwind.piepgras.de) | A cycling navigation app for iOS, built on BRouter and OpenStreetMap. |
+| [SparkRadar](https://sparkradar.app) | A weather radar app with LibreWXR powering its International Mosaic layer. |
 | [Silver Skies (Desktop)](https://github.com/poliberry/silverskies-desktop) | A desktop weather radar, forecast, and severe alert dashboard (Electron + Next.js). |
+| [SkyMonitor](https://skymonitor.app) ([GitHub](https://github.com/chicagoeas/sky-monitor)) | SkyMonitor is a weather website that uses multiple APIs to get you the most accurate weather information for where you are! |
 | [South Alabama Mesonet](https://mesonet.southalabama.edu) | A network of weather stations monitoring conditions across Southern Alabama. |
 | [StormView Rewrite](https://github.com/arc360alt/StormView-Rewrite) | A rewritten version of stormview to be faster, lighter. |
 | [Variable Weather](https://variablewx.librewxr.net) ([GitHub](https://github.com/JoshuaKimsey/variable-weather)) | Inspired by Breezy Weather, Variable Weather makes it easy and fun to get the weather information you need. |
