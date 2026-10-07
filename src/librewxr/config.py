@@ -254,10 +254,10 @@ class Settings(BaseSettings):
     # Anonymous S3-backed CDN at ``www.jma.go.jp/bosai/jmatile/data/nowc/``,
     # 5-min cadence, XYZ tile pyramid in JMA's standard 10-stop palette PNG
     # encoding (4-bit palette for populated tiles, 8-bit RGBA for empty).
-    # Two contributions from one package: the analysis leg (basetime ==
-    # validtime, ingested as standard radar) and the forecast leg
-    # (validtime > basetime, ingested via NowcastContribution to replace
-    # internal optical-flow extrapolation for JPCOMP).  JMA Public Data
+    # One contribution from one package: the analysis leg (basetime ==
+    # validtime) ingested as standard radar.  The forecast leg
+    # (validtime > basetime) is NOT ingested — JPCOMP nowcast comes from
+    # internal optical-flow extrapolation.  JMA Public Data
     # License v1.0 — CC-BY equivalent with commercial reuse explicitly
     # permitted, attribution required.
     jma_base_url: str = "https://www.jma.go.jp/bosai/jmatile/data/nowc"
