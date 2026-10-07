@@ -6,28 +6,26 @@
 
 A self-hostable, drop-in replacement for the [Rain Viewer](https://www.rainviewer.com/) API. LibreWXR serves weather radar tiles using freely available radar composite data from multiple sources, with full compatibility for any client built against the Rain Viewer v2 API.
 
-## Contents
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.11%2B-blue?logo=python&logoColor=white" alt="Python 3.11+"></a>
+  <a href="https://github.com/JoshuaKimsey/LibreWXR/actions/workflows/test.yml"><img src="https://github.com/JoshuaKimsey/LibreWXR/actions/workflows/test.yml/badge.svg" alt="Tests status"></a>
+  <a href="https://ko-fi.com/librewxr"><img src="https://img.shields.io/badge/Ko--fi-LibreWXR-FF5E5B" alt="Support on Ko-fi"></a>
+</p>
 
-- [Why?](#why)
-- [Features](#features)
-- [Current Limitations](#current-limitations)
-- [Coverage](#coverage)
-- [Quick Start](#quick-start)
-- [Usage](#usage)
-- [Configuration](#configuration)
-- [Deployment](#deployment)
-- [Architecture](#architecture)
-- [Data Sources](#data-sources)
-- [Examples](#examples)
-- [Supporters](#supporters)
-- [Who's Using LibreWXR](#whos-using-librewxr)
-- [License](#license)
+<p align="center">
+  <img src="docs/readme-hero.png" alt="LibreWXR rendering radar and satellite layers on a map" width="800">
+</p>
+
+<p align="center">
+  <img src="docs/readme-demo.gif" alt="Animated radar loop rendered by LibreWXR" width="720">
+</p>
 
 ## Why?
 
 Rain Viewer recently (as of January 1st, 2026) restricted their free API tier: maximum zoom 7, single color scheme, no satellite, no forecast, PNG only. LibreWXR restores the full pre-restriction functionality as a self-hosted service.
 
-Beyond this though, is the goal of creating a far more customizable API backend for self hosters. The ability to specify regions, radar styles, denoising levels, and more to come as well. With the goal being self-hosting, there are far greater possibilities for what can be both ingested and output via the API, and there is no need to offer any limitations on what is provided, aside from the technicality of the implementation of such features.
+Beyond compatibility, the goal is a far more customizable API backend for self-hosters — configurable regions, radar styles, denoising levels, and more — with no limits on what the API can ingest and output beyond what the implementation allows.
 
 ## Features
 
