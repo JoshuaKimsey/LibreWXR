@@ -23,7 +23,21 @@ A self-hostable, drop-in replacement for the [Rain Viewer](https://www.rainviewe
 
 ## Why?
 
-Rain Viewer recently (as of January 1st, 2026) restricted their free API tier: maximum zoom 7, single color scheme, no satellite, no forecast, PNG only. LibreWXR restores the full pre-restriction functionality as a self-hosted service.
+Rain Viewer recently (as of January 1st, 2026) restricted their free API tier. LibreWXR restores the full pre-restriction functionality as a free, self-hosted service:
+
+| | Rain Viewer free tier | LibreWXR (self-hosted) |
+|---|---|---|
+| Max zoom level | 7 | 12 (configurable) |
+| Color schemes | Universal Blue only | 15 schemes + raw grayscale |
+| Satellite layer | None | Global (GOES / Meteosat / Himawari composite) |
+| Forecast layer | None | 60-minute nowcast (radar extrapolation + NWP blend) |
+| Image formats | PNG | PNG + WebP (configurable quality) |
+| Permitted use | Personal / educational only | Your server, your terms (AGPL-3.0-or-later) |
+| Uptime & rate limits | Best-effort, none guaranteed | Set by your own infrastructure |
+
+*Rain Viewer free-tier details as published at [rainviewer.com/api](https://www.rainviewer.com/api.html), current as of October 2026.*
+
+Switching an existing client over? The [Rain Viewer → LibreWXR migration guide](docs/rainviewer-migration-guide.md) covers the two-line change most apps need.
 
 Beyond compatibility, the goal is a far more customizable API backend for self-hosters — configurable regions, radar styles, denoising levels, and more — with no limits on what the API can ingest and output beyond what the implementation allows.
 
