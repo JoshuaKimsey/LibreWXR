@@ -12,7 +12,7 @@ This document is the **full** reference for every setting LibreWXR understands. 
 - [Radar Data](#radar-data)
 - [Regions](#regions)
 - [Tile Rendering](#tile-rendering)
-- [Workers and Memory](#workers-and-memory)
+- [Deployment Mode, Workers, and Memory](#deployment-mode-workers-and-memory)
 - [Deployment Architecture (Pipeline + Render Workers)](#deployment-architecture-pipeline--render-workers)
 - [ECMWF IFS Global Coverage](#ecmwf-ifs-global-coverage)
   - [Global: NOAA RRQPE](#global-noaa-rrqpe)
@@ -1577,6 +1577,8 @@ URL path where the MCP HTTP transport is mounted inside the FastAPI app. Change 
 | **Type** | string |
 
 ---
+
+## RAM Sizing Guide
 
 ### Small box (1-2 render workers)
 

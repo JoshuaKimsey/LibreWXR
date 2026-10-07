@@ -998,7 +998,7 @@ To animate through satellite frames, use the same pattern as radar animation (se
 
 ### Color Schemes
 
-LibreWXR supports the 9 original Rain Viewer color schemes, a contributed scheme from the Datameteo Educational team, the high-resolution Viper HD palette by Ben Mitchell, the MRMS CREF operational palette used by NOAA/NSSL's MRMS Product Viewer, the 33/40 Max Storm stepped palette from ABC 33/40's Chief Meteorologist James Aydelott via Ben Mitchell's WxTools, a Windy-inspired radar palette contributed by Gerrit Grunwald, and a raw grayscale mode:
+LibreWXR supports the 9 original Rain Viewer color schemes, a contributed scheme from the Datameteo Educational team, the high-resolution Viper HD palette by Ben Mitchell, the MRMS CREF operational palette used by NOAA/NSSL's MRMS Product Viewer, the 33/40 Max Storm stepped palette from ABC 33/40's Chief Meteorologist James Aydelott via Ben Mitchell's WxTools, the MetService NZ (Dark) scheme, a Windy-inspired radar palette contributed by Gerrit Grunwald, and a raw grayscale mode:
 
 <!-- BEGIN GENERATED: color-scheme-table-descriptions -->
 | ID | Name | Description |

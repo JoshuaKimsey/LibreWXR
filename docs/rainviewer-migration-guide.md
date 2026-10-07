@@ -146,7 +146,7 @@ Every parameter works the same way:
 | `timestamp` | Unix timestamp from metadata | Identical |
 | `size` | `256` or `512` | Identical |
 | `z`, `x`, `y` | Slippy map tile coordinates | Identical |
-| `color` | `0`-`8` | `0`-`12` + `255` (raw grayscale) |
+| `color` | `0`-`8` | `0`-`14` + `255` (raw grayscale) |
 | `smooth` | `0` or `1` | Identical |
 | `snow` | `0` or `1` | Identical |
 | `ext` | `png` (free) / `webp` (paid) | `png` or `webp` (both always available) |

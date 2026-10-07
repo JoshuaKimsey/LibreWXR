@@ -277,5 +277,5 @@ The stdio MCP process reads the same `config.py` settings (it re-uses the `Setti
 ## See Also
 
 - [Configuration Reference](configuration-reference.md#mcp-server) — full env var reference for `LIBREWXR_MCP_ENABLED` and `LIBREWXR_MCP_PATH`.
-- [Getting Started](../README.md) — general setup instructions for LibreWXR.
+- [Quick Start](../README.md#quick-start) — general setup instructions for LibreWXR.
 - [Model Context Protocol Specification](https://modelcontextprotocol.io/) — official MCP docs.
