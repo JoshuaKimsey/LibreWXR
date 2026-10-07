@@ -82,6 +82,39 @@ add NWP grids, satellite frames, nowcast data, and the tile cache on top.
 `/health` is the source of truth for actual usage (see the note at the top
 of this guide).
 
+## RAM and Scaling
+
+The tier table above provisions headroom for traffic spikes; the
+measurements below are what the data + render side itself draws.
+
+Measured RAM by worker count, ALL regions + full NWP chain:
+
+| Configuration | Pipeline RAM | Render RAM | Total |
+|---|---|---|---|
+| ALL regions + full NWP chain, 8 workers | ~8-10 GB | ~3-4 GB | ~12-14 GB |
+| ALL regions + full NWP chain, 16 workers | ~8-10 GB | ~5-6 GB | ~14-16 GB |
+| ALL regions + full NWP chain, 32 workers | ~8-10 GB | ~7-8 GB | ~16-18 GB |
+
+Production observation on an 80-core / 32 GB rack (32 workers): ~16 GB
+total RSS across both containers.
+
+Audience-based scaling:
+
+| Users | Workers | RAM (ALL regions + full NWP) |
+|---|---|---|
+| 1-5 (personal) | 1 | ~9-10 GB |
+| 5-50 (small community) | 1-2 (with CDN) | ~9-18 GB |
+| 50-500 (medium) | 8-16 | ~12-16 GB |
+| 500+ (large) | 24-32+ (with CDN) | ~16-20 GB |
+
+Tiles are served with `Cache-Control: public, max-age=300`, so any caching
+reverse proxy (nginx, Cloudflare, etc.) will work out of the box for
+high-traffic deployments. A CDN like Cloudflare (free tier works) absorbs
+most tile requests at the edge, meaning a single worker can serve far more
+users than the table above suggests. Using a Cloudflare Tunnel also
+provides free HTTPS with no certificate management. For most self-hosting
+scenarios, 1 worker behind Cloudflare is sufficient.
+
 ## AWS Instance Mapping
 
 Indicative only - instance families, generations, availability, and

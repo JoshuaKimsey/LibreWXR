@@ -410,9 +410,32 @@ LibreWXR runs as a data pipeline plus one or more render workers,
 sharing state via memmap files + a `state.json` snapshot on a shared
 volume. Docker Compose starts both for you; the `pipeline` and
 `renderer` services both belong to the `multi` profile (a legacy
-`single` profile starts the same pair).
+`single` profile starts the same pair). The process layout and data
+flow diagrams are in [Architecture](#architecture) below.
 
-### Pipeline + render workers
+```bash
+# In .env
+COMPOSE_PROFILES=multi
+
+# Then:
+docker compose up -d
+```
+
+For a laptop, small VPS, or home server, keep the same architecture but
+run fewer render workers (`LIBREWXR_WORKERS=1` or `2`). Bare metal,
+`python -m librewxr.main` auto-spawns the pipeline and runs one render
+worker unless `LIBREWXR_WORKERS` is set.
+
+Tiles are served with `Cache-Control: public, max-age=300`, so any caching
+reverse proxy or free-tier CDN works out of the box — for most
+self-hosting scenarios, one worker behind Cloudflare is sufficient. RAM
+and scaling tables (per-worker-count and per-audience) live in
+[`docs/self-host-sizing.md`](docs/self-host-sizing.md). Coming from the
+removed one-process deployment: [`docs/single-mode-migration.md`](docs/single-mode-migration.md).
+
+## Architecture
+
+### Process layout
 
 The data pipeline fetches and stores everything; the render side scales
 to N worker processes that each map the same files, so 32 workers don't
@@ -443,51 +466,6 @@ split hands one core to each render process instead of serializing the
 render path through a single process's GIL, and a fetch crash in the
 pipeline no longer takes the tile server down. Production observation on
 an 80-core / 32 GB rack: ~16 GB total RSS, all cores active under load.
-Run with:
-
-```bash
-# In .env
-COMPOSE_PROFILES=multi
-
-# Then:
-docker compose up -d
-```
-
-For a laptop, small VPS, or home server, keep the same architecture but
-run fewer render workers (`LIBREWXR_WORKERS=1` or `2`). Bare metal,
-`python -m librewxr.main` auto-spawns the pipeline and runs one render
-worker unless `LIBREWXR_WORKERS` is set.
-
-### RAM requirements
-
-The architecture shares the radar / NWP / satellite / alert state across
-all render workers via memmap, so adding workers doesn't multiply the
-data RAM — only the per-worker tile cache (default 128 MB) and Python
-interpreter overhead (~80 MB). A small-box deployment runs 1-2 render
-workers and lands near the old one-process footprint (pipeline RAM
-plus a little per-worker overhead).
-
-| Configuration | Pipeline RAM | Render RAM | Total |
-|---|---|---|---|
-| ALL regions + full NWP chain, 8 workers | ~8-10 GB | ~3-4 GB | ~12-14 GB |
-| ALL regions + full NWP chain, 16 workers | ~8-10 GB | ~5-6 GB | ~14-16 GB |
-| ALL regions + full NWP chain, 32 workers | ~8-10 GB | ~7-8 GB | ~16-18 GB |
-
-Production observation on an 80-core / 32 GB rack (32 workers): ~16 GB
-total RSS across both containers.
-
-### Scaling
-
-| Users | Workers | RAM (ALL regions + full NWP) |
-|---|---|---|
-| 1-5 (personal) | 1 | ~9-10 GB |
-| 5-50 (small community) | 1-2 (with CDN) | ~9-18 GB |
-| 50-500 (medium) | 8-16 | ~12-16 GB |
-| 500+ (large) | 24-32+ (with CDN) | ~16-20 GB |
-
-Tiles are served with `Cache-Control: public, max-age=300`, so any caching reverse proxy (nginx, Cloudflare, etc.) will work out of the box for high-traffic deployments. A CDN like Cloudflare (free tier works) absorbs most tile requests at the edge, meaning a single worker can serve far more users than the table above suggests. Using a Cloudflare Tunnel also provides free HTTPS with no certificate management. For most self-hosting scenarios, 1 worker behind Cloudflare is sufficient.
-
-## Architecture
 
 ### Data flow
 
