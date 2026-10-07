@@ -852,3 +852,7 @@ LibreWXR is licensed under the [GNU Affero General Public License v3.0](LICENSE)
 The AGPL is the right fit for the open project and the self-hosting community. But its copyleft and network-use obligations are incompatible with some commercial uses — for example, building LibreWXR into a closed-source product, or running a hosted service on top of it whose modifications you can't release.
 
 If that describes your use case, a separate commercial license is available that lifts the AGPL obligations. This changes nothing about the open project: LibreWXR stays AGPL-licensed and free for everyone else. Reach out to <jkimsey@proton.me> to discuss terms.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/chart?repos=joshuakimsey/librewxr&type=date&legend=bottom-right)](https://www.star-history.com/?repos=joshuakimsey%2Flibrewxr&type=date&legend=bottom-right)
