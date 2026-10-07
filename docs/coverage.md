@@ -32,22 +32,22 @@ Canada, eastern Aleutians, the Mediterranean between Greece and Cyprus,
 the Norwegian/Faroe gap above Iceland) rather than a lat/lon bounding
 box that would have implied coverage where none exists.
 
-| Source | Stations | Per-station range | Composite cadence | Composite resolution |
-|---|---|---|---|---|
-| NOAA MRMS — CONUS | NEXRAD WSR-88D (146) | 240 km | 2 min | ~0.005° (~500 m) |
-| NOAA MRMS — Alaska | NEXRAD WSR-88D (7) | 240 km | 2 min | ~0.01° |
-| NOAA MRMS — Hawaii | NEXRAD WSR-88D (4) | 240 km | 2 min | ~0.005° |
-| NOAA MRMS — Puerto Rico | NEXRAD WSR-88D (1) | 240 km | 2 min | ~0.01° |
-| NOAA MRMS — Guam | NEXRAD WSR-88D (1) | 240 km | 2 min | ~0.0085° |
-| ECCC MSC Canada | S-band dual-pol (33) | 240 km | 6 min | ~0.025° |
-| EUMETNET OPERA | C-band (184, 27 countries) | 300 km | 5 min | 1 km LAEA |
-| DPC Italy (VMI) | C-band + X-band (24: 11 DPC + 13 partner) | 150 km | 5 min | 1 km tmerc |
-| MARN El Salvador | S-band (1, San Andrés) | 120 km | 5 min | ~0.009° (~1 km) |
-| CWA Taiwan QPESUMS | S/C-band (7) | 450 km | 10 min | ~0.0125° (~1.4 km) |
-| MET Malaysia | S-band (12, national network) | 350-375 km | 10 min | ~0.022° lon / 0.019° lat (~2.5 km) |
-| PAGASA Philippines | S-band (9, national mosaic) | 240 km | 15 min | ~0.0069° lon / 0.0091° lat (~770 m) |
-| JMA HRPN (Japan) | C-band (20) + XRAIN X-band + AMeDAS gauges | 240 km | 5 min | ~0.0125° (~1.4 km) |
-| NOAA RRQPE (observed) | geostationary IR blend (no radar stations) | — | 10 min | 0.04° stored (0.02° native) |
+| Code | Source | Stations | Per-station range | Composite cadence | Composite resolution |
+|---|---|---|---|---|---|
+| `USCOMP` | NOAA MRMS — CONUS | NEXRAD WSR-88D (146) | 240 km | 2 min | ~0.005° (~500 m) |
+| `AKCOMP` | NOAA MRMS — Alaska | NEXRAD WSR-88D (7) | 240 km | 2 min | ~0.01° |
+| `HICOMP` | NOAA MRMS — Hawaii | NEXRAD WSR-88D (4) | 240 km | 2 min | ~0.005° |
+| `PRCOMP` | NOAA MRMS — Puerto Rico | NEXRAD WSR-88D (1) | 240 km | 2 min | ~0.01° |
+| `GUCOMP` | NOAA MRMS — Guam | NEXRAD WSR-88D (1) | 240 km | 2 min | ~0.0085° |
+| `CACOMP` | ECCC MSC Canada | S-band dual-pol (33) | 240 km | 6 min | ~0.025° |
+| `OPERA` | EUMETNET OPERA | C-band (184, 27 countries) | 300 km | 5 min | 1 km LAEA |
+| `ITCOMP` | DPC Italy (VMI) | C-band + X-band (24: 11 DPC + 13 partner) | 150 km | 5 min | 1 km tmerc |
+| `SVCOMP` | MARN El Salvador | S-band (1, San Andrés) | 120 km | 5 min | ~0.009° (~1 km) |
+| `TWCOMP` | CWA Taiwan QPESUMS | S/C-band (7) | 450 km | 10 min | ~0.0125° (~1.4 km) |
+| `MYPENINSULAR` + `MYEAST` | MET Malaysia | S-band (12, national network) | 350-375 km | 10 min | ~0.022° lon / 0.019° lat (~2.5 km) |
+| `PHCOMP` | PAGASA Philippines | S-band (9, national mosaic) | 240 km | 15 min | ~0.0069° lon / 0.0091° lat (~770 m) |
+| `JPCOMP` | JMA HRPN (Japan) | C-band (20) + XRAIN X-band + AMeDAS gauges | 240 km | 5 min | ~0.0125° (~1.4 km) |
+| `RRQPE` | NOAA RRQPE (observed) | geostationary IR blend (no radar stations) | — | 10 min | 0.04° stored (0.02° native) |
 
 MRMS and MSC ingest each other's stations along the US/Canada border,
 so the cross-border zone has overlap rather than a hard seam.
@@ -92,20 +92,21 @@ always-on bottom radar tier above) applies first, and the models only
 cover the polar fringe outside the band, the fringe excluded by
 RRQPE's coverage polygon, and RRQPE-decline pixels.
 
-| Source | Coverage | Resolution | Projection | Cycles |
-|---|---|---|---|---|
-| NOAA HRRR-CONUS | Continental US | 3 km | LCC | hourly |
-| NOAA HRRR-Alaska | Alaska + adjacent Pacific | 3 km | polar stereographic | 3-hourly |
-| ECCC HRDPS-Continental | Canada + northern US | 2.5 km | rotated lat/lon | 6-hourly |
-| DMI HARMONIE-AROME DINI | Most of populated Europe + Iceland | 2 km | LCC | 3-hourly |
-| DWD ICON-EU | Europe (wider than DINI) | ~7 km | regular lat/lon | 3-hourly |
-| Météo-France AROME Antilles | Eastern Caribbean (Guadeloupe + Martinique) | 2.5 km | regular lat/lon | 6-hourly |
-| Météo-France AROME Guyane | French Guiana | 2.5 km | regular lat/lon | 6-hourly |
-| Météo-France AROME Indien | Réunion + Mayotte + Comoros + Madagascar + SW Indian Ocean | 2.5 km | regular lat/lon | 6-hourly |
-| Météo-France AROME Nouvelle-Calédonie | New Caledonia + Vanuatu (SW Pacific) | 2.5 km | regular lat/lon | 6-hourly |
-| Météo-France AROME Polynésie | French Polynesia (Society + Tuamotu + Marquesas archipelagoes) | 2.5 km | regular lat/lon | 6-hourly |
-| SMN Argentina WRF-DET | South American Cone (AR/CL/UY/PY + S. Brazil + Bolivia) | 4 km | LCC | 6-hourly |
-| JMA MSM | Japan + Korean Peninsula + Taiwan + Yellow Sea | 5 km | regular lat/lon | 3-hourly |
+| Source | Coverage | Resolution | Projection | Cycles | Toggle |
+|---|---|---|---|---|---|
+| NOAA HRRR-CONUS | Continental US | 3 km | LCC | hourly | `LIBREWXR_NA_NWP_SOURCE=hrrr` |
+| NOAA HRRR-Alaska | Alaska + adjacent Pacific | 3 km | polar stereographic | 3-hourly | *(bundled with HRRR)* |
+| ECCC HRDPS-Continental | Canada + northern US | 2.5 km | rotated lat/lon | 6-hourly | `LIBREWXR_HRDPS_ENABLED=true` |
+| DMI HARMONIE-AROME DINI | Most of populated Europe + Iceland | 2 km | LCC | 3-hourly | `LIBREWXR_EU_NWP_PROFILE=dini_with_icon_eu` |
+| DWD ICON-EU | Europe (wider than DINI) | ~7 km | regular lat/lon | 3-hourly | `LIBREWXR_EU_NWP_PROFILE=icon_eu_only` *(or `dini_with_icon_eu`)* |
+| Météo-France AROME Antilles | Eastern Caribbean (Guadeloupe + Martinique) | 2.5 km | regular lat/lon | 6-hourly | `LIBREWXR_AROME_ANTILLES_ENABLED=true` |
+| Météo-France AROME Guyane | French Guiana | 2.5 km | regular lat/lon | 6-hourly | `LIBREWXR_AROME_GUYANE_ENABLED=true` |
+| Météo-France AROME Indien | Réunion + Mayotte + Comoros + Madagascar + SW Indian Ocean | 2.5 km | regular lat/lon | 6-hourly | `LIBREWXR_AROME_INDIEN_ENABLED=true` |
+| Météo-France AROME Nouvelle-Calédonie | New Caledonia + Vanuatu (SW Pacific) | 2.5 km | regular lat/lon | 6-hourly | `LIBREWXR_AROME_NCALED_ENABLED=true` |
+| Météo-France AROME Polynésie | French Polynesia (Society + Tuamotu + Marquesas archipelagoes) | 2.5 km | regular lat/lon | 6-hourly | `LIBREWXR_AROME_POLYN_ENABLED=true` |
+| SMN Argentina WRF-DET | South American Cone (AR/CL/UY/PY + S. Brazil + Bolivia) | 4 km | LCC | 6-hourly | `LIBREWXR_WRF_SMN_ENABLED=true` |
+| JMA MSM | Japan + Korean Peninsula + Taiwan + Yellow Sea | 5 km | regular lat/lon | 3-hourly | `LIBREWXR_JMA_MSM_ENABLED=true` |
+| ECMWF IFS (global fill) | Everywhere else | 9 km | global | 6-hourly | `LIBREWXR_ECMWF_ENABLED=true` |
 
 The HRRR-Alaska polygon wraps across the antimeridian onto the Russian
 Far East — the polar-stereographic grid genuinely covers that area

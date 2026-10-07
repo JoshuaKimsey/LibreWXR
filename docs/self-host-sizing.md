@@ -54,6 +54,34 @@ tile traffic without a CDN in front. Scale vertically: the designed
 shape is one pipeline writer plus N render workers per host - not
 multi-node.
 
+## Frame Memory per Region
+
+Each enabled radar region keeps `LIBREWXR_MAX_FRAMES` frames (default 12)
+in a memory-mapped ring buffer. Approximate per-frame memory:
+
+| Code | Region | Source | RAM per frame |
+|---|---|---|---|
+| `USCOMP` | Continental US | NCEP MRMS (IEM fallback) | ~63 MB |
+| `AKCOMP` | Alaska | NCEP MRMS (IEM fallback) | ~6 MB |
+| `HICOMP` | Hawaii | NCEP MRMS (IEM fallback) | ~3.4 MB |
+| `PRCOMP` | Puerto Rico | NCEP MRMS (IEM fallback) | ~1 MB |
+| `GUCOMP` | Guam | NCEP MRMS (IEM fallback) | ~1 MB |
+| `CACOMP` | Canada | MSC GeoMet (MRMS blending) | ~6 MB |
+| `SVCOMP` | El Salvador + neighbours | MARN/SNET (San Andrés, 120 km) | <1 MB |
+| `OPERA` | Europe (27 countries) | EUMETNET OPERA | ~16 MB |
+| `ITCOMP` | Italy + neighbours | DPC Radar (24-radar national composite) | ~2 MB |
+| `TWCOMP` | Taiwan + W. Pacific buffer | CWA QPESUMS (7-radar composite) | ~1 MB |
+| `JPCOMP` | Japan archipelago | JMA HRPN (20 radars + AMeDAS gauge correction) | ~4 MB |
+| `MYPENINSULAR` | Peninsular Malaysia + Singapore + N. Sumatra | MET Malaysia (12-radar composite) | <1 MB |
+| `MYEAST` | East Malaysia (Borneo) + Brunei | MET Malaysia (12-radar composite) | <1 MB |
+| `PHCOMP` | Philippines (Luzon, Visayas, Mindanao) | PAGASA PANAHON (9-radar mosaic) | ~4 MB |
+| `RRQPE` | Global 60S-70N band (always-on) | NOAA Enterprise Rain Rate GLB-5 | ~29 MB |
+
+Multiply by `LIBREWXR_MAX_FRAMES` (default 12) for the frame-store budget;
+add NWP grids, satellite frames, nowcast data, and the tile cache on top.
+`/health` is the source of truth for actual usage (see the note at the top
+of this guide).
+
 ## AWS Instance Mapping
 
 Indicative only - instance families, generations, availability, and
