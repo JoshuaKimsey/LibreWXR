@@ -35,7 +35,7 @@ Rain Viewer recently (as of January 1st, 2026) restricted their free API tier. L
 | Permitted use | Personal / educational only | Your server, your terms (AGPL-3.0-or-later) |
 | Uptime & rate limits | Best-effort, none guaranteed | Set by your own infrastructure |
 
-*Rain Viewer free-tier details as published at [rainviewer.com/api](https://www.rainviewer.com/api.html), current as of October 2026.*
+<sub>Rain Viewer free-tier details as published at rainviewer.com/api, current as of October 2026.</sub>
 
 Switching an existing client over? The [Rain Viewer → LibreWXR migration guide](docs/rainviewer-migration-guide.md) covers the two-line change most apps need.
 
