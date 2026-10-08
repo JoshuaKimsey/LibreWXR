@@ -31,7 +31,7 @@ from pathlib import Path
 
 import cv2
 
-from librewxr.config import resolve_cache_dir, settings
+from librewxr.config import resolve_cache_dir, resolve_volatile_dir, settings
 from librewxr.data.alerts_fetcher import WMOAlertsFetcher
 from librewxr.data.alerts_store import AlertsStore
 from librewxr.data.coverage import (
@@ -85,6 +85,13 @@ async def run_pipeline() -> None:
     cache_dir = resolve_cache_dir(settings)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
+    # Stores whose contents are fully regenerated every fetch cycle can be
+    # routed to a RAM-backed filesystem instead of the durable cache volume
+    # (LIBREWXR_VOLATILE_CACHE_DIR; see config.py).  Anything that must
+    # survive a restart keeps using cache_dir.
+    volatile_dir = resolve_volatile_dir(settings)
+    regen_cache_dir = volatile_dir if volatile_dir is not None else cache_dir
+
     # The enabled set includes every always-on contribution region (the
     # coarse global observed tier stays fetchable even under a narrow
     # region spec).
@@ -93,6 +100,12 @@ async def run_pipeline() -> None:
         "Pipeline starting (cache_dir=%s, regions=%s, fetch_interval=%ds)",
         cache_dir, ", ".join(enabled), settings.fetch_interval,
     )
+    if volatile_dir is not None:
+        logger.info(
+            "Volatile store routing: nowcast, storm cells, and precip masks "
+            "under %s (RRQPE scan cache routes via its provider)",
+            volatile_dir,
+        )
 
     # All persistent stores share the same cache_dir so render workers can
     # memmap the same files and __setstate__ from a single state.json.
@@ -146,7 +159,7 @@ async def run_pipeline() -> None:
     # extrapolation phase, so arrows show real storm motion even
     # with nowcast disabled (see LIBREWXR_ARROW_FLOW_ENABLED).
     if settings.nowcast_enabled or settings.arrow_flow_enabled:
-        nowcast_store = NowcastStore(cache_dir=cache_dir)
+        nowcast_store = NowcastStore(cache_dir=regen_cache_dir)
         # External nowcast contributions are only relevant to the
         # extrapolation path; skip the fetch when nowcast is off.
         nowcast_contribs = (
@@ -177,7 +190,7 @@ async def run_pipeline() -> None:
     storm_cell_store = None
     storm_cell_generator = None
     if settings.storm_cells_enabled:
-        storm_cell_store = StormCellStore(cache_dir=cache_dir)
+        storm_cell_store = StormCellStore(cache_dir=regen_cache_dir)
         storm_cell_generator = StormCellGenerator(
             store, storm_cell_store, nowcast_store=nowcast_store,
         )
@@ -210,7 +223,7 @@ async def run_pipeline() -> None:
     # (radar + all NWP samples + nowcast) each cycle, then snapshotted
     # into state.json so render workers query it via memmap without
     # touching the NWP chain.  Multi-mode only.
-    precip_mask_store = PrecipMaskStore(cache_dir=cache_dir)
+    precip_mask_store = PrecipMaskStore(cache_dir=regen_cache_dir)
 
     # Mirrors the render-worker budget resolution in main.py; the
     # pipeline holds the handle solely to own pruning (it never reads

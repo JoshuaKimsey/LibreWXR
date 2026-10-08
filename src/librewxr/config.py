@@ -515,6 +515,18 @@ class Settings(BaseSettings):
     storm_cells_min_dbz: int = 40  # Minimum dBZ for a pixel to be part of a cell
     storm_cells_min_area_km2: float = 25.0  # Minimum cell area in km^2 (filter noise/small cells)
     cache_dir: str = ""  # Persistent cache directory for fetched grids; empty = in-memory only
+    # Optional directory for stores whose contents are fully regenerated
+    # every fetch cycle (nowcast frames + optical-flow fields, per-timestamp
+    # precip masks, storm cells, and the RRQPE source scan cache).  Empty
+    # (default) keeps them under LIBREWXR_CACHE_DIR, unchanged.  When set,
+    # point it at a RAM-backed filesystem (tmpfs / /dev/shm) shared by the
+    # pipeline and ALL render workers at the SAME absolute path: state.json
+    # records absolute memmap paths, so every process that applies state.json
+    # must resolve them.  Its pages count against the container memory limit.
+    # Durable stores (radar frames, NWP/satellite grids, coordinate + shared
+    # tile stores, state.json itself) always stay under LIBREWXR_CACHE_DIR
+    # regardless.
+    volatile_cache_dir: str = ""
 
     # Multi-worker tile-server split.  When render_only is True, this
     # process skips fetcher / NWP grid / satellite / nowcast initialisation
@@ -683,6 +695,13 @@ def resolve_cache_dir(settings) -> Path:
     fallback = Path(tempfile.gettempdir()) / "librewxr-cache"
     _warn_missing_cache_dir(str(fallback))
     return fallback
+
+
+def resolve_volatile_dir(settings) -> Path | None:
+    """Return the volatile store directory, or None when unset."""
+    if not settings.volatile_cache_dir:
+        return None
+    return Path(settings.volatile_cache_dir)
 
 
 settings = Settings()

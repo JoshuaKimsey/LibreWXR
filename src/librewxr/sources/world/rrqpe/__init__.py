@@ -37,14 +37,21 @@ def radar_provider(settings):
 
     if not getattr(settings, "rrqpe_enabled", True):
         return None
-    # Radar providers get no ``cache_dir`` argument; fall back to the
-    # settings-level cache dir so a persistent deployment reuses decoded
-    # scans across restarts (temp dir otherwise — fetch-side state only).
-    cache_dir = getattr(settings, "cache_dir", "") or None
+    # Radar providers get no ``cache_dir`` argument; the scan cache is
+    # fetch-side working state only -- nothing reads it back across
+    # restarts (no loader in any __init__).  The persistent copy that
+    # survives restarts is the FrameStore's ``radar/<ts>_RRQPE.dat``,
+    # restored via RadarFrameCache.  Route this per-cycle write traffic to
+    # the volatile (RAM-backed) directory when one is configured
+    # (LIBREWXR_VOLATILE_CACHE_DIR), else fall back to the durable cache
+    # dir, else a temp dir.
+    volatile = getattr(settings, "volatile_cache_dir", "") or None
+    durable = getattr(settings, "cache_dir", "") or None
+    scan_cache_dir = Path(volatile) if volatile else (Path(durable) if durable else None)
     return RadarSourceContribution(
         regions=REGIONS,
         instance=RRQPESource(
-            RRQPEGrid(cache_dir=Path(cache_dir) if cache_dir else None),
+            RRQPEGrid(cache_dir=scan_cache_dir),
         ),
         group=RRQPE.group,
         # The published extent is the full 2°-inset global band (see

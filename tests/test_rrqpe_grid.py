@@ -840,6 +840,42 @@ class TestAlwaysEnabled:
             real_settings.rrqpe_enabled = True
 
 
+# ── Provider scan-cache routing ────────────────────────────────────────
+
+
+class TestProviderScanCacheRouting:
+    """The RRQPE scan cache routes to ``LIBREWXR_VOLATILE_CACHE_DIR`` when
+    set, else the durable ``LIBREWXR_CACHE_DIR``, else a temp dir."""
+
+    @staticmethod
+    def _provider(*, volatile="", cache="", enabled=True):
+        from types import SimpleNamespace
+
+        from librewxr.sources.world.rrqpe import radar_provider
+
+        stub = SimpleNamespace(
+            rrqpe_enabled=enabled,
+            volatile_cache_dir=volatile,
+            cache_dir=cache,
+        )
+        return radar_provider(stub)
+
+    def test_scan_cache_routes_to_volatile(self, tmp_path):
+        volatile = tmp_path / "volatile"
+        contrib = self._provider(volatile=str(volatile))
+        assert contrib is not None
+        assert contrib.instance._grid._memmap_dir == volatile / "rrqpe"
+
+    def test_scan_cache_falls_back_to_durable(self, tmp_path):
+        durable = tmp_path / "durable"
+        contrib = self._provider(cache=str(durable))
+        assert contrib is not None
+        assert contrib.instance._grid._memmap_dir == durable / "rrqpe"
+
+    def test_provider_returns_none_when_disabled(self):
+        assert self._provider(enabled=False) is None
+
+
 # ── Compositor ordering pin ────────────────────────────────────────────
 
 

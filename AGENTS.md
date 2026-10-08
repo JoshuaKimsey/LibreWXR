@@ -215,6 +215,7 @@ All config via `LIBREWXR_*` env vars or `.env` file. Settings defined in `src/li
 
 **Other:**
 - `LIBREWXR_CACHE_DIR`: persistent disk cache shared by the pipeline + renderers; empty = per-host tempdir fallback with a one-time warning
+- `LIBREWXR_VOLATILE_CACHE_DIR`: optional RAM-backed directory for per-cycle regenerated stores (nowcast/flows, precip masks, storm cells, RRQPE scan cache); empty = keep them under `LIBREWXR_CACHE_DIR`
 - `LIBREWXR_NWP_FETCH_CONCURRENCY`: max parallel NWP grid decodes (default 4)
 - `LIBREWXR_TILE_TRACKING_ENABLED`: hot-tile counters surfaced in `/health` diagnostics (default true; adaptive warming policy not currently shipping)
 - `LIBREWXR_COORD_STORE_ENABLED`: shared on-disk coordinate store (default true; false reverts to per-worker in-process caches; requires `LIBREWXR_CACHE_DIR`)

@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from librewxr.config import Settings, resolve_cache_dir
+from librewxr.config import Settings, resolve_cache_dir, resolve_volatile_dir
 
 
 def _fresh_settings(monkeypatch, *, mode, warm_zoom=None):
@@ -147,3 +147,16 @@ def test_resolve_cache_dir_falls_back_to_tempdir(monkeypatch):
     monkeypatch.setattr(s, "cache_dir", "")
     expected = Path(tempfile.gettempdir()) / "librewxr-cache"
     assert resolve_cache_dir(s) == expected
+
+
+def test_resolve_volatile_dir_unset_returns_none(monkeypatch):
+    s = _fresh_settings(monkeypatch, mode="multi")
+    monkeypatch.setattr(s, "volatile_cache_dir", "")
+    assert resolve_volatile_dir(s) is None
+
+
+def test_resolve_volatile_dir_uses_configured_path(monkeypatch, tmp_path):
+    s = _fresh_settings(monkeypatch, mode="multi")
+    target = tmp_path / "volatile"
+    monkeypatch.setattr(s, "volatile_cache_dir", str(target))
+    assert resolve_volatile_dir(s) == target

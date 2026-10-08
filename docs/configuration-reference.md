@@ -1498,6 +1498,32 @@ When unset, the app uses a stable per-host fallback under the system temp direct
 
 ---
 
+### `LIBREWXR_VOLATILE_CACHE_DIR`
+
+Optional directory for stores whose contents are **fully regenerated every fetch cycle**: nowcast frames + optical-flow fields, per-timestamp precip masks, storm cells, and the RRQPE source scan cache. Point it at a RAM-backed filesystem (tmpfs / `/dev/shm`) to move that per-cycle write traffic off the durable SSD/NVMe cache volume. None of these stores is ever read back across restarts — render workers reopen them only through the absolute memmap paths recorded in `state.json`.
+
+| | |
+|---|---|
+| **Default** | *(empty — the stores stay under `LIBREWXR_CACHE_DIR`)* |
+| **Type** | string |
+
+When empty the behavior is unchanged: every store lives under `LIBREWXR_CACHE_DIR`. When set, the pipeline constructs `NowcastStore`, `StormCellStore`, `PrecipMaskStore`, and the RRQPE scan cache under this directory instead.
+
+Durable stores — radar frames, NWP/satellite grids, the coordinate store, the shared tile store, and `state.json` itself — **always** stay under `LIBREWXR_CACHE_DIR` regardless of this setting.
+
+The mount must exist at the **same absolute path in the pipeline and every render worker**. `state.json` records absolute memmap paths, so each process that applies the snapshot (`__setstate__`) must resolve them at that path. A shared host tmpfs bind mount (`source == target`) works; `docker-compose.yml` carries a commented example on both services.
+
+**Sizing.** Budget roughly:
+
+- **nowcast**: `nowcast_frames` x (sum of enabled region frame bytes + optical-flow fields) — tens of MB for a single region, ~200+ MB globally.
+- **RRQPE scan window**: `(history + tolerance) / 600 s` slots, ~29 MB each at the default `downsample=2`.
+- **masks**: ~0.26 MB x (`max_frames` + `nowcast_frames`).
+- **storm cells**: ~9 KB per region.
+
+Recommend at least **1 GB** of headroom for single-region deployments, more for global ones. tmpfs pages count against the container memory limit, so leave room in `LIBREWXR_PIPELINE_MEMORY` / `LIBREWXR_RENDER_MEMORY` (or the host RAM) for the store contents.
+
+---
+
 ## Performance and Reliability
 
 ### `LIBREWXR_DOWNLOAD_RETRIES`
