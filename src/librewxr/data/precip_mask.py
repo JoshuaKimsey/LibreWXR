@@ -449,6 +449,19 @@ class PrecipMaskStore:
     ) -> None:
         """Persist ``mask`` (memmap + atomic replace) or keep on the heap."""
         if self._persistent:
+            # Unchanged timestamps (typical for settled radar-past slots)
+            # rebuild to a byte-identical mask — skip the rewrite and keep
+            # the existing file + memmap.  A stable mtime also stops
+            # page-cache priming from re-touching the file every cycle.
+            old = self._masks.get(ts)
+            if (
+                old is not None
+                and old.shape == mask.shape
+                and old.dtype == mask.dtype
+                and np.array_equal(old, mask)
+            ):
+                masks[ts] = old
+                return
             final = self._memmap_dir / f"{ts}.dat"
             # The mask dir is shared in multi mode.  The pipeline is the
             # only writer, but two overlapping pipeline processes during

@@ -85,24 +85,97 @@ class FrameStore:
             except OSError:
                 pass
 
+    def _resolve_region_array(
+        self,
+        timestamp: int,
+        name: str,
+        data: np.ndarray,
+        existing: dict[str, np.ndarray] | None,
+    ) -> tuple[np.ndarray, bool]:
+        """Return (array, wrote) for one region, skipping writes when possible.
+
+        Avoids rewriting byte-identical data every fetch cycle (a merge
+        that re-supplies an unchanged array would otherwise copy tens of
+        MB to disk for nothing):
+
+        * an already-stored region that is byte-identical is reused as-is;
+        * a memmap already pointing at this exact target file (boot-
+          restore of a persisted slot) is reopened, no write;
+        * a memmap of a sibling slot file in the same directory (carry-
+          forward) is hardlinked to the target, so no bytes are copied.
+
+        Anything else is written through the atomic ``_to_memmap`` path.
+        """
+        final_path = self._memmap_dir / f"{timestamp}_{name}.dat"
+        if existing is not None and name in existing:
+            cur = existing[name]
+            if (
+                cur.shape == data.shape
+                and cur.dtype == data.dtype
+                and np.array_equal(cur, data)
+            ):
+                return cur, False
+            return self._to_memmap(timestamp, name, data), True
+
+        if isinstance(data, np.memmap):
+            src = Path(str(data.filename))
+            if src.parent == self._memmap_dir and src.name == final_path.name:
+                # The array already IS the target file (boot-restore of an
+                # existing slot) — reopen read-only, no write.
+                return np.memmap(
+                    final_path, dtype=data.dtype, mode="r", shape=data.shape,
+                ), False
+            if src.parent == self._memmap_dir and src.name.endswith(".dat"):
+                # Carry-forward from a sibling slot: hardlink the existing
+                # file so both slot names share one inode.  A later rewrite
+                # of either name replaces its own directory entry without
+                # touching the other's bytes.
+                try:
+                    os.link(src, final_path)
+                except OSError:
+                    pass
+                else:
+                    return np.memmap(
+                        final_path, dtype=data.dtype, mode="r", shape=data.shape,
+                    ), True
+
+        return self._to_memmap(timestamp, name, data), True
+
     async def add_frame(self, frame: RadarFrame) -> tuple[int | None, bool]:
         """Add a frame, evicting the oldest if at capacity.
 
         If a frame with the same timestamp exists, merge the region data.
-        Returns (evicted_timestamp | None, was_merged).
+        Returns (evicted_timestamp | None, merged_with_content_change).
+
+        The bool is True only when the merge actually changed stored
+        content.  A fully byte-identical merge is a no-op: no disk write,
+        no version bump, and it returns ``False`` so callers skip the
+        tile-cache invalidation / state.json dump.
         """
         async with self._lock:
-            # Convert regions to memory-mapped files.  Each region's
-            # write + flush runs in its own worker thread (USCOMP is
-            # ~63 MB) so all regions of one frame write concurrently;
-            # the async lock still serialises concurrent add_frame calls.
+            # Resolve each region against the existing frame (if any)
+            # first: identical data is reused, a memmap of a sibling slot
+            # is hardlinked, and only genuinely new/changed arrays are
+            # written.  np.array_equal reads the stored memmap and
+            # _to_memmap writes — both belong off the event loop, so the
+            # per-region resolution runs in worker threads under one
+            # gather (USCOMP alone is ~63 MB).
+            existing_frame = self._by_ts.get(frame.timestamp)
+            existing_regions = (
+                existing_frame.regions if existing_frame is not None else None
+            )
             region_items = list(frame.regions.items())
-            memmaps = await asyncio.gather(*[
-                asyncio.to_thread(self._to_memmap, frame.timestamp, name, data)
+            resolved = await asyncio.gather(*[
+                asyncio.to_thread(
+                    self._resolve_region_array,
+                    frame.timestamp, name, data, existing_regions,
+                )
                 for name, data in region_items
             ])
-            for (name, _data), memmap in zip(region_items, memmaps):
-                frame.regions[name] = memmap
+            wrote_any = False
+            for (name, _data), (array, wrote) in zip(region_items, resolved):
+                frame.regions[name] = array
+                wrote_any = wrote_any or wrote
 
             # Merge into existing frame if same timestamp.
             # Copy-on-write: build a NEW regions dict and swap the reference instead of
@@ -113,19 +186,26 @@ class FrameStore:
             # updates mid-warm. Swapping the reference leaves in-flight renders on a
             # consistent snapshot (region arrays are never mutated in place, so sharing the
             # old arrays with an in-flight reader is safe).
-            for existing in self._frames:
-                if existing.timestamp == frame.timestamp:
-                    existing.regions = {**existing.regions, **frame.regions}
-                    # Content changed for an unchanged timestamp (e.g. a
-                    # transient region-fetch failure carried forward then
-                    # filled in) — bump the version so render workers know
-                    # the cached geometry for this timestamp is stale.
-                    self._frame_versions[frame.timestamp] = (
-                        self._frame_versions.get(frame.timestamp, 0) + 1
-                    )
+            if existing_frame is not None:
+                existing_frame.regions = {
+                    **existing_frame.regions, **frame.regions
+                }
+                if not wrote_any:
+                    # Every merged region was byte-identical to what is
+                    # already stored — a no-op merge.  No version bump, so
+                    # render workers keep their cached geometry for this
+                    # timestamp (and the pipeline skips its state dump).
                     # Merge keeps the same object, so the ``_by_ts`` entry
                     # stays valid — the dict lookup returns the live frame.
-                    return None, True
+                    return None, False
+                # Content changed for an unchanged timestamp (e.g. a
+                # transient region-fetch failure carried forward then
+                # filled in) — bump the version so render workers know
+                # the cached geometry for this timestamp is stale.
+                self._frame_versions[frame.timestamp] = (
+                    self._frame_versions.get(frame.timestamp, 0) + 1
+                )
+                return None, True
 
             evicted_ts = None
             if len(self._frames) >= self._max_frames:

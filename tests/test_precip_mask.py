@@ -659,6 +659,48 @@ class TestSaveMaskTmpIsolation:
 
 
 # ---------------------------------------------------------------------------
+# Equality guard: unchanged masks are not rewritten
+# ---------------------------------------------------------------------------
+
+
+class TestSaveMaskEqualityGuard:
+    def test_unchanged_build_keeps_file_mtime(self, tmp_path):
+        """Two consecutive builds from unchanged stores rewrite nothing."""
+        store = PrecipMaskStore(cache_dir=tmp_path / "cache")
+        mask_file = tmp_path / "cache" / "mask" / f"{_TS}.dat"
+        frame_store = _FakeFrameStore({_TS: {"USCOMP": _placed_uscomp(*_CELL)}})
+
+        asyncio.run(store.build({"frame_store": frame_store}, _FakeNWPChain(), settings))
+        st_before = mask_file.stat()
+
+        asyncio.run(store.build({"frame_store": frame_store}, _FakeNWPChain(), settings))
+        st_after = mask_file.stat()
+
+        # os.replace installs a fresh inode; unchanged inode + mtime proves
+        # the byte-identical mask was never rewritten.
+        assert st_after.st_ino == st_before.st_ino
+        assert st_after.st_mtime_ns == st_before.st_mtime_ns
+        assert store.has_precip_in_bbox(_TS, _cell_bbox(*_CELL)) is True
+
+    def test_changed_build_rewrites_mask(self, tmp_path):
+        """Different store contents produce a different mask and a rewrite."""
+        store = PrecipMaskStore(cache_dir=tmp_path / "cache")
+        mask_file = tmp_path / "cache" / "mask" / f"{_TS}.dat"
+
+        frame_store = _FakeFrameStore({_TS: {"USCOMP": _placed_uscomp(*_CELL)}})
+        asyncio.run(store.build({"frame_store": frame_store}, _FakeNWPChain(), settings))
+        ino_before = mask_file.stat().st_ino
+
+        moved = (120, 160)
+        frame_store = _FakeFrameStore({_TS: {"USCOMP": _placed_uscomp(*moved)}})
+        asyncio.run(store.build({"frame_store": frame_store}, _FakeNWPChain(), settings))
+
+        assert mask_file.stat().st_ino != ino_before
+        assert store.has_precip_in_bbox(_TS, _cell_bbox(*moved)) is True
+        assert store.has_precip_in_bbox(_TS, _cell_bbox(*_CELL)) is False
+
+
+# ---------------------------------------------------------------------------
 # Sync helper (no async scaffolding)
 # ---------------------------------------------------------------------------
 
