@@ -1513,6 +1513,35 @@ Durable stores — radar frames, NWP/satellite grids, the coordinate store, the 
 
 The mount must exist at the **same absolute path in the pipeline and every render worker**. `state.json` records absolute memmap paths, so each process that applies the snapshot (`__setstate__`) must resolve them at that path. A shared host tmpfs bind mount (`source == target`) works; `docker-compose.yml` carries a commented example on both services.
 
+The update-safe route is a gitignored `docker-compose.override.yml`, which Compose auto-merges on top of the tracked file at runtime (no `-f` chain) and which survives `git pull` untouched:
+
+```yaml
+# docker-compose.override.yml - host-specific deltas, gitignored.
+# Auto-merged on top of docker-compose.yml at runtime (no -f chain).
+# Keeps the tracked compose file pristine so `git pull` never conflicts.
+
+services:
+  pipeline:
+    # Override volume entries with NEW container paths append to the
+    # base mounts (the named cache volume and other base mounts stay
+    # intact; an entry targeting the same container path as a base
+    # entry replaces it).  Bind the host tmpfs at the SAME absolute
+    # path the env var names - both sides must match because
+    # state.json records absolute memmap paths.
+    volumes:
+      - /dev/shm/librewxr:/dev/shm/librewxr
+
+  renderer:
+    volumes:
+      - /dev/shm/librewxr:/dev/shm/librewxr
+```
+
+Set `LIBREWXR_VOLATILE_CACHE_DIR=/dev/shm/librewxr` once in the shared `.env` (compose's `env_file` feeds **both** services from it) - or in an override `environment:` block on each service, which takes precedence over `env_file`.
+
+Host prep: `/dev/shm` defaults to half of host RAM - check `df -h /dev/shm` against the sizing figures above before enabling.
+
+The example is deliberately minimal - an override file can carry any other host-specific deltas alongside (thread caps, cache re-binds, tunnels); the two volume lines are all the volatile routing itself needs.
+
 **Sizing.** Budget roughly:
 
 - **nowcast**: `nowcast_frames` x (sum of enabled region frame bytes + optical-flow fields) — tens of MB for a single region, ~200+ MB globally.

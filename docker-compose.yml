@@ -56,6 +56,8 @@ services:
       # every render worker.  tmpfs pages count against the container
       # memory limit.  See docs/configuration-reference.md.
       # LIBREWXR_VOLATILE_CACHE_DIR: /dev/shm/librewxr
+      # Prefer the gitignored docker-compose.override.yml instead: it
+      # auto-merges over this file and survives `git pull` with no conflicts.
     volumes:
       - librewxr-cache:/data/cache
       - earthkit-cache:/root/.cache/earthkit-regrid
@@ -63,6 +65,8 @@ services:
       # Shared host tmpfs backing LIBREWXR_VOLATILE_CACHE_DIR above.
       # Uncomment in BOTH services (identical path on each side).
       # - /dev/shm/librewxr:/dev/shm/librewxr
+      # Update-safe route; worked example in docs/configuration-reference.md
+      # (LIBREWXR_VOLATILE_CACHE_DIR).
     restart: unless-stopped
     stop_grace_period: 30s
     logging:
@@ -105,12 +109,16 @@ services:
       # every render worker.  tmpfs pages count against the container
       # memory limit.  See docs/configuration-reference.md.
       # LIBREWXR_VOLATILE_CACHE_DIR: /dev/shm/librewxr
+      # Prefer the gitignored docker-compose.override.yml instead: it
+      # auto-merges over this file and survives `git pull` with no conflicts.
     volumes:
       - librewxr-cache:/data/cache
       - ./logs:/logs
       # Shared host tmpfs backing LIBREWXR_VOLATILE_CACHE_DIR above.
       # Uncomment in BOTH services (identical path on each side).
       # - /dev/shm/librewxr:/dev/shm/librewxr
+      # Update-safe route; worked example in docs/configuration-reference.md
+      # (LIBREWXR_VOLATILE_CACHE_DIR).
     # Render workers wait for state.json with a 300 s default timeout
     # (LIBREWXR_STATE_WAIT_TIMEOUT).  depends_on starts the pipeline
     # first so the wait window is shorter on cold start.
