@@ -178,7 +178,10 @@ physical core only contend for the same execution units.
 **Disk:** expect ~20-30 GiB for caches. Note that the coordinate store's
 soft cap - `LIBREWXR_COORD_STORE_MB` - is a **disk** budget, not RAM
 (default 8192 in multi mode; lower it on small disks - it prunes once
-per fetch cycle).
+per fetch cycle). With `LIBREWXR_VOLATILE_CACHE_DIR` set, the per-cycle
+regenerated stores (~1-1.5 GB at ALL regions) live on tmpfs instead of
+disk, so they count against the container/anon budget rather than the
+disk budget.
 
 **RRQPE memory:** the RRQPE observed-precipitation layer (NOAA
 Enterprise Rain Rate) is now a radar region, so its frames live in the
@@ -198,6 +201,7 @@ versus the old NWP-source form is roughly the nowcast half.  Factor 4
 | `LIBREWXR_NWP_FETCH_CONCURRENCY` | Parallel NWP grid decodes in the pipeline; drives decode-time RAM bursts. |
 | `LIBREWXR_COORD_STORE_MB` | Disk budget for the shared coordinate store (not RAM). |
 | `LIBREWXR_CACHE_DIR` | Shared cache directory; put it on SSD. Recommended - unset falls back to a per-host tempdir with a warning. |
+| `LIBREWXR_VOLATILE_CACHE_DIR` | Optional RAM-backed (tmpfs) directory for per-cycle regenerated stores (nowcast, precip masks, storm cells, RRQPE scan cache) - moves their rewrite traffic off the SSD; tmpfs pages count against the container memory limit (~1-1.5 GB at ALL regions). |
 | `LIBREWXR_PIPELINE_MEMORY` | Memory limit for the pipeline container; `12G` compose default. |
 | `LIBREWXR_RENDER_MEMORY` | Memory limit for the renderer container; `18G` compose default. |
 
