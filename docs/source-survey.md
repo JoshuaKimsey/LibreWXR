@@ -1,10 +1,10 @@
 # Source Survey
 
-A snapshot of the data sources LibreWXR has evaluated for inclusion in the core project: what shipped, what's queued, what was investigated and ruled out, and the reasoning behind each call. Covers both radar composites and regional NWP grids. The satellite layer (NOAA GMGSI, LW+VIS hourly composite) is covered separately in docs/satellite-implementation-plan.md. WMO CAP weather alerts (severeweather.wmo.int + NWS API) are fetched by src/librewxr/data/alerts_fetcher.py and served at /v2/alerts.
+A snapshot of the data sources LibreWXR has evaluated for inclusion in the core project: what shipped, what's queued, what was investigated and ruled out, and the reasoning behind each call. Covers radar composites, regional NWP grids, and lightning data (added in the 2026-10-08 sweep). The satellite layer (NOAA GMGSI, LW+VIS hourly composite) is covered separately in docs/satellite-implementation-plan.md. WMO CAP weather alerts (severeweather.wmo.int + NWS API) are fetched by src/librewxr/data/alerts_fetcher.py and served at /v2/alerts.
 
 The open-data criteria these decisions apply are documented in [`adding-a-source.md`](adding-a-source.md#upstream-contribution-criteria). Self-hosters running their own LibreWXR instance are not bound by them — this document is the upstream selection record, not a prescription for every deployment.
 
-Tier statuses and endpoint details were re-validated in an August 2026 sweep; dated per-entry notes record what changed.
+Tier statuses and endpoint details were re-validated in an August 2026 sweep; dated per-entry notes record what changed. The lightning section was surveyed separately on 2026-10-08.
 
 ## Conventions
 
@@ -25,6 +25,9 @@ Sources that shipped and were later removed are recorded in [Reverted and remove
 - [Radar — Tier 2](#radar--tier-2)
 - [Radar — Tier 3](#radar--tier-3)
 - [Satellite — Implemented](#satellite--implemented)
+- [Lightning — Tier 1](#lightning--tier-1)
+- [Lightning — Tier 2](#lightning--tier-2)
+- [Lightning — Tier 3](#lightning--tier-3)
 - [NWP — Implemented](#nwp--implemented)
 - [NWP — Tier 2](#nwp--tier-2)
 - [NWP — Tier 3](#nwp--tier-3)
@@ -471,6 +474,70 @@ One-line outcomes from the same sweep, recorded so they aren't re-probed blindly
 
 Hourly global mosaic (±72.7 deg), VIS-over-LW composite with day/night terminator, S3 bucket noaa-gmgsi-pds. See docs/satellite-implementation-plan.md for the full record.
 
+## Lightning — Tier 1
+
+Surveyed 2026-10-08 — the first time this document covers lightning; no lightning source had been evaluated before this sweep. Unlike radar, the open path for strike observations is geostationary optical flash detection, not ground networks, which are commercial or participant-gated everywhere. Validated against the upstream endpoints; implementation is queued behind whatever else is in flight.
+
+### Global — GOES GLM L2 (GOES-18 West + GOES-19 East)
+
+Source: Geostationary Lightning Mapper Level 2 flash data from the anonymous NOAA NODD buckets `noaa-goes18` / `noaa-goes19` under the `GLM-L2-LCFA` prefix (also mirrored to Google Cloud; a `noaa-goes16` bucket exists but GOES-16 is on-orbit standby since GOES-19 took the East seat — build against G18/G19). Anonymous HTTPS, no key, no registration. NetCDF-4 point lists (events/groups/flashes with lat/lon centroid, time, radiant energy, coverage area), one file per 20-second window, roughly 0.2–0.6 MB each, landing on S3 ~20–40 s after observation. Public domain (NODD) — the cleanest license in the project's source stack.
+
+Live-verified 2026-10-08: both operational buckets were publishing the current day's files at correct 20-second cadence (`GOES-19` East at 75.2°W, `GOES-18` West at 137°W are the two operational GLM instruments). Coverage ±54° latitude — the Americas, Atlantic, and Pacific. Caveat from the same check: GOES-19 suffered a no-transmission anomaly on 2026-07-15/16 with GLM among the last products restored, so treat GLM uptime as a monitored dependency with missed-window handling shaped like any radar source's, not as an assumption.
+
+Coverage value: the entire Western Hemisphere at flash level with sub-minute latency. Paired with MTG LI (Tier 3 below) it covers everything eastward to ~80°E; the 80°E–170°E band (Maritime Continent, Australia, Japan) is the remaining observation gap.
+
+Implementation shape: a self-contained package pair at `sources/world/glm/goes_west/`-style layout (per-satellite instances, like MRMS per-product routing). Flashes are sparse points, not rasters, so they belong in a new LightningStore snapshot distributed via `state.json` — the same pattern as alerts and storm cells (present-time overlay + point sampling), not the radar frame ring buffer. NASA GHRC's gridded GLM L3 (`glmgoesL3`, 2023–present) was considered and skipped: it requires Earthdata login, which is pointless friction when raw L2 is anonymous and finer.
+
+## Lightning — Tier 2
+
+Open access with an open license and a one-item verification gap before it is implementable.
+
+### Global — ECMWF IFS lightning diagnostics (litoti family)
+
+The IFS chain LibreWXR already ingests carries operational lightning diagnostics — `litoti` (instantaneous total lightning flash density, param 228050) plus 3h/6h accumulations `litota3`/`litota6` (228057/228058), units km⁻² day⁻¹. Open-Meteo already exposes "Lightning Density" from IFS on its direct-query API. This is model-derived lightning *threat* at NWP cadence, not observed strikes — the NWP-side analogue of the chain's polar-fringe fill, and the natural filler for exactly the 80°E–170°E observation gap above.
+
+Deferred with one unverified item: whether the Open-Meteo `.om` mirror LibreWXR fetches IFS from actually carries the litoti parameters (their API exposes the derived variable; the mirror's variable list must be checked). If it does, this is a near-zero-ingest add on an already-integrated anonymous CC-BY-4.0 source. If not, ECMWF's own open-data distribution is anonymous and CC-BY-4.0 at 0.25°, costing a GRIB fetch path LibreWXR already has via eccodes — blocked only by being strictly a forecast proxy, so it serves the nowcast/blended surface rather than past observed frames.
+
+### Eastern Hemisphere — MTG LI flash-area imagery via EUMETView (anonymous)
+
+Found 2026-10-08 in a follow-up sweep hunting for a third-party RRQPE-style republication of MTG LI (none exists — see the Tier 3 entry below). The no-key path is EUMETSAT's own OGC visualisation service: EUMETView, a GeoServer at `https://view.eumetsat.int/geoserver/ows` serving **WMS and WCS 2.0.1 fully anonymously** — `GetCapabilities` reports `Fees: none` / `AccessConstraints: none`, and a live probe returned 200s for GetCapabilities, WMS GetMap, and WCS GetCoverage (real GeoTIFF bytes). One lightning layer is exposed: **`mtg_fd:li_afa`** ("LI Accumulated Flash Area - MTG-I - 0 degree"; WCS coverageId `mtg_fd__li_afa`, double underscore). Gridded 14000×14000 over ±70° (~1.1 km/px) on the WMTS-style latency: native AFA accumulation is 30 s and LI L2 nominal timeliness ~90 s, but EUMETView's time dimension runs at **5-minute stride** with `nearestValue=1`, its newest slot landing a few minutes behind wall-clock.
+
+Two constraints cap this at imagery-grade. First, the coverage is served as a **three-band (RED/GREEN/BLUE) raster with radiance-labelled units** — DescribeCoverage semantics say colour-mapped visualisation, not the numeric flash-area field; the EUMETSAT Data Policy explicitly frames EUMETView as visualisation "without providing access to original numerical data". Fine as a tile overlay; not sampleable without colour→value decoding (and a live pixel inspection of a GetCoverage would be the first step if sampling were ever wanted — as a pure visual overlay, no inspection is needed, which is the recommended first scope). Second, it is one derived surface (accumulated flash area, a flash-*density* raster) — no per-flash point, time, or energy. WMTS GetTile currently returns 400 from GeoWebCache ("error getting coverage reader"); WMS/WCS only.
+
+License: MTG LI is EUMETSAT Core Data, "Free and Unrestricted ... including redistribution, and with no conditions on use" (EUMETSAT Data Policy Art. 6), attribution required ("Contains modified EUMETSAT data"). Neither the license nor the access path needs anything a self-hoster can't run anonymously — the only structural difference from a NOAA product is that this is a rendering pipeline, not a data mirror.
+
+Implementation shape: the parked `satellite-integration` branch already contains a working anonymous EUMETView WCS 2.0.1 client (`sources/_shared/geostationary_wcs.py` — DescribeCoverage/GetCoverage with `subset=time("...")`/`subset=Lat(.., ..)` and `scaleSize` downsampling, `httpx.get` bare with no auth), built for the sibling `mtg_fd__ir105_hrfi` / `mtg_fd__vis06_hrfi` coverages on the same host. Reusing that family for `li_afa` is a parameter change plus a present-time imagery overlay; the branch's operational hazards (burst rate-limiting with 503 responses; the documented RETRY_BACKOFF_S = (2, 5, 10) schedule and per-host fetch serialization) are known quantities.
+
+## Lightning — Tier 3
+
+Sources that aren't currently viable. Structural blockers: registration/API-key gates, commercial or participant-gated networks, or decommissioned instruments.
+
+### Eastern Hemisphere — MTG Lightning Imager (EUMETSAT Meteosat-12)
+
+The best open Eastern-Hemisphere instrument, and the document's regular API-key story in a new costume. The Lightning Imager has been operational at 0°E since 2024-10-31, producing L2 flashes and groups (10-second point netCDF-4, plus 30-second accumulated-flash grids on the FCI ~4 km grid) covering ~79°N–79°S — Europe, Africa, the Atlantic, and the western Indian Ocean. License is ideal: "Free and unrestricted", CC-BY-4.0.
+
+The blocker is access: the EUMETSAT Data Store requires free registration plus a per-user API key (EUMETCast multicast is the documented low-latency path and needs dish/multicast infrastructure). Automatic Tier 3 under the no-API-keys rule in `adding-a-source.md`, same posture as KNMI radar — generous license, credential gate.
+
+**No third-party anonymous republication exists (checked 2026-10-08).** The RRQPE-style hope — a foreign provider mirroring LI-derived data anonymously — came up empty: no AWS Open Data Registry entry for MTG/LI/EUMETSAT lightning; Open-Meteo mirrors MTG only for solar radiation and publishes no lightning variables; Sentinel Hub, the Copernicus Data Space, and the Destination Earth Data Lake all carry EUMETSAT lightning only under free registration or org-grant access; the closest academic mirror — France's AERIS/ICARE, which carries all five LI L2 products — requires a (free) ICARE account, as do WEkEO and DestinE. No community EUMETCast-to-public-bucket republisher was found either. The single no-key path to anything LI remains EUMETSAT's own EUMETView, which serves only the accumulated-flash-area imagery (see the Tier 2 entry above).
+
+Trigger to revisit: EUMETSAT exposes LI L2 through an anonymous channel — an open S3/CDN mirror, or WIS2 publication (EUMETSAT is onboarding product classes to WIS2, but LI could not be confirmed there as of 2026-10), or the project ever relaxes the no-API-keys rule. Self-hosters who want Eastern-Hemisphere per-strike data today can legitimately integrate the Data Store (or a third-party account like AERIS/ICARE or WEkEO) themselves — that is an operator choice, not an upstream one.
+
+### Asia-Pacific — FY-4 Lightning Mapping Imager (FengYun)
+
+Premise correction recorded for future surveys: **FY-4B carries no lightning instrument** (AGRI + GIIRS + GHI + SEP only). LMI flies on FY-4A (research-era, relocated 86.5°E → 123.5°E, pointing alternates seasonally between the China region and the Indian Ocean/western Australia, ~15 km geolocation corrections documented in the literature) and FY-4C — launched 2025-12-27 with an upgraded full-disk LMI, effectively still in commissioning through 2026. NSMC access requires an emailed data-requirements form (~7 working day review), the portal is Chinese-primary, redistribution terms are not clearly permissive, and NRT cadence is not documented in English.
+
+Trigger to revisit: FY-4C's full-disk LMI reaches operational NRT status on an anonymous channel (NSMC has no AWS Open Data footprint today, unlike KMA's GK-2A precedent). This is the highest-value future unlock in the section — it is the only instrument that closes the Indian Ocean/Maritime Continent gap left between GOES and MTG LI.
+
+### Ground detection networks — Blitzortung, WWLLN, EUCLID, commercial vendors
+
+Blitzortung is confirmed restrictive: raw data reaches station participants only, and the terms prohibit commercial use outright — "even by users that send data to our servers" — a non-commercial clause, which is an upstream blocker under `adding-a-source.md`. WWLLN (global) distributes through a research agreement with the University of Washington, not an open license. EUCLID (Europe) routes access through member national met services. The commercial vendors (Vaisala NLDN/GLD360, Earth Networks ENTLN/USPLN) are pay-walled. No national met service surveyed in this sweep publishes a machine-readable real-time strike feed anonymously — Japan's LIDEN is paid; Australian BoM, India IMD, and Korea KMA offer archives or app-only viewers.
+
+Trigger to revisit: none. Blitzortung's model is inherently participant-gated and the vendors are commercial by design; do not re-probe.
+
+### ISS LIS — decommissioned
+
+NASA's Lightning Imaging Sensor on the ISS stopped collecting 2023-11-16 and the instrument deorbited 2024-07-12; only reprocessed V3 science data (2017–2023) remains via GHRC DAAC. There is no near-real-time LIS. Recorded so nobody re-surveys the legacy "ISS LIS NRT" dataset name that lingers in NASA's catalog.
+
 ## NWP — Implemented
 
 LibreWXR's NWP chain blends multiple regional models on top of a global base, dispatched per-pixel via feathered hand-off. Lower priority numbers run first.
@@ -657,3 +724,6 @@ The state of the world for radar redistribution, briefly:
 - **Open-Meteo source catalog** (similarly useful for NWP discovery, not for licensing): the model-by-country pages on `open-meteo.com`
 - **AWS Open Data Registry** (search "meteorological", "radar", "weather"): `https://registry.opendata.aws/`
 - **WMO WIS2 country registry**: the single signal that meaningfully changes Tier 3 status for several countries — worth checking annually
+- **NOAA GOES NODD buckets** (GLM listed under `GLM-L2-LCFA`): `https://registry.opendata.aws/noaa-goes/`
+- **EUMETSAT MTG LI data guide**: `https://user.eumetsat.int/resources/user-guides/mtg-li-level-2-data-guide`
+- **EUMETView OGC services** (anonymous WMS/WCS; MTG LI flash-areas at `mtg_fd:li_afa`): `https://view.eumetsat.int/geoserver/ows`
