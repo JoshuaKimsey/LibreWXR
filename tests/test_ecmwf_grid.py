@@ -723,3 +723,251 @@ class TestFetchSyncWindowSlide:
         assert set(grid._timesteps) == before_keys
         assert grid._reference_time == ref_iso
         assert {p.name for p in grid._memmap_dir.glob("*.dat")} == before_files
+
+    async def test_interpolation_skipped_when_hourly_set_unchanged(
+        self, tmp_path, monkeypatch,
+    ):
+        """A recovered interior hour with the same native set as the last
+        interpolation must not re-run interpolation — the synthetics are
+        already stored."""
+        self._patch_settings(monkeypatch)
+        grid = ECMWFGrid(cache_dir=tmp_path)
+        ref_iso = self._iso(self.BASE)
+        grid._reference_time = ref_iso
+
+        # Store holds H0, H2, H3 (H1 missing) plus synthetics.
+        self._seed_window(
+            grid,
+            [self.BASE, self.BASE + 2 * self.HOUR, self.BASE + 3 * self.HOUR],
+        )
+
+        # The native set the store was last interpolated for.
+        native = frozenset(
+            self.BASE + k * self.HOUR for k in range(0, 4)
+        )
+        grid._interpolation_state = (ref_iso, native)
+
+        latest = self._latest(
+            ref_iso, [self.BASE + k * self.HOUR for k in range(0, 5)],
+        )
+
+        def fake_fetch(vt):
+            # H1 recovers; H4 keeps failing (transient).
+            if vt == self._iso(self.BASE + 4 * self.HOUR):
+                raise RuntimeError("simulated S3 failure")
+            return self._new_frame()
+
+        def boom(_ts):
+            raise AssertionError("interpolation must be skipped when unchanged")
+
+        monkeypatch.setattr(
+            "librewxr.sources.world.ifs.interpolation.interpolate_timesteps",
+            boom,
+        )
+        calls = self._wire(monkeypatch, grid, latest, fake_fetch)
+
+        result = await grid.fetch()
+
+        assert result is True
+        assert set(calls) == {
+            self._iso(self.BASE + self.HOUR),
+            self._iso(self.BASE + 4 * self.HOUR),
+        }
+        # State unchanged: still the same ref + native set.
+        assert grid._interpolation_state == (ref_iso, native)
+
+    async def test_interpolation_runs_when_hourly_set_changed(
+        self, tmp_path, monkeypatch,
+    ):
+        """A newly-fetched hour changes the native set, so interpolation
+        runs and the memo is updated."""
+        self._patch_settings(monkeypatch)
+        grid = ECMWFGrid(cache_dir=tmp_path)
+        ref_iso = self._iso(self.BASE)
+        grid._reference_time = ref_iso
+        self._seed_window(
+            grid, [self.BASE + k * self.HOUR for k in range(0, 4)],
+        )
+        grid._interpolation_state = (
+            ref_iso, frozenset(self.BASE + k * self.HOUR for k in range(0, 4)),
+        )
+
+        latest = self._latest(
+            ref_iso, [self.BASE + k * self.HOUR for k in range(0, 5)],
+        )
+        self._wire(monkeypatch, grid, latest, self._new_frame)
+
+        interp_calls: list[dict] = []
+
+        def fake_interpolate(ts):
+            interp_calls.append(dict(ts))
+            return dict(ts)
+
+        monkeypatch.setattr(
+            "librewxr.sources.world.ifs.interpolation.interpolate_timesteps",
+            fake_interpolate,
+        )
+
+        result = await grid.fetch()
+
+        assert result is True
+        assert len(interp_calls) == 1
+        assert grid._interpolation_state == (
+            ref_iso,
+            frozenset(self.BASE + k * self.HOUR for k in range(0, 5)),
+        )
+
+    async def test_interpolation_runs_when_reference_changed(
+        self, tmp_path, monkeypatch,
+    ):
+        """A changed reference_time (even with a matching native set) makes
+        the memo stale, so interpolation runs."""
+        self._patch_settings(monkeypatch)
+        grid = ECMWFGrid(cache_dir=tmp_path)
+        ref_iso = self._iso(self.BASE)
+        grid._reference_time = ref_iso
+        self._seed_window(
+            grid, [self.BASE + k * self.HOUR for k in range(0, 4)],
+        )
+        grid._interpolation_state = (
+            "1999-01-01T00:00:00Z",
+            frozenset(self.BASE + k * self.HOUR for k in range(0, 4)),
+        )
+
+        latest = self._latest(
+            ref_iso, [self.BASE + k * self.HOUR for k in range(0, 5)],
+        )
+        self._wire(monkeypatch, grid, latest, self._new_frame)
+
+        interp_calls: list[dict] = []
+
+        def fake_interpolate(ts):
+            interp_calls.append(dict(ts))
+            return dict(ts)
+
+        monkeypatch.setattr(
+            "librewxr.sources.world.ifs.interpolation.interpolate_timesteps",
+            fake_interpolate,
+        )
+
+        result = await grid.fetch()
+
+        assert result is True
+        assert len(interp_calls) == 1
+        assert grid._interpolation_state == (
+            ref_iso,
+            frozenset(self.BASE + k * self.HOUR for k in range(0, 5)),
+        )
+
+    async def test_identical_recomputed_synthetic_is_not_rewritten(
+        self, tmp_path, monkeypatch,
+    ):
+        """A recomputed synthetic whose bytes match the stored memmap must
+        reuse the existing file instead of rewriting it."""
+        self._patch_settings(monkeypatch)
+        grid = ECMWFGrid(cache_dir=tmp_path)
+        ref_iso = self._iso(self.BASE)
+        grid._reference_time = ref_iso
+        self._seed_window(
+            grid, [self.BASE + k * self.HOUR for k in range(0, 4)],
+        )
+        # Mismatched memo forces the interpolation branch.
+        grid._interpolation_state = (ref_iso, frozenset({self.BASE}))
+
+        latest = self._latest(
+            ref_iso, [self.BASE + k * self.HOUR for k in range(0, 5)],
+        )
+        self._wire(monkeypatch, grid, latest, self._new_frame)
+
+        synthetic = self.BASE + self.STEP  # stored synthetic between H0 and H1
+        path = grid._memmap_dir / f"{synthetic}_precip.dat"
+        before_mtime = path.stat().st_mtime_ns
+        old_pair = grid._timesteps[synthetic]
+
+        def fake_interpolate(ts):
+            out = dict(ts)
+            # Re-emit the stored synthetic as an identical heap array.
+            out[synthetic] = (
+                np.array(ts[synthetic][0]), np.array(ts[synthetic][1]),
+            )
+            return out
+
+        monkeypatch.setattr(
+            "librewxr.sources.world.ifs.interpolation.interpolate_timesteps",
+            fake_interpolate,
+        )
+
+        result = await grid.fetch()
+
+        assert result is True
+        # The memmap file was left untouched and the old pair reused.
+        assert path.stat().st_mtime_ns == before_mtime
+        assert grid._timesteps[synthetic][0] is old_pair[0]
+
+
+class TestIFSInterpolationMemoHelpers:
+    """Unit tests for the interpolation-memo helpers on ``ECMWFGrid``."""
+
+    def test_hourly_set_returns_hour_marks_only(self):
+        grid = ECMWFGrid()
+        timesteps = {3600: None, 4200: None, 7200: None, 7800: None}
+        assert grid._hourly_set(timesteps) == frozenset({3600, 7200})
+
+    def test_reusable_pair_identical_memmap_backed(self, tmp_path):
+        grid = ECMWFGrid(cache_dir=tmp_path)
+        ts = 3600
+        precip = np.full((4, 4), 7, dtype=np.uint8)
+        snow = np.zeros((4, 4), dtype=bool)
+        grid._timesteps[ts] = (
+            grid._to_memmap(f"{ts}_precip", precip),
+            grid._to_memmap(f"{ts}_snow", snow),
+        )
+        old = grid._timesteps[ts]
+
+        reuse = grid._reusable_pair(ts, precip.copy(), snow.copy())
+
+        assert reuse is old
+
+    def test_reusable_pair_differing_array_returns_none(self, tmp_path):
+        grid = ECMWFGrid(cache_dir=tmp_path)
+        ts = 3600
+        precip = np.full((4, 4), 7, dtype=np.uint8)
+        snow = np.zeros((4, 4), dtype=bool)
+        grid._timesteps[ts] = (
+            grid._to_memmap(f"{ts}_precip", precip),
+            grid._to_memmap(f"{ts}_snow", snow),
+        )
+
+        different = precip.copy()
+        different[0, 0] = 8
+        assert grid._reusable_pair(ts, different, snow.copy()) is None
+
+    def test_reusable_pair_shape_mismatch_returns_none(self, tmp_path):
+        grid = ECMWFGrid(cache_dir=tmp_path)
+        ts = 3600
+        precip = np.full((4, 4), 7, dtype=np.uint8)
+        snow = np.zeros((4, 4), dtype=bool)
+        grid._timesteps[ts] = (
+            grid._to_memmap(f"{ts}_precip", precip),
+            grid._to_memmap(f"{ts}_snow", snow),
+        )
+
+        assert (
+            grid._reusable_pair(
+                ts,
+                np.full((2, 2), 7, dtype=np.uint8),
+                np.zeros((2, 2), dtype=bool),
+            )
+            is None
+        )
+
+    def test_reusable_pair_missing_timestamp_returns_none(self, tmp_path):
+        grid = ECMWFGrid(cache_dir=tmp_path)
+        assert (
+            grid._reusable_pair(
+                1234,
+                np.zeros((2, 2), dtype=np.uint8),
+                np.zeros((2, 2), dtype=bool),
+            )
+            is None
+        )

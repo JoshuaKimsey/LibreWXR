@@ -63,6 +63,10 @@ class ECMWFGrid:
         self._timesteps: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         self._sorted_timestamps: list[int] = []
         self._reference_time: str | None = None
+        # (reference_time, hourly-original-set) the store was last
+        # interpolated for.  A window slide that leaves the native hourly
+        # set unchanged skips re-interpolation entirely.
+        self._interpolation_state: tuple[str, frozenset[int]] | None = None
         self._fs: fsspec.AbstractFileSystem | None = None
         if cache_dir is not None:
             self._memmap_dir = Path(cache_dir) / "ecmwf_ifs"
@@ -109,6 +113,33 @@ class ECMWFGrid:
                 path.unlink()
             except OSError:
                 pass
+
+    def _hourly_set(self, timesteps: dict[int, tuple]) -> frozenset[int]:
+        """Native hourly timestamps present in ``timesteps``.
+
+        Synthetics land on 600 s steps between hourly originals, never on
+        hour marks, so hour-aligned keys identify the native set.
+        """
+        return frozenset(ts for ts in timesteps if ts % 3600 == 0)
+
+    def _reusable_pair(
+        self, ts: int, precip: np.ndarray, snow: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """Return the already-stored pair at ``ts`` when it is byte-identical.
+
+        Used to skip rewriting a freshly re-interpolated synthetic frame
+        whose recomputed arrays match what the store already holds.
+        """
+        old = self._timesteps.get(ts)
+        if old is None:
+            return None
+        if old[0].shape != precip.shape or old[1].shape != snow.shape:
+            return None
+        if old[0].dtype != precip.dtype or old[1].dtype != snow.dtype:
+            return None
+        if np.array_equal(old[0], precip) and np.array_equal(old[1], snow):
+            return old
+        return None
 
     @property
     def data(self) -> np.ndarray | None:
@@ -344,6 +375,7 @@ class ECMWFGrid:
             # COLD PATH — changed reference_time or empty store.  Fetch the
             # whole window, interpolate, and replace the store wholesale.
             new_timesteps = fetched_timesteps
+            hourly_originals = frozenset(fetched_timesteps.keys())
 
             # Optionally interpolate between hourly frames to produce 10-min steps
             if settings.ecmwf_interpolation and len(new_timesteps) >= 2:
@@ -363,6 +395,9 @@ class ECMWFGrid:
             self._timesteps = new_timesteps
             self._sorted_timestamps = sorted(new_timesteps.keys())
             self._reference_time = ref_time
+            # Describes what is stored even when interpolation was off: the
+            # hourly-original set the store holds for this reference_time.
+            self._interpolation_state = (ref_time, hourly_originals)
 
             logger.info(
                 "ECMWF IFS updated: ref=%s, %d timesteps loaded (%s)",
@@ -394,11 +429,24 @@ class ECMWFGrid:
         retained = len(merged) - len(fetched_timesteps)
 
         # Interpolation is idempotent: already-synthetic brackets are skipped,
-        # so this only synthesizes the newly-sparse bracket.
+        # so this only synthesizes the newly-sparse bracket.  Memoize on the
+        # native hourly set so a window slide that leaves it unchanged skips
+        # interpolation entirely (the store already holds the synthetics).
+        hourly_present = self._hourly_set(merged)
         if settings.ecmwf_interpolation and len(merged) >= 2:
-            from librewxr.sources.world.ifs.interpolation import interpolate_timesteps
+            if self._interpolation_state == (ref_time, hourly_present):
+                logger.debug(
+                    "ECMWF IFS: hourly set unchanged for ref %s, skipping "
+                    "interpolation",
+                    ref_time,
+                )
+            else:
+                from librewxr.sources.world.ifs.interpolation import (
+                    interpolate_timesteps,
+                )
 
-            merged = interpolate_timesteps(merged)
+                merged = interpolate_timesteps(merged)
+                self._interpolation_state = (ref_time, hourly_present)
 
         # Delete orphaned files (evicted keys, crashed-cycle leftovers) before
         # writing the new frames; retained memmaps keep their files untouched.
@@ -410,6 +458,13 @@ class ECMWFGrid:
 
         for ts, (precip, snow) in list(merged.items()):
             if isinstance(precip, np.memmap) and isinstance(snow, np.memmap):
+                continue
+            # A re-interpolated bracket can come out byte-identical (e.g.
+            # repeated window slides while an interior hour fetch keeps
+            # failing); identical bytes must not be rewritten.
+            reuse = self._reusable_pair(ts, precip, snow)
+            if reuse is not None:
+                merged[ts] = reuse
                 continue
             merged[ts] = (
                 self._to_memmap(f"{ts}_precip", precip),
@@ -710,6 +765,9 @@ class ECMWFGrid:
         self._timesteps = new_timesteps
         self._sorted_timestamps = sorted(new_timesteps.keys())
         self._reference_time = state["reference_time"]
+        # Render workers never fetch, but the attribute must exist on every
+        # instance so fetcher-side code can compare against it safely.
+        self._interpolation_state = None
         self._fs = None  # lazily recreated if needed
         self._persistent = True
 
