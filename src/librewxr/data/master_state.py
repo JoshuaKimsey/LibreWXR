@@ -25,9 +25,24 @@ Stores whose value is ``None`` (disabled by config) are skipped.  Stores
 present in the snapshot but absent from the consumer's ``stores`` dict
 are silently ignored, so a tile-server worker can be started with a
 subset of stores enabled.
+
+The serialised payload is **gzip-compressed on disk** (the file name is
+still ``state.json``).  :func:`load_state` magic-byte sniffs the gzip
+header, so legacy plaintext ``state.json`` files written by older
+versions still load.  This trade was made because the snapshot is
+rewritten on every fetch cycle and alert-heavy deployments produce a
+~28 MB file per write; gzip cuts the durable-write volume several-fold
+at negligible CPU cost.
+
+Mixed-version deployments -- an old binary's render worker reading a
+new pipeline's gzipped ``state.json`` -- fail loudly by design: the old
+``json.loads`` sees the gzip magic bytes and raises.  Restart the
+pipeline and the renderers together; ``docker compose`` and the
+auto-spawn bare-metal mode both do this naturally.
 """
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import os
@@ -105,11 +120,14 @@ def write_state_snapshot(payload: dict, cache_dir: Path) -> Path:
     final = cache_dir / STATE_FILENAME
     tmp = cache_dir / f".{STATE_FILENAME}.tmp"
     started = time.monotonic()
-    tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
+    raw = json.dumps(payload, default=str).encode("utf-8")
+    data = gzip.compress(raw)
+    tmp.write_bytes(data)
     os.replace(tmp, final)
     logger.debug(
-        "Wrote state.json: %d store(s) → %s (%.2fs)",
-        len(payload["stores"]), final, time.monotonic() - started,
+        "Wrote state.json: %d store(s) → %s (%.2f MB raw -> %.2f MB gz, %.2fs)",
+        len(payload["stores"]), final,
+        len(raw) / 1e6, len(data) / 1e6, time.monotonic() - started,
     )
     return final
 
@@ -151,7 +169,10 @@ def load_state(cache_dir: Path) -> dict[str, Any] | None:
     path = Path(cache_dir) / STATE_FILENAME
     if not path.exists():
         return None
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    raw = path.read_bytes()
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    payload = json.loads(raw)
     version = payload.get("version")
     if version != STATE_VERSION:
         logger.warning(
