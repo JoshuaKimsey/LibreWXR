@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "librewxr"
-version = "0.2.0"
+version = "0.3.0"
 description = "Self-hostable Rain Viewer API replacement using NEXRAD radar data"
 requires-python = ">=3.11"
 authors = [{ name = "Joshua Kimsey", email = "jkimsey@proton.me" }]
