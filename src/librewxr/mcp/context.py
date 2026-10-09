@@ -29,6 +29,7 @@ from librewxr.data.nowcast import NowcastStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.store import FrameStore
 from librewxr.data.alerts_store import AlertsStore
+from librewxr.data.storm_cells import StormCellStore
 from librewxr.api import routes
 from librewxr.sources import (
     collect_nwp_contributions,
@@ -126,12 +127,21 @@ async def build_stdio_lifespan(mcp_instance):
         else None
     )
     alerts_store = AlertsStore() if settings.alerts_enabled else None
+    storm_cell_store = (
+        # The pipeline owns the shared storm-cells dir and may be
+        # mid-write; a boot here must never delete its in-flight tmp
+        # files (the stale-tmp sweep stays the pipeline's job).
+        StormCellStore(cache_dir=cache_dir, cleanup_tmp=False)
+        if settings.storm_cells_enabled
+        else None
+    )
 
     # ---- Build the stores dict for apply_state ---------------------------
     stores: dict[str, object | None] = {
         "frame_store": store,
         **nwp_grids_by_slug,
         "nowcast_store": nowcast_store,
+        "storm_cell_store": storm_cell_store,
         "alerts_store": alerts_store,
     }
 
@@ -156,6 +166,7 @@ async def build_stdio_lifespan(mcp_instance):
         slug: stores[slug] for slug in nwp_grids_by_slug if stores[slug] is not None
     }
     nowcast_store = stores["nowcast_store"]
+    storm_cell_store = stores["storm_cell_store"]
     alerts_store = stores["alerts_store"]
 
     # ---- Coverage masks --------------------------------------------------
@@ -200,6 +211,7 @@ async def build_stdio_lifespan(mcp_instance):
     routes.alerts_store = alerts_store
     routes.alerts_fetcher = None
     routes.alerts_enabled = alerts_store is not None
+    routes.storm_cell_store = storm_cell_store
 
     # ---- State poller ----------------------------------------------------
     last_mtime = state_mtime(cache_dir)
@@ -276,5 +288,7 @@ async def build_stdio_lifespan(mcp_instance):
             logger.exception("Poller shutdown error")
         if nowcast_store is not None:
             nowcast_store.cleanup()
+        if storm_cell_store is not None:
+            storm_cell_store.cleanup()
         store.cleanup()
         logger.info("MCP stdio context shutdown complete")
