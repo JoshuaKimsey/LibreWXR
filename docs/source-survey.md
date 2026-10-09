@@ -4,7 +4,7 @@ A snapshot of the data sources LibreWXR has evaluated for inclusion in the core 
 
 The open-data criteria these decisions apply are documented in [`adding-a-source.md`](adding-a-source.md#upstream-contribution-criteria). Self-hosters running their own LibreWXR instance are not bound by them — this document is the upstream selection record, not a prescription for every deployment.
 
-Tier statuses and endpoint details were re-validated in an August 2026 sweep; dated per-entry notes record what changed. The lightning section was surveyed separately on 2026-10-08.
+Tier statuses and endpoint details were re-validated in an August 2026 sweep; dated per-entry notes record what changed. The lightning section was surveyed separately on 2026-10-08; its Tier 1 GOES GLM source shipped 2026-10-09 (see Lightning — Implemented).
 
 ## Conventions
 
@@ -25,6 +25,7 @@ Sources that shipped and were later removed are recorded in [Reverted and remove
 - [Radar — Tier 2](#radar--tier-2)
 - [Radar — Tier 3](#radar--tier-3)
 - [Satellite — Implemented](#satellite--implemented)
+- [Lightning — Implemented](#lightning--implemented)
 - [Lightning — Tier 1](#lightning--tier-1)
 - [Lightning — Tier 2](#lightning--tier-2)
 - [Lightning — Tier 3](#lightning--tier-3)
@@ -476,19 +477,15 @@ One-line outcomes from the same sweep, recorded so they aren't re-probed blindly
 
 Hourly global mosaic (±72.7 deg), VIS-over-LW composite with day/night terminator, S3 bucket noaa-gmgsi-pds. See docs/satellite-implementation-plan.md for the full record.
 
+## Lightning — Implemented
+
+### NOAA GOES GLM (GOES-East + GOES-West) — shipped 2026-10-09
+
+Total-lightning flash points from the anonymous NOAA NODD buckets `noaa-goes18` (West) / `noaa-goes19` (East) under the `GLM-L2-LCFA` prefix. Ingested data/-side (`data/lightning_fetcher.py` + `data/lightning_store.py` — deliberately NOT a `sources/` package) on their own clock-aligned 5-minute loop, crossing processes via an on-disk artifact under `<cache_dir>/lightning/` with NO `state.json` section. Surfaced as the `?lightning=` per-frame tile overlay, the `/v2/lightning` GeoJSON endpoint, and the MCP `get_recent_lightning` tool. See docs/lightning-implementation-plan.md for the full record (the living decision log).
+
 ## Lightning — Tier 1
 
-Surveyed 2026-10-08 — the first time this document covers lightning; no lightning source had been evaluated before this sweep. Unlike radar, the open path for strike observations is geostationary optical flash detection, not ground networks, which are commercial or participant-gated everywhere. Validated against the upstream endpoints; implementation is queued behind whatever else is in flight.
-
-### Global — GOES GLM L2 (GOES-18 West + GOES-19 East)
-
-Source: Geostationary Lightning Mapper Level 2 flash data from the anonymous NOAA NODD buckets `noaa-goes18` / `noaa-goes19` under the `GLM-L2-LCFA` prefix (also mirrored to Google Cloud; a `noaa-goes16` bucket exists but GOES-16 is on-orbit standby since GOES-19 took the East seat — build against G18/G19). Anonymous HTTPS, no key, no registration. NetCDF-4 point lists (events/groups/flashes with lat/lon centroid, time, radiant energy, coverage area), one file per 20-second window, roughly 0.2–0.6 MB each, landing on S3 ~20–40 s after observation. Public domain (NODD) — the cleanest license in the project's source stack.
-
-Live-verified 2026-10-08: both operational buckets were publishing the current day's files at correct 20-second cadence (`GOES-19` East at 75.2°W, `GOES-18` West at 137°W are the two operational GLM instruments). Coverage ±54° latitude — the Americas, Atlantic, and Pacific. Caveat from the same check: GOES-19 suffered a no-transmission anomaly on 2026-07-15/16 with GLM among the last products restored, so treat GLM uptime as a monitored dependency with missed-window handling shaped like any radar source's, not as an assumption.
-
-Coverage value: the entire Western Hemisphere at flash level with sub-minute latency. Paired with MTG LI (Tier 3 below) it covers everything eastward to ~80°E; the 80°E–170°E band (Maritime Continent, Australia, Japan) is the remaining observation gap.
-
-Implementation shape: a self-contained package pair at `sources/world/glm/goes_west/`-style layout (per-satellite instances, like MRMS per-product routing). Flashes are sparse points, not rasters, so they belong in a new LightningStore snapshot distributed via `state.json` — the same pattern as alerts and storm cells (present-time overlay + point sampling), not the radar frame ring buffer. NASA GHRC's gridded GLM L3 (`glmgoesL3`, 2023–present) was considered and skipped: it requires Earthdata login, which is pointless friction when raw L2 is anonymous and finer.
+Tier 1 is now empty — GOES GLM shipped 2026-10-09 (see Lightning — Implemented above).
 
 ## Lightning — Tier 2
 

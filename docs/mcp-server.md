@@ -1,6 +1,6 @@
 # MCP Server — Model Context Protocol
 
-LibreWXR ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes live weather data to LLM agents and MCP-capable tools. Phase 1 provides three tools: **`get_precip_nowcast`** (point-based precipitation forecast), **`get_active_alerts`** (WMO CAP weather alerts near a point), and **`get_storm_cells`** (detected convective storm cells near a point). Two transports are available: an **HTTP transport** mounted inside the main FastAPI app, and a **stdio transport** for local desktop agents like Claude Desktop.
+LibreWXR ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes live weather data to LLM agents and MCP-capable tools. Phase 1 provides four tools: **`get_precip_nowcast`** (point-based precipitation forecast), **`get_active_alerts`** (WMO CAP weather alerts near a point), **`get_storm_cells`** (detected convective storm cells near a point), and **`get_recent_lightning`** (recent GOES GLM lightning strikes near a point, inside a bbox, or across the held window). Two transports are available: an **HTTP transport** mounted inside the main FastAPI app, and a **stdio transport** for local desktop agents like Claude Desktop.
 
 ---
 
@@ -187,6 +187,53 @@ Returns a list of detected storm cells within `radius_km` of the point, sourced 
 - `motion_speed_kmh` and `motion_heading_deg` are `null` (not missing) when no optical-flow data was available — this is the JSON-safe representation (NaN is not valid JSON).
 - Never raises — invalid coordinates, disabled detection, or empty data all result in `[]`.
 
+### `get_recent_lightning(lat, lon, radius_km=100.0, bbox=None, minutes=30.0, limit=2000)`
+
+Returns recent GOES GLM lightning strikes near a point, inside a bounding box, or across the held window.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `lat` | float | `None` | Latitude of the centre point (degrees). Optional; used together with `lon`. |
+| `lon` | float | `None` | Longitude of the centre point (degrees). Optional; used together with `lat`. |
+| `radius_km` | float | `100.0` | Search radius in kilometres. Used only when both `lat` and `lon` are given. |
+| `bbox` | list[float] | `None` | `[west, south, east, north]` rectangle. Used when `lat` + `lon` are not both given. |
+| `minutes` | float | `30.0` | Lookback window in minutes, clamped to `LIBREWXR_LIGHTNING_MAX_AGE`. |
+| `limit` | int | `2000` | Maximum number of strikes returned, newest first. |
+
+**Returns:** A list of dicts, one per strike, each containing:
+
+| Field | Type | Description |
+|---|---|---|
+| `lat` | float | Strike latitude (degrees) |
+| `lon` | float | Strike longitude (degrees) |
+| `utc` | string | ISO 8601 observation time |
+| `energy` | float | Radiant energy of the flash (joules) |
+| `satellite` | string | Source satellite: `"goes18"` or `"goes19"` |
+
+**Behaviour:**
+
+- Returns strikes newest first.
+- When both `lat` and `lon` are given, filters to strikes within `radius_km` of the point. Point wins over `bbox` when both are supplied (mirrors `/v2/alerts`).
+- When `lat` + `lon` are not both given, `bbox` filters to strikes inside the rectangle; with neither, returns every strike in the held window.
+- `minutes` is clamped to `LIBREWXR_LIGHTNING_MAX_AGE` (default 30 minutes).
+- Both transports (HTTP and stdio) serve the same function.
+- Returns an empty list `[]` when lightning is disabled by configuration (`LIBREWXR_LIGHTNING_ENABLED=false`) or when nothing matches.
+- Never raises — invalid coordinates, disabled ingestion, or empty data all result in `[]`.
+
+**Example:**
+
+```
+get_recent_lightning(lat=30.27, lon=-97.74, radius_km=50, minutes=15)
+```
+
+```json
+[
+  {"lat": 30.31, "lon": -97.70, "utc": "2026-10-09T11:42:10Z", "energy": 2.4e-15, "satellite": "goes19"}
+]
+```
+
 ---
 
 ## Discovery
@@ -208,7 +255,7 @@ Example body:
   "$schema": "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json",
   "name": "io.github.joshuakimsey/librewxr-mcp",
   "title": "LibreWXR MCP",
-  "description": "Precipitation nowcasts, active weather alerts, and storm-cell data for any point on Earth.",
+  "description": "Precipitation nowcasts, weather alerts, storm cells, and recent lightning strikes for any point.",
   "version": "0.1.0",
   "websiteUrl": "http://localhost:8080",
   "repository": { "source": "github", "url": "https://github.com/JoshuaKimsey/LibreWRX" },
@@ -267,6 +314,8 @@ The server-side configuration determines what data the MCP tools can access:
 - `LIBREWXR_RADAR_ENABLED` — when `false`, radar data is unavailable (nowcast may still return NWP-only frames).
 - `LIBREWXR_REGIONAL_NWP_ENABLED` — when `false`, the nowcast blends against ECMWF IFS only (no regional model for the point).
 - `LIBREWXR_ALERTS_ENABLED` — when `false`, `get_active_alerts` returns an empty FeatureCollection.
+- `LIBREWXR_STORM_CELLS_ENABLED` — when `false`, `get_storm_cells` returns `[]`.
+- `LIBREWXR_LIGHTNING_ENABLED` — when `false`, `get_recent_lightning` returns `[]`.
 - `LIBREWXR_NOWCAST_ENABLED` — when `false`, `get_precip_nowcast` returns `[]`.
 - `LIBREWXR_NOWCAST_BLEND_MODE` — controls how radar and NWP are blended in the nowcast (see [configuration reference](configuration-reference.md#nowcasting)).
 

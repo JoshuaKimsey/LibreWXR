@@ -13,9 +13,9 @@ mode if you really want it.
 
 - **One architecture.** A data pipeline process
   (`python -m librewxr.data_pipeline`) fetches all radar / NWP /
-  satellite / alerts data and writes a shared `state.json` snapshot.
-  One or more render workers (`python -m librewxr.main`) memmap that
-  snapshot and serve tiles.
+  satellite / alerts / lightning data and writes a shared `state.json`
+  snapshot. One or more render workers (`python -m librewxr.main`)
+  memmap that snapshot and serve tiles.
 - **Single mode is gone as of v0.1.0.** The old single-container path is
   deleted, and the `librewxr` compose service that ran it is removed. The
   `pipeline` and `renderer` services are now both tagged

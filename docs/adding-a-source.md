@@ -2,6 +2,8 @@
 
 This guide walks through adding a radar composite or regional NWP grid to LibreWXR. By the end, your source will be auto-discovered at startup, dispatched to by `RadarFetcher`, blended into the NWP chain, contribute to the coverage map, and need zero edits to `data/fetcher.py`, `data/regions.py`, or `data/coverage.py`.
 
+Cross-cutting point feeds do not use this walkthrough: weather alerts (`data/alerts_fetcher.py`) and lightning (`data/lightning_fetcher.py`) live data/-side as their own loops with their own stores, outside the `sources/` auto-discovery tree.
+
 If you're looking for the short procedural checklist instead of the full walkthrough, see the **"Adding a New Source"** section in [`CLAUDE.md`](../CLAUDE.md) at the project root.
 
 Self-hosters running their own LibreWXR instance are free to integrate any source the architecture supports — that's between the operator and the upstream data provider. **Contributing a source to the core project is narrower:** the data has to be open, either by explicit license or by a clear governmental policy that places it in the open. Read [Upstream contribution criteria](#upstream-contribution-criteria) before doing the implementation work, especially if the licensing situation isn't already obvious.

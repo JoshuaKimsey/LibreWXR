@@ -1,8 +1,8 @@
 # LibreWXR runs as a pipeline + renderer pair.
 #
 #   pipeline  - asyncio process fetching all radar / NWP / satellite /
-#               alerts data and writing a state.json snapshot under
-#               /data/cache after every fetch cycle.
+#               alerts / lightning data and writing a state.json
+#               snapshot under /data/cache after every fetch cycle.
 #   renderer  - N uvicorn worker processes that memmap the same files
 #               and serve tiles, bypassing the Python GIL on the render
 #               path.
@@ -30,8 +30,9 @@
 services:
   # ─── MULTI MODE ─────────────────────────────────────────────────────
   # pipeline   — single asyncio process fetching all radar / NWP /
-  #              satellite / alerts data and writing a state.json
-  #              snapshot under /data/cache after every fetch cycle.
+  #              satellite / alerts / lightning data and writing a
+  #              state.json snapshot under /data/cache after every
+  #              fetch cycle.
   # renderer   — N uvicorn worker processes that memmap the same files
   #              and refresh their in-memory stores when state.json
   #              changes.  No fetcher, no upstream HTTP — only tile

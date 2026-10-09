@@ -14,6 +14,7 @@ A tutorial for adding live weather radar to a website using LibreWXR. No prior e
   - [Widgets and Single-Location Images](#widgets-and-single-location-images)
   - [Alerts Endpoint](#alerts-endpoint)
   - [Storm Cells Endpoint](#storm-cells-endpoint)
+  - [Lightning Endpoint](#lightning-endpoint)
   - [Health Endpoint](#health-endpoint)
 - [Step-by-Step: Leaflet Integration](#step-by-step-leaflet-integration)
   - [1. Basic Map Setup](#1-basic-map-setup)
@@ -35,6 +36,7 @@ A tutorial for adding live weather radar to a website using LibreWXR. No prior e
   - [Smoothing and Snow](#smoothing-and-snow)
   - [Image Format](#image-format)
   - [Arrows Query Parameter](#arrows-query-parameter)
+  - [Lightning Query Parameter](#lightning-query-parameter)
 - [Tips and Best Practices](#tips-and-best-practices)
 - [Refreshing Data](#refreshing-data)
 - [Complete Working Examples](#complete-working-examples)
@@ -165,6 +167,7 @@ This is where the actual tile images come from. Your map library will call this 
 |-----------|-------------|--------|
 | `arrows` | Precipitation motion arrows | `""` (off), `light`, `dark`, `1`/`true` (alias for light) |
 | `cells` | Storm-cell markers (light/dark shape labels, rendered server-side) | `""` (off), `light`, `dark`, `1`/`true` (alias for light) |
+| `lightning` | GOES GLM lightning strike glyphs (rendered server-side) | `""` (off), `1`/`true`/`dots` (energy-scaled dots), `bolts` (bolt glyphs); unknown values fall back to off silently |
 
 **Example tile URL:**
 
@@ -219,7 +222,7 @@ For widgets that poll a fixed location, request a single image centered on the c
 GET /v2/radar/{timestamp}/256/7/52.52/13.405/2/1_1.png
 ```
 
-This returns a 256x256 (or 512x512) PNG/WebP centered on the EPSG:4326 coordinate at the given zoom - the center snaps to the nearest pixel, longitude wraps across the antimeridian, and latitude clamps to the Web Mercator limit (+/-85.0511 deg). Path segments containing a dot are treated as lat/lon and plain integer segments as x/y tile indices - use the `{timestamp}` from the metadata response exactly as you would for tiles. The coverage variant is `/v2/coverage/0/{size}/{z}/{lat}/{lon}/0/0_0.png`, and the `?arrows=` / `?cells=` query parameters are silently ignored on lat/lon window URLs.
+This returns a 256x256 (or 512x512) PNG/WebP centered on the EPSG:4326 coordinate at the given zoom - the center snaps to the nearest pixel, longitude wraps across the antimeridian, and latitude clamps to the Web Mercator limit (+/-85.0511 deg). Path segments containing a dot are treated as lat/lon and plain integer segments as x/y tile indices - use the `{timestamp}` from the metadata response exactly as you would for tiles. The coverage variant is `/v2/coverage/0/{size}/{z}/{lat}/{lon}/0/0_0.png`, and the `?arrows=` / `?cells=` / `?lightning=` query parameters are silently ignored on lat/lon window URLs.
 
 ### Alerts Endpoint
 
@@ -300,6 +303,29 @@ Returns detected convective storm cells from the latest radar frame. The default
 | `format` | `geojson` (default) or `json` — anything else is rejected with `422` |
 
 Each GeoJSON feature's `properties` carries `area_km2`, `max_dbz`, `motion_speed_kmh`, `motion_heading_deg` (`null` when no motion data), and `region`; the lat/lon centroid lives in the `geometry`. Returns `503 Service Unavailable` when storm-cell detection is disabled on the server.
+
+### Lightning Endpoint
+
+```
+GET /v2/lightning
+GET /v2/lightning?lat={lat}&lon={lon}&radius_km={radius}
+GET /v2/lightning?bbox=west,south,east,north
+```
+
+Returns recent GOES GLM lightning strikes as a GeoJSON `FeatureCollection` of `Point` features (coordinates `[lon, lat]`). With no parameters it returns every strike in the held 30-minute window; point queries return strikes within `radius_km` of `lat`/`lon`; `bbox=west,south,east,north` returns strikes inside the rectangle.
+
+**Query parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| *(none)* | Every strike in the held 30-minute window |
+| `lat`, `lon` | Only strikes within `radius_km` of the point — both required together, otherwise `400` |
+| `radius_km` | Search radius in kilometres (default `25`, silently ignored when lat/lon are omitted) |
+| `bbox` | `west,south,east,north` — only strikes inside the rectangle (used when lat/lon are not both given); malformed boxes are rejected with `400` |
+| `minutes` | Lookback window in minutes, clamped to the server's `LIBREWXR_LIGHTNING_MAX_AGE` retention (default `1800` s / 30 min) |
+| `limit` | Maximum number of strikes returned, newest first (default: the full held window, uncapped) |
+
+Each GeoJSON feature's `properties` carries `utc` (ISO 8601), `energy` (joules), and `satellite` (`goes18` / `goes19`); the strike location lives in the `geometry`. Returns `503 Service Unavailable` when lightning is disabled on the server.
 
 ### Health Endpoint
 
@@ -1063,6 +1089,27 @@ Append `?arrows=light` or `?arrows=dark` to any tile URL to overlay precipitatio
 ```
 
 The arrows indicate the direction and relative speed of precipitation movement, derived from optical flow analysis. They are rendered server-side directly into the tile image.
+
+### Lightning Query Parameter
+
+Append `?lightning=dots` (or `?lightning=1` / `?lightning=true`) to any tile URL to overlay GOES GLM lightning strikes as small energy-scaled dots, or `?lightning=bolts` for a hand-authored vector bolt glyph:
+
+```
+/v2/radar/1700000400/256/5/8/12/7/1_0.png?lightning=dots
+/v2/radar/1700000400/256/5/8/12/7/1_0.png?lightning=bolts
+```
+
+| Value | Effect |
+|-------|--------|
+| `""` (absent) | Off |
+| `1`, `true`, `dots` | Small energy-scaled dots |
+| `bolts` | Hand-authored vector bolt glyphs |
+
+Unknown values fall back to off silently, matching `?arrows=` / `?cells=`. Glyphs render at constant brightness with no age fade.
+
+Each requested frame draws the strikes that happened during its own 10-minute slot window `(T-600, T]` — a strike exactly on the boundary belongs to the earlier frame — so timeline playback replays the storm instead of showing every strike on every frame. Strikes older than `LIBREWXR_LIGHTNING_MAX_AGE` (default 30 minutes) age out and render plain. The overlay combines freely with `?arrows=` / `?cells=`, and a presentational strongest-by-energy cap (`LIBREWXR_LIGHTNING_MAX_DRAW_PER_TILE`, default 1000) bounds the per-tile draw cost during dense outbreaks.
+
+Use it for a severe-weather now-reading: with `?arrows=` and `?cells=` also on, strikes colocated with detected cells and steering arrows read as an active convective core.
 
 ---
 

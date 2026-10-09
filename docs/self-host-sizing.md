@@ -17,8 +17,8 @@
 
 The tiers below are sized against one reference workload: the full
 feature set - all radar regions (`LIBREWXR_ENABLED_REGIONS=ALL`), the
-complete regional NWP chain plus IFS, GMGSI satellite, nowcast, and
-weather alerts - serving real public traffic at ~15 requests/s average
+complete regional NWP chain plus IFS, GMGSI satellite, nowcast, weather
+alerts, and lightning - serving real public traffic at ~15 requests/s average
 (~1.3M requests/day) with a long-tail request distribution.
 
 ## Deployment Shape
@@ -181,7 +181,9 @@ soft cap - `LIBREWXR_COORD_STORE_MB` - is a **disk** budget, not RAM
 per fetch cycle). With `LIBREWXR_VOLATILE_CACHE_DIR` set, the per-cycle
 regenerated stores (~1-1.5 GB at ALL regions) live on tmpfs instead of
 disk, so they count against the container/anon budget rather than the
-disk budget.
+disk budget. The lightning artifact adds ~360 small files/hour under
+`<cache_dir>/lightning/` (a few MB total) - negligible next to the tile
+caches.
 
 **RRQPE memory:** the RRQPE observed-precipitation layer (NOAA
 Enterprise Rain Rate) is now a radar region, so its frames live in the

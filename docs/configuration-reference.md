@@ -1388,13 +1388,13 @@ At 25 km², a cell needs to be roughly 5×5 km to register — well below the si
 
 ## Lightning (GOES GLM)
 
-LibreWXR ingests NOAA GOES GLM (Geostationary Lightning Mapper) flash points from GOES-East + GOES-West on their own clock-aligned fetch loop and overlays them on radar tiles via the `?lightning=` query parameter. Flashes are held as structured points in `LightningStore` (500k-point RAM ceiling, warn-once) and written to a shared on-disk artifact `<cache_dir>/lightning/current.npz`, with per-satellite resume watermarks in `<cache_dir>/lightning/watermark.json`. There is deliberately no `state.json` section — the artifact is the cross-process handoff (the shared-tile-store / precip-mask pattern), and render workers plus the stdio MCP transport refresh it via a cheap mtime stat on demand. The store always holds every flash inside the window; only a presentational per-tile draw cap trims the overlay.
+LibreWXR ingests NOAA GOES GLM (Geostationary Lightning Mapper) flash points from GOES-East + GOES-West on their own clock-aligned fetch loop and overlays them on radar tiles via the `?lightning=` query parameter. Flashes are held as structured points in `LightningStore` (500k-point RAM ceiling, warn-once) and written to a shared on-disk artifact `<cache_dir>/lightning/current.npz`, with per-satellite resume watermarks in `<cache_dir>/lightning/watermark.json`. There is deliberately no `state.json` section — the artifact is the cross-process handoff (the shared-tile-store / precip-mask pattern), and render workers plus the stdio MCP transport refresh it via a cheap mtime stat on demand. The store always holds every flash inside the window; only a presentational per-tile draw cap trims the overlay. Served on tiles via `?lightning=`, as GeoJSON at `/v2/lightning`, and through the MCP `get_recent_lightning` tool.
 
-`?lightning=` values: `""` = off; `1` / `true` / `dots` = small energy-scaled dots (default); `bolts` = a hand-authored vector bolt polygon (deliberately not a text glyph, so there is no font dependency). The overlay draws at constant brightness with no age fade and attaches to the newest analysis frame only (per-frame animation is Phase 2). Unknown values fall back to off silently, matching `cells`/`arrows`.
+`?lightning=` values: `""` = off; `1` / `true` / `dots` = small energy-scaled dots (default); `bolts` = a hand-authored vector bolt polygon (deliberately not a text glyph, so there is no font dependency). The overlay draws at constant brightness with no age fade and attaches to every requested frame's own 10-minute slot window `(T-600, T]` (a strike exactly on the boundary belongs to the earlier frame; strikes older than `LIBREWXR_LIGHTNING_MAX_AGE` render plain). Unknown values fall back to off silently, matching `cells`/`arrows`.
 
 ### `LIBREWXR_LIGHTNING_ENABLED`
 
-Master switch for the lightning layer and the MCP `get_recent_lightning` tool. When `false`, the fetcher loop does not run, `?lightning=` is a no-op on the tile endpoint, and the tool degrades to an empty list.
+Master switch for the lightning layer and the MCP `get_recent_lightning` tool. When `false`, the fetcher loop does not run, `?lightning=` is a no-op on the tile endpoint, `/v2/lightning` returns 503, and the tool degrades to an empty list.
 
 | | |
 |---|---|
@@ -1422,7 +1422,7 @@ How often (in seconds) the clock-aligned GLM fetch loop runs. The loop is its ow
 
 ### `LIBREWXR_LIGHTNING_MAX_AGE`
 
-Age in seconds of flash history retained in the store; older points are trimmed oldest-first. Also clamps the MCP `minutes=` parameter.
+Age in seconds of flash history retained in the store; older points are trimmed oldest-first. Also clamps the `minutes=` parameter on the MCP tool and `/v2/lightning`.
 
 | | |
 |---|---|

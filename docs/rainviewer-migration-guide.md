@@ -68,6 +68,7 @@ LibreWXR provides everything the pre-restriction Rain Viewer API offered, self-h
 Plus additional features Rain Viewer didn't offer:
 - Precipitation motion arrows (`?arrows=light` or `?arrows=dark`)
 - Storm-cell markers (`?cells=light` or `?cells=dark`)
+- Lightning strikes (`?lightning=dots|bolts` per-frame tile overlay, plus a `/v2/lightning` GeoJSON feed)
 - Configurable noise filtering and speckle removal
 - ECMWF IFS 9km global model layer + NOAA RRQPE global observed precipitation (60S-70N) + regional NWP layers (HRRR, HRRR-Alaska, HRDPS, JMA MSM, AROME Antilles, AROME Guyane, AROME Indien, AROME Ncaled, AROME Polyn, DMI DINI, ICON-EU, WRF-SMN)
 - Optical flow interpolation for smooth global animation
@@ -151,7 +152,7 @@ Every parameter works the same way:
 | `snow` | `0` or `1` | Identical |
 | `ext` | `png` (free) / `webp` (paid) | `png` or `webp` (both always available) |
 
-**LibreWXR addition:** The `?arrows=light` and `?arrows=dark` query parameters are new and optional. Rain Viewer clients that don't use them will work without changes.
+**LibreWXR addition:** The `?arrows=light`/`?arrows=dark`, `?cells=light`/`?cells=dark`, and `?lightning=` query parameters are new and optional. Rain Viewer clients that don't use them will work without changes.
 
 ### Coverage Tiles
 
@@ -178,7 +179,7 @@ Returns a `size` x `size` PNG or WebP centered on the coordinate, for past radar
 
 **LibreWXR addition:** timestamp `0` in the `{timestamp}` slot is an alias for the latest frame - radar resolves it to the newest past radar frame and the satellite endpoint to the latest GMGSI timestamp (RainViewer itself reserves `0` this way only on the coverage endpoint). Resolution happens before any caching, so alias URLs key and cache exactly like the canonical ones, and the resolved timestamp is returned in the `X-Frame-Timestamp` response header on both 200 and 304 responses. Any other unknown timestamp still returns 404.
 
-Path segments containing a dot are treated as lat/lon; plain integer segments are x/y tile indices (a coordinate without a dot is an integer index, even if it names a latitude). The center is snapped to the nearest pixel at that zoom. Longitude wraps across the antimeridian (a window centered near +/-180 deg shows content from both sides of the seam, center preserved). Latitude is clamped to the Web Mercator limit (+/-85.0511 deg); lat beyond +/-90 deg is a 400, and windows at the poles clamp to the world edge. The `?arrows=` and `?cells=` query parameters are tile-mode only and are silently ignored on lat/lon window URLs.
+Path segments containing a dot are treated as lat/lon; plain integer segments are x/y tile indices (a coordinate without a dot is an integer index, even if it names a latitude). The center is snapped to the nearest pixel at that zoom. Longitude wraps across the antimeridian (a window centered near +/-180 deg shows content from both sides of the seam, center preserved). Latitude is clamped to the Web Mercator limit (+/-85.0511 deg); lat beyond +/-90 deg is a 400, and windows at the poles clamp to the world edge. The `?arrows=`, `?cells=`, and `?lightning=` query parameters are tile-mode only and are silently ignored on lat/lon window URLs.
 
 Repeated requests for the same location hit the tile cache (the snapped origin is the cache key), so widgets polling a fixed location are cheap after the first render.
 
@@ -199,6 +200,7 @@ Repeated requests for the same location hit the tile cache (the snapped origin i
 | Nowcast/Forecast | No | ~60 min | Up to 60 min |
 | Satellite | No (discontinued Jan 2026) | Yes (IR, 10-min) | Yes (GMGSI LW+VIS composite, hourly) |
 | Motion arrows | No | No | Yes |
+| Lightning | No | No | Yes |
 | Coverage | Global | Global | US, Canada, Europe, El Salvador, Japan (JMA HRPN), Taiwan, SE Asia radar + global RRQPE observed + global ECMWF IFS + regional NWP |
 | Rate limits | Yes | Higher limits | None (self-hosted) |
 | Cost | Free | Subscription | Free (self-hosted) |

@@ -59,13 +59,14 @@ Beyond compatibility, the goal is a far more customizable API backend for self-h
 - **Weather alerts (WMO CAP + NWS)** — global weather alerts polled every 5 minutes from severeweather.wmo.int, with MeteoAlarm geocodes for European polygon resolution. US alerts come directly from the NWS API, with zone-based alerts (e.g. Tornado Watches) resolved to zone polygons at ingest. Surfaced through a Rain Viewer-extension alerts API (`/v2/alerts`). Configurable via `LIBREWXR_ALERTS_ENABLED`
 - **Snow detection** — per-pixel snow/rain classification. Regional NWP sources classify natively from their own 2-metre temperature field (HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, ICON-EU, JMA MSM); ECMWF IFS snowfall ratio fills everywhere else
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
-- **Pipeline + render-worker architecture** — a data pipeline process fetches all radar / NWP / satellite / alerts data while one or more render workers serve tiles from a shared memmap snapshot. Split across processes so every core can render in parallel instead of being GIL-bound at one. `COMPOSE_PROFILES=multi` is the shipped default; a legacy `single` profile maps to one render worker with the legacy-single defaults
+- **Pipeline + render-worker architecture** — a data pipeline process fetches all radar / NWP / satellite / alerts / lightning data while one or more render workers serve tiles from a shared memmap snapshot. Split across processes so every core can render in parallel instead of being GIL-bound at one. `COMPOSE_PROFILES=multi` is the shipped default; a legacy `single` profile maps to one render worker with the legacy-single defaults
 - **Persistent disk cache** — radar / NWP / satellite / alerts data are cached to disk with atomic writes, surviving restarts and container recreation without re-downloading from upstream. Configurable via `LIBREWXR_CACHE_DIR` (a per-host tempdir fallback is used, with a warning, when unset)
 - **Memory-efficient storage** — radar frames, NWP grids, satellite frames, and nowcast data are all backed by memory-mapped files, letting the OS page cache manage physical RAM instead of pinning data on the heap. Pages are reclaimed under memory pressure and re-faulted on access
 - **Smart fetch optimization** — radar sources skip re-downloading frames already in memory (only ~1 of 12 frames is new each cycle), NWP models skip redundant S3 fetches when the model run hasn't changed, and parallel NWP fetches are concurrency-capped via `LIBREWXR_NWP_FETCH_CONCURRENCY` so peak transient RAM stays bounded
 - **Health endpoint** — `/health` for monitoring uptime, per-component memory breakdown, frame count, NWP chain status, alerts status, MCP mount state, and cache state, plus a `cluster` aggregation of per-worker stats in multi-worker deployments
-- **MCP server** for AI agents — query precipitation nowcast and active weather alerts via Model Context Protocol. HTTP transport mounted at `/mcp` for n8n-style automation; stdio transport for local agents like Claude Desktop. See [MCP server](#mcp-server-librewxr-extension) below.
+- **MCP server** for AI agents — query precipitation nowcast, active weather alerts, storm cells, and recent lightning strikes via Model Context Protocol. HTTP transport mounted at `/mcp` for n8n-style automation; stdio transport for local agents like Claude Desktop. See [MCP server](#mcp-server-librewxr-extension) below.
 - **Storm-cell detection** — convective cells detected on radar frames each cycle via connected-component labeling at a configurable dBZ threshold. Overlay them on tiles with `?cells=light|dark` (parallel to `?arrows=`). See [Storm-Cell Detection](docs/storm-cells.md).
+- **Lightning overlay** — NOAA GOES GLM flash points (GOES-East + GOES-West) drawn on radar tiles with `?lightning=dots`/`bolts`, each frame showing the strikes from its own 10-minute window; also queryable via `/v2/lightning` and the MCP `get_recent_lightning` tool.
 - **Fully configurable** — all tunable parameters exposed via environment variables
 
 ## Current Limitations
@@ -73,6 +74,7 @@ Beyond compatibility, the goal is a far more customizable API backend for self-h
 - **Limited radar coverage outside US / Canada / Europe / Central America / Taiwan / Japan / SE Asia** — real radar composites cover the US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Canada, El Salvador and its neighbours, Europe (via OPERA pan-European composite + DPC for Italy), Taiwan (CWA QPESUMS), Japan (JMA HRPN), Malaysia + Borneo + Brunei + Singapore + N. Sumatra (MET Malaysia), and the Philippines (PAGASA PANAHON). Within the 60S-70N band, the precipitation layer outside these radar domains is satellite-derived OBSERVED data (NOAA RRQPE, Enterprise Rain Rate GLB-5) — an IR-based estimate at 0.04° rather than radar-grade detail. Only poleward of the RRQPE band, in the fringe excluded by RRQPE's coverage polygon, and when RRQPE declines does the regional NWP chain on top of ECMWF IFS fill in — that's a complete picture of global precipitation, but those regions are modelled output, not direct radar observation
 - **Experimental nowcasting** — precipitation nowcast uses optical flow extrapolation blended with whichever regional model is active in the active NWP chain (or ECMWF IFS where none is), which works well for steady, organized precipitation but is less reliable for fast-developing convection, cell initiation/dissipation, or complex terrain effects
 - **Satellite is hourly, not real-time** — GMGSI publishes one composite per hour with tens of minutes of latency from observation. Native per-satellite feeds (GOES, Himawari, Meteosat) refresh every 5–15 minutes, but at the cost of seam-blending and reprojection work that GMGSI handles upstream. GMGSI also caps at ±72.7° latitude — the deep polar regions are out of frame
+- **Lightning coverage follows the GOES GLM observation footprint** — strikes come from the GOES-East + GOES-West geostationary disks, roughly the Americas, the Atlantic, and the eastern Pacific, to about ±57° latitude per satellite. Africa, Asia, and the Indian Ocean sit outside GLM's view, so no lightning overlay is available there
 
 ## Coverage
 
@@ -279,6 +281,7 @@ GET /v2/radar/{timestamp}/{size}/{z}/{x}/{y}/{color}/{smooth}_{snow}.{ext}
 |---|---|---|
 | `arrows` | `light`, `dark` | Draw precipitation motion arrows (light for dark maps, dark for light maps) |
 | `cells` | `light`, `dark` | Draw detected storm-cell markers (light for dark maps, dark for light maps) |
+| `lightning` | `""`, `1`, `true`, `dots`, `bolts` | Draw GOES GLM lightning strike glyphs (`""` / `1` / `true` / `dots` = energy-scaled dots, `bolts` = bolt glyphs; default off, unknown values fall back to off silently) |
 
 Ready-made integration snippets: see [`docs/web-integration-guide.md`](docs/web-integration-guide.md) and the [Examples](#examples) section below.
 
@@ -318,7 +321,7 @@ GET /v2/radar/{timestamp}/{size}/{z}/{lat}/{lon}/{color}/{smooth}_{snow}.{ext}
 | `lat`, `lon` | decimal degrees | Image center; path segments containing a dot are treated as lat/lon, plain integer segments as x/y tile indices |
 | `size` | `256`, `512` | Image size (intermediate values quantize: `< 512` becomes `256`) |
 
-The center is snapped to the nearest pixel at that zoom; longitude wraps across the antimeridian and latitude clamps to the Web Mercator limit. Unknown timestamps return 404; no-data areas return a transparent 200 PNG; a timestamp of `0` aliases the latest frame, with the resolved timestamp returned in the `X-Frame-Timestamp` header. The `?arrows=` / `?cells=` parameters are tile-mode only; the coverage variant is `/v2/coverage/0/{size}/{z}/{lat}/{lon}/0/0_0.png`.
+The center is snapped to the nearest pixel at that zoom; longitude wraps across the antimeridian and latitude clamps to the Web Mercator limit. Unknown timestamps return 404; no-data areas return a transparent 200 PNG; a timestamp of `0` aliases the latest frame, with the resolved timestamp returned in the `X-Frame-Timestamp` header. The `?arrows=` / `?cells=` / `?lightning=` parameters are tile-mode only; the coverage variant is `/v2/coverage/0/{size}/{z}/{lat}/{lon}/0/0_0.png`.
 
 #### Satellite Tiles
 
@@ -363,21 +366,32 @@ GET /v2/storm-cells?format=json
 
 Returns detected storm cells from the latest radar frame as a GeoJSON `FeatureCollection` (one `Point` feature per cell centroid; `format=json` returns a plain `{generated_at, cells}` payload instead). Each cell carries `area_km2`, `max_dbz`, `motion_speed_kmh` / `motion_heading_deg` (null when no motion data), and `region`. `lat` + `lon` + `radius_km` (default 100) filter to a search radius. Returns `503` when storm-cell detection is disabled.
 
+#### Lightning (LibreWXR extension)
+
+```
+GET /v2/lightning
+GET /v2/lightning?lat={lat}&lon={lon}&radius_km={radius}
+GET /v2/lightning?bbox=west,south,east,north
+```
+
+Returns recent GOES GLM lightning strikes as a GeoJSON `FeatureCollection` of `Point` features, each carrying `utc`, `energy` (joules), and `satellite` (`goes18` / `goes19`) properties. With no parameters it returns every strike in the held 30-minute window. `lat` + `lon` (with optional `radius_km`, default 25) returns strikes within distance of the point; `bbox=west,south,east,north` returns strikes inside the rectangle. `minutes` sets the lookback window (clamped to the 30-minute retention) and `limit` caps the results newest-first (default: the full window). Returns `503` when lightning is disabled. Prefer `bbox` or point + `radius_km` during severe outbreaks — the no-args window can be large; `limit` caps a large window.
+
 #### Health
 
 ```
 GET /health
 ```
 
-Returns server status, frame count, cache usage, NWP chain state, satellite cache state, alerts status, MCP mount state, and per-component memory breakdown, plus a `cluster` aggregation of per-worker stats in multi-worker deployments.
+Returns server status, frame count, cache usage, NWP chain state, satellite cache state, alerts status, lightning status, MCP mount state, and per-component memory breakdown, plus a `cluster` aggregation of per-worker stats in multi-worker deployments.
 
 #### MCP Server (LibreWXR extension)
 
-LibreWXR exposes an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) endpoint for AI agents and automation pipelines. Three tools are available:
+LibreWXR exposes an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) endpoint for AI agents and automation pipelines. Four tools are available:
 
 - `get_precip_nowcast(lat, lon, minutes=60)` — returns future precipitation frames (up to 60 minutes ahead) with dBZ, rain rate (mm/h), data source (`radar` | `nwp` | `none`), blend weight, and coverage (`in_range` | `out_of_range`).
 - `get_active_alerts(lat, lon, radius_km=25, severity=None)` — returns a GeoJSON FeatureCollection of alerts within `radius_km` from the merged WMO + NWS store; US zone-based alerts (e.g. Tornado Watches) are resolved to zone polygons at ingest. Returns an empty collection when alerts are disabled or none match; never raises.
 - `get_storm_cells(lat, lon, radius_km=100)` — returns a list of detected storm cells within `radius_km` of the point. Each cell dict: `{lat, lon, area_km2, max_dbz, motion_speed_kmh, motion_heading_deg, region}`. Returns an empty list when detection is disabled or no cells are within range; never raises.
+- `get_recent_lightning(lat, lon, radius_km=100.0, bbox=None, minutes=30.0, limit=2000)` — returns recent GOES GLM lightning strikes near a point, inside a `bbox`, or across the held window. Each strike dict: `{lat, lon, utc, energy, satellite}`. Returns an empty list when lightning is disabled or nothing matches; never raises.
 
 The endpoint is mounted at `LIBREWXR_MCP_PATH` (default `/mcp`) when the `[mcp]` extra is installed and `LIBREWXR_MCP_ENABLED=true` (the default). Failures (missing extra, build error) are silently skipped so the REST API still boots; the `/health` endpoint surfaces the actual mount state as `mcp: {enabled, mounted, path, tools}`.
 
@@ -447,12 +461,12 @@ interpreter overhead.
 │   data-pipeline                        │    │   tile-server                          │
 │   (one asyncio process)                │    │   (N uvicorn workers,                  │
 │                                        │    │    LIBREWXR_RENDER_ONLY=1)             │
-│   [radar / NWP / sat / alerts]  ──┐    │    │                                        │
-│                                    │   │    │       ┌──> Worker 1 ─┐                 │
-│   [Fetchers] ──> [Memmap stores +  │   │    │       ├──> Worker 2 ─┤                 │
-│                   state.json       │   │    │       ├──> Worker 3 ─┼──> tiles + API  │
-│                   snapshot]        │   │    │       ├──> ...      ─┤                 │
-│                                    │   │    │       └──> Worker N ─┘                 │
+│   [radar/NWP/sat/alerts/lightning] ──┐ │    │                                        │
+│                                      │ │    │       ┌──> Worker 1 ─┐                 │
+│   [Fetchers] ──> [Memmap stores +    │ │    │       ├──> Worker 2 ─┤                 │
+│                   state.json         │ │    │       ├──> Worker 3 ─┼──> tiles + API  │
+│                   snapshot]          │ │    │       ├──> ...      ─┤                 │
+│                                      │ │    │       └──> Worker N ─┘                 │
 └────────────────────────────────────────┘    │       (each polls state.json mtime and │
                   │                           │        re-loads stores on change)      │
                   │                           └────────────────────────────────────────┘
@@ -493,8 +507,11 @@ an 80-core / 32 GB rack: ~16 GB total RSS, all cores active under load.
 [NOAA GMGSI S3] ─> [LW + VIS frames] ──> [Disk Cache] ─┤
    (hourly global mosaic)                (atomic writes)│
                                                        │
-[WMO CAP] ───────> [Alert Store] ──────────────────────┘
+[WMO CAP] ───────> [Alert Store] ──────────────────────┤
    (severeweather.wmo.int + MeteoAlarm geocodes)
+                                                       │
+[GOES GLM] ──────> [Lightning Store] ──────────────────┘
+   (NOAA NODD S3, clock-aligned 5-min loop)
 ```
 
 All stores are memmap-backed — the OS page cache manages physical RAM
