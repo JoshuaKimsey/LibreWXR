@@ -144,6 +144,11 @@ _TRANSPARENT_RENDER_MEMO: dict[tuple[int, str], tuple[bytes, str]] = {}
 _latest_ts_cache: tuple[float, list[int]] | None = None
 _LATEST_TS_TTL = 5.0
 
+# Radar frame cadence used to slice GOES GLM strikes into per-frame slots
+# (internal, not config): a requested frame T draws the half-open window
+# (T - _LIGHTNING_SLOT_S, T] of flash points.
+_LIGHTNING_SLOT_S = 600
+
 # WMO alerts — set by main.py during startup
 alerts_store = None  # AlertsStore | None
 alerts_fetcher = None  # WMOAlertsFetcher | None
@@ -820,20 +825,27 @@ def _shared_tile_key(timestamp, version, z, x, y, tile_size, smooth, snow, color
     )
 
 
-def _shared_overlay_key(timestamp, frame_version, flow_version, cells_version, z, x, y, tile_size, smooth, snow, color, ext, arrow_style, cell_style, lightning_version: int = 0, lightning_style: str = "") -> str:
+def _shared_overlay_key(timestamp, frame_version, flow_version, cells_version, z, x, y, tile_size, smooth, snow, color, ext, arrow_style, cell_style, lightning_fingerprint: str = "0", lightning_style: str = "") -> str:
     """Shared-store key for an encoded overlay tile.
 
     Same content-versioning principle as ``_shared_tile_key`` extended
-    with flow/cells/lightning versions so a pipeline regeneration re-keys
-    overlay tiles instead of serving stale bytes; the leading timestamp
-    keeps ``_ts_of`` sharding and ``invalidate_timestamp`` prefix sweeps
+    with flow/cells versions so a pipeline regeneration re-keys overlay
+    tiles instead of serving stale bytes; the leading timestamp keeps
+    ``_ts_of`` sharding and ``invalidate_timestamp`` prefix sweeps
     working.
+
+    The lightning segment is a CONTENT fingerprint of the tile's slot
+    strikes (count + newest ``time_s``), not the store's version: it is
+    deterministic, so a recompute yields identical bytes and a slot that
+    later gains late-fetched strikes re-keys exactly once.  The live
+    store version is deliberately NOT folded in - a reload with identical
+    content must stay a cache hit.
     """
     return (
         f"{timestamp}-v{frame_version}-f{flow_version}-c{cells_version}-"
         f"{z}-{x}-{y}-{tile_size}-{int(smooth)}{int(snow)}-{color}-{ext}-"
         f"q{settings.webp_quality}-a{arrow_style}-k{cell_style}-"
-        f"g{lightning_version}-G{lightning_style or '-'}"
+        f"g{lightning_fingerprint}-G{lightning_style or '-'}"
     )
 
 
@@ -1234,13 +1246,13 @@ async def radar_tile(
             # unreachable on the next request.
             flow_v = nowcast_store.flow_version if nowcast_store is not None else 0
             cells_v = storm_cell_store.cells_version if storm_cell_store is not None else 0
-            lightning_v = 0
+            lightning_fp = "0"
             if eff_lightning and lightning_store is not None:
                 # Reader-side refresh from the pipeline's on-disk artifact
-                # (stat-guarded; never raises).  The version keys the overlay
-                # cache so a fresh artifact re-renders on the next request.
+                # (stat-guarded; never raises).  The overlay key below folds a
+                # CONTENT fingerprint of this tile's slot strikes, not the live
+                # store version - see the attach block.
                 await lightning_store.maybe_reload()
-                lightning_v = lightning_store.version
 
             flow_regions = None
             nwp_flow = None
@@ -1262,18 +1274,20 @@ async def radar_tile(
 
             flash_points = None
             if eff_lightning and lightning_store is not None:
-                # Only show flashes on the newest analysis frame -- like
-                # cells, the points answer "what is striking RIGHT NOW",
-                # not a historical record (Phase 2 adds per-slot frames
-                # via the overlay ring).  An unknown latest timestamp
-                # degrades to no overlay.
-                latest_timestamps = await _latest_timestamps_cached()
-                latest_analysis_ts = (
-                    max(latest_timestamps) if latest_timestamps else None
+                # Ruling 4: strikes appear in the frames they happened in.
+                # Frame ``timestamp`` draws its own 10-minute slot
+                # ``(T-600, T]`` - the lower edge is exclusive so a strike
+                # exactly on a frame boundary belongs to the earlier frame
+                # only (no double-show), the upper edge inclusive.  Slots
+                # older than MAX_AGE age out of the store and the frame
+                # renders plain; late-fetched strikes bump the fingerprint
+                # below so the tile re-renders once with the complete slot.
+                west, south, east, north = tile_bounds(z, xi, yi)
+                flash_points = lightning_store.points_in(
+                    south, north, west, east,
+                    since_s=timestamp - _LIGHTNING_SLOT_S + 1,
+                    until_s=timestamp,
                 )
-                if latest_analysis_ts is not None and timestamp == latest_analysis_ts:
-                    west, south, east, north = tile_bounds(z, xi, yi)
-                    flash_points = lightning_store.points_in(south, north, west, east)
 
             # Effective overlay styles as actually passed to ``present_tile``:
             # an arrows/cells/lightning request degrades to plain when no
@@ -1284,6 +1298,16 @@ async def radar_tile(
                 eff_lightning
                 if (flash_points is not None and len(flash_points))
                 else ""
+            )
+            # Deterministic content fingerprint of this tile's slot strikes:
+            # folds into the overlay cache keys below so a slot re-renders
+            # only when its strike content changes.  Identical points always
+            # yield identical bytes; a reload with the same content stays a
+            # cache hit (unlike a live store-version key).
+            lightning_fp = (
+                f"{len(flash_points)}-{int(flash_points['time_s'].max())}"
+                if eff_lightning and flash_points is not None and len(flash_points)
+                else "0"
             )
 
             if is_plain or not (eff_arrow or eff_cells or eff_lightning):
@@ -1374,7 +1398,7 @@ async def radar_tile(
                 # tiles are now cached too - previously re-rendered per
                 # request.
                 overlay_key = present_key + (
-                    eff_arrow, eff_cells, flow_v, cells_v, eff_lightning, lightning_v,
+                    eff_arrow, eff_cells, flow_v, cells_v, eff_lightning, lightning_fp,
                 )
                 cached = tile_cache.get(overlay_key)
                 if isinstance(cached, CachedRender):
@@ -1392,7 +1416,7 @@ async def radar_tile(
                             ov_key = _shared_overlay_key(
                                 timestamp, version, flow_v, cells_v, z, xi, yi,
                                 tile_size, smooth, snow, color, ext,
-                                eff_arrow, eff_cells, lightning_v, eff_lightning,
+                                eff_arrow, eff_cells, lightning_fp, eff_lightning,
                             )
                             if io_executor is not None:
                                 loop = asyncio.get_running_loop()
@@ -1441,7 +1465,7 @@ async def radar_tile(
                                 ov_key = _shared_overlay_key(
                                     timestamp, version, flow_v, cells_v, z, xi, yi,
                                     tile_size, smooth, snow, color, ext,
-                                    eff_arrow, eff_cells, lightning_v, eff_lightning,
+                                    eff_arrow, eff_cells, lightning_fp, eff_lightning,
                                 )
                                 if io_executor is not None:
                                     loop = asyncio.get_running_loop()

@@ -45,14 +45,22 @@ def _tile_center_latlon(z: int, x: int, y: int) -> tuple[float, float]:
     return lat, lon
 
 
-def _make_points(coords) -> np.ndarray:
-    """Build a structured flash-point array from (lat, lon, energy) tuples."""
+def _make_points(coords, *, base_time: int | None = None) -> np.ndarray:
+    """Build a structured flash-point array from (lat, lon, energy) tuples.
+
+    ``base_time`` (epoch seconds) sets the first strike's ``time_s``; later
+    entries follow at +10 s.  Callers that assert on paint should pass a
+    time inside the target frame's ``(T-600, T]`` slot; the default is a
+    fixed epoch far in the past so time-independent assertions (e.g.
+    ``/health`` counts) stay stable.
+    """
     arr = np.zeros(len(coords), dtype=_POINT_DTYPE)
+    base = 1_700_000_000 if base_time is None else base_time
     for i, (lat, lon, energy) in enumerate(coords):
         arr["lat"][i] = lat
         arr["lon"][i] = lon
         arr["energy"][i] = energy
-        arr["time_s"][i] = 1_700_000_000 + i * 10
+        arr["time_s"][i] = base + i * 10
         arr["satellite"][i] = 19
     return arr
 
@@ -102,6 +110,7 @@ class _StubLightningStore:
     def points_in(
         self, lat0: float, lat1: float, lon0: float, lon1: float, *,
         since_s: int | None = None,
+        until_s: int | None = None,
     ) -> np.ndarray:
         points = self._points
         if points.shape[0] == 0:
@@ -114,6 +123,8 @@ class _StubLightningStore:
         )
         if since_s is not None:
             mask &= points["time_s"] >= since_s
+        if until_s is not None:
+            mask &= points["time_s"] <= until_s
         return points[mask]
 
 
@@ -210,7 +221,9 @@ def test_lightning_param_styles(client, monkeypatch):
     assert plain.status_code == 200
 
     lat, lon = _tile_center_latlon(4, 3, 6)
-    stub = _StubLightningStore(_make_points([(lat, lon, 1e-12)]))
+    stub = _StubLightningStore(
+        _make_points([(lat, lon, 1e-12)], base_time=ts - 60)
+    )
     monkeypatch.setattr(routes, "lightning_store", stub)
 
     for value in ("1", "true", "dots"):
@@ -230,20 +243,56 @@ def test_lightning_param_styles(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Case 2: newest-analysis-frame only
+# Case 2: per-frame slot windows (ruling 4)
 # ---------------------------------------------------------------------------
 
-def test_lightning_only_on_newest_frame(client, monkeypatch):
+def test_lightning_slot_windows_per_frame(client, monkeypatch):
+    """Ruling 4: each frame draws its own 10-minute slot ``(T-600, T]``.
+
+    A strike shows in the frames it happened in, so a past frame paints its
+    own slot (Phase 1 asserted plain there).  The lower edge is exclusive
+    and the upper edge inclusive.
+    """
     c, ts, ts_prev = client
     lat, lon = _tile_center_latlon(4, 3, 6)
-    stub = _StubLightningStore(_make_points([(lat, lon, 1e-12)]))
-    monkeypatch.setattr(routes, "lightning_store", stub)
-
     newest = _tile_url(ts)
     past = _tile_url(ts_prev)
 
-    assert c.get(f"{newest}?lightning=dots").content != c.get(newest).content
-    assert c.get(f"{past}?lightning=dots").content == c.get(past).content
+    newest_plain = c.get(newest).content
+    past_plain = c.get(past).content
+
+    def _strike(at: int) -> _StubLightningStore:
+        routes.tile_cache.clear()
+        stub = _StubLightningStore(
+            _make_points([(lat, lon, 1e-12)], base_time=at)
+        )
+        monkeypatch.setattr(routes, "lightning_store", stub)
+        return stub
+
+    # Inside the newest frame's slot -> paints the newest frame.
+    _strike(ts - 60)
+    assert c.get(f"{newest}?lightning=dots").content != newest_plain
+
+    # Inside the PAST frame's own slot -> paints the past frame, and does
+    # not paint the newest frame.
+    _strike(ts_prev - 60)
+    assert c.get(f"{past}?lightning=dots").content != past_plain
+    assert c.get(f"{newest}?lightning=dots").content == newest_plain
+
+    # A strike after ``ts`` (future slot) does not paint frame ``ts``.
+    _strike(ts + 60)
+    assert c.get(f"{newest}?lightning=dots").content == newest_plain
+
+    # A strike exactly at ``ts - 600`` belongs to the earlier frame (the
+    # lower edge is exclusive): it paints the past frame, not the newest.
+    _strike(ts - 600)
+    assert c.get(f"{newest}?lightning=dots").content == newest_plain
+    assert c.get(f"{past}?lightning=dots").content != past_plain
+
+    # A strike older than every slot window paints nothing.
+    _strike(ts - 2000)
+    assert c.get(f"{newest}?lightning=dots").content == newest_plain
+    assert c.get(f"{past}?lightning=dots").content == past_plain
 
 
 # ---------------------------------------------------------------------------
@@ -276,16 +325,19 @@ def test_lightning_empty_points_degrades(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Case 5: version rekey
+# Case 5: content-fingerprint rekey
 # ---------------------------------------------------------------------------
 
-def test_lightning_version_bump_rekeys_overlay(client, monkeypatch):
-    """Bumping the store version re-keys the overlay so the next request
-    re-renders instead of serving the previous artifact's cached bytes."""
+def test_lightning_fingerprint_rekeys_overlay(client, monkeypatch):
+    """A change in the slot's strike content (count/newest time) re-keys the
+    overlay so the next request re-renders; a bare store-version bump with
+    identical points does NOT."""
     c, ts, _ = client
     url = f"{_tile_url(ts)}?lightning=dots"
     lat, lon = _tile_center_latlon(4, 3, 6)
-    stub = _StubLightningStore(_make_points([(lat, lon, 1e-12)]), version=1)
+    stub = _StubLightningStore(
+        _make_points([(lat, lon, 1e-12)], base_time=ts - 60), version=1,
+    )
     monkeypatch.setattr(routes, "lightning_store", stub)
     routes.tile_cache.clear()
 
@@ -302,18 +354,73 @@ def test_lightning_version_bump_rekeys_overlay(client, monkeypatch):
     assert first.status_code == 200
     assert calls["present"] == 1
 
-    # Repeat under the same version: in-worker overlay cache hit.
+    # Repeat with identical content: in-worker overlay cache hit.
     repeat = c.get(url)
     assert repeat.status_code == 200
     assert repeat.content == first.content
     assert calls["present"] == 1
 
-    # Pipeline re-saves the artifact: new version -> new key -> re-render.
+    # A bare store-version bump with identical points must NOT re-render
+    # (the fingerprint, not the version, keys the overlay).
     stub.version = 2
-    again = c.get(url)
-    assert again.status_code == 200
-    assert again.content == first.content
+    version_bump = c.get(url)
+    assert version_bump.status_code == 200
+    assert version_bump.content == first.content
+    assert calls["present"] == 1
+
+    # A new strike (different count AND newest time) -> new fingerprint ->
+    # re-render.
+    stub._points = _make_points(
+        [(lat, lon, 1e-12), (lat, lon, 2e-12)], base_time=ts - 60,
+    )
+    changed = c.get(url)
+    assert changed.status_code == 200
     assert calls["present"] == 2
+
+    # Same new content again -> cache hit.
+    changed_repeat = c.get(url)
+    assert changed_repeat.status_code == 200
+    assert changed_repeat.content == changed.content
+    assert calls["present"] == 2
+
+
+def test_lightning_reload_identical_content_keeps_cache_hit(client, monkeypatch):
+    """A reader reload returning identical content stays a cache hit.
+
+    Phase 1 keyed the overlay on the live store version, so every reload
+    re-rendered; the content fingerprint makes replay/scrubbing a hit once
+    a slot's data settles."""
+    c, ts, _ = client
+    url = f"{_tile_url(ts)}?lightning=dots"
+    lat, lon = _tile_center_latlon(4, 3, 6)
+    stub = _StubLightningStore(
+        _make_points([(lat, lon, 1e-12)], base_time=ts - 60),
+    )
+    monkeypatch.setattr(routes, "lightning_store", stub)
+    routes.tile_cache.clear()
+
+    orig_present = routes._present_tile_async
+    calls = {"present": 0}
+
+    async def counting_present(*args, **kwargs):
+        calls["present"] += 1
+        return await orig_present(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "_present_tile_async", counting_present)
+
+    first = c.get(url)
+    assert first.status_code == 200
+    assert calls["present"] == 1
+    reloads_after_first = stub.reload_calls
+    assert reloads_after_first >= 1
+
+    # Second request: maybe_reload runs again (counter bumps) but returns
+    # the same points, so the overlay cache still serves the first bytes.
+    second = c.get(url)
+    assert second.status_code == 200
+    assert second.content == first.content
+    assert calls["present"] == 1
+    assert stub.reload_calls > reloads_after_first
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +431,9 @@ def test_maybe_reload_only_when_active(client, monkeypatch):
     c, ts, _ = client
     url = _tile_url(ts)
     lat, lon = _tile_center_latlon(4, 3, 6)
-    stub = _StubLightningStore(_make_points([(lat, lon, 1e-12)]))
+    stub = _StubLightningStore(
+        _make_points([(lat, lon, 1e-12)], base_time=ts - 60)
+    )
     monkeypatch.setattr(routes, "lightning_store", stub)
     routes.tile_cache.clear()
 
@@ -382,7 +491,9 @@ def test_health_counts_overlay_entries(client, monkeypatch):
     assert c.get(url).status_code == 200
 
     lat, lon = _tile_center_latlon(4, 3, 6)
-    stub = _StubLightningStore(_make_points([(lat, lon, 1e-12)]))
+    stub = _StubLightningStore(
+        _make_points([(lat, lon, 1e-12)], base_time=ts - 60)
+    )
     monkeypatch.setattr(routes, "lightning_store", stub)
 
     # Warm an overlay entry.

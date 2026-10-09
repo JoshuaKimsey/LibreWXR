@@ -150,6 +150,31 @@ async def test_points_in_filter(tmp_path):
     assert out.dtype == _POINT_DTYPE
 
 
+async def test_points_in_until_filter(tmp_path):
+    store = LightningStore(tmp_path)
+    points = _make_points([
+        (100, 10.0, -80.0, 1.0, 18),
+        (200, 11.5, -79.0, 2.0, 19),
+        (300, 11.0, -79.5, 3.0, 18),
+    ])
+    await store.replace_points(points, last_seen_s=300, max_age_s=1800)
+
+    # Inclusive upper bound: time_s == until_s kept, time_s == until_s+1 dropped.
+    sel_until = store.points_in(10.0, 12.0, -81.0, -78.0, until_s=200)
+    assert list(sel_until["time_s"]) == [100, 200]
+
+    # Combined window (frame slot): both bounds inclusive.
+    sel_window = store.points_in(
+        10.0, 12.0, -81.0, -78.0, since_s=101, until_s=200,
+    )
+    assert list(sel_window["time_s"]) == [200]
+
+    # until_s alone with a bound below every point yields nothing.
+    assert store.points_in(
+        10.0, 12.0, -81.0, -78.0, until_s=99,
+    ).shape[0] == 0
+
+
 # ---------------------------------------------------------------------------
 # Reader reload
 # ---------------------------------------------------------------------------

@@ -249,12 +249,18 @@ class LightningStore:
         lon1: float,
         *,
         since_s: int | None = None,
+        until_s: int | None = None,
     ) -> np.ndarray:
         """Return points inside the inclusive lat/lon box.
 
-        Optional ``since_s`` keeps only points with ``time_s >= since_s``.
-        Returns a fresh array (an empty structured array when nothing
-        matches); never raises on an empty store.
+        Optional ``since_s`` keeps only points with ``time_s >= since_s``;
+        optional ``until_s`` keeps only points with ``time_s <= until_s``.
+        Both bounds are inclusive, so a frame's slot query uses
+        ``since_s = T - slot + 1`` (exclusive lower edge) and
+        ``until_s = T`` (inclusive upper edge) to yield the half-open
+        window ``(T - slot, T]``.  Returns a fresh array (an empty
+        structured array when nothing matches); never raises on an empty
+        store.
         """
         points = self._points
         if points.shape[0] == 0:
@@ -267,6 +273,8 @@ class LightningStore:
         )
         if since_s is not None:
             mask &= points["time_s"] >= since_s
+        if until_s is not None:
+            mask &= points["time_s"] <= until_s
         return points[mask]
 
     # -- read-only properties ------------------------------------------------
