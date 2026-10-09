@@ -564,14 +564,25 @@ class JMAMSMGrid:
                 min_lead = max(0, window_start - run_ts)
                 max_lead = min(
                     MAX_FORECAST_HOURS * 3600,
-                    window_end - run_ts + BRACKET_INTERVAL_SECONDS,
+                    window_end - run_ts,
                 )
                 if max_lead < min_lead:
                     continue
                 min_step = max(0, min_lead // BRACKET_INTERVAL_SECONDS)
+                # The bracket native for the last partial hour of the
+                # window is the hour at or above window_end, i.e.
+                # (window_end - run) // 3600 + 1.  The old
+                # "+ BRACKET_INTERVAL_SECONDS" ceil over-fetched one more
+                # hour that is never sampled and (in unaligned phases)
+                # landed above the eviction ceiling, churning a full
+                # re-download every cycle.  At hour-aligned phases this
+                # keeps the one native whose valid time == window_end +
+                # 3600 == the eviction ceiling exactly (eviction is strict
+                # '>', so it is kept); a plain ceil() would drop that
+                # bracket native right at hour-aligned phases.
                 max_step = min(
                     MAX_FORECAST_HOURS,
-                    -(-max_lead // BRACKET_INTERVAL_SECONDS),
+                    max_lead // BRACKET_INTERVAL_SECONDS + 1,
                 )
                 for step in range(int(min_step), int(max_step) + 1):
                     added = await asyncio.to_thread(
@@ -626,6 +637,18 @@ class JMAMSMGrid:
             if lead % BRACKET_INTERVAL_SECONDS == 0
         )
         if self._interpolated_runs.get(run_ts) == native_leads:
+            return 0
+        # Output-presence gate: if every consecutive stored lead pair is
+        # already at the stored cadence, another interpolate_run pass would
+        # create nothing - skip the Farneback work entirely.  Robust to any
+        # native-set wobble (failed-then-retried fetches, partial publishes)
+        # and to warm restarts (frames on disk, memo empty).
+        leads = sorted(frames_by_lead)
+        if all(
+            leads[i + 1] - leads[i] <= STORED_INTERVAL_SECONDS
+            for i in range(len(leads) - 1)
+        ):
+            self._interpolated_runs[run_ts] = native_leads
             return 0
         snow_by_lead: dict[int, np.ndarray] | None = {
             lead: arr

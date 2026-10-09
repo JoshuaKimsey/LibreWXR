@@ -804,7 +804,7 @@ class WRFSMNGrid:
                 )
                 max_lead = min(
                     MAX_FORECAST_HOURS * 3600,
-                    window_end - run_ts + BRACKET_INTERVAL_SECONDS,
+                    window_end - run_ts,
                 )
                 if max_lead < min_lead:
                     continue
@@ -813,9 +813,21 @@ class WRFSMNGrid:
                 # Step 0 has no actual file (cumulative since init = 0);
                 # the diff path treats it as a zero baseline.
                 min_step = max(0, (min_lead // BRACKET_INTERVAL_SECONDS) - 1)
+                # The bracket native for the last partial hour of the
+                # window is the hour at or above window_end, i.e.
+                # (window_end - run) // 3600 + 1.  The old
+                # "+ BRACKET_INTERVAL_SECONDS" ceil over-fetched one more
+                # hour that is never sampled and (in unaligned phases)
+                # landed above the eviction ceiling, churning a full
+                # re-download every cycle.  At hour-aligned phases this
+                # keeps the one native whose valid time == window_end +
+                # 3600 == the eviction ceiling exactly (eviction is strict
+                # '>', so it is kept); a plain ceil() would drop that
+                # bracket native right at hour-aligned phases and break
+                # bracket lookups at lead == window_end.
                 max_step = min(
                     MAX_FORECAST_HOURS,
-                    -(-max_lead // BRACKET_INTERVAL_SECONDS),
+                    max_lead // BRACKET_INTERVAL_SECONDS + 1,
                 )
                 run_step_ranges.append((run_ts, run_dt, int(min_step), int(max_step)))
                 for step in range(int(min_step), int(max_step) + 1):
@@ -900,6 +912,18 @@ class WRFSMNGrid:
         )
         if self._interpolated_runs.get(run_ts) == native_leads:
             return 0
+        # Output-presence gate: if every consecutive stored lead pair is
+        # already at the stored cadence, another interpolate_run pass would
+        # create nothing - skip the Farneback work entirely.  Robust to any
+        # native-set wobble (failed-then-retried fetches, partial publishes)
+        # and to warm restarts (frames on disk, memo empty).
+        leads = sorted(frames_by_lead)
+        if all(
+            leads[i + 1] - leads[i] <= STORED_INTERVAL_SECONDS
+            for i in range(len(leads) - 1)
+        ):
+            self._interpolated_runs[run_ts] = native_leads
+            return 0
         snow_by_lead: dict[int, np.ndarray] | None = {
             lead: arr
             for (r, lead), arr in self._snow_masks.items()
@@ -977,10 +1001,17 @@ class WRFSMNGrid:
         # Already have this step's accum (warm restart / partial fetch).
         if (run_ts, step_hour) in self._accum:
             return 0
-        # Frame already exists on disk — nothing to do at all.
+        # Frame already exists on disk.  Normally nothing to do — but on
+        # a warm restart the frame is restored from disk while ``_accum``
+        # (memory-only) is empty, and a later step's diff needs this step
+        # as its baseline.  Rebuild just the accum via an accum-only
+        # re-download; the frame and its snow sidecar are left untouched.
         lead_seconds = step_hour * BRACKET_INTERVAL_SECONDS
         if (run_ts, lead_seconds) in self._frames:
-            return 0
+            accum = await self._fetch_accum_only(run, step_hour, client)
+            if accum is None:
+                return -1
+            return 1
 
         url = file_url(run, step_hour)
         from librewxr.data.retry import retry_get
@@ -1023,6 +1054,52 @@ class WRFSMNGrid:
                 self._snow_masks[(run_ts, lead_seconds)] = mm
         return 1
 
+    async def _fetch_accum_only(
+        self, run: datetime, step_hour: int, client: httpx.AsyncClient,
+    ) -> np.ndarray | None:
+        """Rebuild one step's accum without touching its frame or snow file.
+
+        Warm-restart path: ``_load_cached_frames`` restores frames but not
+        ``_accum``, and ``_fetch_accum`` early-returns on an existing
+        frame, so a later step's diff baseline could never be rebuilt.
+        This downloads the NetCDF and decodes only the ``PP`` precip
+        field; neither the frame nor its snow sidecar is rewritten.
+        """
+        run_ts = int(run.timestamp())
+        cached = self._accum.get((run_ts, step_hour))
+        if cached is not None:
+            return cached
+
+        # Step 0 is the zero baseline; no HTTP needed.
+        if step_hour == 0:
+            baseline = np.zeros(
+                (WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH),
+                dtype=np.float32,
+            )
+            self._accum[(run_ts, 0)] = baseline
+            return baseline
+
+        url = file_url(run, step_hour)
+        from librewxr.data.retry import retry_get
+        resp = await retry_get(client, url, log_name="WRF-SMN data")
+        if resp is None:
+            return None
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if getattr(e.response, "status_code", None) == 404:
+                logger.debug("WRF-SMN not yet published for %s", url)
+            else:
+                logger.warning("WRF-SMN accum fetch failed for %s: %s", url, e)
+            return None
+
+        accum = await asyncio.to_thread(decode_pp_message, resp.content)
+        if accum is None:
+            return None
+
+        self._accum[(run_ts, step_hour)] = accum
+        return accum
+
     def _compute_frame(self, run_ts: int, step_hour: int) -> int:
         """CPU half of the fetch pipeline: diff + encode + memmap-write.
 
@@ -1054,9 +1131,14 @@ class WRFSMNGrid:
     def _evict_outside_window(
         self, window_start: int, window_end: int,
     ) -> None:
-        slack = BRACKET_INTERVAL_SECONDS
-        ws = window_start - slack
-        we = window_end + slack
+        # 3-bracket floor keeps the diff-baseline family resident: the
+        # worst-case bottom accum (``min_step``) has valid time
+        # window_start - 3*BRACKET + 1, so it is fetched once per run
+        # instead of being unlinked-and-refetched every cycle.  The top
+        # needs only 1 bracket — the corrected ``max_step`` tops out at
+        # window_end + BRACKET exactly, and eviction is strict '>'.
+        ws = window_start - 3 * BRACKET_INTERVAL_SECONDS
+        we = window_end + BRACKET_INTERVAL_SECONDS
         stale_frames = []
         for key in self._frames:
             run_ts, lead = key

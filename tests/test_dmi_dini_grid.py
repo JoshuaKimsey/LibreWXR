@@ -18,6 +18,7 @@ from librewxr.sources.regional.europe.nwp.dmi_dini.grid import (
     DMI_DINI_GRID_WIDTH,
     DMI_DINI_LA1,
     DMI_DINI_LO1,
+    MAX_FORECAST_HOURS,
     SOURCE_STEP_SECONDS,
     STORED_INTERVAL_SECONDS,
     DMIDiniGrid,
@@ -939,3 +940,163 @@ class TestChainSnowMaskWithDMIDini:
             np.array([40.71]), np.array([-74.01]), timestamp=1000000,
         )
         assert out.tolist() == [True]
+
+
+# ── Fetch-range arithmetic + eviction window ─────────────────────────
+
+
+class TestEvictionWindowFloorAndCeiling:
+    """The widened fetch range must not churn the boundary natives."""
+
+    @pytest.mark.asyncio
+    async def test_bottom_diff_baseline_frame_survives_eviction(self, tmp_path):
+        g = DMIDiniGrid(cache_dir=tmp_path)
+        window_start = int(datetime(2026, 5, 3, 12, tzinfo=timezone.utc).timestamp())
+        window_end = window_start + 3600
+        # Earliest run the fetch loop picks (3 h before window_start); its
+        # worst-case min_step lands at window_start - 3 * BRACKET + 1.
+        run_ts = window_start - 3 * BRACKET_INTERVAL_SECONDS
+        lead_a = (window_start - 10799) - run_ts   # window_start - 10799
+        lead_b = (window_start - 7200) - run_ts    # window_start - 7200
+        fake = np.zeros(
+            (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH), dtype=np.uint8,
+        )
+        for lead in (lead_a, lead_b):
+            mm = g._to_memmap(f"r{run_ts}_l{lead}", fake)
+            g._frames[(run_ts, lead)] = mm
+
+        g._evict_outside_window(window_start, window_end)
+
+        assert (run_ts, lead_a) in g._frames
+        assert (run_ts, lead_b) in g._frames
+        assert (g._memmap_dir / f"r{run_ts}_l{lead_a}.dat").exists()
+        assert (g._memmap_dir / f"r{run_ts}_l{lead_b}.dat").exists()
+        await g.close()
+
+    @pytest.mark.asyncio
+    async def test_hour_aligned_top_bracket_survives_eviction(self, tmp_path):
+        g = DMIDiniGrid(cache_dir=tmp_path)
+        run_ts = int(datetime(2026, 5, 3, 0, tzinfo=timezone.utc).timestamp())
+        window_end = run_ts + 6 * 3600            # hour-aligned phase
+        window_start = window_end - 3600
+        # Reproduce fetch()'s top-of-range arithmetic exactly.
+        max_lead = min(MAX_FORECAST_HOURS * 3600, window_end - run_ts)
+        max_step = min(
+            MAX_FORECAST_HOURS,
+            max_lead // BRACKET_INTERVAL_SECONDS + 1,
+        )
+        top_lead = max_step * BRACKET_INTERVAL_SECONDS
+        assert run_ts + top_lead == window_end + BRACKET_INTERVAL_SECONDS
+
+        fake = np.zeros(
+            (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH), dtype=np.uint8,
+        )
+        mm = g._to_memmap(f"r{run_ts}_l{top_lead}", fake)
+        g._frames[(run_ts, top_lead)] = mm
+
+        g._evict_outside_window(window_start, window_end)
+
+        assert (run_ts, top_lead) in g._frames
+        assert (g._memmap_dir / f"r{run_ts}_l{top_lead}.dat").exists()
+        await g.close()
+
+
+# ── Interpolation output-presence gate ────────────────────────────────
+
+
+class TestInterpolationOutputPresenceGate:
+    def test_full_spacing_run_skips_without_running_farneback(
+        self, tmp_path, monkeypatch,
+    ):
+        from librewxr.data import nwp_interpolation
+
+        calls = {"n": 0}
+
+        def _boom(*args, **kwargs):
+            calls["n"] += 1
+            raise AssertionError("interpolate_run must not be called")
+
+        monkeypatch.setattr(nwp_interpolation, "interpolate_run", _boom)
+
+        g = DMIDiniGrid(cache_dir=tmp_path)
+        run_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
+        fake = np.zeros(
+            (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH), dtype=np.uint8,
+        )
+        for lead in range(0, 3600 + 1, STORED_INTERVAL_SECONDS):
+            mm = g._to_memmap(f"r{run_ts}_l{lead}", fake)
+            g._frames[(run_ts, lead)] = mm
+
+        before = sorted(p.name for p in g._memmap_dir.iterdir())
+        added = g._interpolate_run_frames(run_ts)
+        after = sorted(p.name for p in g._memmap_dir.iterdir())
+
+        assert added == 0
+        assert after == before
+        assert calls["n"] == 0
+        assert g._interpolated_runs.get(run_ts) == frozenset({0, 3600})
+
+
+# ── Warm-restart accum rebuild ────────────────────────────────────────
+
+
+class _CountingRangeClient:
+    """Records GETs; returns a trivial response for the range fetch."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict | None]] = []
+
+    async def get(self, url, **kwargs):
+        self.calls.append((url, kwargs.get("headers")))
+        return _FakeResp(b"grib-bytes")
+
+
+class TestWarmRestartAccumRebuild:
+    @pytest.mark.asyncio
+    async def test_prev_accum_rebuilt_without_rewriting_frame(
+        self, tmp_path, monkeypatch,
+    ):
+        from librewxr.sources.regional.europe.nwp.dmi_dini import grid as dmi
+
+        g = DMIDiniGrid(cache_dir=tmp_path)
+        run_dt = datetime(2026, 5, 3, 6, tzinfo=timezone.utc)
+        run_ts = int(run_dt.timestamp())
+        new_step = 4
+        prev_step = new_step - 1
+        prev_lead = prev_step * BRACKET_INTERVAL_SECONDS
+
+        # Warm restart: prev frame restored from disk, accum dict empty.
+        fake = np.zeros(
+            (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH), dtype=np.uint8,
+        )
+        prev_mm = g._to_memmap(f"r{run_ts}_l{prev_lead}", fake)
+        g._frames[(run_ts, prev_lead)] = prev_mm
+        # Avoid the unrelated 2t fetch for the new step.
+        g._snow_masks[(run_ts, new_step * BRACKET_INTERVAL_SECONDS)] = fake
+        # Pre-seed the per-run tp offset so no header walk runs.
+        g._tp_offsets[run_ts] = (1234, 100)
+
+        monkeypatch.setattr(
+            dmi, "decode_tp_message",
+            lambda _b: np.full(
+                (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH), 1.0,
+                dtype=np.float32,
+            ),
+        )
+
+        prev_path = g._memmap_dir / f"r{run_ts}_l{prev_lead}.dat"
+        mtime_before = prev_path.stat().st_mtime_ns
+
+        client = _CountingRangeClient()
+        rc = await g._fetch_one_step(run_dt, new_step, client)
+
+        assert rc == 1
+        assert (run_ts, prev_step) in g._accum
+        assert (run_ts, new_step * BRACKET_INTERVAL_SECONDS) in g._frames
+        # The prev frame file must not have been rewritten.
+        assert prev_path.stat().st_mtime_ns == mtime_before
+        # Exactly one byte-range GET for the prev step's tp message.
+        prev_url = dmi.file_url(run_dt, prev_step)
+        prev_gets = [c for c in client.calls if c[0] == prev_url]
+        assert len(prev_gets) == 1
+        await g.close()

@@ -948,16 +948,28 @@ class DMIDiniGrid:
                 min_lead = max(0, window_start - run_ts - BRACKET_INTERVAL_SECONDS)
                 max_lead = min(
                     MAX_FORECAST_HOURS * 3600,
-                    window_end - run_ts + BRACKET_INTERVAL_SECONDS,
+                    window_end - run_ts,
                 )
                 if max_lead < min_lead:
                     continue
                 # Need step F-1 to compute the rate at step F via diff,
                 # so always start one step earlier than strictly needed.
                 min_step = max(0, (min_lead // BRACKET_INTERVAL_SECONDS) - 1)
+                # The bracket native for the last partial hour of the
+                # window is the hour at or above window_end, i.e.
+                # (window_end - run) // 3600 + 1.  The old
+                # "+ BRACKET_INTERVAL_SECONDS" ceil over-fetched one more
+                # hour that is never sampled and (in unaligned phases)
+                # landed above the eviction ceiling, churning a full
+                # re-download every cycle.  At hour-aligned phases this
+                # keeps the one native whose valid time == window_end +
+                # 3600 == the eviction ceiling exactly (eviction is strict
+                # '>', so it is kept); ceil((window_end - run) / 3600)
+                # would drop that bracket native right at hour-aligned
+                # phases and break bracket lookups at lead == window_end.
                 max_step = min(
                     MAX_FORECAST_HOURS,
-                    -(-max_lead // BRACKET_INTERVAL_SECONDS),
+                    max_lead // BRACKET_INTERVAL_SECONDS + 1,
                 )
                 # Fan out this run's per-step units under one bounded
                 # gather — per-run latency drops from sum(step fetches)
@@ -1040,6 +1052,18 @@ class DMIDiniGrid:
             if lead % BRACKET_INTERVAL_SECONDS == 0
         )
         if self._interpolated_runs.get(run_ts) == native_leads:
+            return 0
+        # Output-presence gate: if every consecutive stored lead pair is
+        # already at the stored cadence, another interpolate_run pass would
+        # create nothing - skip the Farneback work entirely.  Robust to any
+        # native-set wobble (failed-then-retried fetches, partial publishes)
+        # and to warm restarts (frames on disk, memo empty).
+        leads = sorted(frames_by_lead)
+        if all(
+            leads[i + 1] - leads[i] <= STORED_INTERVAL_SECONDS
+            for i in range(len(leads) - 1)
+        ):
+            self._interpolated_runs[run_ts] = native_leads
             return 0
         snow_by_lead: dict[int, np.ndarray] | None = {
             lead: arr
@@ -1180,8 +1204,16 @@ class DMIDiniGrid:
         prev_key = (run_ts, step_hour - 1)
         prev = self._accum.get(prev_key)
         if prev is None and step_hour - 1 >= 0:
-            await self._fetch_one_step(run, step_hour - 1, client)
-            prev = self._accum.get(prev_key)
+            prev_frame_lead = (step_hour - 1) * BRACKET_INTERVAL_SECONDS
+            if (run_ts, prev_frame_lead) in self._frames:
+                # Warm restart: frame restored from disk but its accum
+                # was not - rebuild just the accum without rewriting the
+                # frame (the recursive full fetch would early-return on
+                # the existing frame and never rebuild it).
+                prev = await self._fetch_accum_only(run, step_hour - 1, client)
+            else:
+                await self._fetch_one_step(run, step_hour - 1, client)
+                prev = self._accum.get(prev_key)
         if prev is None:
             return -1
 
@@ -1205,6 +1237,71 @@ class DMIDiniGrid:
             await self._fetch_and_store_snow(run, step_hour, url, client)
 
         return 1
+
+    async def _fetch_accum_only(
+        self, run: datetime, step_hour: int, client: httpx.AsyncClient,
+    ) -> np.ndarray | None:
+        """Rebuild one step's accum without touching its frame or snow files.
+
+        Warm-restart path: ``_load_cached_frames`` restores frames but not
+        ``_accum``, and the recursive prev-step fetch early-returns on an
+        existing frame, so the diff baseline for a newly-fetched step
+        could never be rebuilt.  This does the tp download + decode only.
+        """
+        run_ts = int(run.timestamp())
+        cached = self._accum.get((run_ts, step_hour))
+        if cached is not None:
+            return cached
+
+        # Step 0 is the zero baseline; no HTTP needed.
+        if step_hour == 0:
+            baseline = np.zeros(
+                (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH),
+                dtype=np.float32,
+            )
+            self._accum[(run_ts, 0)] = baseline
+            return baseline
+
+        url = file_url(run, step_hour)
+
+        # Resolve (or reuse) the cached tp byte offset for this run -
+        # same header walk as ``_fetch_one_step_impl``.
+        tp_loc = self._tp_offsets.get(run_ts)
+        if tp_loc is None:
+            tp_loc = await find_tp_message_offset(url, client)
+            if tp_loc is None:
+                logger.warning(
+                    "DMI DINI: unable to locate tp message for run %s step %d",
+                    run.isoformat(), step_hour,
+                )
+                return None
+            self._tp_offsets[run_ts] = tp_loc
+            logger.info(
+                "DMI DINI: tp message located for run %s at byte offset %d (size %.2f MB)",
+                run.isoformat(), tp_loc[0], tp_loc[1] / 1e6,
+            )
+
+        offset, size = tp_loc
+        from librewxr.data.retry import retry_get
+        resp = await retry_get(
+            client, url,
+            headers={"Range": f"bytes={offset}-{offset + size - 1}"},
+            log_name="DMI DINI data",
+        )
+        if resp is None:
+            return None
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            logger.warning("DMI DINI accum fetch failed for %s: %s", url, e)
+            return None
+
+        accum = await asyncio.to_thread(decode_tp_message, resp.content)
+        if accum is None:
+            return None
+
+        self._accum[(run_ts, step_hour)] = accum
+        return accum
 
     async def _fetch_and_store_snow(
         self,
@@ -1269,9 +1366,14 @@ class DMIDiniGrid:
     # ── Eviction ──────────────────────────────────────────────────────
 
     def _evict_outside_window(self, window_start: int, window_end: int) -> None:
-        slack = BRACKET_INTERVAL_SECONDS
-        ws = window_start - slack
-        we = window_end + slack
+        # The bottom diff-baseline native (min_step) has worst-case valid
+        # time window_start - 3 * BRACKET + 1, so a 3-bracket floor keeps
+        # it resident (fetched once per run) instead of unlinked-and-
+        # refetched every cycle.  The top needs only 1 bracket because the
+        # corrected max_step tops out at window_end + BRACKET exactly
+        # (strict '>' eviction keeps it).
+        ws = window_start - 3 * BRACKET_INTERVAL_SECONDS
+        we = window_end + BRACKET_INTERVAL_SECONDS
         stale_frames = []
         for key in self._frames:
             run_ts, lead = key

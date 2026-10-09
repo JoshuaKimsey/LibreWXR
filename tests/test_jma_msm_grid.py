@@ -502,3 +502,84 @@ class TestRegionalInterpolationToggle:
     def test_bracket_interval_is_10min_when_enabled(self):
         grid = JMAMSMGrid()
         assert grid._bracket_interval() == STORED_INTERVAL_SECONDS
+
+
+# ── GitHub issue #36: top-of-range over-fetch / interpolation gate ────
+
+
+class TestTopOfRange:
+    """The corrected max_step must fetch the bracket native at or above
+    window_end (including the hour-aligned phase) but no never-sampled
+    hour above the one-bracket eviction ceiling."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("minute", [0, 30])
+    async def test_max_step_covers_bracket_native_but_not_over_fetches(
+        self, monkeypatch, minute,
+    ):
+        from librewxr.config import settings as _settings
+
+        monkeypatch.setattr(_settings, "regional_interpolation", False)
+
+        now = int(
+            datetime(2026, 5, 30, 12, minute, tzinfo=timezone.utc).timestamp()
+        )
+        grid = JMAMSMGrid()
+
+        seen: list[tuple[int, int]] = []
+
+        def fake_fetch_one_step_sync(run, step_hour, bucket):
+            seen.append((int(run.timestamp()), step_hour))
+            return 0
+
+        monkeypatch.setattr(
+            grid, "_fetch_one_step_sync", fake_fetch_one_step_sync,
+        )
+
+        await grid.fetch(
+            now_ts=now, history_seconds=5 * 3600, horizon_seconds=3600,
+        )
+
+        window_end = now + 3600
+        runs = {run for (run, _step) in seen}
+        assert runs  # the window covered at least one run
+        for run_ts in runs:
+            expected = (window_end - run_ts) // BRACKET_INTERVAL_SECONDS + 1
+            steps = {step for (r, step) in seen if r == run_ts}
+            assert expected in steps
+            assert (expected + 1) not in steps
+            top_valid = run_ts + expected * BRACKET_INTERVAL_SECONDS
+            assert top_valid >= window_end
+            assert top_valid <= window_end + BRACKET_INTERVAL_SECONDS
+        await grid.close()
+
+
+class TestInterpolationOutputPresenceGate:
+    """When a run's stored leads already tile the stored cadence, the
+    Farneback pass is skipped and the memo is warmed."""
+
+    def test_returns_zero_and_warms_memo_when_leads_already_tiled(
+        self, monkeypatch,
+    ):
+        import librewxr.data.nwp_interpolation as interp
+
+        def _boom(*_a, **_kw):
+            raise AssertionError("interpolate_run must not run")
+
+        monkeypatch.setattr(interp, "interpolate_run", _boom)
+
+        grid = JMAMSMGrid()
+        run_ts = int(datetime(2026, 5, 30, 6, tzinfo=timezone.utc).timestamp())
+        leads = list(range(0, 3601, STORED_INTERVAL_SECONDS))
+        for lead in leads:
+            grid._frames[(run_ts, lead)] = np.zeros((2, 2), dtype=np.uint8)
+        before = set(grid._frames)
+
+        added = grid._interpolate_run_frames(run_ts)
+
+        assert added == 0
+        assert set(grid._frames) == before  # nothing written
+        native = frozenset(
+            lead for lead in leads if lead % BRACKET_INTERVAL_SECONDS == 0
+        )
+        assert grid._interpolated_runs[run_ts] == native

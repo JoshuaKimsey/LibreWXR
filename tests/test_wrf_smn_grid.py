@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 from datetime import datetime, timezone
 
+import httpx
 import numpy as np
 import pytest
 
@@ -810,3 +811,201 @@ class TestRegionalInterpolationDisabled:
         grid = WRFSMNGrid()
         # The setting defaults to True in config.py.
         assert grid._bracket_interval() == STORED_INTERVAL_SECONDS
+
+
+# ── GitHub issue #36: top-of-range / eviction churn ───────────────────
+
+
+class _FakeHTTPResponse:
+    """Minimal stand-in for ``httpx.Response`` in the fetch-loop tests."""
+
+    def __init__(self, status_code: int, content: bytes = b"",
+                 url: str = "http://fake.invalid/wrf_smn"):
+        self.status_code = status_code
+        self.content = content
+        self._request = httpx.Request("GET", url)
+        self._response = httpx.Response(status_code, request=self._request)
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"HTTP {self.status_code}", request=self._request,
+                response=self._response,
+            )
+
+
+class TestEvictionFloorKeepsDiffBaseline:
+    """The bottom diff-baseline family must survive eviction, not be
+    unlinked-and-refetched every cycle.  Worst-case bottom accum valid is
+    window_start - 3*BRACKET + 1; worst-case bottom *frame* valid is
+    window_start - 2*BRACKET + 1."""
+
+    def test_keeps_two_worst_case_bottom_frames_and_evicts_below(self):
+        grid = WRFSMNGrid()
+        window_start = int(
+            datetime(2026, 5, 8, 12, tzinfo=timezone.utc).timestamp()
+        )
+        window_end = window_start + 3600
+        run_ts = window_start - 20_000
+        # Screen the records in-memory only (eviction tolerates missing files).
+        grid._frames[(run_ts, 9_201)] = np.zeros((2, 2), dtype=np.uint8)   # valid -10799
+        grid._frames[(run_ts, 12_800)] = np.zeros((2, 2), dtype=np.uint8)  # valid -7200
+        grid._frames[(run_ts, 9_199)] = np.zeros((2, 2), dtype=np.uint8)   # valid -10801
+
+        grid._evict_outside_window(window_start, window_end)
+
+        assert (run_ts, 9_201) in grid._frames      # window_start - 10799 survives
+        assert (run_ts, 12_800) in grid._frames     # window_start - 7200 survives
+        assert (run_ts, 9_199) not in grid._frames  # just below the floor evicted
+
+
+class TestTopOfRangeHourAligned:
+    """The corrected max_step must keep the bracket native at or above
+    window_end (including the hour-aligned phase where it lands exactly on
+    the eviction ceiling window_end + 3600) and must not fetch the
+    never-sampled hour above that ceiling."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("minute", [0, 30])
+    async def test_keeps_bracket_native_but_not_over_fetches(
+        self, monkeypatch, minute,
+    ):
+        from librewxr.config import settings as _settings
+        from librewxr.sources.regional.south_america.nwp.wrf_smn import grid as smn
+
+        monkeypatch.setattr(_settings, "regional_interpolation", False)
+
+        # 12:00 / 12:30 UTC, 4 h publish delay → newest run 06:00.
+        now = int(
+            datetime(2026, 5, 8, 12, minute, tzinfo=timezone.utc).timestamp()
+        )
+        grid = WRFSMNGrid()
+
+        async def fake_retry_get(client, url, **kwargs):
+            return _FakeHTTPResponse(200, content=b"x", url=url)
+
+        monkeypatch.setattr("librewxr.data.retry.retry_get", fake_retry_get)
+        monkeypatch.setattr(
+            smn, "decode_pp_message",
+            lambda _b: np.full((4, 4), 1.0, dtype=np.float32),
+        )
+        monkeypatch.setattr(smn, "decode_t2_message", lambda _b: None)
+
+        # Record every (run, step) Phase 1 actually requests so the test
+        # observes the fetch range, not just the post-eviction store.
+        real_fetch_accum = grid._fetch_accum
+        requested: list[tuple[int, int]] = []
+
+        async def recording_fetch_accum(run, step_hour, client):
+            requested.append((int(run.timestamp()), step_hour))
+            return await real_fetch_accum(run, step_hour, client)
+
+        monkeypatch.setattr(grid, "_fetch_accum", recording_fetch_accum)
+
+        publish_delay = _settings.wrf_smn_publish_delay_minutes * 60
+        window_end = now + 3600
+        run_ts = floor_cycle(now - publish_delay)
+        expected_top = (window_end - run_ts) // BRACKET_INTERVAL_SECONDS + 1
+
+        await grid.fetch(now_ts=now, history_seconds=0, horizon_seconds=3600)
+
+        # The top bracket native is in the requested fetch range...
+        assert (run_ts, expected_top) in requested
+        # ...but the never-sampled hour above the ceiling is not.
+        assert (run_ts, expected_top + 1) not in requested
+        # And the top native survives eviction (valid <= window_end + 3600,
+        # eviction is strict '>').
+        top_key = (run_ts, expected_top * BRACKET_INTERVAL_SECONDS)
+        assert top_key in grid._frames
+        top_valid = run_ts + expected_top * BRACKET_INTERVAL_SECONDS
+        assert top_valid >= window_end
+        assert top_valid <= window_end + BRACKET_INTERVAL_SECONDS
+        if minute == 0:
+            # Hour-aligned: the top native sits exactly on the ceiling.
+            assert top_valid == window_end + BRACKET_INTERVAL_SECONDS
+        await grid.close()
+
+
+class TestInterpolationOutputPresenceGate:
+    """When a run's stored leads already tile the stored cadence, the
+    Farneback pass is skipped and the memo is warmed."""
+
+    def test_returns_zero_and_warms_memo_when_leads_already_tiled(
+        self, monkeypatch,
+    ):
+        import librewxr.data.nwp_interpolation as interp
+
+        def _boom(*_a, **_kw):
+            raise AssertionError("interpolate_run must not run")
+
+        monkeypatch.setattr(interp, "interpolate_run", _boom)
+
+        grid = WRFSMNGrid()
+        run_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
+        leads = list(range(0, 3601, STORED_INTERVAL_SECONDS))
+        for lead in leads:
+            grid._frames[(run_ts, lead)] = np.zeros((2, 2), dtype=np.uint8)
+        before = set(grid._frames)
+
+        added = grid._interpolate_run_frames(run_ts)
+
+        assert added == 0
+        assert set(grid._frames) == before  # nothing written
+        native = frozenset(
+            lead for lead in leads if lead % BRACKET_INTERVAL_SECONDS == 0
+        )
+        assert grid._interpolated_runs[run_ts] == native
+
+
+class TestWarmRestartAccumRebuild:
+    """Regression: ``_accum`` is memory-only, so after a pipeline restart
+    frames reload from disk while ``_accum`` is empty.  A step whose frame
+    already exists must still rebuild its accum so the next step's diff
+    can proceed — without rewriting the frame or its snow sidecar."""
+
+    @pytest.mark.asyncio
+    async def test_rebuilds_missing_accum_without_rewriting_frame(
+        self, monkeypatch, tmp_path,
+    ):
+        from librewxr.sources.regional.south_america.nwp.wrf_smn import grid as smn
+
+        run_dt = datetime(2026, 5, 8, 0, tzinfo=timezone.utc)
+        run_ts = int(run_dt.timestamp())
+
+        grid = WRFSMNGrid(cache_dir=tmp_path)
+        # Warm-restart state: step 5's frame is on disk, ``_accum`` is empty.
+        frame_arr = np.zeros(
+            (WRF_SMN_GRID_HEIGHT, WRF_SMN_GRID_WIDTH), dtype=np.uint8,
+        )
+        mm = grid._to_memmap(f"r{run_ts}_l{5 * 3600}", frame_arr)
+        grid._frames[(run_ts, 5 * 3600)] = mm
+        frame_path = grid._frame_path(run_ts, 5 * 3600)
+        before = frame_path.read_bytes()
+
+        calls = {"n": 0}
+
+        async def fake_retry_get(client, url, **kwargs):
+            calls["n"] += 1
+            return _FakeHTTPResponse(200, content=b"ignored", url=url)
+
+        monkeypatch.setattr("librewxr.data.retry.retry_get", fake_retry_get)
+        monkeypatch.setattr(
+            smn, "decode_pp_message",
+            lambda _b: np.full((4, 4), 10.0, dtype=np.float32),
+        )
+        # The later step's own accum is already available.
+        grid._accum[(run_ts, 6)] = np.full((4, 4), 16.0, dtype=np.float32)
+
+        rc = await grid._fetch_accum(run_dt, 5, object())
+        assert rc == 1
+        assert calls["n"] == 1  # exactly one accum-only download
+        assert (run_ts, 5) in grid._accum
+        # The frame file is byte-for-byte untouched.
+        assert frame_path.read_bytes() == before
+
+        # The later step's diff now succeeds off the rebuilt baseline.
+        made = grid._compute_frame(run_ts, 6)
+        assert made == 1
+        assert (run_ts, 6 * 3600) in grid._frames
+        await grid.close()
+
