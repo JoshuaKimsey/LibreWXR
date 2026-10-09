@@ -40,6 +40,11 @@ from librewxr.data.coverage import (
     persist_masks_in_background,
 )
 from librewxr.data.fetcher import RadarFetcher
+from librewxr.data.lightning_fetcher import (
+    _NOAA_SATS,
+    GOESGLMLightningFetcher,
+)
+from librewxr.data.lightning_store import LightningStore
 from librewxr.data.master_state import snapshot_state, write_state_snapshot
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.storm_cells import StormCellGenerator, StormCellStore
@@ -218,6 +223,14 @@ async def run_pipeline() -> None:
     # via apply_state instead.
     alerts_store = AlertsStore() if settings.alerts_enabled else None
 
+    # LightningStore is pipeline-owned and deliberately NOT a member of the
+    # state.json snapshot: the artifact under <cache_dir>/lightning/ IS the
+    # cross-process handoff (docs/lightning-implementation-plan.md ruling 2),
+    # mirroring the shared-tile-store / precip-mask precedent.
+    lightning_store = (
+        LightningStore(cache_dir=cache_dir) if settings.lightning_enabled else None
+    )
+
     # Per-timestamp global precip mask (the Tier 2 empty-tile gate's
     # replacement).  Built from every source's combined contribution
     # (radar + all NWP samples + nowcast) each cycle, then snapshotted
@@ -314,6 +327,25 @@ async def run_pipeline() -> None:
             settings.alerts_fetch_interval,
         )
 
+    # Lightning rides its own clock-aligned task (never coupled to the radar
+    # fetch cycle or the alerts loop).  The artifact is the only handoff.
+    lightning_fetcher = None
+    if lightning_store is not None and settings.lightning_noaa_enabled:
+        lightning_fetcher = GOESGLMLightningFetcher(
+            lightning_store,
+            cache_dir=cache_dir,
+            interval_s=settings.lightning_fetch_interval,
+            max_age_s=settings.lightning_max_age,
+            satellites=_NOAA_SATS,
+        )
+        await lightning_fetcher.start()
+        logger.info(
+            "Lightning: GOES GLM ingest started (interval=%ds)",
+            settings.lightning_fetch_interval,
+        )
+    elif lightning_store is not None:
+        logger.info("Lightning enabled but no GLM family enabled; fetch loop idle")
+
     await fetcher.start()
     logger.info("Pipeline running — Ctrl-C / SIGTERM to stop")
 
@@ -338,6 +370,8 @@ async def run_pipeline() -> None:
         await fetcher.stop()
         if alerts_fetcher is not None:
             await alerts_fetcher.close()
+        if lightning_fetcher is not None:
+            await lightning_fetcher.close()
         if nowcast_store is not None:
             nowcast_store.cleanup()
         if storm_cell_store is not None:

@@ -514,6 +514,13 @@ class Settings(BaseSettings):
     storm_cells_enabled: bool = True
     storm_cells_min_dbz: int = 40  # Minimum dBZ for a pixel to be part of a cell
     storm_cells_min_area_km2: float = 25.0  # Minimum cell area in km^2 (filter noise/small cells)
+    # Lightning (GOES GLM flash points; per-family booleans - NOAA GOES now,
+    # EUMETSAT / FengYun decoder families later)
+    lightning_enabled: bool = True           # LIBREWXR_LIGHTNING_ENABLED
+    lightning_noaa_enabled: bool = True      # LIBREWXR_LIGHTNING_NOAA_ENABLED
+    lightning_fetch_interval: int = 300      # LIBREWXR_LIGHTNING_FETCH_INTERVAL (seconds)
+    lightning_max_age: int = 1800           # LIBREWXR_LIGHTNING_MAX_AGE (seconds; 1800 = 30 min)
+    lightning_max_draw_per_tile: int = 1000 # LIBREWXR_LIGHTNING_MAX_DRAW_PER_TILE
     cache_dir: str = ""  # Persistent cache directory for fetched grids; empty = in-memory only
     # Optional directory for stores whose contents are fully regenerated
     # every fetch cycle (nowcast frames + optical-flow fields, per-timestamp

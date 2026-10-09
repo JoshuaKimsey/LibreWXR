@@ -101,4 +101,5 @@ markers = [
     "alerts: WMO CAP weather alerts tests",
     "mcp: MCP server tool and transport tests",
     "storm_cells: Storm-cell detection, store, and overlay tests",
+    "lightning: GOES GLM lightning store, fetcher, and overlay tests",
 ]
