@@ -29,6 +29,7 @@ from librewxr.data.nowcast import NowcastStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.store import FrameStore
 from librewxr.data.alerts_store import AlertsStore
+from librewxr.data.lightning_store import LightningStore
 from librewxr.data.storm_cells import StormCellStore
 from librewxr.api import routes
 from librewxr.sources import (
@@ -135,6 +136,16 @@ async def build_stdio_lifespan(mcp_instance):
         if settings.storm_cells_enabled
         else None
     )
+    # No state.json section and no __getstate__: the on-disk artifact IS the
+    # cross-process handoff, so this store stays OUT of the ``stores`` dict
+    # below (it is not part of the master snapshot).
+    lightning_store = (
+        LightningStore(cache_dir=cache_dir) if settings.lightning_enabled else None
+    )
+    if lightning_store is not None:
+        # Opportunistic first load (cheap stat): the pipeline may not have
+        # written the artifact yet, in which case this is a no-op.
+        await lightning_store.maybe_reload()
 
     # ---- Build the stores dict for apply_state ---------------------------
     stores: dict[str, object | None] = {
@@ -212,6 +223,8 @@ async def build_stdio_lifespan(mcp_instance):
     routes.alerts_fetcher = None
     routes.alerts_enabled = alerts_store is not None
     routes.storm_cell_store = storm_cell_store
+    routes.lightning_store = lightning_store
+    routes.lightning_enabled = settings.lightning_enabled
 
     # ---- State poller ----------------------------------------------------
     last_mtime = state_mtime(cache_dir)

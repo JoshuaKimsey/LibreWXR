@@ -42,8 +42,8 @@ _SERVER_CARD_SCHEMA = (
 _NAME = "io.github.joshuakimsey/librewxr-mcp"
 _TITLE = "LibreWXR MCP"
 _DESCRIPTION = (
-    "Precipitation nowcasts, active weather alerts, and storm-cell "
-    "data for any point on Earth."
+    "Precipitation nowcasts, weather alerts, storm cells, and recent "
+    "lightning strikes for any point."
 )
 _REPOSITORY_URL = "https://github.com/JoshuaKimsey/LibreWRX"
 

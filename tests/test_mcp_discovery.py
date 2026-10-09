@@ -32,7 +32,12 @@ SERVER_CARD_SCHEMA = (
     "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json"
 )
 SERVER_CARD_NAME = "io.github.joshuakimsey/librewxr-mcp"
-MCP_TOOL_NAMES = ["get_precip_nowcast", "get_active_alerts", "get_storm_cells"]
+MCP_TOOL_NAMES = [
+    "get_precip_nowcast",
+    "get_active_alerts",
+    "get_storm_cells",
+    "get_recent_lightning",
+]
 
 _INIT_HEADERS = {
     "Content-Type": "application/json",

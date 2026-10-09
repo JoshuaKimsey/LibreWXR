@@ -12,10 +12,12 @@ its own stores) can call them identically.  No module-level mutable state.
 import logging
 import math
 import time
+from datetime import datetime, timezone
 
 import numpy as np
 
 from librewxr.api.models import AlertsResponse
+from librewxr.config import settings
 from librewxr.data.regions import REGIONS
 from librewxr.mcp.alerts_query import alerts_within_radius
 from librewxr.mcp.sampling import (
@@ -294,5 +296,115 @@ async def get_storm_cells(
                 "motion_heading_deg": heading if not math.isnan(heading) else None,
                 "region": region_name,
             })
+
+    return results
+
+
+# GOES bird number -> satellite label.  Keep in sync with _NOAA_SATS in
+# librewxr/data/lightning_fetcher.py.
+_SATELLITE_NAMES = {18: "goes18", 19: "goes19"}
+
+
+async def get_recent_lightning(
+    lightning_store,
+    lat: float | None = None,
+    lon: float | None = None,
+    radius_km: float = 100.0,
+    minutes: float = 30.0,
+    limit: int = 2000,
+) -> list[dict]:
+    """Query recent GOES GLM lightning strikes, optionally near a point.
+
+    Returns a list of recent flash strikes (newest first), each with the
+    strike lat/lon, UTC ISO-8601 time, energy in joules, and the GOES
+    satellite that observed it.  Strikes are limited to the last
+    ``minutes`` minutes (clamped to the store's configured retention),
+    filtered to those within ``radius_km`` of (lat, lon) using the
+    equirectangular cos(lat) approximation when BOTH ``lat`` and ``lon``
+    are given, and capped at ``limit`` (newest first).  Returns an empty
+    list when lightning is disabled, the store is empty, or nothing
+    matches; never raises.
+
+    Parameters
+    ----------
+    lightning_store : LightningStore | None
+        The global lightning store (None when lightning is disabled).
+    lat : float | None
+        Query latitude in degrees.  ``None`` (or a ``None`` lon) skips
+        the radius filter and returns all strikes in the window.
+    lon : float | None
+        Query longitude in degrees.  ``None`` (or a ``None`` lat) skips
+        the radius filter and returns all strikes in the window.
+    radius_km : float
+        Search radius in kilometres (default 100.0 -- wider than the
+        alerts default because strikes are point events, not polygons).
+        Silently ignored when ``lat`` or ``lon`` is ``None``.
+    minutes : float
+        Look-back window in minutes (default 30.0).  Clamped to the
+        store's configured retention (``settings.lightning_max_age``) and
+        floored at 0 (a zero window returns only future-dated strikes,
+        i.e. none in practice).
+    limit : int
+        Maximum number of strikes to return, newest first (default
+        2000).  ``limit <= 0`` returns an empty list.
+
+    Returns
+    -------
+    list[dict]
+        One dict per strike, newest first.  Each dict has:
+        ``lat``, ``lon``, ``utc`` (ISO-8601 string), ``energy`` (joules),
+        ``satellite`` (e.g. ``"goes19"``).
+    """
+    if lightning_store is None:
+        return []
+
+    # Reader-side refresh is best-effort by contract; it never raises.
+    await lightning_store.maybe_reload()
+
+    # Clamp the requested window to the store's configured retention, then
+    # floor at zero so a negative ``minutes`` degrades to an empty window.
+    window_minutes = min(float(minutes), settings.lightning_max_age / 60.0)
+    if window_minutes < 0.0:
+        window_minutes = 0.0
+    since_s = int(time.time()) - int(window_minutes * 60)
+
+    points = lightning_store.points
+    if points.shape[0] == 0:
+        return []
+
+    mask = points["time_s"] >= since_s
+
+    # Radius filter (only when both lat AND lon are given): equirectangular
+    # cos(lat) distance -- same formula as get_storm_cells / alerts_query.py.
+    # With either omitted the filter is skipped and all strikes return.
+    if lat is not None and lon is not None:
+        cos_lat = math.cos(math.radians(lat))
+        deg_to_km_lat = 111.0
+        deg_to_km_lon = 111.0 * cos_lat
+        radius_km_sq = radius_km * radius_km
+        dlat_km = (points["lat"].astype(np.float64) - lat) * deg_to_km_lat
+        dlon_km = (points["lon"].astype(np.float64) - lon) * deg_to_km_lon
+        mask &= (dlat_km * dlat_km + dlon_km * dlon_km) <= radius_km_sq
+
+    selected = points[mask]
+    if selected.shape[0] == 0 or limit <= 0:
+        return []
+
+    # Newest first, then cap to ``limit``.
+    selected = selected[np.argsort(selected["time_s"])[::-1]]
+    selected = selected[:limit]
+
+    results: list[dict] = []
+    for point in selected:
+        sat = int(point["satellite"])
+        results.append({
+            "lat": float(point["lat"]),
+            "lon": float(point["lon"]),
+            "utc": datetime.fromtimestamp(
+                int(point["time_s"]), tz=timezone.utc,
+            ).isoformat(),
+            "energy": float(point["energy"]),
+            "satellite": _SATELLITE_NAMES.get(sat, f"goes{sat}"),
+        })
 
     return results

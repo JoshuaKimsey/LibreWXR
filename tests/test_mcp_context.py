@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
-"""Stdio-mode MCP context: storm-cell store hydration from state.json.
+"""Stdio-mode MCP context: lightning + storm-cell store hydration.
 
 Regression coverage for the gap where ``build_stdio_lifespan`` never
 built a ``StormCellStore`` or assigned ``routes.storm_cell_store``, so
@@ -9,6 +9,11 @@ when the pipeline had detected cells.  The lifespan now mirrors the
 render-only worker: construct the store (``cleanup_tmp=False``; the
 pipeline owns the shared dir), add it to the ``stores`` dict so
 ``apply_state`` reloads it, and expose it on ``routes``.
+
+Also covers the ``LightningStore`` stdio wiring: it is built from the
+on-disk artifact path and eagerly ``maybe_reload``-ed, but (unlike storm
+cells) it is deliberately NOT part of the ``stores`` dict -- it has no
+``__getstate__`` and no state.json section.
 """
 
 import numpy as np
@@ -16,6 +21,7 @@ import pytest
 
 from librewxr.api import routes
 from librewxr.config import settings
+from librewxr.data.lightning_store import _POINT_DTYPE, LightningStore
 from librewxr.data.master_state import dump_state
 from librewxr.data.storm_cells import _CELL_DTYPE, StormCellStore
 from librewxr.data.store import FrameStore, RadarFrame
@@ -43,6 +49,8 @@ _ROUTES_ATTRS = (
     "alerts_fetcher",
     "alerts_enabled",
     "storm_cell_store",
+    "lightning_store",
+    "lightning_enabled",
 )
 
 
@@ -90,6 +98,21 @@ async def _seed_state(cache_dir, *, with_storm_cells: bool) -> None:
     dump_state(stores, cache_dir)
 
 
+async def _seed_lightning_artifact(cache_dir) -> None:
+    """Write a real lightning artifact: a store with two strikes."""
+    lightning_store = LightningStore(cache_dir=cache_dir)
+    points = np.zeros(2, dtype=_POINT_DTYPE)
+    points["time_s"] = [2000000000, 2000000060]
+    points["lat"] = [35.0, 36.0]
+    points["lon"] = [-95.0, -94.0]
+    points["energy"] = [1.0e-5, 2.0e-5]
+    points["satellite"] = [18, 19]
+    await lightning_store.replace_points(
+        points, last_seen_s=2000000060.0, max_age_s=1800,
+    )
+    assert await lightning_store.save_snapshot()
+
+
 async def test_stdio_context_restores_storm_cells(tmp_path, monkeypatch):
     """Snapshot carries cells -> the booted context exposes a live store."""
     cache_dir = tmp_path / "cache"
@@ -129,3 +152,35 @@ async def test_stdio_context_storm_cells_disabled_is_none(tmp_path, monkeypatch)
 
     async with build_stdio_lifespan(None):
         assert routes.storm_cell_store is None
+
+
+async def test_stdio_context_restores_lightning(tmp_path, monkeypatch):
+    """Artifact present -> the booted context eagerly loads its strikes."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    _configure_settings(monkeypatch, cache_dir)
+    monkeypatch.setattr(settings, "storm_cells_enabled", False)
+    monkeypatch.setattr(settings, "lightning_enabled", True)
+    await _seed_state(cache_dir, with_storm_cells=False)
+    await _seed_lightning_artifact(cache_dir)
+
+    async with build_stdio_lifespan(None):
+        store = routes.lightning_store
+        assert isinstance(store, LightningStore)
+        assert store.total_count == 2
+        assert routes.lightning_enabled is True
+
+
+async def test_stdio_context_lightning_disabled_is_none(tmp_path, monkeypatch):
+    """``lightning_enabled=False`` -> None even when the artifact exists."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    _configure_settings(monkeypatch, cache_dir)
+    monkeypatch.setattr(settings, "storm_cells_enabled", False)
+    monkeypatch.setattr(settings, "lightning_enabled", False)
+    await _seed_state(cache_dir, with_storm_cells=False)
+    await _seed_lightning_artifact(cache_dir)
+
+    async with build_stdio_lifespan(None):
+        assert routes.lightning_store is None
+        assert routes.lightning_enabled is False

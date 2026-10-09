@@ -120,6 +120,40 @@ def _register_tools(mcp: FastMCP) -> None:
             radius_km,
         )
 
+    @mcp.tool(name="get_recent_lightning")
+    async def _lightning_tool(
+        lat: float | None = None,
+        lon: float | None = None,
+        radius_km: float = 100.0,
+        minutes: float = 30.0,
+        limit: int = 2000,
+    ) -> list[dict]:
+        """Get recent GOES GLM lightning strikes, optionally near a point.
+
+        Returns a list of recent flash strikes (newest first), each with
+        the strike lat/lon, UTC ISO-8601 time, energy (joules), and the
+        GOES satellite that observed it.  Filtered to strikes within
+        ``radius_km`` of the query point (when both lat and lon are given)
+        and the last ``minutes`` minutes, capped at ``limit``.  Returns an
+        empty list when lightning is disabled or nothing matches; never
+        raises.
+
+        Args:
+            lat: Query latitude in degrees (-90 to 90); optional.
+            lon: Query longitude in degrees (-180 to 180); optional.
+            radius_km: Search radius in kilometres (default 100.0).
+            minutes: Look-back window in minutes (default 30.0).
+            limit: Maximum strikes to return, newest first (default 2000).
+        """
+        return await tools.get_recent_lightning(
+            routes.lightning_store,
+            lat,
+            lon,
+            radius_km,
+            minutes,
+            limit,
+        )
+
 
 def build_mcp_http_app():
     """Build the FastMCP instance for the HTTP transport.

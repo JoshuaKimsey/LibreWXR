@@ -869,7 +869,12 @@ if mcp_app is not None:
     routes.mcp_path = settings.mcp_path
     # Matches the tool names registered by _register_tools in
     # librewxr/mcp/server.py.  Update this list when a new tool is added.
-    routes.mcp_tools = ["get_precip_nowcast", "get_active_alerts", "get_storm_cells"]
+    routes.mcp_tools = [
+        "get_precip_nowcast",
+        "get_active_alerts",
+        "get_storm_cells",
+        "get_recent_lightning",
+    ]
     logger.debug("MCP HTTP transport mounted at %s", settings.mcp_path)
 
 @app.exception_handler(StarletteHTTPException)
