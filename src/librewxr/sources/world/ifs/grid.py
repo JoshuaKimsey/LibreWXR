@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,12 @@ ZR_B_SNOW = 2.0
 # S3 path construction
 S3_LATEST_PATH = "data_spatial/ecmwf_ifs/latest.json"
 
+# Hourly fallback re-poll so a newly-completed mirror run is noticed within
+# ~1h even when the local coverage check is satisfied; the mirror flips
+# ``completed`` ~7-8h after each 6-hourly run init, so a <=1h notice lag is
+# harmless (the previous run still covers the window).
+_LATEST_POLL_FALLBACK_SECONDS = 3600
+
 
 class ECMWFGrid:
     """ECMWF IFS 9km precipitation grid for global fallback coverage.
@@ -67,6 +74,9 @@ class ECMWFGrid:
         # interpolated for.  A window slide that leaves the native hourly
         # set unchanged skips re-interpolation entirely.
         self._interpolation_state: tuple[str, frozenset[int]] | None = None
+        # time.monotonic() of the last actual latest.json poll attempt, or
+        # None when this instance has never polled.
+        self._last_latest_poll: float | None = None
         self._fs: fsspec.AbstractFileSystem | None = None
         if cache_dir is not None:
             self._memmap_dir = Path(cache_dir) / "ecmwf_ifs"
@@ -201,6 +211,45 @@ class ECMWFGrid:
             vt_dt = vt_dt.replace(tzinfo=timezone.utc)
         return int(vt_dt.timestamp())
 
+    def _should_skip_latest_poll(self) -> bool:
+        """True when the stored hourly set already covers the desired window.
+
+        Computes the desired hourly window locally, without any network: the
+        trailing edge is the hour containing ``now + nowcast duration``
+        (mirroring ``_select_valid_times``) and the window walks back
+        ``max_ts`` hours from there.  This approximates what
+        ``_select_valid_times`` would pick from the mirror's actual
+        ``valid_times`` list.  If the approximation is wrong (gapped
+        ``valid_times``, short lists, a fast-flipping mirror) the gate fails
+        OPEN - it polls every cycle - which is the safe direction.
+
+        Even when coverage is satisfied the poll still runs at least once per
+        ``_LATEST_POLL_FALLBACK_SECONDS`` so a newly-completed mirror run is
+        noticed within ~1h.
+        """
+        if self._reference_time is None or not self._timesteps:
+            return False
+
+        max_ts = settings.get_ecmwf_max_timesteps()
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        if settings.nowcast_enabled:
+            anchor = now_ts + settings.nowcast_frames * settings.fetch_interval
+        else:
+            anchor = now_ts
+        end_hour = ((anchor + 3599) // 3600) * 3600
+        desired = {end_hour - k * 3600 for k in range(max_ts)}
+        # Hour-aligned keys are the native IFS hours; synthetics land on 600 s
+        # steps between them and must be ignored (as in the incremental path).
+        stored_hourly = {ts for ts in self._timesteps if ts % 3600 == 0}
+
+        if not desired <= stored_hourly:
+            return False
+        return (
+            self._last_latest_poll is not None
+            and time.monotonic() - self._last_latest_poll
+            < _LATEST_POLL_FALLBACK_SECONDS
+        )
+
     @staticmethod
     def _select_valid_times(valid_times: list[str], max_ts: int) -> list[str]:
         """Pick valid_times that best bracket the current radar window.
@@ -262,6 +311,13 @@ class ECMWFGrid:
         """Synchronous fetch — runs in a thread to avoid blocking the event loop."""
         from librewxr.data.retry import retry_sync
 
+        if self._should_skip_latest_poll():
+            logger.debug(
+                "ECMWF IFS: stored window covers desired hours, "
+                "skipping latest.json poll",
+            )
+            return True
+
         fs = self._get_fs()
         bucket = settings.ecmwf_s3_bucket
 
@@ -270,6 +326,9 @@ class ECMWFGrid:
             fs.cat, f"{bucket}/{S3_LATEST_PATH}",
             log_name="ECMWF IFS latest.json",
         )
+        # Record the attempt regardless of outcome so persistent failures are
+        # still spaced out by the fallback window.
+        self._last_latest_poll = time.monotonic()
         if latest_raw is None:
             logger.warning("ECMWF IFS: failed to fetch latest.json after retries")
             return False
@@ -768,6 +827,10 @@ class ECMWFGrid:
         # Render workers never fetch, but the attribute must exist on every
         # instance so fetcher-side code can compare against it safely.
         self._interpolation_state = None
+        # Pickle-compat: snapshots predate the latest.json poll gate.  Render
+        # workers never fetch, but the attribute must exist on every instance
+        # so fetcher-side code can compare against it safely.
+        self._last_latest_poll = state.get("_last_latest_poll")
         self._fs = None  # lazily recreated if needed
         self._persistent = True
 

@@ -2,6 +2,7 @@
 # Copyright (C) 2026 Joshua Kimsey
 import io
 import json
+import time
 from datetime import datetime, timezone
 
 import numpy as np
@@ -22,6 +23,7 @@ from librewxr.sources.world.ifs.grid import (
     ZR_B_RAIN,
     ZR_A_SNOW,
     ZR_B_SNOW,
+    _LATEST_POLL_FALLBACK_SECONDS,
 )
 from librewxr.data.nwp_source import NWPChain
 
@@ -504,6 +506,16 @@ class _StubFS:
         raise AssertionError("stub fs.cat should be intercepted by patched retry_sync")
 
 
+class _FixedNowDatetime(datetime):
+    """``datetime`` subclass whose ``now()`` returns a test-controlled instant."""
+
+    current: datetime | None = None
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.current
+
+
 class TestFetchSyncWindowSlide:
     """Incremental hourly window-slide behavior of ``ECMWFGrid._fetch_sync``.
 
@@ -553,6 +565,37 @@ class TestFetchSyncWindowSlide:
 
         monkeypatch.setattr(grid, "_fetch_one_timestep", fake)
         return calls
+
+    def _wire_counting(self, monkeypatch, grid, latest: dict, fake_fetch):
+        """Like ``_wire`` but also counts ``latest.json`` poll attempts.
+
+        Returns ``(calls, polls)`` where ``polls["latest"]`` is the number of
+        ``retry_sync`` invocations (one per actual latest.json read; the
+        ``_fetch_one_timestep`` fake never reaches ``retry_sync``).
+        """
+        monkeypatch.setattr(ECMWFGrid, "_get_fs", lambda self: _StubFS())
+        polls = {"latest": 0}
+
+        def counting_retry(fn, *args, **kwargs):
+            polls["latest"] += 1
+            return json.dumps(latest).encode("utf-8")
+
+        monkeypatch.setattr("librewxr.data.retry.retry_sync", counting_retry)
+        calls: list[str] = []
+
+        def fake(fs, run_prefix, vt, has_snow, variables):
+            calls.append(vt)
+            return fake_fetch(vt)
+
+        monkeypatch.setattr(grid, "_fetch_one_timestep", fake)
+        return calls, polls
+
+    def _use_fixed_now(self, monkeypatch, ts: int) -> None:
+        """Freeze ``grid.datetime.now`` at the given Unix instant."""
+        _FixedNowDatetime.current = datetime.fromtimestamp(ts, tz=timezone.utc)
+        monkeypatch.setattr(
+            "librewxr.sources.world.ifs.grid.datetime", _FixedNowDatetime,
+        )
 
     def _seed(self, grid, ts: int, value: int) -> None:
         precip = np.full(self.SHAPE, value, dtype=np.uint8)
@@ -903,6 +946,108 @@ class TestFetchSyncWindowSlide:
         # The memmap file was left untouched and the old pair reused.
         assert path.stat().st_mtime_ns == before_mtime
         assert grid._timesteps[synthetic][0] is old_pair[0]
+
+    async def test_latest_poll_gate_skips_when_window_covered(
+        self, tmp_path, monkeypatch,
+    ):
+        """A second fetch with the window unchanged makes zero network calls."""
+        self._patch_settings(monkeypatch)
+        monkeypatch.setattr(settings, "nowcast_enabled", False)
+        grid = ECMWFGrid(cache_dir=tmp_path)
+
+        # now just before H4 -> desired hourly window is {H1, H2, H3, H4}.
+        self._use_fixed_now(monkeypatch, self.BASE + 4 * self.HOUR - 100)
+
+        ref_iso = self._iso(self.BASE)
+        latest = self._latest(
+            ref_iso, [self.BASE + k * self.HOUR for k in range(0, 5)],
+        )
+        calls, polls = self._wire_counting(
+            monkeypatch, grid, latest, self._new_frame,
+        )
+
+        # First fetch: store empty -> cold fetch polls and loads H1..H4.
+        assert await grid.fetch() is True
+        assert polls["latest"] == 1
+        assert sorted(calls) == [
+            self._iso(self.BASE + k * self.HOUR) for k in range(1, 5)
+        ]
+        assert grid._last_latest_poll is not None
+
+        # Second fetch: window unchanged and poll fresh -> gate skips entirely.
+        calls.clear()
+        assert await grid.fetch() is True
+        assert polls["latest"] == 1
+        assert calls == []
+
+    async def test_latest_poll_gate_polls_when_window_slides(
+        self, tmp_path, monkeypatch,
+    ):
+        """Sliding past an hour boundary re-polls and fetches the new hour."""
+        self._patch_settings(monkeypatch)
+        monkeypatch.setattr(settings, "nowcast_enabled", False)
+        grid = ECMWFGrid(cache_dir=tmp_path)
+
+        ref_iso = self._iso(self.BASE)
+        latest = self._latest(
+            ref_iso, [self.BASE + k * self.HOUR for k in range(0, 7)],
+        )
+        calls, polls = self._wire_counting(
+            monkeypatch, grid, latest, self._new_frame,
+        )
+
+        self._use_fixed_now(monkeypatch, self.BASE + 4 * self.HOUR - 100)
+        assert await grid.fetch() is True
+        assert polls["latest"] == 1
+        assert sorted(calls) == [
+            self._iso(self.BASE + k * self.HOUR) for k in range(1, 5)
+        ]
+
+        # Slide past the H5 boundary: desired window becomes {H3..H6}, which
+        # the stored {H1..H4} no longer covers -> gate fails open and re-polls.
+        calls.clear()
+        self._use_fixed_now(monkeypatch, self.BASE + 5 * self.HOUR + 100)
+
+        assert await grid.fetch() is True
+        assert polls["latest"] == 2
+        assert sorted(calls) == [
+            self._iso(self.BASE + 5 * self.HOUR),
+            self._iso(self.BASE + 6 * self.HOUR),
+        ]
+
+    async def test_latest_poll_fallback_forces_poll(
+        self, tmp_path, monkeypatch,
+    ):
+        """Coverage satisfied but a stale poll still triggers a re-poll."""
+        self._patch_settings(monkeypatch)
+        monkeypatch.setattr(settings, "nowcast_enabled", False)
+        grid = ECMWFGrid(cache_dir=tmp_path)
+        ref_iso = self._iso(self.BASE)
+        grid._reference_time = ref_iso
+
+        # Store already covers the desired window H1..H4.
+        self._seed_window(
+            grid, [self.BASE + k * self.HOUR for k in range(1, 5)],
+        )
+        # Coverage is satisfied, but the last poll is past the fallback window.
+        grid._last_latest_poll = (
+            time.monotonic() - _LATEST_POLL_FALLBACK_SECONDS - 1
+        )
+
+        self._use_fixed_now(monkeypatch, self.BASE + 4 * self.HOUR - 100)
+
+        latest = self._latest(
+            ref_iso, [self.BASE + k * self.HOUR for k in range(0, 5)],
+        )
+        calls, polls = self._wire_counting(
+            monkeypatch, grid, latest, self._new_frame,
+        )
+
+        assert await grid.fetch() is True
+        # The stale timestamp defeats the coverage gate, so latest.json is
+        # read; the unchanged window then hits the guard -> no timestep fetch.
+        assert polls["latest"] == 1
+        assert calls == []
 
 
 class TestIFSInterpolationMemoHelpers:
