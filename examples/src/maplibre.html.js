@@ -39,6 +39,11 @@
         <option value="light">Cells: Light</option>
         <option value="dark">Cells: Dark</option>
     </select>
+    <select id="lv-lightning" aria-label="Lightning strikes">
+        <option value="">Lightning: Off</option>
+        <option value="dots">Lightning: Dots</option>
+        <option value="bolts">Lightning: Bolts</option>
+    </select>
     <button type="button" class="icon-btn" id="lv-alerts" aria-pressed="false" aria-label="Toggle weather alerts" title="Weather alerts">
         <span class="btn-icon"><svg viewBox="0 0 24 24"><path d="M12 3 L20 19 H4 Z"/><line x1="12" y1="10" x2="12" y2="15"/><circle cx="12" cy="17.5" r="1"/></svg></span>
         Alerts

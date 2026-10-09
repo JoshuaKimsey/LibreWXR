@@ -58,6 +58,7 @@
         colorScheme: 10,
         arrows: '',              // '' | 'light' | 'dark'
         cells: '',               // '' | 'light' | 'dark'
+        lightning: '',           // '' | 'dots' | 'bolts'
         smooth: true,
         snow: true,
         format: 'webp',          // 'webp' | 'png'
@@ -119,6 +120,7 @@
             colorScheme: config.colorScheme,
             arrows: config.arrows,
             cells: config.cells,
+            lightning: config.lightning,
             smooth: config.smooth,
             snow: config.snow,
             format: config.format,
@@ -254,6 +256,7 @@
             var params = [];
             if (state.arrows) params.push('arrows=' + state.arrows);
             if (state.cells) params.push('cells=' + state.cells);
+            if (state.lightning) params.push('lightning=' + state.lightning);
             if (params.length) url += '?' + params.join('&');
             return url;
         }
@@ -1435,6 +1438,7 @@
             if ((c = byId('lv-scheme'))) c.style.display = isSatOnly ? 'none' : '';
             if ((c = byId('lv-arrows'))) c.style.display = isSatOnly ? 'none' : '';
             if ((c = byId('lv-cells'))) c.style.display = isSatOnly ? 'none' : '';
+            if ((c = byId('lv-lightning'))) c.style.display = isSatOnly ? 'none' : '';
             document.dispatchEvent(new CustomEvent('lvselect:sync'));
         }
 
@@ -1716,6 +1720,13 @@
             invalidateFrameLayers();
         }
 
+        function applyLightning(v) {
+            v = v || '';
+            if (v === state.lightning) return;
+            state.lightning = v;
+            invalidateFrameLayers();
+        }
+
         function applySmooth(b) {
             b = !!b;
             if (b === state.smooth) return;
@@ -1773,6 +1784,11 @@
             if ((c = byId('lv-cells'))) {
                 c.addEventListener('change', function () {
                     applyCells(this.value);
+                });
+            }
+            if ((c = byId('lv-lightning'))) {
+                c.addEventListener('change', function () {
+                    applyLightning(this.value);
                 });
             }
             if ((c = byId('lv-alerts'))) {
@@ -1841,6 +1857,7 @@
             if ((c = byId('lv-scheme'))) c.value = String(state.colorScheme);
             if ((c = byId('lv-arrows'))) c.value = state.arrows;
             if ((c = byId('lv-cells'))) c.value = state.cells;
+            if ((c = byId('lv-lightning'))) c.value = state.lightning;
             if ((c = byId('lv-smooth'))) c.checked = state.smooth;
             if ((c = byId('lv-snow'))) c.checked = state.snow;
             if ((c = byId('lv-format'))) c.value = state.format;
@@ -1974,6 +1991,7 @@
             setColorScheme: applyColorScheme,
             setArrows: applyArrows,
             setCells: applyCells,
+            setLightning: applyLightning,
             setSmooth: applySmooth,
             setSnow: applySnow,
             setFormat: applyFormat,

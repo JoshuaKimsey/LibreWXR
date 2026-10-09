@@ -234,6 +234,7 @@ LibreWXR.createViewer({
     view: { lat: 33.749, lon: -84.388, zoom: 7, maxZoom: 12 }, // Atlanta
     layerMode: 'radar',   // radar only - satellite/nowcast split still animates
     colorScheme: 10,      // default scheme
+    lightning: 'dots',    // lightning strikes overlay on by default (subtle dots style)
     smooth: true,         // 1_1 webp tiles
     snow: true,
     format: 'webp',

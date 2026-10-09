@@ -40,6 +40,11 @@
         <option value="light">Cells: Light</option>
         <option value="dark">Cells: Dark</option>
     </select>
+    <select id="lv-lightning" aria-label="Lightning strikes">
+        <option value="">Lightning: Off</option>
+        <option value="dots">Lightning: Dots</option>
+        <option value="bolts">Lightning: Bolts</option>
+    </select>
     <select id="lv-basemap" aria-label="Base map">
         <option value="auto">Map: Auto</option>
         <option value="osm-standard">Map: OSM Standard</option>

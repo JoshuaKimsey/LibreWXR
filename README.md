@@ -602,6 +602,7 @@ The `examples/` directory contains three self-contained HTML files showcasing th
 - **Options panel** — collapsible controls for smoothing, snow mask, PNG/WebP output format, and 256/512px tile size with HiDPI auto-detection
 - **Motion arrows** — off, light, or dark
 - **Storm-cell markers** — cell detection with light/dark label styles
+- **Lightning strikes** — GOES GLM flash overlay via the `?lightning=` toggle (dots or bolts)
 - **Scrubber bar** — draggable timeline with past/nowcast visual distinction and tick labels
 - **Background preloading** — pre-renders all frames with a progress indicator for smooth animation
 - **Keyboard shortcuts** — Space to play/pause, arrow keys to step through frames
