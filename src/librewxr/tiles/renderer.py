@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 import io
+import logging
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -28,6 +29,9 @@ from librewxr.tiles.png_palette import encode_png
 
 if TYPE_CHECKING:
     from librewxr.data.precip_mask import PrecipMaskStore
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +354,8 @@ def present_tile(
     cell_style: str = "",
     cells_by_region: dict[str, np.ndarray] | None = None,
     cell_counts: dict[str, int] | None = None,
+    lightning_style: str = "",
+    flash_points: np.ndarray | None = None,
 ) -> bytes:
     """Render a cached ``TileGeometry`` to encoded bytes.
 
@@ -426,6 +432,11 @@ def present_tile(
         img = _draw_storm_cells(
             img, cells_by_region, cell_counts or {}, regions_with_data,
             z, x, y, geom.tile_size, cell_style,
+        )
+
+    if lightning_style and flash_points is not None and len(flash_points):
+        img = _draw_lightning(
+            img, flash_points, z, x, y, geom.tile_size, lightning_style,
         )
 
     return _encode_image(img, fmt)
@@ -1335,6 +1346,122 @@ def _draw_storm_cells(
                         (x1 - head_len * math.cos(angle + ha),
                          y1 - head_len * math.sin(angle + ha)),
                     ], fill=arrow_color)
+
+    return Image.alpha_composite(img, overlay)
+
+
+# Hand-authored vector lightning bolt in unit space (x right, y down, all
+# coords in 0..1) -- deliberately NOT a unicode/emoji glyph: server-side PIL
+# text rendering depends on fonts the project container does not ship, so a
+# missing glyph would blank every icon or draw `.notdef` tofu boxes.  The
+# polygon is shaped to visually match U+1F5F2's outline and renders
+# identically everywhere (see docs/lightning-implementation-plan.md ruling 7).
+_LIGHTNING_BOLT_POLY = [
+    (0.62, 0.02), (0.18, 0.52), (0.44, 0.52), (0.36, 0.98),
+    (0.82, 0.44), (0.55, 0.44), (0.78, 0.02),
+]
+
+# Web-Mercator latitude clamp (the projection is undefined at the poles).
+_MERCATOR_LAT_LIMIT = 85.05112878
+
+
+def _draw_lightning(
+    img: Image.Image,
+    flash_points: np.ndarray,
+    z: int,
+    x: int,
+    y: int,
+    tile_size: int,
+    style: str,
+) -> Image.Image:
+    """Draw GOES GLM flash points as a vector overlay on the tile.
+
+    ``style`` is ``"dots"`` (small filled circles sized by energy) or
+    ``"bolts"`` (the hand-authored ``_LIGHTNING_BOLT_POLY`` vector polygon).
+    Any other value degrades silently to returning ``img`` unchanged,
+    matching the cells/arrows fallback.
+
+    Points are forward-projected from lat/lon into tile-local fractional
+    pixels with the standard Web-Mercator formulas; non-finite coordinates,
+    points past the Mercator latitude clamp, and points beyond a small
+    margin outside the tile are skipped before any drawing work.  The
+    presentational draw cap (``settings.lightning_max_draw_per_tile``) keeps
+    only the strongest-by-energy candidates for outbreak-dense tiles and
+    logs the trim at DEBUG; it removes nothing from the underlying store.
+    Brightness is constant -- there is deliberately no age taper
+    (docs/lightning-implementation-plan.md rulings 4 and 10).
+    """
+    if style not in ("dots", "bolts"):
+        return img
+    if flash_points is None or len(flash_points) == 0:
+        return img
+
+    n = float((1 << z) * tile_size)
+    margin = 8.0
+
+    # Cull to in-tile candidates; the original index preserves time order.
+    candidates: list[tuple[int, float, float, float]] = []
+    for i in range(len(flash_points)):
+        lat = float(flash_points[i]["lat"])
+        lon = float(flash_points[i]["lon"])
+        if not (math.isfinite(lat) and math.isfinite(lon)):
+            continue
+        if abs(lat) >= _MERCATOR_LAT_LIMIT or abs(lon) > 180.0:
+            continue
+        px = (lon + 180.0) / 360.0 * n - x * tile_size
+        py = (
+            0.5 - math.asinh(math.tan(math.radians(lat))) / (2.0 * math.pi)
+        ) * n - y * tile_size
+        if px < -margin or px > tile_size + margin:
+            continue
+        if py < -margin or py > tile_size + margin:
+            continue
+        candidates.append((i, px, py, float(flash_points[i]["energy"])))
+
+    if not candidates:
+        return img
+
+    max_draw = settings.lightning_max_draw_per_tile
+    if max_draw > 0 and len(candidates) > max_draw:
+        strongest = sorted(candidates, key=lambda c: c[3], reverse=True)[:max_draw]
+        logger.debug(
+            "lightning draw cap: tile z=%d x=%d y=%d style=%s capped %d -> %d",
+            z, x, y, style, len(candidates), max_draw,
+        )
+        # Restore time order after the energy sort so bright picks still
+        # draw oldest-first (relevant when glyphs overlap).
+        candidates = sorted(strongest, key=lambda c: c[0])
+
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    if style == "dots":
+        rim_color = (70, 50, 10, 200)
+        core_color = (255, 240, 170, 255)
+        for _i, px, py, energy in candidates:
+            # Energy is joule-scale (~1e-15..4e-12 J): normalize to 1e-15 J
+            # so log10 spans a useful range (log1p would be identically ~0).
+            radius = 1.5 + 0.6 * math.log10(max(energy, 1e-15) / 1e-15)
+            radius = max(1.5, min(4.0, radius))
+            rim = radius + 0.75
+            draw.ellipse(
+                [(px - rim, py - rim), (px + rim, py + rim)], fill=rim_color,
+            )
+            draw.ellipse(
+                [(px - radius, py - radius), (px + radius, py + radius)],
+                fill=core_color,
+            )
+    else:  # "bolts"
+        scale = max(5.0, 0.035 * tile_size)
+        fill_color = (255, 215, 80, 255)
+        outline_color = (60, 45, 10, 220)
+        for _i, px, py, _energy in candidates:
+            pts = [
+                (px + (vx - 0.5) * scale, py + (vy - 0.5) * scale)
+                for vx, vy in _LIGHTNING_BOLT_POLY
+            ]
+            draw.polygon(pts, fill=fill_color)
+            draw.line(pts + [pts[0]], fill=outline_color, width=1)
 
     return Image.alpha_composite(img, overlay)
 

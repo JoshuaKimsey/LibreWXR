@@ -62,7 +62,7 @@ _MAX_LIST_PAGES = 20
 # "seconds since 2000-01-01 12:00:00" (the true 12:00 epoch is 946728000,
 # derived from the units string); the fallback below is only used when the
 # units attribute is absent/unparseable.
-_GLM_EPOCH_FALLBACK = 946684800.0
+_GLM_EPOCH_FALLBACK = 946728000.0
 _KEY_RE = re.compile(r"GLM-L2-LCFA.*?_s(\d{14})_e(\d{14})")
 _KEY_TAG_RE = re.compile(r"<Key>(.*?)</Key>", re.DOTALL)
 _TRUNCATED_RE = re.compile(r"<IsTruncated>\s*(true|false)\s*</IsTruncated>")

@@ -35,6 +35,7 @@ from librewxr.data.master_state import (
     state_mtime,
 )
 from librewxr.data.nowcast import NowcastStore
+from librewxr.data.lightning_store import LightningStore
 from librewxr.data.storm_cells import StormCellStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.precip_mask import PrecipMaskStore
@@ -473,6 +474,16 @@ async def _render_only_lifespan(app: FastAPI):
         if settings.storm_cells_enabled
         else None
     )
+    # Lightning is reader-owned: the store finds the pipeline's on-disk
+    # artifact by path on first use, so a cold render worker is never
+    # blocked on a boot snapshot.  Deliberately NOT in the ``stores`` dict
+    # below -- it has no state.json section (no __getstate__), so adding
+    # it would crash the snapshot writer.
+    lightning_store = (
+        LightningStore(cache_dir=cache_dir)
+        if settings.lightning_enabled
+        else None
+    )
     alerts_store = AlertsStore() if settings.alerts_enabled else None
 
     # Per-timestamp global precip mask, built by the pipeline and
@@ -623,6 +634,8 @@ async def _render_only_lifespan(app: FastAPI):
     routes.satellite_grids = satellite_grids_by_slug
     routes.nowcast_store = nowcast_store
     routes.storm_cell_store = storm_cell_store
+    routes.lightning_store = lightning_store
+    routes.lightning_enabled = settings.lightning_enabled
     routes.tile_request_tracker = tile_request_tracker
     routes.start_time = time.time()
     routes.enabled_regions = enabled

@@ -34,6 +34,7 @@ from librewxr.api.models import (
 from librewxr.api.conditional import compute_etag, conditional_response
 from librewxr.colors.schemes import SCHEME_NAMES
 from librewxr.config import settings
+from librewxr.data.lightning_store import LightningStore
 from librewxr.data.store import FrameStore
 from librewxr.data.worker_pulse import read_worker_pulses
 from librewxr.mcp.discovery import build_ai_catalog
@@ -43,6 +44,7 @@ from librewxr.tiles.cache import CachedRender, TileCache
 from librewxr.tiles.coordinates import (
     coord_cache_bytes,
     coord_cache_stats,
+    tile_bounds,
     window_origin,
 )
 from librewxr.tiles.renderer import (
@@ -84,6 +86,11 @@ precip_mask = None  # PrecipMaskStore | None — set by main.py (multi mode only
 satellite_grids: dict[str, object] = {}
 nowcast_store = None  # NowcastStore | None
 storm_cell_store = None  # StormCellStore | None
+# GOES GLM flash points — set by main.py during startup.  Unlike the
+# other stores this has no state.json section: render workers read the
+# pipeline's on-disk artifact directly (see data/lightning_store.py).
+lightning_store: LightningStore | None = None
+lightning_enabled: bool = False
 radar_cache = None  # RadarFrameCache | None
 radar_fetcher = None  # RadarFetcher | None
 tile_request_tracker: TileRequestTracker | None = None
@@ -559,6 +566,24 @@ async def health():
         logger.exception("Failed to assemble cluster health section")
         cluster = None
 
+    # Lightning is reader-owned: refresh from the artifact (never raises)
+    # so workers report what they currently hold.  Disabled / unwired
+    # degrades to the small shape below, matching the storm-cells block.
+    if settings.lightning_enabled and lightning_store is not None:
+        await lightning_store.maybe_reload()
+        lightning_health = {
+            "enabled": True,
+            "points": lightning_store.total_count,
+            "version": lightning_store.version,
+            "last_updated": lightning_store.last_updated,
+            "window_start_s": lightning_store.window_start_s,
+            "window_end_s": lightning_store.window_end_s,
+            "ceiling_trimmed_total": lightning_store.ceiling_trimmed_total,
+            "satellites": lightning_store.meta.get("satellites", {}),
+        }
+    else:
+        lightning_health = {"enabled": False}
+
     return {
         "status": "ok" if frame_count > 0 else "degraded",
         "uptime_seconds": uptime,
@@ -663,6 +688,7 @@ async def health():
             "last_updated": int(storm_cell_store.last_updated) if storm_cell_store is not None else 0,
             "per_region": await storm_cell_store.get_counts() if storm_cell_store is not None else {},
         } if settings.storm_cells_enabled else {"enabled": False},
+        "lightning": lightning_health,
     }
 
 
@@ -787,19 +813,20 @@ def _shared_tile_key(timestamp, version, z, x, y, tile_size, smooth, snow, color
     )
 
 
-def _shared_overlay_key(timestamp, frame_version, flow_version, cells_version, z, x, y, tile_size, smooth, snow, color, ext, arrow_style, cell_style) -> str:
+def _shared_overlay_key(timestamp, frame_version, flow_version, cells_version, z, x, y, tile_size, smooth, snow, color, ext, arrow_style, cell_style, lightning_version: int = 0, lightning_style: str = "") -> str:
     """Shared-store key for an encoded overlay tile.
 
     Same content-versioning principle as ``_shared_tile_key`` extended
-    with flow/cells versions so a pipeline regeneration re-keys overlay
-    tiles instead of serving stale bytes; the leading timestamp keeps
-    ``_ts_of`` sharding and ``invalidate_timestamp`` prefix sweeps
+    with flow/cells/lightning versions so a pipeline regeneration re-keys
+    overlay tiles instead of serving stale bytes; the leading timestamp
+    keeps ``_ts_of`` sharding and ``invalidate_timestamp`` prefix sweeps
     working.
     """
     return (
         f"{timestamp}-v{frame_version}-f{flow_version}-c{cells_version}-"
         f"{z}-{x}-{y}-{tile_size}-{int(smooth)}{int(snow)}-{color}-{ext}-"
-        f"q{settings.webp_quality}-a{arrow_style}-k{cell_style}"
+        f"q{settings.webp_quality}-a{arrow_style}-k{cell_style}-"
+        f"g{lightning_version}-G{lightning_style or '-'}"
     )
 
 
@@ -1014,6 +1041,10 @@ async def radar_tile(
     ext: str = Path(pattern=r"^(png|webp)$"),
     arrows: str = Query(default=""),
     cells: str = Query(default=""),
+    lightning: str = Query(
+        default="",
+        description="Lightning overlay: 1/true/dots for dot glyphs, bolts for bolt icons, empty for off",
+    ),
 ) -> Response:
     """Rain Viewer-compatible tile endpoint."""
     t0 = time.perf_counter_ns()
@@ -1051,10 +1082,18 @@ async def radar_tile(
     elif cells == "dark":
         cell_style = "dark"
 
+    # Lightning style: "dots" (default) or "bolts".  Unknown values fall
+    # back to off silently, mirroring arrows/cells.
+    eff_lightning = ""
+    if lightning in ("1", "true", "dots"):
+        eff_lightning = "dots"
+    elif lightning == "bolts":
+        eff_lightning = "bolts"
+
     # Plain tile: no overlays requested.  Computed here (before the frame
     # fetch) because the shared-store lookup only serves plain tiles and
     # needs the flag for its guard.
-    is_plain = not arrows and not cells
+    is_plain = not arrows and not cells and not lightning
 
     # Geometry cache: keyed only on inputs that affect the sampled values
     # (radar source + viewport + smoothing + snow-mask presence).  Color
@@ -1188,6 +1227,13 @@ async def radar_tile(
             # unreachable on the next request.
             flow_v = nowcast_store.flow_version if nowcast_store is not None else 0
             cells_v = storm_cell_store.cells_version if storm_cell_store is not None else 0
+            lightning_v = 0
+            if eff_lightning and lightning_store is not None:
+                # Reader-side refresh from the pipeline's on-disk artifact
+                # (stat-guarded; never raises).  The version keys the overlay
+                # cache so a fresh artifact re-renders on the next request.
+                await lightning_store.maybe_reload()
+                lightning_v = lightning_store.version
 
             flow_regions = None
             nwp_flow = None
@@ -1207,13 +1253,33 @@ async def radar_tile(
                     cells_by_region = await storm_cell_store.get_cells() or None
                     cell_counts = await storm_cell_store.get_counts() or None
 
+            flash_points = None
+            if eff_lightning and lightning_store is not None:
+                # Only show flashes on the newest analysis frame -- like
+                # cells, the points answer "what is striking RIGHT NOW",
+                # not a historical record (Phase 2 adds per-slot frames
+                # via the overlay ring).  An unknown latest timestamp
+                # degrades to no overlay.
+                latest_timestamps = await _latest_timestamps_cached()
+                latest_analysis_ts = (
+                    max(latest_timestamps) if latest_timestamps else None
+                )
+                if latest_analysis_ts is not None and timestamp == latest_analysis_ts:
+                    west, south, east, north = tile_bounds(z, xi, yi)
+                    flash_points = lightning_store.points_in(south, north, west, east)
+
             # Effective overlay styles as actually passed to ``present_tile``:
-            # an arrows/cells request degrades to plain when no flow or cell
-            # data is available for this request.
+            # an arrows/cells/lightning request degrades to plain when no
+            # flow/cell/flash data is available for this request.
             eff_arrow = arrow_style if (flow_regions or nwp_flow is not None) else ""
             eff_cells = cell_style if cells_by_region else ""
+            eff_lightning = (
+                eff_lightning
+                if (flash_points is not None and len(flash_points))
+                else ""
+            )
 
-            if is_plain or not (eff_arrow or eff_cells):
+            if is_plain or not (eff_arrow or eff_cells or eff_lightning):
                 # An overlay request with no flow/cell data available also lands
                 # here - it falls through to the exact plain present path (same
                 # present_key, same cache entry) rather than creating a duplicate.
@@ -1259,6 +1325,8 @@ async def radar_tile(
                             cell_style=eff_cells,
                             cells_by_region=cells_by_region,
                             cell_counts=cell_counts,
+                            lightning_style=eff_lightning,
+                            flash_points=flash_points,
                         )
                         present_ns = time.perf_counter_ns() - present_start
                         tile_cache.put(present_key, CachedRender(data=tile_bytes, etag=etag))
@@ -1298,7 +1366,9 @@ async def radar_tile(
                 # timestamps per cycle as before), and past-frame overlay
                 # tiles are now cached too - previously re-rendered per
                 # request.
-                overlay_key = present_key + (eff_arrow, eff_cells, flow_v, cells_v)
+                overlay_key = present_key + (
+                    eff_arrow, eff_cells, flow_v, cells_v, eff_lightning, lightning_v,
+                )
                 cached = tile_cache.get(overlay_key)
                 if isinstance(cached, CachedRender):
                     tile_bytes = cached.data
@@ -1315,7 +1385,7 @@ async def radar_tile(
                             ov_key = _shared_overlay_key(
                                 timestamp, version, flow_v, cells_v, z, xi, yi,
                                 tile_size, smooth, snow, color, ext,
-                                eff_arrow, eff_cells,
+                                eff_arrow, eff_cells, lightning_v, eff_lightning,
                             )
                             if io_executor is not None:
                                 loop = asyncio.get_running_loop()
@@ -1344,6 +1414,8 @@ async def radar_tile(
                             cell_style=eff_cells,
                             cells_by_region=cells_by_region,
                             cell_counts=cell_counts,
+                            lightning_style=eff_lightning,
+                            flash_points=flash_points,
                         )
                         present_ns = time.perf_counter_ns() - present_start
                         tile_cache.put(overlay_key, CachedRender(data=tile_bytes, etag=etag))
@@ -1362,7 +1434,7 @@ async def radar_tile(
                                 ov_key = _shared_overlay_key(
                                     timestamp, version, flow_v, cells_v, z, xi, yi,
                                     tile_size, smooth, snow, color, ext,
-                                    eff_arrow, eff_cells,
+                                    eff_arrow, eff_cells, lightning_v, eff_lightning,
                                 )
                                 if io_executor is not None:
                                     loop = asyncio.get_running_loop()
