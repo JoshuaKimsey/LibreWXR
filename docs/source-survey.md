@@ -450,6 +450,8 @@ Trigger to revisit: UHMC publicly announces a restored radar with a data feed. M
 
 The pairing with the Ukraine entry above is deliberate. Ukraine's radar infrastructure was destroyed by Russia, so LibreWXR neither pretends Ukraine has coverage (Tier 3 — infrastructure unavailable) nor accepts the aggressor's data as a substitute (Tier 3 — project-policy exclusion). Ingesting and redistributing data from a state agency of an aggressor government, even data as politically neutral as precipitation radar, normalises that state's institutional standing during an ongoing war of aggression. LibreWXR declines to do that.
 
+**Slava Ukraini!**
+
 Technical context, recorded so the research isn't redone if policy ever changes:
 
 - **Operator:** Hydrometcenter of Russia, part of Roshydromet.
