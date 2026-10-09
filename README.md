@@ -562,7 +562,7 @@ Layered ahead of IFS via specificity-first dispatch (see the [Regional NWP chain
 
 ### Lightning
 
-- Lightning: NOAA GOES-R Geostationary Lightning Mapper (GLM) — flash points from GOES-East + GOES-West, ingested from anonymous NOAA NODD S3 as an optional `?lightning=` radar-tile overlay and served through the MCP `get_recent_lightning` tool. US public domain; attribution requested-not-required.
+- Lightning: NOAA GOES-R Geostationary Lightning Mapper (GLM) — flash points from GOES-East + GOES-West, ingested from anonymous NOAA NODD S3 as an optional `?lightning=` radar-tile overlay and served through the MCP `get_recent_lightning` tool and the `/v2/lightning` GeoJSON endpoint (no-args full window, or `lat` + `lon` + `radius_km`, or `bbox`). Tiles replay each frame's strikes - every frame draws the strikes from its own 10-minute slot window. US public domain; attribution requested-not-required.
 
 ### Weather alerts
 

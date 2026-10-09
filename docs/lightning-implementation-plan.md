@@ -1,6 +1,6 @@
 # Lightning Implementation Plan (GOES GLM Phase 1)
 
-Status: revised draft, 2026-10-08 (second revision — maintainer rulings incorporated). Companion to the lightning sections in docs/source-survey.md (GOES GLM = Lightning Tier 1). This document is the living decision log for the feature; the rulings section encodes the maintainer's answers so later sessions don't re-derive them. **Phase 1 landed 2026-10-09 — see "Phase 1 as-landed (2026-10-09)" below; the sections above are the historical plan of record and the config block has been superseded.**
+Status: revised draft, 2026-10-08 (second revision — maintainer rulings incorporated). Companion to the lightning sections in docs/source-survey.md (GOES GLM = Lightning Tier 1). This document is the living decision log for the feature; the rulings section encodes the maintainer's answers so later sessions don't re-derive them. **Phase 1 landed 2026-10-09 and Phase 2 landed 2026-10-09 (Phase 1 + Phase 2 both landed; Phase 3 remains locked) — see "Phase 1 as-landed (2026-10-09)" and "Phase 2 as-landed (2026-10-09)" below; the sections above are the historical plan of record and the config block has been superseded.**
 
 ## Maintainer rulings (recorded 2026-10-08)
 
@@ -143,11 +143,13 @@ lightning_max_draw_per_tile: int = 1000           # LIBREWXR_LIGHTNING_MAX_DRAW_
 - Attribution: README + the gitignored librewxr-site (manual companion edit), per ruling 11 — NOT example frontends.
 - This plan remains the living decision log; update rulings as phases land (the satellite-implementation-plan.md convention).
 
-## Phase 2 (committed once Phase 1 lands)
+## Phase 2 (committed once Phase 1 lands) - as-landed 2026-10-09
+
+**Landed 2026-10-09 - see "Phase 2 as-landed (2026-10-09)" below.** The numbered items below are the original commitment; item 3 was rejected by maintainer ruling (noted inline).
 
 1. `/v2/lightning` REST endpoint as specified above (ruling 9).
 2. Past-frame lightning animation: per-frame slot buckets via `points_for_slot` — the "ring" is ~12 sparse point arrays (~1 MB each, ~12 MB total), NOT an 80 MB raster ring; present_tile draws slot `ts`'s strikes for any requested frame; per-frame overlay versions freeze at creation so replay in the timeline is cache-hit, and only cache eviction or a cold start recomputes. Verify during implementation: whether the shared tile store persists overlay bytes across restarts so even a cold start can warm from disk rather than recompute — nice-to-have, not load-bearing.
-3. Optional additional styles (e.g. `heat` blobs) — presentational only, not data changes.
+3. ~~Optional additional styles (e.g. `heat` blobs) — presentational only, not data changes.~~ **REJECTED by maintainer ruling 2026-10-09: lightning serves specific strikes, never generalized areas of activity - do not implement, do not leave it as an open option.**
 
 ## Phase 3 (locked until access or rule changes)
 
@@ -168,7 +170,7 @@ lightning_max_draw_per_tile: int = 1000           # LIBREWXR_LIGHTNING_MAX_DRAW_
 
 1. GLM variable names/units — confirmed live in pre-flight against NCEI C01527 and the netCDF attrs (ruling 6).
 2. Whether shared overflow-byte persistence covers overlay variants across restarts (Phase 2 item 2 verify note).
-3. Whether gzip already applies to `/v2/*` responses (Phase 2 REST item) — check, don't assume.
+3. **Resolved (2026-10-09).** Gzip did NOT apply to `/v2/*` responses. A pure-ASGI `JsonGZipMiddleware` in `main.py` now gzips `application/json` responses >= 1 KiB, only when the client advertises `Accept-Encoding: gzip` (see Phase 2 as-landed).
 
 ## Phase 1 as-landed (2026-10-09)
 
@@ -178,7 +180,7 @@ lightning_max_draw_per_tile: int = 1000           # LIBREWXR_LIGHTNING_MAX_DRAW_
   - `LIBREWXR_LIGHTNING_FETCH_INTERVAL=300` — seconds, clock-aligned.
   - `LIBREWXR_LIGHTNING_MAX_AGE=1800` — seconds (30 min); clamps MCP `minutes=`.
   - `LIBREWXR_LIGHTNING_MAX_DRAW_PER_TILE=1000` — presentational strongest-by-energy cap; the store always holds every flash in the window.
-- **Overlay.** `?lightning=` takes `""` off, `1`/`true`/`dots` small energy-scaled dots (default), `bolts` the hand-authored vector bolt polygon (ruling 7). Constant brightness, no age fade; **newest analysis frame only** (Phase 2 adds per-frame animation via 10-minute slot buckets). The overlay cache key folds the store version; the geometry cache is untouched. Unknown values fall back to off **silently** — this supersedes the "with a warning" wording above, matching the `cells`/`arrows` precedent.
+- **Overlay.** `?lightning=` takes `""` off, `1`/`true`/`dots` small energy-scaled dots (default), `bolts` the hand-authored vector bolt polygon (ruling 7). Constant brightness, no age fade; **newest analysis frame only** (Phase 2 adds per-frame animation via 10-minute slot buckets - landed, see Phase 2 as-landed). The overlay cache key folds the store version; the geometry cache is untouched. Unknown values fall back to off **silently** — this supersedes the "with a warning" wording above, matching the `cells`/`arrows` precedent.
 - **Pre-flight decode findings (ruling 6, satisfied 2026-10-09 against live `noaa-goes18`/`noaa-goes19` files).**
   - Files are FLAT netCDF (there is no `flash` group).
   - The plan's `flash_time_offset_of_effect_time` does **not** exist; the landed decoder uses `flash_time_offset_of_first_event`.
@@ -191,3 +193,14 @@ lightning_max_draw_per_tile: int = 1000           # LIBREWXR_LIGHTNING_MAX_DRAW_
 - **Companion fix.** The `/health` tile-cache overlay classifier now counts overlay keys correctly (`>= 14`-element overlay keys); it had undercounted since the flow/cells version-keying.
 - **Tests as-landed.** Marker `lightning` registered. Files split: `tests/test_lightning.py` (store), `tests/test_lightning_fetcher.py` (fetcher + synthetic GLM netCDF fixtures), `tests/test_lightning_render.py` (overlay draw), `tests/test_api_lightning.py` (routes + `/health`), plus lightning cases in `tests/test_mcp_lightning.py` / `tests/test_mcp_context.py` (marker `mcp`). Fetcher tests write synthetic-GLM netCDF fixtures with h5py in-fixture and inject the HTTP surface — **never real S3**.
 - **Anchor corrections for future sessions.** `_draw_lightning` lives in `tiles/renderer.py` after `_draw_storm_cells`; the `mcp/context.py` routes assignment is at the routes-write block (~line 223); the routes module singletons are declared at the top of `routes.py` (`storm_cell_store` ~line 86).
+
+## Phase 2 as-landed (2026-10-09)
+
+- **`/v2/lightning` REST endpoint (ruling 9).** A GeoJSON `FeatureCollection` mirroring `/v2/alerts` and `/v2/storm-cells`. No args returns every strike in the held window; `lat` + `lon` (+ `radius_km`, default 25) returns strikes within distance; `bbox=west,south,east,north` returns strikes inside the rectangle (alerts-style 400 validation); `minutes` (clamped to `LIBREWXR_LIGHTNING_MAX_AGE`) and `limit` (default: uncapped full window, newest-first) apply on every mode. Point wins over bbox when both are supplied (mirrors `/v2/alerts` precedence). The bbox mode lives in the SHARED pure query function `mcp.tools.get_recent_lightning`, so the MCP tool gained `bbox` at identical cost; MCP keeps its explicit bounded `limit=2000` default while REST defaults to uncapped. The endpoint defers to the shared function via the storm-cells deferred-import pattern. Models `LightningProperties` / `LightningFeature` / `LightningResponse` in `api/models.py` (GeoJSON Point geometry `[lon, lat]`; properties `utc` / `energy` / `satellite`). Returns `503` when lightning is disabled.
+- **JSON gzip middleware (serving-layer companion; resolves open implementation note 3).** A pure-ASGI `JsonGZipMiddleware` in `main.py` gzips ONLY `application/json` responses >= 1 KiB (internal constant `_JSON_GZIP_MIN_BYTES`, deliberately not a config knob), and only when the request advertises `Accept-Encoding: gzip`; it adds `Vary: Accept-Encoding` and never touches PNG/WebP tiles or streaming responses (the first multi-chunk body disables compression for that exchange). Registered before CORS so CORS stays outermost. This resolves the plan's open implementation note 3: gzip did NOT already apply; JSON responses are now gzipped. Motivated by the no-args lightning/alerts modes - a severe-outbreak no-args lightning response can be tens of MB - while the tile hot path stays CPU-free.
+- **Per-frame lightning animation (ruling 4).** Every requested frame now draws the strikes that happened during THAT frame's own 10-minute window `(T-600, T]` (internal `_LIGHTNING_SLOT_S = 600`, not config; the lower edge is exclusive so a boundary strike belongs to the earlier frame only, the upper edge inclusive). The Phase 1 newest-frame-only gate is REMOVED - the newest frame now draws its own slot too (previously all held points). Slots older than `LIBREWXR_LIGHTNING_MAX_AGE` age out of the store and render plain. Two design deltas from the plan's Phase 2 sketch, both recorded as improvements:
+  - **No slot-ring storage was needed.** The store already holds all points in one time-sorted array, so a slot is a mask query: `points_in` gained an inclusive `until_s`, called with `since_s = T-600+1, until_s = T`. The plan's ~12 sparse arrays (~12 MB) were never materialized.
+  - **Overlay cache keys fold a DETERMINISTIC CONTENT FINGERPRINT** of that tile's slot strikes (`"{count}-{newest time_s}"`) instead of the plan's "per-frame overlay versions frozen at creation". Identical bytes whenever recomputed (cache eviction or cold start); a slot that later gains late-fetched strikes re-renders exactly once (frozen-at-creation would permanently miss them); a reload with identical content stays a cache hit (the live store version is deliberately NOT folded in).
+  - **Shared-store verify note (plan Phase 2 item 2):** TRUE as-landed - the shared tile store is disk-backed with content-versioned keys, budget-pruned only, so overlay bytes survive restarts and cold starts warm from disk rather than recompute.
+- **Heat / generalized-activity styles REJECTED (maintainer ruling 2026-10-09).** Lightning serves specific strikes, never generalized areas of activity. The plan's Phase 2 "Optional additional styles (e.g. heat blobs)" item is struck (see the Phase 2 section above) - not implemented, not left as an open option.
+- **No new env vars.** Phase 2 added no configuration surface; the five Phase 1 `LIBREWXR_LIGHTNING_*` vars are unchanged, and the gzip threshold is an internal constant, not a knob.
