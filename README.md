@@ -560,6 +560,10 @@ Layered ahead of IFS via specificity-first dispatch (see the [Regional NWP chain
 
 - **[NOAA GMGSI](https://registry.opendata.aws/noaa-gmgsi/)** — Global Mosaic of Geostationary Satellite Imagery, composited by NESDIS from GOES-East, GOES-West, Meteosat-9, Meteosat-10, and Himawari-9. Ingested as longwave IR + visible channels and rendered as a VIS-over-LW composite with natural day/night terminator. Anonymous AWS Open Data; hourly cadence; ±72.7° latitude coverage. Persistent disk cache survives restarts.
 
+### Lightning
+
+- Lightning: NOAA GOES-R Geostationary Lightning Mapper (GLM) — flash points from GOES-East + GOES-West, ingested from anonymous NOAA NODD S3 as an optional `?lightning=` radar-tile overlay and served through the MCP `get_recent_lightning` tool. US public domain; attribution requested-not-required.
+
 ### Weather alerts
 
 - **WMO CAP** at [severeweather.wmo.int](https://severeweather.wmo.int/) — global weather alerts with MeteoAlarm geocodes for European polygon resolution. Updates every 5 minutes; surfaced through a Rain Viewer-extension alerts API.

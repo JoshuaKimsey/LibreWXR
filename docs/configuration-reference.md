@@ -25,6 +25,7 @@ This document is the **full** reference for every setting LibreWXR understands. 
   - [East Asia: JMA MSM](#east-asia-jma-msm)
 - [Nowcasting](#nowcasting)
 - [Storm-Cell Detection](#storm-cell-detection)
+- [Lightning (GOES GLM)](#lightning-goes-glm)
 - [Satellite (GMGSI)](#satellite-gmgsi)
 - [Weather Alerts (WMO CAP)](#weather-alerts-wmo-cap)
 - [Persistent Cache](#persistent-cache)
@@ -1382,6 +1383,63 @@ Minimum area for a connected component to be reported as a storm cell, in square
 | **Unit** | km² |
 
 At 25 km², a cell needs to be roughly 5×5 km to register — well below the size of a single thunderstorm cell (~10-50 km² at the lower end), while still filtering out speckle and isolated clutter pixels. Increase to e.g. 100 km² to report only the largest organized mesoscale features. Decrease to e.g. 5 km² for very fine-grained detection, at the cost of more noise.
+
+---
+
+## Lightning (GOES GLM)
+
+LibreWXR ingests NOAA GOES GLM (Geostationary Lightning Mapper) flash points from GOES-East + GOES-West on their own clock-aligned fetch loop and overlays them on radar tiles via the `?lightning=` query parameter. Flashes are held as structured points in `LightningStore` (500k-point RAM ceiling, warn-once) and written to a shared on-disk artifact `<cache_dir>/lightning/current.npz`, with per-satellite resume watermarks in `<cache_dir>/lightning/watermark.json`. There is deliberately no `state.json` section — the artifact is the cross-process handoff (the shared-tile-store / precip-mask pattern), and render workers plus the stdio MCP transport refresh it via a cheap mtime stat on demand. The store always holds every flash inside the window; only a presentational per-tile draw cap trims the overlay.
+
+`?lightning=` values: `""` = off; `1` / `true` / `dots` = small energy-scaled dots (default); `bolts` = a hand-authored vector bolt polygon (deliberately not a text glyph, so there is no font dependency). The overlay draws at constant brightness with no age fade and attaches to the newest analysis frame only (per-frame animation is Phase 2). Unknown values fall back to off silently, matching `cells`/`arrows`.
+
+### `LIBREWXR_LIGHTNING_ENABLED`
+
+Master switch for the lightning layer and the MCP `get_recent_lightning` tool. When `false`, the fetcher loop does not run, `?lightning=` is a no-op on the tile endpoint, and the tool degrades to an empty list.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+### `LIBREWXR_LIGHTNING_NOAA_ENABLED`
+
+Per-family switch for the NOAA GOES GLM flash family (GOES-East + GOES-West). Satellite identity is internal and never configured; families are the knob. EUMETSAT / FengYun family booleans only appear alongside their decoders.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+### `LIBREWXR_LIGHTNING_FETCH_INTERVAL`
+
+How often (in seconds) the clock-aligned GLM fetch loop runs. The loop is its own knob so disabling alerts never disables lightning and vice versa.
+
+| | |
+|---|---|
+| **Default** | `300` |
+| **Type** | integer |
+| **Unit** | seconds |
+
+### `LIBREWXR_LIGHTNING_MAX_AGE`
+
+Age in seconds of flash history retained in the store; older points are trimmed oldest-first. Also clamps the MCP `minutes=` parameter.
+
+| | |
+|---|---|
+| **Default** | `1800` |
+| **Type** | integer |
+| **Unit** | seconds |
+
+1800 s = 30 minutes, matching the standard "wait 30 minutes after the last thunder" guidance and covering three 10-minute nowcast slots.
+
+### `LIBREWXR_LIGHTNING_MAX_DRAW_PER_TILE`
+
+Presentational cap on the number of flashes drawn per tile. When a tile holds more flashes than this, glyphs are chosen strongest-by-energy (logged at DEBUG). It removes nothing from the store or the API — the store and MCP always see every flash in the window; this only bounds the per-tile draw cost during dense outbreaks.
+
+| | |
+|---|---|
+| **Default** | `1000` |
+| **Type** | integer |
 
 ---
 
