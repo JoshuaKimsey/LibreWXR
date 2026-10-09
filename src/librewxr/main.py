@@ -2,6 +2,7 @@
 # Copyright (C) 2026 Joshua Kimsey
 import asyncio
 import atexit
+import gzip
 import logging
 import os
 import random
@@ -852,7 +853,151 @@ if settings.mcp_enabled:
             "Install with `pip install -e '.[mcp]'` to enable."
         )
 
+# --- JSON gzip middleware ----------------------------------------------
+# Internal size floor for the on-the-fly gzip middleware below.  This is
+# deliberately NOT a config knob: the tile hot path is the thing being
+# protected, and the only large JSON we ship is the severe-outbreak
+# lightning/alerts payload (tens of MB with no args), so a fixed 1 KiB
+# floor skips per-tile work while still catching every response worth
+# compressing.
+_JSON_GZIP_MIN_BYTES = 1024
+
+
+class JsonGZipMiddleware:
+    """Gzip ``application/json`` responses above a size floor.
+
+    A pure-ASGI middleware -- deliberately NOT Starlette's
+    ``BaseHTTPMiddleware``, which spins up a task group and a response
+    forwarder per request -- so the PNG/WebP tile hot path pays nothing
+    beyond two header checks and one message hold.
+
+    Only ``application/json`` bodies at or above
+    ``_JSON_GZIP_MIN_BYTES`` are compressed, and only when the request
+    advertises ``Accept-Encoding: gzip``.  Tiles/images and streaming
+    (multi-chunk, e.g. SSE or the streamable MCP transport) responses
+    always pass through untouched: the first ``http.response.body`` with
+    ``more_body`` set marks a stream and disables compression for the
+    whole exchange.  Compressed responses gain a ``Vary:
+    Accept-Encoding`` header so shared caches stay correct.
+
+    Motivated by the ``/v2/lightning`` and ``/v2/alerts`` large-JSON
+    modes, where a no-args severe-outbreak query can be tens of MB,
+    while keeping the tile hot path CPU-free.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        if not _accepts_gzip(scope.get("headers") or []):
+            await self.app(scope, receive, send)
+            return
+
+        start_message = None
+
+        async def send_wrapper(message):
+            nonlocal start_message
+            type_ = message["type"]
+            if type_ == "http.response.start":
+                # Hold the start until the first body chunk tells us
+                # whether this is a stream or a single-shot candidate.
+                start_message = message
+                return
+            if type_ == "http.response.body":
+                if start_message is None:
+                    # No start seen (defensive): forward untouched.
+                    await send(message)
+                    return
+                if message.get("more_body"):
+                    # Streaming response: emit the held start + this
+                    # chunk, then let every later message flow untouched.
+                    await send(start_message)
+                    await send(message)
+                    start_message = None
+                    return
+                body = message.get("body", b"")
+                if _should_gzip(start_message, body):
+                    compressed = gzip.compress(body, compresslevel=6)
+                    await send(_rewritten_start(start_message, len(compressed)))
+                    await send({"type": "http.response.body", "body": compressed})
+                else:
+                    await send(start_message)
+                    await send(message)
+                start_message = None
+                return
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
+def _accepts_gzip(headers) -> bool:
+    """True when an ``accept-encoding`` header lists ``gzip`` as a token."""
+    for name, value in headers:
+        if name.lower() != b"accept-encoding":
+            continue
+        for token in value.decode("latin-1").split(","):
+            # Strip any ``;q=`` parameter before comparing the token.
+            if token.split(";", 1)[0].strip().lower() == "gzip":
+                return True
+    return False
+
+
+def _should_gzip(start_message, body: bytes) -> bool:
+    """Whether a single-shot response body is a JSON compression candidate."""
+    if len(body) < _JSON_GZIP_MIN_BYTES:
+        return False
+    content_type = None
+    for name, value in start_message.get("headers") or []:
+        lower = name.lower()
+        if lower == b"content-type":
+            content_type = value
+        elif lower == b"content-encoding":
+            # Already encoded: never double-compress.
+            return False
+    if content_type is None:
+        return False
+    return content_type.lower().startswith(b"application/json")
+
+
+def _rewritten_start(start_message, compressed_len: int):
+    """Rebuild a start message with gzip length/encoding and ``Vary`` headers."""
+    new_headers = []
+    vary_index = None
+    vary_value = None
+    for name, value in start_message.get("headers") or []:
+        lower = name.lower()
+        if lower == b"content-length":
+            # Drop the stale uncompressed length; we append the new one.
+            continue
+        if lower == b"vary":
+            vary_index = len(new_headers)
+            vary_value = value
+        new_headers.append((name, value))
+    new_headers.append((b"content-encoding", b"gzip"))
+    new_headers.append((b"content-length", str(compressed_len).encode("ascii")))
+    if vary_index is None:
+        new_headers.append((b"vary", b"accept-encoding"))
+    else:
+        existing = vary_value.decode("latin-1")
+        tokens = [t.strip().lower() for t in existing.split(",")]
+        if "accept-encoding" not in tokens:
+            new_headers[vary_index] = (
+                b"vary",
+                f"{existing}, accept-encoding".encode("latin-1"),
+            )
+    new_message = dict(start_message)
+    new_message["headers"] = new_headers
+    return new_message
+
+
 app = FastAPI(title="LibreWXR", version="0.1.1", lifespan=combined_lifespan)
+
+# Register gzip before CORS so CORS is added last and stays outermost.
+app.add_middleware(JsonGZipMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
