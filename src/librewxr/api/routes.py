@@ -22,6 +22,9 @@ from librewxr.api.models import (
     AlertsResponse,
     ColorScheme,
     GeoJSONFeature,
+    LightningFeature,
+    LightningProperties,
+    LightningResponse,
     RadarData,
     RadarTimestamp,
     SatelliteData,
@@ -1895,3 +1898,85 @@ async def get_storm_cells_rest(
         )
 
     return StormCellsResponse(type="FeatureCollection", features=features)
+
+
+# ---------------------------------------------------------------------------
+# Lightning
+# ---------------------------------------------------------------------------
+
+@router.get("/v2/lightning", response_model=LightningResponse)
+async def get_lightning(
+    lat: float | None = Query(None, ge=-90, le=90, description="Latitude for point lookup"),
+    lon: float | None = Query(None, ge=-180, le=180, description="Longitude for point lookup"),
+    radius_km: float = Query(25.0, ge=0, le=2000, description="Search radius in kilometres (used only with lat/lon)"),
+    bbox: str | None = Query(None, description="Bounding box: west,south,east,north"),
+    minutes: float = Query(30.0, ge=0, description="Look-back window in minutes (clamped to LIBREWXR_LIGHTNING_MAX_AGE)"),
+    limit: int | None = Query(None, ge=0, description="Maximum strikes to return, newest first (default: full window)"),
+) -> LightningResponse:
+    """Recent GOES GLM lightning strikes as a GeoJSON FeatureCollection.
+
+    - No params: every strike in the held window (see the size note below).
+    - lat + lon: strikes within ``radius_km`` of the point (both must be
+      provided together, otherwise ``400``).  ``bbox`` is ignored when a
+      point is supplied.
+    - bbox: strikes inside ``west,south,east,north``.
+
+    ``minutes`` is clamped to ``LIBREWXR_LIGHTNING_MAX_AGE`` (the store's
+    retention).  ``limit`` returns the newest strikes first.
+
+    Response-size note: during severe outbreaks the no-args mode can be
+    very large -- prefer ``bbox`` or ``lat``+``lon``+``radius_km`` (with
+    ``minutes``) to narrow the query, and use ``limit`` to cap a large
+    window.
+
+    Reuses the MCP ``get_recent_lightning`` pure query function.  The
+    import is deferred inside the body on purpose: a top-level import would
+    create a cycle (routes -> mcp.tools -> mcp.alerts_query -> routes).
+    """
+    if not settings.lightning_enabled or lightning_store is None:
+        raise HTTPException(status_code=503, detail="Lightning not available")
+
+    if (lat is None) != (lon is None):
+        raise HTTPException(status_code=400, detail="lat and lon must be provided together")
+
+    # Parse/validate bbox exactly like /v2/alerts -- and only when the point
+    # filter is not in effect, so a supplied lat+lon silently wins.
+    bbox_tuple: tuple[float, float, float, float] | None = None
+    if bbox is not None and not (lat is not None and lon is not None):
+        parts = bbox.split(",")
+        if len(parts) != 4:
+            raise HTTPException(status_code=400, detail="bbox must be: west,south,east,north")
+        try:
+            w, s, e, n = map(float, parts)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="bbox values must be numeric")
+        if w < -180 or e > 180 or s < -90 or n > 90 or w > e or s > n:
+            raise HTTPException(status_code=400, detail="bbox values out of range")
+        bbox_tuple = (w, s, e, n)
+
+    # Deferred import: routes -> mcp.tools -> mcp.alerts_query -> routes
+    # would be a cycle at module level.
+    from librewxr.mcp.tools import get_recent_lightning as query_lightning
+
+    strikes = await query_lightning(
+        lightning_store, lat, lon, radius_km, bbox_tuple, minutes, limit,
+    )
+
+    features: list[LightningFeature] = []
+    for s in strikes:
+        features.append(
+            LightningFeature(
+                type="Feature",
+                properties=LightningProperties(
+                    utc=s["utc"],
+                    energy=s["energy"],
+                    satellite=s["satellite"],
+                ),
+                geometry={
+                    "type": "Point",
+                    "coordinates": [s["lon"], s["lat"]],
+                },
+            )
+        )
+
+    return LightningResponse(type="FeatureCollection", features=features)

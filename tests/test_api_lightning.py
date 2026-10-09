@@ -10,6 +10,7 @@ route state so this module never clobbers another test module's globals.
 
 import math
 import time
+from datetime import datetime
 
 import numpy as np
 import pytest
@@ -77,6 +78,10 @@ class _StubLightningStore:
     @property
     def total_count(self) -> int:
         return int(self._points.shape[0])
+
+    @property
+    def points(self) -> np.ndarray:
+        return self._points
 
     @property
     def window_start_s(self) -> int | None:
@@ -388,3 +393,182 @@ def test_health_counts_overlay_entries(client, monkeypatch):
     tile_cache = resp.json()["tile_cache"]
     assert tile_cache["overlay_entries"] >= 1
     assert tile_cache["overlay_bytes"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Case 9: /v2/lightning REST endpoint
+# ---------------------------------------------------------------------------
+
+def _recent_points(rows) -> np.ndarray:
+    """Build recent flash points from (lat, lon, energy) tuples.
+
+    ``time_s`` descends from now (i=0 newest) so strikes fall inside the
+    default 30-minute window; satellite 19 -> ``"goes19"``.
+    """
+    now = int(time.time())
+    arr = np.zeros(len(rows), dtype=_POINT_DTYPE)
+    for i, (lat, lon, energy) in enumerate(rows):
+        arr["lat"][i] = lat
+        arr["lon"][i] = lon
+        arr["energy"][i] = energy
+        arr["time_s"][i] = now - i * 10
+        arr["satellite"][i] = 19
+    return arr
+
+
+def test_lightning_rest_store_none_503(client, monkeypatch):
+    c, _, _ = client
+    monkeypatch.setattr(routes, "lightning_store", None)
+    resp = c.get("/v2/lightning")
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "Lightning not available"
+
+
+def test_lightning_rest_no_args_feature_shape(client, monkeypatch):
+    c, _, _ = client
+    now = int(time.time())
+    stub = _StubLightningStore(_recent_points([(35.0, -95.0, 1.5e-5)]))
+    monkeypatch.setattr(routes, "lightning_store", stub)
+
+    resp = c.get("/v2/lightning")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["type"] == "FeatureCollection"
+    assert len(data["features"]) == 1
+
+    feature = data["features"][0]
+    assert feature["type"] == "Feature"
+    assert feature["geometry"] == {"type": "Point", "coordinates": [-95.0, 35.0]}
+    props = feature["properties"]
+    assert props["satellite"] == "goes19"
+    assert props["energy"] == pytest.approx(1.5e-5, rel=1e-6)
+    # utc is ISO-8601 and round-trips to the point's epoch.
+    assert int(datetime.fromisoformat(props["utc"]).timestamp()) == now
+
+
+def test_lightning_rest_no_args_all_strikes(client, monkeypatch):
+    c, _, _ = client
+    stub = _StubLightningStore(
+        _recent_points([(35.0, -95.0, 1.0e-5), (34.0, -94.0, 2.0e-5)]),
+    )
+    monkeypatch.setattr(routes, "lightning_store", stub)
+    resp = c.get("/v2/lightning")
+    assert resp.status_code == 200
+    assert len(resp.json()["features"]) == 2
+
+
+def test_lightning_rest_empty_store(client, monkeypatch):
+    c, _, _ = client
+    stub = _StubLightningStore(np.empty(0, dtype=_POINT_DTYPE))
+    monkeypatch.setattr(routes, "lightning_store", stub)
+    resp = c.get("/v2/lightning")
+    assert resp.status_code == 200
+    assert resp.json()["features"] == []
+
+
+def test_lightning_rest_point_radius_default(client, monkeypatch):
+    """Default radius_km=25 keeps the ~10 km strike, drops the ~60 km one."""
+    c, _, _ = client
+    near = (35.0, -95.0, 1.0e-5)
+    far = (35.0 + 60.0 / 111.0, -95.0, 2.0e-5)
+    stub = _StubLightningStore(_recent_points([near, far]))
+    monkeypatch.setattr(routes, "lightning_store", stub)
+
+    resp = c.get("/v2/lightning?lat=35.0&lon=-95.0")
+    assert resp.status_code == 200
+    features = resp.json()["features"]
+    assert len(features) == 1
+    assert features[0]["geometry"]["coordinates"] == [-95.0, 35.0]
+
+
+def test_lightning_rest_lone_lat_400(client, monkeypatch):
+    c, _, _ = client
+    stub = _StubLightningStore(_recent_points([(35.0, -95.0, 1.0e-5)]))
+    monkeypatch.setattr(routes, "lightning_store", stub)
+    resp = c.get("/v2/lightning?lat=35.0")
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "lat and lon must be provided together"
+
+
+def test_lightning_rest_lone_lon_400(client, monkeypatch):
+    c, _, _ = client
+    stub = _StubLightningStore(_recent_points([(35.0, -95.0, 1.0e-5)]))
+    monkeypatch.setattr(routes, "lightning_store", stub)
+    resp = c.get("/v2/lightning?lon=-95.0")
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "lat and lon must be provided together"
+
+
+def test_lightning_rest_bbox_keeps_inside(client, monkeypatch):
+    c, _, _ = client
+    inside = (35.0, -95.0, 1.0e-5)
+    outside = (10.0, 10.0, 2.0e-5)
+    stub = _StubLightningStore(_recent_points([inside, outside]))
+    monkeypatch.setattr(routes, "lightning_store", stub)
+
+    resp = c.get("/v2/lightning?bbox=-100,30,-90,40")
+    assert resp.status_code == 200
+    features = resp.json()["features"]
+    assert len(features) == 1
+    assert features[0]["geometry"]["coordinates"] == [-95.0, 35.0]
+
+
+@pytest.mark.parametrize(
+    ("bbox", "detail"),
+    [
+        ("-100,30,-90", "bbox must be: west,south,east,north"),
+        ("-100,xx,-90,40", "bbox values must be numeric"),
+        ("-200,30,-90,40", "bbox values out of range"),
+        ("-100,95,-90,40", "bbox values out of range"),
+        ("-90,30,-100,40", "bbox values out of range"),
+        ("-100,40,-90,30", "bbox values out of range"),
+    ],
+)
+def test_lightning_rest_bbox_400(client, monkeypatch, bbox, detail):
+    c, _, _ = client
+    stub = _StubLightningStore(_recent_points([(35.0, -95.0, 1.0e-5)]))
+    monkeypatch.setattr(routes, "lightning_store", stub)
+    resp = c.get(f"/v2/lightning?bbox={bbox}")
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == detail
+
+
+def test_lightning_rest_minutes_clamped(client, monkeypatch):
+    """minutes=120 clamps to the 30-min retention: the 45-min-old point drops."""
+    c, _, _ = client
+    now = int(time.time())
+    arr = np.zeros(2, dtype=_POINT_DTYPE)
+    arr["lat"] = [35.0, 36.0]
+    arr["lon"] = [-95.0, -94.0]
+    arr["energy"] = [1.0e-5, 2.0e-5]
+    arr["time_s"] = [now - 10 * 60, now - 45 * 60]
+    arr["satellite"] = 19
+    stub = _StubLightningStore(arr)
+    monkeypatch.setattr(routes, "lightning_store", stub)
+
+    resp = c.get("/v2/lightning?minutes=120")
+    assert resp.status_code == 200
+    features = resp.json()["features"]
+    assert len(features) == 1
+    assert features[0]["geometry"]["coordinates"] == [-95.0, 35.0]
+
+
+def test_lightning_rest_limit_newest_first(client, monkeypatch):
+    c, _, _ = client
+    now = int(time.time())
+    arr = np.zeros(3, dtype=_POINT_DTYPE)
+    # i=0 newest, i=2 oldest.
+    arr["lat"] = [35.0, 34.0, 33.0]
+    arr["lon"] = [-95.0, -94.0, -93.0]
+    arr["energy"] = [1.0e-5, 2.0e-5, 3.0e-5]
+    arr["time_s"] = [now, now - 60, now - 120]
+    arr["satellite"] = 19
+    stub = _StubLightningStore(arr)
+    monkeypatch.setattr(routes, "lightning_store", stub)
+
+    resp = c.get("/v2/lightning?limit=2")
+    assert resp.status_code == 200
+    features = resp.json()["features"]
+    assert len(features) == 2
+    coords = [f["geometry"]["coordinates"] for f in features]
+    assert coords == [[-95.0, 35.0], [-94.0, 34.0]]

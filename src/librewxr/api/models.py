@@ -50,6 +50,23 @@ class StormCellsData(BaseModel):
     cells: list[dict]
 
 
+class LightningProperties(BaseModel):
+    utc: str
+    energy: float
+    satellite: str
+
+
+class LightningFeature(BaseModel):
+    type: Literal["Feature"] = "Feature"
+    properties: LightningProperties
+    geometry: dict
+
+
+class LightningResponse(BaseModel):
+    type: Literal["FeatureCollection"] = "FeatureCollection"
+    features: list[LightningFeature]
+
+
 class RadarTimestamp(BaseModel):
     time: int
     path: str

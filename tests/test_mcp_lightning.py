@@ -212,3 +212,93 @@ async def test_get_recent_lightning_reload_once():
     assert store.reload_calls == 1
     await get_recent_lightning(store)
     assert store.reload_calls == 2
+
+
+# ---------------------------------------------------------------------------
+# bbox filter
+# ---------------------------------------------------------------------------
+
+
+async def test_get_recent_lightning_bbox_filter():
+    """bbox keeps in-box strikes and drops those outside."""
+    now = int(time.time())
+    inside = (now - 30, 35.0, -95.0, 1.0e-5, 19)
+    outside = (now - 60, 10.0, 10.0, 2.0e-5, 18)
+    store = _MockLightningStore(_build_points([inside, outside]))
+
+    result = await get_recent_lightning(
+        store, bbox=(-100.0, 30.0, -90.0, 40.0), minutes=30,
+    )
+    assert len(result) == 1
+    assert result[0]["satellite"] == "goes19"
+
+
+async def test_get_recent_lightning_bbox_without_latlon():
+    """bbox applies on its own (no lat/lon): both in-box strikes return."""
+    now = int(time.time())
+    rows = [
+        (now - 30, 35.0, -95.0, 1.0e-5, 19),
+        (now - 60, 36.0, -94.0, 2.0e-5, 18),
+        (now - 90, 60.0, 10.0, 3.0e-5, 19),
+    ]
+    store = _MockLightningStore(_build_points(rows))
+    result = await get_recent_lightning(
+        store, bbox=(-100.0, 30.0, -90.0, 40.0), minutes=30,
+    )
+    assert len(result) == 2
+
+
+async def test_get_recent_lightning_point_wins_over_bbox():
+    """lat+lon radius filter wins; bbox is silently ignored."""
+    now = int(time.time())
+    near = (now - 30, 35.0, -95.0, 1.0e-5, 19)
+    # ~60 km north -- inside the huge bbox but outside the 50 km radius.
+    far = (now - 60, 35.0 + 60.0 / 111.0, -95.0, 2.0e-5, 18)
+    store = _MockLightningStore(_build_points([near, far]))
+
+    result = await get_recent_lightning(
+        store,
+        lat=35.0,
+        lon=-95.0,
+        radius_km=50.0,
+        bbox=(-120.0, 10.0, -70.0, 60.0),
+        minutes=30,
+    )
+    assert len(result) == 1
+    assert result[0]["satellite"] == "goes19"
+
+
+async def test_get_recent_lightning_degenerate_bbox_empty():
+    """An inverted (degenerate) box naturally selects nothing."""
+    now = int(time.time())
+    point = (now - 30, 35.0, -95.0, 1.0e-5, 19)
+    store = _MockLightningStore(_build_points([point]))
+    result = await get_recent_lightning(
+        store, bbox=(-90.0, 30.0, -100.0, 40.0), minutes=30,
+    )
+    assert result == []
+
+
+# ---------------------------------------------------------------------------
+# limit=None (uncapped) / limit=0
+# ---------------------------------------------------------------------------
+
+
+async def test_get_recent_lightning_limit_none_uncapped(monkeypatch):
+    """limit=None returns every selected strike (no cap)."""
+    monkeypatch.setattr(settings, "lightning_max_age", 1800)
+    now = int(time.time())
+    rows = [(now - i * 60, 35.0, -95.0, float(i), 19) for i in range(5)]
+    store = _MockLightningStore(_build_points(rows))
+    result = await get_recent_lightning(store, minutes=60, limit=None)
+
+    assert len(result) == 5
+    assert [_epoch(r["utc"]) for r in result] == [now - i * 60 for i in range(5)]
+
+
+async def test_get_recent_lightning_zero_limit_multiple():
+    """limit=0 returns an empty list even when strikes are selected."""
+    now = int(time.time())
+    rows = [(now - i * 60, 35.0, -95.0, float(i), 19) for i in range(3)]
+    store = _MockLightningStore(_build_points(rows))
+    assert await get_recent_lightning(store, minutes=30, limit=0) == []

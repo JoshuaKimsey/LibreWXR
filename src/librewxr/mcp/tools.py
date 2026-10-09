@@ -310,8 +310,9 @@ async def get_recent_lightning(
     lat: float | None = None,
     lon: float | None = None,
     radius_km: float = 100.0,
+    bbox: tuple[float, float, float, float] | None = None,
     minutes: float = 30.0,
-    limit: int = 2000,
+    limit: int | None = 2000,
 ) -> list[dict]:
     """Query recent GOES GLM lightning strikes, optionally near a point.
 
@@ -319,34 +320,44 @@ async def get_recent_lightning(
     strike lat/lon, UTC ISO-8601 time, energy in joules, and the GOES
     satellite that observed it.  Strikes are limited to the last
     ``minutes`` minutes (clamped to the store's configured retention),
-    filtered to those within ``radius_km`` of (lat, lon) using the
-    equirectangular cos(lat) approximation when BOTH ``lat`` and ``lon``
-    are given, and capped at ``limit`` (newest first).  Returns an empty
-    list when lightning is disabled, the store is empty, or nothing
-    matches; never raises.
+    filtered spatially, and capped at ``limit`` (newest first).  Returns
+    an empty list when lightning is disabled, the store is empty, or
+    nothing matches; never raises.
+
+    Spatial precedence mirrors ``/v2/alerts``: when BOTH ``lat`` and
+    ``lon`` are given the radius filter applies (``bbox`` is silently
+    ignored); otherwise when ``bbox`` is given the box filter applies;
+    otherwise no spatial filter is applied.
 
     Parameters
     ----------
     lightning_store : LightningStore | None
         The global lightning store (None when lightning is disabled).
     lat : float | None
-        Query latitude in degrees.  ``None`` (or a ``None`` lon) skips
-        the radius filter and returns all strikes in the window.
+        Query latitude in degrees.  Used with ``lon`` for the radius
+        filter; a lone value falls through to the ``bbox`` / no-filter
+        path.
     lon : float | None
-        Query longitude in degrees.  ``None`` (or a ``None`` lat) skips
-        the radius filter and returns all strikes in the window.
+        Query longitude in degrees.  Used with ``lat`` for the radius
+        filter; a lone value falls through to the ``bbox`` / no-filter
+        path.
     radius_km : float
         Search radius in kilometres (default 100.0 -- wider than the
         alerts default because strikes are point events, not polygons).
-        Silently ignored when ``lat`` or ``lon`` is ``None``.
+        Silently ignored unless BOTH ``lat`` and ``lon`` are given.
+    bbox : tuple[float, float, float, float] | None
+        ``(west, south, east, north)`` rectangle filter.  Applied only
+        when the point filter is not (i.e. ``lat``/``lon`` not both
+        given).  A degenerate/invalid box naturally selects nothing.
     minutes : float
         Look-back window in minutes (default 30.0).  Clamped to the
         store's configured retention (``settings.lightning_max_age``) and
         floored at 0 (a zero window returns only future-dated strikes,
         i.e. none in practice).
-    limit : int
+    limit : int | None
         Maximum number of strikes to return, newest first (default
-        2000).  ``limit <= 0`` returns an empty list.
+        2000).  ``None`` means uncapped (return every selected strike);
+        ``limit <= 0`` returns an empty list.
 
     Returns
     -------
@@ -374,9 +385,11 @@ async def get_recent_lightning(
 
     mask = points["time_s"] >= since_s
 
-    # Radius filter (only when both lat AND lon are given): equirectangular
-    # cos(lat) distance -- same formula as get_storm_cells / alerts_query.py.
-    # With either omitted the filter is skipped and all strikes return.
+    # Spatial filter, mirroring /v2/alerts precedence: an explicit point
+    # (both lat AND lon) wins over bbox; with neither, no spatial filter is
+    # applied and every strike in the time window returns.  The point filter
+    # uses the equirectangular cos(lat) distance -- same formula as
+    # get_storm_cells / alerts_query.py.
     if lat is not None and lon is not None:
         cos_lat = math.cos(math.radians(lat))
         deg_to_km_lat = 111.0
@@ -385,14 +398,23 @@ async def get_recent_lightning(
         dlat_km = (points["lat"].astype(np.float64) - lat) * deg_to_km_lat
         dlon_km = (points["lon"].astype(np.float64) - lon) * deg_to_km_lon
         mask &= (dlat_km * dlat_km + dlon_km * dlon_km) <= radius_km_sq
+    elif bbox is not None:
+        west, south, east, north = bbox
+        mask &= (
+            (points["lat"] >= south)
+            & (points["lat"] <= north)
+            & (points["lon"] >= west)
+            & (points["lon"] <= east)
+        )
 
     selected = points[mask]
-    if selected.shape[0] == 0 or limit <= 0:
+    if selected.shape[0] == 0 or (limit is not None and limit <= 0):
         return []
 
-    # Newest first, then cap to ``limit``.
+    # Newest first, then cap to ``limit`` (None = uncapped).
     selected = selected[np.argsort(selected["time_s"])[::-1]]
-    selected = selected[:limit]
+    if limit is not None:
+        selected = selected[:limit]
 
     results: list[dict] = []
     for point in selected:
