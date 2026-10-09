@@ -73,7 +73,7 @@ _POINT_DTYPE = np.dtype([
 
 - `present_tile(...)` gains keyword-only `lightning_style: str = ""` and `flash_points: np.ndarray | None = None`, mirroring `cell_style` / `cells_by_region` (renderer.py:335-353).
 - New `_draw_lightning(img, geom, flash_points, style)` — PIL RGBA overlay + `Image.alpha_composite`, the `_draw_storm_cells` pattern (renderer.py:1339). Per flash: project lat/lon to tile pixels (same coordinates helpers storm cells use).
-  - `dots` (default): small filled circles, size modestly scaled by `log1p(energy)`.
+  - `dots` (default): small filled circles, size modestly scaled by `log1p(energy)`. (inoperative at joule scale — the landed formula is recorded in Phase 1 as-landed)
   - `bolts`: the vector bolt polygon, same projection, slightly larger footprint; two-toned to read on any basemap.
   - **No age taper:** constant brightness — strikes belong to the frame/slot they happened in (ruling 4).
   - Draw cap: when a tile's flash count exceeds `LIBREWXR_LIGHTNING_MAX_DRAW_PER_TILE`, sort by energy and draw the strongest K (presentational ruling 3; log at DEBUG). Most tiles have zero flashes and skip the layer entirely.
@@ -140,6 +140,7 @@ lightning_max_draw_per_tile: int = 1000           # LIBREWXR_LIGHTNING_MAX_DRAW_
 
 - AGENTS.md: lightning bullets under data/ + Configuration section listing the new env vars.
 - docs/configuration-reference.md: the config block above with defaults.
+- docs/lightning.md: dedicated user guide (added 2026-10-09).
 - Attribution: README + the gitignored librewxr-site (manual companion edit), per ruling 11 — NOT example frontends.
 - This plan remains the living decision log; update rulings as phases land (the satellite-implementation-plan.md convention).
 
@@ -180,7 +181,7 @@ lightning_max_draw_per_tile: int = 1000           # LIBREWXR_LIGHTNING_MAX_DRAW_
   - `LIBREWXR_LIGHTNING_FETCH_INTERVAL=300` — seconds, clock-aligned.
   - `LIBREWXR_LIGHTNING_MAX_AGE=1800` — seconds (30 min); clamps MCP `minutes=`.
   - `LIBREWXR_LIGHTNING_MAX_DRAW_PER_TILE=1000` — presentational strongest-by-energy cap; the store always holds every flash in the window.
-- **Overlay.** `?lightning=` takes `""` off, `1`/`true`/`dots` small energy-scaled dots (default), `bolts` the hand-authored vector bolt polygon (ruling 7). Constant brightness, no age fade; **newest analysis frame only** (Phase 2 adds per-frame animation via 10-minute slot buckets - landed, see Phase 2 as-landed). The overlay cache key folds the store version; the geometry cache is untouched. Unknown values fall back to off **silently** — this supersedes the "with a warning" wording above, matching the `cells`/`arrows` precedent.
+- **Overlay.** `?lightning=` takes `""` off, `1`/`true`/`dots` small energy-scaled dots (default) (radius `1.5 + 0.6 * log10(max(energy, 1e-15) / 1e-15)` px, clamped to 1.5-4.0), `bolts` the hand-authored vector bolt polygon (ruling 7). Constant brightness, no age fade; **newest analysis frame only** (Phase 2 adds per-frame animation via 10-minute slot buckets - landed, see Phase 2 as-landed). The overlay cache key folds the store version; the geometry cache is untouched. Unknown values fall back to off **silently** — this supersedes the "with a warning" wording above, matching the `cells`/`arrows` precedent.
 - **Pre-flight decode findings (ruling 6, satisfied 2026-10-09 against live `noaa-goes18`/`noaa-goes19` files).**
   - Files are FLAT netCDF (there is no `flash` group).
   - The plan's `flash_time_offset_of_effect_time` does **not** exist; the landed decoder uses `flash_time_offset_of_first_event`.

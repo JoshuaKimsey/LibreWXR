@@ -66,7 +66,7 @@ Beyond compatibility, the goal is a far more customizable API backend for self-h
 - **Health endpoint** — `/health` for monitoring uptime, per-component memory breakdown, frame count, NWP chain status, alerts status, MCP mount state, and cache state, plus a `cluster` aggregation of per-worker stats in multi-worker deployments
 - **MCP server** for AI agents — query precipitation nowcast, active weather alerts, storm cells, and recent lightning strikes via Model Context Protocol. HTTP transport mounted at `/mcp` for n8n-style automation; stdio transport for local agents like Claude Desktop. See [MCP server](#mcp-server-librewxr-extension) below.
 - **Storm-cell detection** — convective cells detected on radar frames each cycle via connected-component labeling at a configurable dBZ threshold. Overlay them on tiles with `?cells=light|dark` (parallel to `?arrows=`). See [Storm-Cell Detection](docs/storm-cells.md).
-- **Lightning overlay** — NOAA GOES GLM flash points (GOES-East + GOES-West) drawn on radar tiles with `?lightning=dots`/`bolts`, each frame showing the strikes from its own 10-minute window; also queryable via `/v2/lightning` and the MCP `get_recent_lightning` tool.
+- **Lightning overlay** — NOAA GOES GLM flash points (GOES-East + GOES-West) drawn on radar tiles with `?lightning=dots`/`bolts`, each frame showing the strikes from its own 10-minute window; also queryable via `/v2/lightning` and the MCP `get_recent_lightning` tool. See [Lightning](docs/lightning.md).
 - **Fully configurable** — all tunable parameters exposed via environment variables
 
 ## Current Limitations
@@ -579,7 +579,7 @@ Layered ahead of IFS via specificity-first dispatch (see the [Regional NWP chain
 
 ### Lightning
 
-- Lightning: NOAA GOES-R Geostationary Lightning Mapper (GLM) — flash points from GOES-East + GOES-West, ingested from anonymous NOAA NODD S3 as an optional `?lightning=` radar-tile overlay and served through the MCP `get_recent_lightning` tool and the `/v2/lightning` GeoJSON endpoint (no-args full window, or `lat` + `lon` + `radius_km`, or `bbox`). Tiles replay each frame's strikes - every frame draws the strikes from its own 10-minute slot window. US public domain; attribution requested-not-required.
+- Lightning: NOAA GOES-R Geostationary Lightning Mapper (GLM) — flash points from GOES-East + GOES-West, ingested from anonymous NOAA NODD S3 as an optional `?lightning=` radar-tile overlay and served through the MCP `get_recent_lightning` tool and the `/v2/lightning` GeoJSON endpoint (no-args full window, or `lat` + `lon` + `radius_km`, or `bbox`). Tiles replay each frame's strikes - every frame draws the strikes from its own 10-minute slot window. US public domain; attribution requested-not-required. See [docs/lightning.md](docs/lightning.md) for the full guide.
 
 ### Weather alerts
 
