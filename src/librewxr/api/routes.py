@@ -526,10 +526,11 @@ async def health():
     # entries (``"sat"``-prefixed keys), geometry entries (int timestamp +
     # 6-element viewport key), present render entries (int timestamp +
     # 9-element viewport/visual key), overlay present entries (int
-    # timestamp + 9-element viewport/visual key + 2-element style suffix,
-    # nowcast frames only), and lat/lon-centered window present entries
-    # (int timestamp + "win" + 9-element window/visual key).  Each kind is
-    # reported with its own count and byte total.
+    # timestamp + 9-element viewport/visual key + 6-element style/version
+    # suffix -- arrows/cells/lightning styles and their content versions;
+    # any frame an overlay attaches to), and lat/lon-centered window
+    # present entries (int timestamp + "win" + 9-element window/visual
+    # key).  Each kind is reported with its own count and byte total.
     cache_kind_geometry = 0
     cache_kind_geometry_bytes = 0
     cache_kind_present = 0
@@ -550,7 +551,10 @@ async def health():
         elif key and isinstance(key[0], int) and len(key) == 10:
             cache_kind_present += 1
             cache_kind_present_bytes += size
-        elif key and isinstance(key[0], int) and len(key) == 12:
+        elif key and isinstance(key[0], int) and len(key) >= 14:
+            # Overlay keys are the 10-element present key plus style/version
+            # params (14 since flow/cells versioning, 16 with lightning); window
+            # keys are length 11 with key[1] == "win", so they cannot land here.
             cache_kind_overlay += 1
             cache_kind_overlay_bytes += size
         elif key and isinstance(key[0], int) and len(key) == 11 and key[1] == "win":

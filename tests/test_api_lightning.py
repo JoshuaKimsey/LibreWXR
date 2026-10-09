@@ -357,3 +357,34 @@ def test_health_lightning_reports_stub(client, monkeypatch):
     assert section["points"] == 1
     assert section["version"] == 7
     assert section["satellites"] == stub.meta["satellites"]
+
+
+# ---------------------------------------------------------------------------
+# Case 8: /health overlay-kind accounting
+# ---------------------------------------------------------------------------
+
+def test_health_counts_overlay_entries(client, monkeypatch):
+    """Overlay cache entries must land in the /health overlay bucket.
+
+    The classifier keys off the overlay key length; a wrong length sent
+    overlay entries into no bucket at all, silently undercounting
+    ``overlay_entries``/``overlay_bytes``.
+    """
+    c, ts, _ = client
+    url = _tile_url(ts)
+
+    # Warm a geometry entry and a present entry with a plain request.
+    assert c.get(url).status_code == 200
+
+    lat, lon = _tile_center_latlon(4, 3, 6)
+    stub = _StubLightningStore(_make_points([(lat, lon, 1e-12)]))
+    monkeypatch.setattr(routes, "lightning_store", stub)
+
+    # Warm an overlay entry.
+    assert c.get(f"{url}?lightning=dots").status_code == 200
+
+    resp = c.get("/health")
+    assert resp.status_code == 200
+    tile_cache = resp.json()["tile_cache"]
+    assert tile_cache["overlay_entries"] >= 1
+    assert tile_cache["overlay_bytes"] > 0
