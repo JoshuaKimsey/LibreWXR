@@ -668,6 +668,7 @@ A sample of the projects and deployments built on the LibreWXR API:
 | [StormView Rewrite](https://github.com/arc360alt/StormView-Rewrite) | A rewritten version of stormview to be faster, lighter. |
 | [Variable Weather](https://variablewx.librewxr.net) ([GitHub](https://github.com/JoshuaKimsey/variable-weather)) | Inspired by Breezy Weather, Variable Weather makes it easy and fun to get the weather information you need. |
 | [WhatWeather](https://play.google.com/store/apps/details?id=com.kolov.weatherstation) | A weather-station app that repurposes old Android phones and tablets as always-on weather displays. |
+| [YAWP (Yet Another Weather Program)](https://play.google.com/store/apps/details?id=com.delatte.yawp) | A full-featured Android weather app with animated radar and nowcast loops, satellite clouds, nearby personal weather stations, widgets, and a live weather wallpaper. |
 | [ZeusWatch](https://github.com/SysAdminDoc/ZeusWatch) | A free, open-source Android weather app with a premium dark UI. No API keys required. |
 
 Built something with LibreWXR? Head over to our [Discussions post](https://github.com/JoshuaKimsey/LibreWXR/discussions/29) to get listed.
