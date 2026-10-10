@@ -651,17 +651,23 @@ A sample of the projects and deployments built on the LibreWXR API:
 | [Linecast](https://github.com/ashuttl/linecast) | Weather, tides, the sun, the moon, and maps, drawn for the terminal. The Old Farmer's Almanac meets Minitel. |
 | [LocalSky](https://github.com/silenthooligan/localsky) | Hyperlocal weather on your hardware. Smart irrigation when you want it. |
 | [Merry Sky](https://merrysky.net) | A lightweight forecasting website providing an all-in-one hourly summary of the upcoming temperature, precipitations and more. |
+| [MeteoZoom](https://meteozoom.com) | A free worldwide weather portal with minutely precipitation forecasts, live radar and satellite maps, and weather alerts. |
+| [MMM-RAIN-MAP](https://github.com/jalibu/MMM-RAIN-MAP) | A MagicMirror² module that displays an animated rain-radar map from LibreWXR or RainViewer on OpenStreetMap. |
+| [OSS Weather](https://github.com/Akylas/oss-weather) | An open-source, privacy-first weather app for Android and iOS with LibreWXR radar and satellite available as map layers. |
 | [Photo-Planner](https://apps.apple.com/de/app/photo-planner/id6764817751) | An app to visualize the field of view for selected cameras and lenses and overlay it onto a map. |
 | [PiClock](https://github.com/n0bel/PiClock) ([PiClock3](https://github.com/n0bel/PiClock3)) | A Fancy Clock built around a monitor and a Raspberry Pi. |
 | [Presura](https://presura.eu) | A multi-language weather viewer for the European Union. |
 | [RidePilot](https://apps.apple.com/us/app/ridepilot-smart-bike-computer/id6790916720) | A cycling tracking app. |
 | [Rueckenwind](https://rueckenwind.piepgras.de) | A cycling navigation app for iOS, built on BRouter and OpenStreetMap. |
-| [SparkRadar](https://sparkradar.app) | A weather radar app with LibreWXR powering its International Mosaic layer. |
+| [Sensecast](https://sensecast.app) | A multi-source weather app for iOS and Android that explains the forecast, with Doppler radar frames provided by LibreWXR. |
 | [Silver Skies (Desktop)](https://github.com/poliberry/silverskies-desktop) | A desktop weather radar, forecast, and severe alert dashboard (Electron + Next.js). |
+| [SkyForge](https://apps.apple.com/us/app/skyforge/id6792437650) | A weather app for iOS with LibreWXR radar and satellite layers in its weather map. |
 | [SkyMonitor](https://skymonitor.app) ([GitHub](https://github.com/chicagoeas/sky-monitor)) | SkyMonitor is a weather website that uses multiple APIs to get you the most accurate weather information for where you are! |
 | [South Alabama Mesonet](https://mesonet.southalabama.edu) | A network of weather stations monitoring conditions across Southern Alabama. |
+| [SparkRadar](https://sparkradar.app) | A weather radar app with LibreWXR powering its International Mosaic layer. |
 | [StormView Rewrite](https://github.com/arc360alt/StormView-Rewrite) | A rewritten version of stormview to be faster, lighter. |
 | [Variable Weather](https://variablewx.librewxr.net) ([GitHub](https://github.com/JoshuaKimsey/variable-weather)) | Inspired by Breezy Weather, Variable Weather makes it easy and fun to get the weather information you need. |
+| [WhatWeather](https://play.google.com/store/apps/details?id=com.kolov.weatherstation) | A weather-station app that repurposes old Android phones and tablets as always-on weather displays. |
 | [ZeusWatch](https://github.com/SysAdminDoc/ZeusWatch) | A free, open-source Android weather app with a premium dark UI. No API keys required. |
 
 Built something with LibreWXR? Head over to our [Discussions post](https://github.com/JoshuaKimsey/LibreWXR/discussions/29) to get listed.
