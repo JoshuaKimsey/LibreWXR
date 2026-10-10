@@ -256,7 +256,7 @@ Example body:
   "name": "io.github.joshuakimsey/librewxr-mcp",
   "title": "LibreWXR MCP",
   "description": "Precipitation nowcasts, weather alerts, storm cells, and recent lightning strikes for any point.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "websiteUrl": "http://localhost:8080",
   "repository": { "source": "github", "url": "https://github.com/JoshuaKimsey/LibreWRX" },
   "remotes": [
