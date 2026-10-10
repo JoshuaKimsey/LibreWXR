@@ -3,9 +3,10 @@
 """DWD ICON-EU — self-contained NWP source package.
 
 7 km European regional model.  Gated by
-``settings.eu_nwp_profile`` so it can stand alone (``icon_eu_only``)
-or pair with DMI DINI (``dini_with_icon_eu``) where DINI wins inside
-its smaller 2 km domain and ICON-EU catches the rest of Europe.
+``settings.eu_nwp_profile``: on under ``icon_eu_only`` and
+``dini_with_icon_eu``, off under ``ifs`` and ``dini_only``.  When
+paired with DMI DINI (``dini_with_icon_eu``) DINI wins inside its
+smaller 2 km domain and ICON-EU catches the rest of Europe.
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ __all__ = ["ICONEUGrid", "nwp_provider"]
 
 
 def nwp_provider(settings, cache_dir) -> NWPContribution | None:
-    """Return an ICON-EU contribution under either active EU profile."""
+    """Return an ICON-EU contribution under ``icon_eu_only`` or ``dini_with_icon_eu``."""
     profile = getattr(settings, "eu_nwp_profile", "icon_eu_only")
     if profile not in ("icon_eu_only", "dini_with_icon_eu"):
         return None

@@ -359,6 +359,11 @@ class Settings(BaseSettings):
     # itself is fixed: narrowest-domain first).
     #   "ifs"                 - no regional NWP; IFS is the only source.
     #   "icon_eu_only"        - DWD ICON-EU (~7 km, 3-hourly) ahead of IFS.
+    #   "dini_only"           - DMI DINI (2 km native LCC, 3-hourly) ahead
+    #                           of IFS, without ICON-EU; IFS fills
+    #                           everything outside DINI's footprint
+    #                           (Iberia, southern Italy, the Balkans,
+    #                           eastern Europe).
     #   "dini_with_icon_eu"   - DMI HARMONIE-AROME DINI (2 km native LCC,
     #                           3-hourly) ahead of ICON-EU ahead of IFS.
     #                           DINI covers most of populated Europe;
@@ -366,10 +371,7 @@ class Settings(BaseSettings):
     #                           Iberia, southern Italy, the Balkans, and
     #                           eastern Europe past Poland that DINI
     #                           doesn't reach.
-    # See project memory entry "EU NWP profile naming refactor"
-    # (project_eu_nwp_profile_refactor.md) for the planned future move
-    # to a list-valued LIBREWXR_EU_NWP_CHAIN setting.
-    eu_nwp_profile: Literal["ifs", "icon_eu_only", "dini_with_icon_eu"] = "ifs"
+    eu_nwp_profile: Literal["ifs", "icon_eu_only", "dini_only", "dini_with_icon_eu"] = "ifs"
     icon_eu_base_url: str = "https://opendata.dwd.de/weather/nwp/icon-eu/grib"
     icon_eu_publish_delay_minutes: int = 240  # main runs typically publish ~3-4h after init; 4h is conservative
     # dBZ calibration shift applied after Z-R conversion of ICON-EU

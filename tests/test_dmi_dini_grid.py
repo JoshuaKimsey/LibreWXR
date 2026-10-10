@@ -1100,3 +1100,32 @@ class TestWarmRestartAccumRebuild:
         prev_gets = [c for c in client.calls if c[0] == prev_url]
         assert len(prev_gets) == 1
         await g.close()
+
+
+# ── Provider gating ──────────────────────────────────────────────────
+
+
+class TestProvider:
+    @pytest.mark.parametrize("profile", ["dini_only", "dini_with_icon_eu"])
+    def test_provider_returns_contribution_when_enabled(
+        self, monkeypatch, tmp_path, profile,
+    ):
+        from librewxr.config import settings as _settings
+        from librewxr.sources.regional.europe.nwp.dmi_dini import nwp_provider
+
+        monkeypatch.setattr(_settings, "eu_nwp_profile", profile)
+        contrib = nwp_provider(_settings, tmp_path)
+        assert contrib is not None
+        assert contrib.priority == 30
+        assert contrib.name == "DMI DINI"
+        assert contrib.regional is True
+
+    @pytest.mark.parametrize("profile", ["ifs", "icon_eu_only"])
+    def test_provider_returns_none_when_disabled(
+        self, monkeypatch, tmp_path, profile,
+    ):
+        from librewxr.config import settings as _settings
+        from librewxr.sources.regional.europe.nwp.dmi_dini import nwp_provider
+
+        monkeypatch.setattr(_settings, "eu_nwp_profile", profile)
+        assert nwp_provider(_settings, tmp_path) is None

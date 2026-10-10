@@ -97,7 +97,7 @@ RRQPE's coverage polygon, and RRQPE-decline pixels.
 | NOAA HRRR-CONUS | Continental US | 3 km | LCC | hourly | `LIBREWXR_NA_NWP_SOURCE=hrrr` |
 | NOAA HRRR-Alaska | Alaska + adjacent Pacific | 3 km | polar stereographic | 3-hourly | *(bundled with HRRR)* |
 | ECCC HRDPS-Continental | Canada + northern US | 2.5 km | rotated lat/lon | 6-hourly | `LIBREWXR_HRDPS_ENABLED=true` |
-| DMI HARMONIE-AROME DINI | Most of populated Europe + Iceland | 2 km | LCC | 3-hourly | `LIBREWXR_EU_NWP_PROFILE=dini_with_icon_eu` |
+| DMI HARMONIE-AROME DINI | Most of populated Europe + Iceland | 2 km | LCC | 3-hourly | `LIBREWXR_EU_NWP_PROFILE=dini_only` *(or `dini_with_icon_eu`)* |
 | DWD ICON-EU | Europe (wider than DINI) | ~7 km | regular lat/lon | 3-hourly | `LIBREWXR_EU_NWP_PROFILE=icon_eu_only` *(or `dini_with_icon_eu`)* |
 | Météo-France AROME Antilles | Eastern Caribbean (Guadeloupe + Martinique) | 2.5 km | regular lat/lon | 6-hourly | `LIBREWXR_AROME_ANTILLES_ENABLED=true` |
 | Météo-France AROME Guyane | French Guiana | 2.5 km | regular lat/lon | 6-hourly | `LIBREWXR_AROME_GUYANE_ENABLED=true` |
@@ -113,9 +113,11 @@ Far East — the polar-stereographic grid genuinely covers that area
 because the central meridian sits at 135°W and the grid extends ~3,900
 km eastward from it.
 
-DMI DINI and ICON-EU both cover Europe; the chain picks DINI inside
-its tighter domain and falls through to ICON-EU for the rest (then
-IFS beyond ICON-EU). This is configurable via
+DMI DINI and ICON-EU both cover Europe; when paired, the chain picks
+DINI inside its tighter domain and falls through to ICON-EU for the
+rest (then IFS beyond ICON-EU). Under the `dini_only` profile DINI runs
+alone and IFS fills everything outside its footprint. This is
+configurable via
 [`LIBREWXR_EU_NWP_PROFILE`](configuration-reference.md#librewxr_eu_nwp_profile).
 
 ---

@@ -186,7 +186,7 @@ All config via `LIBREWXR_*` env vars or `.env` file. Settings defined in `src/li
 **NWP:**
 - `LIBREWXR_REGIONAL_NWP_ENABLED`: master switch for all regional NWP (false = IFS only)
 - `LIBREWXR_NA_NWP_SOURCE`: `ifs` (default) or `hrrr` — North American NWP source
-- `LIBREWXR_EU_NWP_PROFILE`: `ifs`, `icon_eu_only`, or `dini_with_icon_eu` — European NWP profile
+- `LIBREWXR_EU_NWP_PROFILE`: `ifs`, `icon_eu_only`, `dini_only`, or `dini_with_icon_eu` — European NWP profile
 - `LIBREWXR_ECMWF_ENABLED`: disable IFS global precipitation (debug use)
 
 **Satellite:**

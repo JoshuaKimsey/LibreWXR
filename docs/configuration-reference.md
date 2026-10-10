@@ -964,10 +964,11 @@ LibreWXR's European NWP chain uses both **DMI HARMONIE-AROME DINI** (2 km native
 |---|---|
 | **Default** | `ifs` |
 | **Type** | string |
-| **Values** | `ifs`, `icon_eu_only`, `dini_with_icon_eu` |
+| **Values** | `ifs`, `icon_eu_only`, `dini_only`, `dini_with_icon_eu` |
 
 - **`ifs`** — IFS only; no regional NWP over Europe.
 - **`icon_eu_only`** — DWD ICON-EU ahead of IFS. Free DWD opendata HTTPS — no auth. Covers all of Europe broadly.
+- **`dini_only`** — DMI HARMONIE-AROME DINI ahead of IFS, without ICON-EU. Anonymous AWS Open Data S3. IFS fills everything outside DINI's footprint (Iberia, southern Italy, the Balkans, eastern Europe).
 - **`dini_with_icon_eu`** — DMI HARMONIE-AROME DINI ahead of ICON-EU ahead of IFS. Anonymous AWS Open Data S3. Best European coverage; adds ~250 MB RAM total.
 
 (Renamed from `LIBREWXR_EU_NWP_SOURCE` on 2026-05-03 — the old `dmi_dini` value implicitly loaded ICON-EU too, which was surprising. The new profile names make the loaded set obvious.)
