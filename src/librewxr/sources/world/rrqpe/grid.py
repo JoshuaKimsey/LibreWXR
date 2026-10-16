@@ -77,6 +77,12 @@ NORTH_EDGE = 70.0
 SOUTH_EDGE = -60.0
 WEST_EDGE = -180.0
 
+# Native rows decoded per strip.  A full-globe float64 read plus its
+# float32 copies peaks at ~2.4 GB; strips bound the temporaries to a few
+# MB.  Rounded down to a multiple of the downsample factor so no
+# downsample block straddles two strips.
+_DECODE_STRIP_ROWS = 64
+
 # Z-R relationship (Marshall-Palmer, stratiform rain).
 ZR_A_RAIN = 200.0
 ZR_B_RAIN = 1.6
@@ -577,33 +583,47 @@ class RRQPEGrid:
                 tmp_path = tmp.name
             with HDF5_LOCK:
                 ds = netCDF4.Dataset(tmp_path, "r")
-                try:
+            try:
+                with HDF5_LOCK:
                     rows = ds.dimensions["Rows"].size
                     cols = ds.dimensions["Columns"].size
                     rvar = ds.variables["RRQPE"]
-                    rate_raw = np.asarray(rvar[:], dtype=np.float64)
+                    dvar = ds.variables["DQF"]
                     scale = float(getattr(rvar, "scale_factor", 1.0))
                     offset = float(getattr(rvar, "add_offset", 0.0))
-                    dqf = np.asarray(ds.variables["DQF"][:])
-                finally:
+                # A leading singleton time dimension is indexed away.
+                rate_shape, dqf_shape = rvar.shape[-2:], dvar.shape[-2:]
+                if rate_shape != (rows, cols) or dqf_shape != (rows, cols):
+                    logger.warning(
+                        "RRQPE: unexpected shape rate=%s dqf=%s (want (%d, %d)); "
+                        "rejecting",
+                        rvar.shape, dvar.shape, rows, cols,
+                    )
+                    return None
+                factor = self._downsample
+                out_rows, out_cols = rows // factor, cols // factor
+                encoded = np.empty((out_rows, out_cols), dtype=np.uint8)
+                step = max(factor, (_DECODE_STRIP_ROWS // factor) * factor)
+                for start in range(0, out_rows * factor, step):
+                    end = min(start + step, out_rows * factor)
+                    index = (slice(start, end), slice(0, out_cols * factor))
+                    with HDF5_LOCK:
+                        rate_raw = np.asarray(
+                            rvar[(0,) + index if rvar.ndim == 3 else index],
+                            dtype=np.float64,
+                        )
+                        dqf = np.asarray(dvar[(0,) + index if dvar.ndim == 3 else index])
+                    rate = (rate_raw * scale + offset).astype(np.float32)
+                    # DQF==3 is no-data; DQF==2 (degraded) stays valid.
+                    rate = np.where(dqf == 3, np.nan, rate)
+                    downsampled = block_nanmean_downsample(rate, factor)
+                    encoded[start // factor:end // factor] = precip_rate_to_dbz_encoded(
+                        downsampled, dbz_offset=dbz_offset,
+                    )
+                return encoded
+            finally:
+                with HDF5_LOCK:
                     ds.close()
-            # Collapse a leading singleton time dimension if present.
-            if rate_raw.ndim == 3:
-                rate_raw = rate_raw[0]
-            if dqf.ndim == 3:
-                dqf = dqf[0]
-            if rate_raw.shape != (rows, cols) or dqf.shape != (rows, cols):
-                logger.warning(
-                    "RRQPE: unexpected shape rate=%s dqf=%s (want (%d, %d)); "
-                    "rejecting",
-                    rate_raw.shape, dqf.shape, rows, cols,
-                )
-                return None
-            rate = (rate_raw * scale + offset).astype(np.float32)
-            # DQF==3 is no-data; DQF==2 (degraded) stays valid.
-            rate = np.where(dqf == 3, np.nan, rate)
-            downsampled = block_nanmean_downsample(rate, self._downsample)
-            return precip_rate_to_dbz_encoded(downsampled, dbz_offset=dbz_offset)
         except Exception:
             logger.exception("RRQPE: failed to decode NetCDF4 buffer")
             return None

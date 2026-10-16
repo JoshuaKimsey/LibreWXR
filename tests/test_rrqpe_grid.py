@@ -487,6 +487,75 @@ def _synthetic_nc_bytes(rows: int = 4, cols: int = 4, rate: float = 3.0) -> byte
             pass
 
 
+def _varied_nc_bytes(rows: int, cols: int, *, time_dim: bool = False) -> bytes:
+    """NetCDF4 buffer with varied rates, fill values and DQF 0/2/3."""
+    from netCDF4 import Dataset
+
+    rng = np.random.default_rng(7)
+    packed = rng.integers(0, 800, size=(rows, cols)).astype(np.int16)
+    packed[rng.random((rows, cols)) < 0.1] = -9990
+    dqf = rng.choice(np.array([0, 2, 3], dtype=np.int8), size=(rows, cols))
+    dims = ("time", "Rows", "Columns") if time_dim else ("Rows", "Columns")
+    fd, path = tempfile.mkstemp(suffix=".nc")
+    os.close(fd)
+    try:
+        ds = Dataset(path, "w", format="NETCDF4")
+        if time_dim:
+            ds.createDimension("time", 1)
+        ds.createDimension("Rows", rows)
+        ds.createDimension("Columns", cols)
+        rvar = ds.createVariable("RRQPE", "i2", dims, fill_value=np.int16(-9990))
+        rvar.scale_factor = np.float32(0.1)
+        rvar.add_offset = np.float32(0.0)
+        rvar.set_auto_maskandscale(False)
+        rvar[:] = packed[None] if time_dim else packed
+        ds.createVariable("DQF", "i1", dims)[:] = dqf[None] if time_dim else dqf
+        ds.close()
+        with open(path, "rb") as fh:
+            return fh.read()
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+class TestDecodeStrips:
+    """Strip-wise decoding must not change the output: every strip size
+    gives the same grid as decoding all rows in one pass."""
+
+    @pytest.mark.parametrize("downsample", [1, 2, 4])
+    @pytest.mark.parametrize("time_dim", [False, True])
+    def test_strip_size_does_not_change_output(
+        self, tmp_path, monkeypatch, downsample, time_dim,
+    ):
+        # 133 rows: several strips, a short last strip, and rows cropped
+        # by the downsample factor.
+        nc = _varied_nc_bytes(133, 18, time_dim=time_dim)
+        grid = RRQPEGrid(cache_dir=tmp_path, downsample=downsample)
+        monkeypatch.setattr(rrqpe_grid, "_DECODE_STRIP_ROWS", 10_000)
+        whole = grid._decode_to_encoded(nc, 6.0)
+        assert whole.shape == (133 // downsample, 18 // downsample)
+        assert whole.any()
+        for strip_rows in (1, 7, 64):
+            monkeypatch.setattr(rrqpe_grid, "_DECODE_STRIP_ROWS", strip_rows)
+            assert np.array_equal(grid._decode_to_encoded(nc, 6.0), whole)
+
+    def test_shape_mismatch_rejected(self, tmp_path):
+        from netCDF4 import Dataset
+
+        path = tmp_path / "bad.nc"
+        ds = Dataset(path, "w", format="NETCDF4")
+        ds.createDimension("Rows", 4)
+        ds.createDimension("Columns", 4)
+        ds.createDimension("Other", 3)
+        ds.createVariable("RRQPE", "i2", ("Rows", "Other"))[:] = 0
+        ds.createVariable("DQF", "i1", ("Rows", "Columns"))[:] = 0
+        ds.close()
+        grid = RRQPEGrid(cache_dir=tmp_path / "store", downsample=1)
+        assert grid._decode_to_encoded(path.read_bytes(), 6.0) is None
+
+
 class _S3Transport:
     """MockTransport handler serving hour listings + .nc downloads."""
 
