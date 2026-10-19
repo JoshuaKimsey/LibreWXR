@@ -541,7 +541,11 @@ class TestDecodeStrips:
             monkeypatch.setattr(rrqpe_grid, "_DECODE_STRIP_ROWS", strip_rows)
             assert np.array_equal(grid._decode_to_encoded(nc, 6.0), whole)
 
-    def test_shape_mismatch_rejected(self, tmp_path):
+    @pytest.mark.parametrize("rate_dims", [
+        ("Rows", "Other"),                    # wrong trailing shape
+        ("a", "b", "Rows", "Columns"),        # beyond 3D
+    ])
+    def test_shape_mismatch_rejected(self, tmp_path, caplog, rate_dims):
         from netCDF4 import Dataset
 
         path = tmp_path / "bad.nc"
@@ -549,11 +553,16 @@ class TestDecodeStrips:
         ds.createDimension("Rows", 4)
         ds.createDimension("Columns", 4)
         ds.createDimension("Other", 3)
-        ds.createVariable("RRQPE", "i2", ("Rows", "Other"))[:] = 0
+        ds.createDimension("a", 1)
+        ds.createDimension("b", 1)
+        ds.createVariable("RRQPE", "i2", rate_dims)[:] = 0
         ds.createVariable("DQF", "i1", ("Rows", "Columns"))[:] = 0
         ds.close()
         grid = RRQPEGrid(cache_dir=tmp_path / "store", downsample=1)
         assert grid._decode_to_encoded(path.read_bytes(), 6.0) is None
+        # Rejected by the shape check, not by a later decode exception.
+        assert "unexpected shape" in caplog.text
+        assert "failed to decode" not in caplog.text
 
 
 class _S3Transport:

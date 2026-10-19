@@ -591,13 +591,20 @@ class RRQPEGrid:
                     dvar = ds.variables["DQF"]
                     scale = float(getattr(rvar, "scale_factor", 1.0))
                     offset = float(getattr(rvar, "add_offset", 0.0))
+                    # Variable.shape is a netCDF-C round trip on every read.
+                    rate_full_shape = rvar.shape
+                    dqf_full_shape = dvar.shape
                 # A leading singleton time dimension is indexed away.
-                rate_shape, dqf_shape = rvar.shape[-2:], dvar.shape[-2:]
-                if rate_shape != (rows, cols) or dqf_shape != (rows, cols):
+                if (
+                    len(rate_full_shape) not in (2, 3)
+                    or len(dqf_full_shape) not in (2, 3)
+                    or rate_full_shape[-2:] != (rows, cols)
+                    or dqf_full_shape[-2:] != (rows, cols)
+                ):
                     logger.warning(
                         "RRQPE: unexpected shape rate=%s dqf=%s (want (%d, %d)); "
                         "rejecting",
-                        rvar.shape, dvar.shape, rows, cols,
+                        rate_full_shape, dqf_full_shape, rows, cols,
                     )
                     return None
                 factor = self._downsample
