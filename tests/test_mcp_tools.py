@@ -8,8 +8,10 @@ import numpy as np
 import pytest
 
 from librewxr.api.models import AlertProperties, AlertsResponse, GeoJSONFeature
+from librewxr.config import settings
 from librewxr.data.nowcast import NowcastFrame
 from librewxr.data.regions import REGIONS, RegionDef
+from librewxr.mcp.sampling import dbz_to_rate_mmh
 from librewxr.mcp.tools import get_active_alerts, get_precip_nowcast
 
 
@@ -36,6 +38,18 @@ _TEST_REGION = RegionDef(
 # Pre-build a 10x10 frame with a known pixel at (5,5) = 64 (0.0 dBZ).
 _FRAME_DATA = np.zeros((10, 10), dtype=np.uint8)
 _FRAME_DATA[5, 5] = 64
+
+# A synthetic latlon region registered as the RRQPE region name, so the
+# display-calibration undo path is exercised.  Same geometry as TEST_US.
+_RRQPE_REGION = RegionDef(
+    name="RRQPE",
+    west=-100.0, east=-90.0, south=35.0, north=45.0,
+    pixel_size=1.0, group="TEST",
+)
+
+# 10x10 frame with pixel (5,5) = 100 -> stored dBZ = 100/2 - 32 = 18.0.
+_FRAME_DATA_HIGH = np.zeros((10, 10), dtype=np.uint8)
+_FRAME_DATA_HIGH[5, 5] = 100
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +215,82 @@ async def test_get_precip_nowcast_source_none(monkeypatch):
     assert r["coverage"] == "out_of_range"
     assert r["dbz"] is None
     assert r["rate_mmh"] == 0.0
+
+
+@pytest.mark.mcp
+async def test_get_precip_nowcast_rrqpe_undoes_display_offset(monkeypatch):
+    """RRQPE stored dBZ carries the display shift -> MCP reports true values."""
+    frame = NowcastFrame(timestamp=TS_10, regions={"RRQPE": _FRAME_DATA_HIGH}, blend_weight=1.0)
+    store = MockNowcastStore([TS_10], [frame])
+
+    monkeypatch.setitem(REGIONS, "RRQPE", _RRQPE_REGION)
+    monkeypatch.setattr(settings, "rrqpe_dbz_offset", -7.0)
+    monkeypatch.setattr("librewxr.mcp.tools.time.time", lambda: FIXED_NOW)
+
+    def _mock_sample(_name, _lat, _lon):
+        return np.array([True])
+
+    monkeypatch.setattr("librewxr.mcp.sampling.sample_coverage", _mock_sample)
+
+    result = await get_precip_nowcast(None, store, ["RRQPE"], 40.0, -95.0, 60)
+
+    assert len(result) == 1
+    r = result[0]
+    assert r["source"] == "radar"
+    assert r["blend_weight"] == 1.0
+    # Stored pixel 100 -> 18.0 dBZ; rrqpe_dbz_offset=-7.0 -> true 25.0 dBZ.
+    assert r["dbz"] == pytest.approx(25.0)
+    assert r["rate_mmh"] == pytest.approx(dbz_to_rate_mmh(25.0))
+    assert r["rate_mmh"] > dbz_to_rate_mmh(18.0)
+
+
+@pytest.mark.mcp
+async def test_get_precip_nowcast_non_rrqpe_not_corrected(monkeypatch):
+    """Regions without a display offset pass their stored dBZ through as-is."""
+    frame = NowcastFrame(timestamp=TS_10, regions={"TEST_US": _FRAME_DATA_HIGH}, blend_weight=0.7)
+    store = MockNowcastStore([TS_10], [frame])
+
+    monkeypatch.setitem(REGIONS, "TEST_US", _TEST_REGION)
+    monkeypatch.setattr(settings, "rrqpe_dbz_offset", -7.0)
+    monkeypatch.setattr("librewxr.mcp.tools.time.time", lambda: FIXED_NOW)
+
+    def _mock_sample(_name, _lat, _lon):
+        return np.array([True])
+
+    monkeypatch.setattr("librewxr.mcp.sampling.sample_coverage", _mock_sample)
+
+    result = await get_precip_nowcast(None, store, ["TEST_US"], 40.0, -95.0, 60)
+
+    assert len(result) == 1
+    r = result[0]
+    assert r["source"] == "radar"
+    assert r["dbz"] == pytest.approx(18.0)
+    assert r["rate_mmh"] == pytest.approx(dbz_to_rate_mmh(18.0))
+
+
+@pytest.mark.mcp
+async def test_get_precip_nowcast_nwp_fallback_not_corrected(monkeypatch):
+    """The NWP fallback branch keeps the chain's decoded dBZ uncorrected."""
+    frame = NowcastFrame(timestamp=TS_10, regions={"OTHER": _FRAME_DATA}, blend_weight=0.0)
+    store = MockNowcastStore([TS_10], [frame])
+    nwp = MockNWPChain(pixel_value=100)  # 100 -> (100/2) - 32 = 18.0 dBZ
+
+    monkeypatch.setitem(REGIONS, "RRQPE", _RRQPE_REGION)
+    monkeypatch.setattr(settings, "rrqpe_dbz_offset", -7.0)
+
+    def _mock_sample(_name, _lat, _lon):
+        return np.array([True])
+
+    monkeypatch.setattr("librewxr.mcp.sampling.sample_coverage", _mock_sample)
+
+    result = await get_precip_nowcast(nwp, store, ["RRQPE"], 40.0, -95.0, 60)
+
+    assert len(result) == 1
+    r = result[0]
+    assert r["source"] == "nwp"
+    assert r["coverage"] == "in_range"
+    assert r["dbz"] == pytest.approx(18.0)
+    assert r["rate_mmh"] == pytest.approx(dbz_to_rate_mmh(18.0))
 
 
 # ---------------------------------------------------------------------------

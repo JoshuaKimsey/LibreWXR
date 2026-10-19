@@ -13,6 +13,7 @@ import math
 
 import numpy as np
 
+from librewxr.config import settings
 from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.data.coverage import sample_coverage
 from librewxr.tiles.coordinates import _laea_forward, _tmerc_forward
@@ -80,6 +81,29 @@ def dbz_to_rate_mmh(dbz: float | None, is_snow: bool = False) -> float:
     Z = 10.0 ** (dbz / 10.0)
     R = (Z / A) ** (1.0 / B)
     return float(R)
+
+
+# Display-calibration dBZ shifts baked into stored arrays at decode
+# time (the ``*_dbz_offset`` settings in config.py).  MCP reports true
+# values, so the shift is undone for sources whose stored dBZ carries
+# one.  Only the RRQPE radar branch is corrected: the NWP fallback
+# samples a weighted multi-source blend where a per-source undo is not
+# well-defined.
+_DISPLAY_DBZ_OFFSET_SETTINGS: dict[str, str] = {
+    "RRQPE": "rrqpe_dbz_offset",
+}
+
+
+def undo_display_dbz_offset(
+    dbz: float | None, region_name: str | None,
+) -> float | None:
+    """Remove a decode-time display calibration shift from a dBZ sample."""
+    if dbz is None or region_name is None:
+        return dbz
+    attr = _DISPLAY_DBZ_OFFSET_SETTINGS.get(region_name)
+    if attr is None:
+        return dbz
+    return dbz - getattr(settings, attr)
 
 
 def resolve_region_for_point(

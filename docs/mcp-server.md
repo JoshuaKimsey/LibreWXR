@@ -109,8 +109,8 @@ Returns a list of future nowcast frames (precipitation forecast) for a single ge
 |---|---|---|
 | `time` | string | ISO 8601 timestamp of the forecast frame |
 | `minutes_offset` | int | Minutes from now this frame represents |
-| `dbz` | float | Reflectivity in dBZ at the point for this frame |
-| `rate_mmh` | float | Precipitation rate in mm/h (derived from dBZ via Marshall-Palmer Z-R) |
+| `dbz` | float | Reflectivity in dBZ at the point for this frame. True (display-calibration-offset-free) for radar-served pixels (`source: "radar"`); NWP-fallback samples (`source: "nwp"`) are not corrected for source-specific display calibration |
+| `rate_mmh` | float | Precipitation rate in mm/h (derived from dBZ via Marshall-Palmer Z-R). Same calibration caveat as `dbz`: true for radar-served pixels, possibly display-calibrated for NWP-fallback samples |
 | `source` | string | `"radar"` when the value comes from radar extrapolation, `"nwp"` when it comes from the model chain, `"none"` when there is no data |
 | `blend_weight` | float | Weight of the radar source in the blended nowcast (0.0 = pure NWP, 1.0 = pure radar). Only meaningful when source is not `"none"`. |
 | `coverage` | string | `"in_range"` when the point is inside radar coverage, `"out_of_range"` when it is not |
