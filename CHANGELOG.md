@@ -7,6 +7,45 @@ and commit the result alongside the version bump.
 
 ---
 
+## [v0.4.0 - RRQPE decode fix, true-rate MCP sampling, Docker port pin](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.4.0)
+
+2026-10-19
+
+The headline of this release is a correctness fix for the RRQPE global radar band: rain rates were being decoded at one tenth of reality (#41). The map looked close to radar anyway because a +6 dBZ display offset was quietly absorbing the error, so the decode fix lands together with a recalibrated offset, and MCP point sampling now reports true values.
+
+### RRQPE decode fix (#41)
+
+- netCDF4 applies `scale_factor` on read, and the decoder multiplied by it a second time, so every RRQPE rate decoded at one tenth of the file's value. The synthetic test fixture was double-packing on write, which cancelled the bug in tests. The decoder now reads raw packed int16 and unpacks exactly once, and the fixture stores the real-file convention ([651f705](https://github.com/JoshuaKimsey/LibreWXR/commit/651f705))
+- New regression test pins the decode contract: a file in the real packed convention must decode to a direct encode of its true rate, and fails under the old double unpack ([651f705](https://github.com/JoshuaKimsey/LibreWXR/commit/651f705))
+
+### RRQPE display recalibration
+
+- Default `LIBREWXR_RRQPE_DBZ_OFFSET` moves from +6 to -7: with decoding fixed, a single-scene comparison against MRMS MergedReflectivityQCComposite put zero offset about 13 dB hot; -7 realigns the RRQPE band with radar ([ba9032a](https://github.com/JoshuaKimsey/LibreWXR/commit/ba9032a))
+- Provisional: a multi-scene recalibration against MRMS/OPERA is planned, so this default may shift again in a future release
+
+### MCP: true-rate point sampling
+
+- `get_precip_nowcast` now undoes the decode-time display shift for RRQPE-served radar samples, so reported `dbz` and `rate_mmh` are the file's true values. Previously they read about 0.37x reality for RRQPE points ([2f03c68](https://github.com/JoshuaKimsey/LibreWXR/commit/2f03c68))
+- The NWP fallback branch is intentionally uncorrected: chain samples are weighted blends of multiple sources with no single winner. Documented in `docs/mcp-server.md` ([2f03c68](https://github.com/JoshuaKimsey/LibreWXR/commit/2f03c68))
+
+### Docker: LIBREWXR_PORT only moves the published host port (#42)
+
+- The renderer's in-container bind is pinned to 8080 (compose `environment:` overrides `env_file:`), so the published `${LIBREWXR_PORT:-8080}:8080` mapping always lines up. Previously any non-default port dead-ended the published mapping: the container bound the custom port while compose still pointed at 8080 ([3a3ed08](https://github.com/JoshuaKimsey/LibreWXR/commit/3a3ed08))
+- On bare metal `LIBREWXR_PORT` remains the bind port
+
+### Memory: RRQPE row-strip decoding (#40)
+
+- RRQPE/DQF decode 64 rows at a time instead of materialising full-globe float64 and float32 copies: peak RSS per GLB file drops from ~2.4 GB to ~0.5 GB at the default downsample, output bit-identical ([29821f9](https://github.com/JoshuaKimsey/LibreWXR/commit/29821f9))
+- Variable shapes are captured under the HDF5 lock in one pass and beyond-3D variables are rejected cleanly ([df1ebfc](https://github.com/JoshuaKimsey/LibreWXR/commit/df1ebfc))
+
+### Other
+
+- README: newly identified users added ([89feb62](https://github.com/JoshuaKimsey/LibreWXR/commit/89feb62), [1de18af](https://github.com/JoshuaKimsey/LibreWXR/commit/1de18af))
+
+Upgrading: pull, rebuild, restart (`docker compose up -d --build`, or `python -m librewxr.main` on bare metal). Docker users who set `LIBREWXR_PORT`: it now controls only the published host port and the container always binds 8080. If you hand-tuned `LIBREWXR_RRQPE_DBZ_OFFSET` against the old decode, reset it to the new default (-7). MCP consumers: `dbz` / `rate_mmh` values change for RRQPE-served points (response schemas unchanged).
+
+---
+
 ## [v0.3.1 - NWP disk-churn fixes and dini_only profile](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.3.1)
 
 2026-10-10
