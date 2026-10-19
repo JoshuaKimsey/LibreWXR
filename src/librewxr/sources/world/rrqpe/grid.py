@@ -589,6 +589,11 @@ class RRQPEGrid:
                     cols = ds.dimensions["Columns"].size
                     rvar = ds.variables["RRQPE"]
                     dvar = ds.variables["DQF"]
+                    # netCDF4 auto-applies scale_factor/add_offset on read; disable it so
+                    # the values stay raw packed int16 and the unpack below happens
+                    # exactly once.
+                    rvar.set_auto_maskandscale(False)
+                    dvar.set_auto_maskandscale(False)
                     scale = float(getattr(rvar, "scale_factor", 1.0))
                     offset = float(getattr(rvar, "add_offset", 0.0))
                     # Variable.shape is a netCDF-C round trip on every read.

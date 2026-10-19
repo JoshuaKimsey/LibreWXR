@@ -452,7 +452,9 @@ def _synthetic_nc_bytes(rows: int = 4, cols: int = 4, rate: float = 3.0) -> byte
 
     Dims/vars/attrs mirror the live GLB-5 files (scaled int16 RRQPE with
     DQF, where 3 = no-data) but at a small size so the fetch tests stay
-    cheap.  Rate is uniform across the grid.
+    cheap.  Stores packed int16 (raw value = rate x 10) matching live
+    GLB-5 files, i.e. auto-packing is off at write time so netCDF4 does
+    not rescale the data on the way in.  Rate is uniform across the grid.
     """
     from netCDF4 import Dataset
 
@@ -475,7 +477,8 @@ def _synthetic_nc_bytes(rows: int = 4, cols: int = 4, rate: float = 3.0) -> byte
         rvar.add_offset = np.float32(0.0)
         rvar.units = "mm/h"
         dvar = ds.createVariable("DQF", "i1", ("Rows", "Columns"))
-        rvar[:] = np.full((rows, cols), int(rate / 0.1), dtype=np.int16)
+        rvar.set_auto_maskandscale(False)
+        rvar[:] = np.full((rows, cols), np.int16(round(rate / 0.1)), dtype=np.int16)
         dvar[:] = np.zeros((rows, cols), dtype=np.int8)
         ds.close()
         with open(path, "rb") as fh:
@@ -563,6 +566,23 @@ class TestDecodeStrips:
         # Rejected by the shape check, not by a later decode exception.
         assert "unexpected shape" in caplog.text
         assert "failed to decode" not in caplog.text
+
+
+class TestDecodeScaleFactor:
+    """netCDF4 auto-applies ``scale_factor`` on read, so the decoder's
+    explicit unpack must be the only one -- otherwise rates come out 10x
+    low against real GLB-5 files (raw packed int16)."""
+
+    @pytest.mark.parametrize("rate", [3.0, 72.5])
+    def test_decode_applies_scale_factor_exactly_once(self, tmp_path, rate):
+        nc = _synthetic_nc_bytes(rows=4, cols=4, rate=rate)
+        grid = RRQPEGrid(cache_dir=tmp_path, downsample=1)
+        decoded = grid._decode_to_encoded(nc, 0.0)
+        expected = precip_rate_to_dbz_encoded(
+            np.full((4, 4), np.float32(rate), dtype=np.float32),
+            dbz_offset=0.0,
+        )
+        assert np.array_equal(decoded, expected)
 
 
 class _S3Transport:
