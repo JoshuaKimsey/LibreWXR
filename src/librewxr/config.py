@@ -319,11 +319,14 @@ class Settings(BaseSettings):
     # not-yet-published slots are never requested; a missed scan simply
     # has no key in its hour directory and is skipped.
     rrqpe_publish_delay_minutes: int = 15
-    # dBZ calibration shift applied after Z-R conversion of RRQPE rain
-    # rates.  Same Marshall-Palmer caveat as ICON-EU / DINI: satellite
-    # QPE is a surface rain rate, radar reflectivity samples the storm
-    # column and reads higher, so nudge the derived dBZ up to match.
-    rrqpe_dbz_offset: float = 6.0
+    # Display calibration shift applied after Z-R conversion of RRQPE rain
+    # rates.  Empirical: with the scale_factor double-unpack decode bug
+    # fixed (Oct 2026), a single-scene comparison against MRMS
+    # MergedReflectivityQCComposite (Great Lakes / New York, 2026-10-16
+    # 10:00Z) put the zero-offset median ~13 dB hot vs radar; -7 realigns
+    # it.  Provisional -- recalibrate against MRMS/OPERA across multiple
+    # scenes before treating this as settled.
+    rrqpe_dbz_offset: float = -7.0
     # Integer block-averaging factor for the 0.02° native grid
     # (1/2/4 → 0.02°/0.04°/0.08°).  2 is the default: each decoded
     # ~117 MB float32 frame becomes a ~29 MB uint8 store.
