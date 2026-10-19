@@ -61,6 +61,8 @@ Most self-hosters want the new behaviour, but if your reverse proxy or network o
 
 The port the server listens on.
 
+In Docker deployments the renderer pins the in-container bind to 8080 (`LIBREWXR_PORT: "8080"` in `docker-compose.yml`, which overrides any `.env` value), so `LIBREWXR_PORT` there controls only the published host port via the `${LIBREWXR_PORT:-8080}:8080` mapping. On bare metal it remains the bind port as before.
+
 | | |
 |---|---|
 | **Default** | `8080` |

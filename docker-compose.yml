@@ -92,6 +92,7 @@ services:
     profiles: ["multi", "single"]
     build: .
     command: ["python", "-m", "librewxr.main"]
+    # Host side follows LIBREWXR_PORT; container side is pinned 8080 below.
     ports:
       - "${LIBREWXR_PORT:-8080}:8080"
     env_file:
@@ -102,6 +103,12 @@ services:
       # the renderer reads everything from the pipeline's snapshot.
       LIBREWXR_RENDER_ONLY: "1"
       LIBREWXR_LOG_FILE: /logs/librewxr.log
+      # Pin the in-container bind to the image's EXPOSE 8080 so the
+      # published mapping above always lines up: LIBREWXR_PORT drives
+      # the HOST side only here (on bare metal it stays the bind
+      # port).  environment overrides env_file, so a .env value can
+      # not move the internal bind off 8080 (issue #42).
+      LIBREWXR_PORT: "8080"
       # Optional RAM-backed directory for stores regenerated every fetch
       # cycle (nowcast frames + flows, precip masks, storm cells, RRQPE
       # scan cache).  Uncomment in BOTH services along with the matching
