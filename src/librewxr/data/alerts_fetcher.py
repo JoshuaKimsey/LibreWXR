@@ -65,9 +65,11 @@ _EXCLUDED_SOURCE_IDS = frozenset({
     "us-noaa-nws-en",  # handled directly via NWS API
     # China CMA: excluded for volume/shape, not data quality. Largest source on
     # the hub (~21% of active items), but its CAPs carry no <polygon>/<circle>
-    # and only "CPEAS" 12-digit admin codes this parser cannot resolve, plus
-    # dual-language (en + zh) info blocks -- so every alert would be downloaded
-    # and then discarded. Revisit once a CPEAS geocode resolver exists.
+    # and only "CPEAS" 12-digit admin codes, plus dual-language info blocks --
+    # every alert would be downloaded and discarded. A CPEAS resolver is a
+    # trivial registry data drop now, but no openly licensed geometry source
+    # exists: township polygons are not public and the county-level DataV/AMAP
+    # table bars caching/redistribution. Parked until such a source appears.
     "cn-cma-xx",
     "mo-smg-xx",
 })

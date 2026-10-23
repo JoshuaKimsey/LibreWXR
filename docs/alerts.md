@@ -71,7 +71,11 @@ Two sources are deliberately excluded from the WMO feed path:
   no usable polygons, and no resolver covers CPEAS yet. It is the
   largest single hub source (roughly 21% of active items), so it is
   excluded rather than downloaded and discarded; the rationale is
-  documented inline at the exclusion in `_EXCLUDED_SOURCE_IDS`.
+  documented inline at the exclusion in `_EXCLUDED_SOURCE_IDS`. It stays
+  parked: a resolver would now be a trivial registry data drop, but no
+  openly licensed geometry source exists (township polygons are not
+  public, and the county-level DataV/AMAP source prohibits caching and
+  redistribution).
 
 A sources.json or wmo_all.json outage does not freeze the US slice: the
 last-known non-NWS alerts are kept and refreshed NWS alerts are merged
