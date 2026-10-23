@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-import os
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -38,6 +37,7 @@ import httpx
 import numpy as np
 
 from librewxr.config import settings
+from librewxr.data.memmap_guard import atomic_memmap_write
 
 logger = logging.getLogger(__name__)
 
@@ -615,14 +615,11 @@ class HRRRGrid:
         Atomic write (``.tmp`` → ``os.replace``) means a crash mid-write
         leaves the previous version intact, never a half-written file.
         """
-        final = self._memmap_dir / f"{name}.dat"
-        tmp = final.with_suffix(".dat.tmp")
-        mm = np.memmap(tmp, dtype=data.dtype, mode="w+", shape=data.shape)
-        mm[:] = data
-        mm.flush()
-        del mm
-        os.replace(tmp, final)
-        return np.memmap(final, dtype=data.dtype, mode="r", shape=data.shape)
+        return atomic_memmap_write(
+            self._memmap_dir / f"{name}.dat",
+            data,
+            what=f"{type(self).__name__} {name}",
+        )
 
     def _memmap_path_for(self, run_ts: int, lead_seconds: int) -> Path:
         return self._memmap_dir / f"r{run_ts}_l{lead_seconds}.dat"

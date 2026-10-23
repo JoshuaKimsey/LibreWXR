@@ -17,6 +17,7 @@ from earthkit.regrid import interpolate
 from omfiles import OmFileReader
 
 from librewxr.config import settings
+from librewxr.data.memmap_guard import atomic_memmap_write
 
 logger = logging.getLogger(__name__)
 
@@ -99,14 +100,11 @@ class ECMWFGrid:
         Atomic write (.tmp → os.replace) ensures readers in other processes
         never see a half-written file — required for multi-worker safety.
         """
-        final = self._memmap_dir / f"{name}.dat"
-        tmp = final.with_suffix(".dat.tmp")
-        mm = np.memmap(tmp, dtype=data.dtype, mode="w+", shape=data.shape)
-        mm[:] = data
-        mm.flush()
-        del mm
-        os.replace(tmp, final)
-        return np.memmap(final, dtype=data.dtype, mode="r", shape=data.shape)
+        return atomic_memmap_write(
+            self._memmap_dir / f"{name}.dat",
+            data,
+            what=f"{type(self).__name__} {name}",
+        )
 
     def _cleanup_memmap_files(self, keep: set[str] | None = None) -> None:
         """Delete memmap files except those listed in ``keep``.

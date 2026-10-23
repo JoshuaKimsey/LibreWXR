@@ -25,6 +25,7 @@ from librewxr.config import settings
 from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.sources.world.rrqpe.grid import (
     _REFRESH_THROTTLE_SECONDS,
+    _history_seconds,
     GLB5_KEY_RE,
     NATIVE_COLS,
     NATIVE_PIXEL,
@@ -42,6 +43,17 @@ from librewxr.sources.world.rrqpe.grid import (
 )
 from librewxr.sources.world.rrqpe import grid as rrqpe_grid
 from librewxr.sources.world.rrqpe.source import RRQPESource
+
+
+def _pin_shape(grid: RRQPEGrid, rows: int, cols: int) -> RRQPEGrid:
+    """Match the grid's expected frame geometry to a synthetic tiny .nc.
+
+    The decode path rejects files whose Rows/Columns disagree with the
+    region's real dimensions (issue #43); these fixtures are a handful of
+    pixels wide, so declare that as the expectation.
+    """
+    grid._rows, grid._cols = rows, cols
+    return grid
 
 
 def _inject_frame(grid: RRQPEGrid, ts: int, value: int):
@@ -535,7 +547,10 @@ class TestDecodeStrips:
         # 133 rows: several strips, a short last strip, and rows cropped
         # by the downsample factor.
         nc = _varied_nc_bytes(133, 18, time_dim=time_dim)
-        grid = RRQPEGrid(cache_dir=tmp_path, downsample=downsample)
+        grid = _pin_shape(
+            RRQPEGrid(cache_dir=tmp_path, downsample=downsample),
+            133 // downsample, 18 // downsample,
+        )
         monkeypatch.setattr(rrqpe_grid, "_DECODE_STRIP_ROWS", 10_000)
         whole = grid._decode_to_encoded(nc, 6.0)
         assert whole.shape == (133 // downsample, 18 // downsample)
@@ -576,7 +591,7 @@ class TestDecodeScaleFactor:
     @pytest.mark.parametrize("rate", [3.0, 72.5])
     def test_decode_applies_scale_factor_exactly_once(self, tmp_path, rate):
         nc = _synthetic_nc_bytes(rows=4, cols=4, rate=rate)
-        grid = RRQPEGrid(cache_dir=tmp_path, downsample=1)
+        grid = _pin_shape(RRQPEGrid(cache_dir=tmp_path, downsample=1), 4, 4)
         decoded = grid._decode_to_encoded(nc, 0.0)
         expected = precip_rate_to_dbz_encoded(
             np.full((4, 4), np.float32(rate), dtype=np.float32),
@@ -640,7 +655,7 @@ class TestFetch:
         now_ts = self._now()
         slot_a = now_ts - 30 * 60
         slot_b = now_ts - 20 * 60
-        grid = RRQPEGrid(cache_dir=tmp_path, downsample=1)
+        grid = _pin_shape(RRQPEGrid(cache_dir=tmp_path, downsample=1), 4, 4)
         nc = _synthetic_nc_bytes(rows=4, cols=4, rate=3.0)
         grid._client = httpx.Client(transport=httpx.MockTransport(
             _S3Transport([slot_a, slot_b], nc),
@@ -663,7 +678,7 @@ class TestFetch:
         now_ts = self._now()
         old_slot = now_ts - 3 * 3600  # 09:00 — far outside the window
         slot_new = now_ts - 20 * 60   # 11:40
-        grid = RRQPEGrid(cache_dir=tmp_path, downsample=4)
+        grid = _pin_shape(RRQPEGrid(cache_dir=tmp_path, downsample=4), 2, 2)
         old_mm = grid._to_memmap(
             str(old_slot), np.full(grid.effective_shape, 100, dtype=np.uint8),
         )
@@ -687,7 +702,7 @@ class TestFetch:
         now_ts = self._now()
         present_slot = now_ts - 20 * 60  # 11:40 — listed
         absent_slot = now_ts - 40 * 60   # 11:20 — needed but not listed
-        grid = RRQPEGrid(cache_dir=tmp_path, downsample=1)
+        grid = _pin_shape(RRQPEGrid(cache_dir=tmp_path, downsample=1), 4, 4)
         nc = _synthetic_nc_bytes(rows=4, cols=4, rate=3.0)
         grid._client = httpx.Client(transport=httpx.MockTransport(
             _S3Transport([present_slot], nc),
@@ -727,7 +742,7 @@ class TestFetch:
         """
         now_ts = self._now()
         slot = now_ts - 20 * 60
-        grid = RRQPEGrid(cache_dir=tmp_path, downsample=1)
+        grid = _pin_shape(RRQPEGrid(cache_dir=tmp_path, downsample=1), 4, 4)
         nc = _synthetic_nc_bytes(rows=4, cols=4, rate=3.0)
         grid._client = httpx.Client(transport=httpx.MockTransport(
             _S3Transport([slot], nc),
@@ -762,6 +777,122 @@ class TestBootHygiene:
         grid = RRQPEGrid(cache_dir=tmp_path)
         assert not stale.exists()
         await grid.close()
+
+    async def test_pid_uuid_tmp_swept_at_boot(self, tmp_path):
+        cache_dir = tmp_path / "rrqpe"
+        cache_dir.mkdir(parents=True)
+        stale = cache_dir / f"123.dat.{os.getpid()}.{'ab' * 16}.tmp"
+        stale.write_bytes(b"\x00" * 8)
+        grid = RRQPEGrid(cache_dir=tmp_path)
+        assert not stale.exists()
+        await grid.close()
+
+
+class TestRehydration:
+    """A restart must re-open the on-disk scan window, not re-download it."""
+
+    async def test_rehydrates_in_window_frames_only(self, tmp_path):
+        factor = 4
+        rows, cols = downsampled_shape(factor)
+        memmap_dir = tmp_path / "rrqpe"
+        memmap_dir.mkdir(parents=True)
+        now = int(time.time())
+        in_window = (now // SCAN_INTERVAL_SECONDS) * SCAN_INTERVAL_SECONDS - 600
+        out_window = now - _history_seconds() - 7200
+        wrong_size = in_window - 600
+
+        (memmap_dir / f"{in_window}.dat").write_bytes(b"\x05" * (rows * cols))
+        (memmap_dir / f"{out_window}.dat").write_bytes(b"\x05" * (rows * cols))
+        (memmap_dir / f"{wrong_size}.dat").write_bytes(b"\x05" * 10)
+        (memmap_dir / "not-a-timestamp.dat").write_bytes(b"\x05")
+
+        grid = RRQPEGrid(cache_dir=tmp_path, downsample=factor)
+        try:
+            assert list(grid._timesteps) == [in_window]
+            assert grid.reference_time == in_window
+            # In-window frame is served from disk with its stored content.
+            assert np.asarray(grid._timesteps[in_window])[0, 0] == 5
+            # Stale + wrong-sized files are dropped, not hydrated.  A file
+            # that is not one of ours at all is left alone.
+            assert not (memmap_dir / f"{out_window}.dat").exists()
+            assert not (memmap_dir / f"{wrong_size}.dat").exists()
+            assert (memmap_dir / "not-a-timestamp.dat").exists()
+        finally:
+            await grid.close()
+
+    async def test_fetch_after_rehydrate_downloads_only_missing_slots(self, tmp_path):
+        """The rehydrated slot is kept as-is; only absent slots are fetched."""
+        # Tiny synthetic .nc, so the grid's expectation is pinned to match.
+        rows = cols = 4
+        memmap_dir = tmp_path / "rrqpe"
+        memmap_dir.mkdir(parents=True)
+        now_ts = (int(time.time()) // SCAN_INTERVAL_SECONDS) * SCAN_INTERVAL_SECONDS
+        hydrated_slot = now_ts - 600
+        wrong_size_slot = now_ts - 1200
+
+        grid = _pin_shape(RRQPEGrid(cache_dir=tmp_path, downsample=1), rows, cols)
+        # Re-seed the directory by hand, then re-run rehydration the way a
+        # fresh process would see it.
+        (memmap_dir / f"{hydrated_slot}.dat").write_bytes(b"\x07" * (rows * cols))
+        (memmap_dir / f"{wrong_size_slot}.dat").write_bytes(b"\x07" * 3)
+        grid._timesteps.clear()
+        grid._rehydrate()
+        assert list(grid._timesteps) == [hydrated_slot]
+        assert np.asarray(grid._timesteps[hydrated_slot])[0, 0] == 7
+        assert not (memmap_dir / f"{wrong_size_slot}.dat").exists()
+
+        # Every slot the fetch pass needs, so the stub can serve them all.
+        tolerance = settings.rrqpe_match_tolerance_seconds
+        publish_delay = settings.rrqpe_publish_delay_minutes * 60
+        window_start = now_ts - 3600 - tolerance
+        first_slot = -(-window_start // SCAN_INTERVAL_SECONDS) * SCAN_INTERVAL_SECONDS
+        needed = list(
+            range(first_slot, now_ts - publish_delay + 1, SCAN_INTERVAL_SECONDS)
+        )
+
+        class _Recording(_S3Transport):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.downloads: list[int] = []
+
+            def __call__(self, request):
+                url = str(request.url)
+                if url.endswith(".nc"):
+                    ts = scan_ts_from_key(url)
+                    if ts is not None:
+                        self.downloads.append(ts)
+                return super().__call__(request)
+
+        transport = _Recording(needed, _synthetic_nc_bytes(rows=rows, cols=cols))
+        grid._client = httpx.Client(transport=httpx.MockTransport(transport))
+        try:
+            await grid.fetch(now_ts=now_ts, history_seconds=3600)
+
+            # The hydrated slot was never re-downloaded (content unchanged)...
+            assert hydrated_slot not in transport.downloads
+            assert np.asarray(grid._timesteps[hydrated_slot])[0, 0] == 7
+            # ...while the slot whose file was stale got fetched again.
+            assert wrong_size_slot in transport.downloads
+            assert wrong_size_slot in grid._timesteps
+            # Only genuinely missing slots hit the network.
+            missing = set(needed) - {hydrated_slot}
+            assert set(transport.downloads) == missing
+        finally:
+            grid._client.close()
+            await grid.close()
+
+
+class TestDecodeShapeGuard:
+    async def test_decoded_shape_mismatch_rejected(self, tmp_path, caplog):
+        """A file whose Rows/Columns disagree with the region is rejected."""
+        nc = _synthetic_nc_bytes(rows=4, cols=4, rate=3.0)
+        grid = RRQPEGrid(cache_dir=tmp_path, downsample=1)  # wants (6501, 18000)
+        try:
+            with caplog.at_level("WARNING"):
+                assert grid._decode_to_encoded(nc, 0.0) is None
+            assert "does not match the expected" in caplog.text
+        finally:
+            await grid.close()
 
 
 # ── Radar-source fetch protocol (fetch_frame slotting) ─────────────────

@@ -59,6 +59,12 @@ services:
       # LIBREWXR_VOLATILE_CACHE_DIR: /dev/shm/librewxr
       # Prefer the gitignored docker-compose.override.yml instead: it
       # auto-merges over this file and survives `git pull` with no conflicts.
+    # The container's own /dev/shm is 64 MiB by default -- far too small
+    # for the per-cycle stores (a memmap fill that exhausts it dies with
+    # SIGBUS, not an exception).  tmpfs pages count against the service
+    # memory limit; raise this via an override for bigger volatile
+    # footprints.  See docs/configuration-reference.md.
+    shm_size: "2g"
     volumes:
       - librewxr-cache:/data/cache
       - earthkit-cache:/root/.cache/earthkit-regrid
@@ -119,6 +125,12 @@ services:
       # LIBREWXR_VOLATILE_CACHE_DIR: /dev/shm/librewxr
       # Prefer the gitignored docker-compose.override.yml instead: it
       # auto-merges over this file and survives `git pull` with no conflicts.
+    # The container's own /dev/shm is 64 MiB by default -- far too small
+    # for the per-cycle stores (a memmap fill that exhausts it dies with
+    # SIGBUS, not an exception).  tmpfs pages count against the service
+    # memory limit; raise this via an override for bigger volatile
+    # footprints.  See docs/configuration-reference.md.
+    shm_size: "2g"
     volumes:
       - librewxr-cache:/data/cache
       - ./logs:/logs

@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import shutil
 import tempfile
@@ -37,6 +36,7 @@ import numpy as np
 from omfiles import OmFileReader
 
 from librewxr.config import settings
+from librewxr.data.memmap_guard import atomic_memmap_write
 from librewxr.sources.regional.north_america.usa.nwp.hrrr.grid import compute_snow_mask
 
 logger = logging.getLogger(__name__)
@@ -302,14 +302,11 @@ class JMAMSMGrid:
         return self._memmap_dir / f"r{run_ts}_l{lead_seconds}_snow.dat"
 
     def _to_memmap(self, name: str, data: np.ndarray) -> np.ndarray:
-        final = self._memmap_dir / f"{name}.dat"
-        tmp = final.with_suffix(".dat.tmp")
-        mm = np.memmap(tmp, dtype=data.dtype, mode="w+", shape=data.shape)
-        mm[:] = data
-        mm.flush()
-        del mm
-        os.replace(tmp, final)
-        return np.memmap(final, dtype=data.dtype, mode="r", shape=data.shape)
+        return atomic_memmap_write(
+            self._memmap_dir / f"{name}.dat",
+            data,
+            what=f"{type(self).__name__} {name}",
+        )
 
     def _load_cached_frames(self) -> None:
         for path in self._memmap_dir.glob("*.tmp"):

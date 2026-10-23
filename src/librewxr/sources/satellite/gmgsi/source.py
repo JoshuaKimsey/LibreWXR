@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,6 +32,7 @@ import numpy as np
 import xarray as xr
 
 from librewxr.config import settings
+from librewxr.data.memmap_guard import atomic_memmap_write
 from librewxr.sources._helpers import HDF5_LOCK
 
 logger = logging.getLogger(__name__)
@@ -485,13 +485,19 @@ class GMGSISource:
         return self._channel_cache_dir / f"frame_{unix_ts}.dat"
 
     def _write_cache(self, unix_ts: int, arr: np.ndarray) -> None:
-        final = self._cache_path_for(unix_ts)
-        tmp = final.with_suffix(".dat.tmp")
-        mm = np.memmap(tmp, dtype=GRID_DTYPE, mode="w+", shape=GRID_SHAPE)
-        mm[:] = arr
-        mm.flush()
-        del mm
-        os.replace(tmp, final)
+        data = np.ascontiguousarray(arr, dtype=GRID_DTYPE)
+        if data.shape != GRID_SHAPE:
+            # The reader memmaps with GRID_SHAPE, so publishing a file of
+            # any other size would just fail on the next process's read.
+            raise ValueError(
+                f"GMGSI cache write for {unix_ts}: shape {data.shape} "
+                f"does not match {GRID_SHAPE}"
+            )
+        atomic_memmap_write(
+            self._cache_path_for(unix_ts),
+            data,
+            what=f"GMGSI {self.friendly_name} scene {unix_ts}",
+        )
 
     def _read_cache(self, unix_ts: int) -> np.ndarray | None:
         path = self._cache_path_for(unix_ts)

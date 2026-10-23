@@ -49,7 +49,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import shutil
 import tempfile
@@ -63,6 +62,7 @@ import httpx
 import numpy as np
 
 from librewxr.config import settings
+from librewxr.data.memmap_guard import atomic_memmap_write
 from librewxr.data.retry import retry_sync
 from librewxr.sources._helpers import HDF5_LOCK
 
@@ -117,6 +117,23 @@ RRQPE_LAG_SECONDS = 3 * SCAN_INTERVAL_SECONDS
 # at startup (initial backfill + the first full cycle); collapsing the
 # second call into the first avoids a redundant S3 listing pass.
 _REFRESH_THROTTLE_SECONDS = 120
+
+
+def _history_seconds() -> int:
+    """Scan history window the scan store keeps, in seconds.
+
+    Mirrors ``RRQPESource._refresh_scans``: every slot a frame in one
+    cycle can reference after the constant shift (``max_frames``
+    intervals back), plus the match tolerance and one extra scan interval
+    so an older-neighbour fallback for the oldest frame is never evicted.
+    Used by startup rehydration so a restart re-opens exactly the window a
+    fetch pass would keep.
+    """
+    return (
+        settings.max_frames * settings.fetch_interval
+        + settings.rrqpe_match_tolerance_seconds
+        + SCAN_INTERVAL_SECONDS
+    )
 
 
 # ── Pure helpers (grid math, keys, XML) ────────────────────────────────
@@ -288,9 +305,13 @@ class RRQPEGrid:
             self._memmap_dir = Path(tempfile.mkdtemp(prefix="librewxr_rrqpe_"))
             self._persistent = False
         self._memmap_dir.mkdir(parents=True, exist_ok=True)
-        # Drop stale .tmp files from a crash mid-write.
+        # Drop stale tmp files from a crash mid-write.  The writers use
+        # pid+uuid names, so any ``*.tmp`` here is a remnant.
         for path in self._memmap_dir.glob("*.tmp"):
             path.unlink(missing_ok=True)
+        # Re-open last process's frames instead of re-downloading the whole
+        # window (~5.3 GB of .nc at the default 15-16 slots).
+        self._rehydrate()
         logger.debug(
             "RRQPE memmap directory: %s (persistent=%s, downsample=%d)",
             self._memmap_dir, self._persistent, self._downsample,
@@ -320,23 +341,82 @@ class RRQPEGrid:
 
     # ── Cache management ──────────────────────────────────────────────
 
+    def _expected_frame_nbytes(self) -> int:
+        """Byte size of one stored (uint8 encoded) scan frame."""
+        return self._rows * self._cols
+
+    def _rehydrate(self) -> None:
+        """Re-open last process's on-disk frames (persistent mode).
+
+        A restart used to re-download the whole scan window -- 15-16
+        slots, ~5.3 GB of .nc -- plus the NWP cold windows, because the
+        store never looked at the files it had already written.  Only
+        files inside the current history window and at the current frame
+        size are re-opened; anything else is stale and is dropped.
+
+        Fail-soft by design: one unreadable file must not abort the
+        constructor or the fetch loop.
+        """
+        if not self._persistent:
+            return
+
+        now = int(datetime.now(timezone.utc).timestamp())
+        window_start = (
+            now - _history_seconds() - settings.rrqpe_match_tolerance_seconds
+        )
+        expected_nbytes = self._expected_frame_nbytes()
+        shape = (self._rows, self._cols)
+        loaded = 0
+        stale_shape = 0
+        for path in self._memmap_dir.glob("*.dat"):
+            try:
+                ts = int(path.stem)
+            except ValueError:
+                continue  # not one of ours
+            if ts < window_start:
+                # Outside the window this process would serve; the next
+                # fetch pass would evict it anyway.
+                path.unlink(missing_ok=True)
+                continue
+            try:
+                if path.stat().st_size != expected_nbytes:
+                    stale_shape += 1
+                    path.unlink(missing_ok=True)
+                    continue
+                self._timesteps[ts] = np.memmap(
+                    path, dtype=np.uint8, mode="r", shape=shape,
+                )
+                loaded += 1
+            except Exception:
+                logger.debug(
+                    "RRQPE: skipping unreadable cache file %s", path, exc_info=True,
+                )
+        self._sorted_timestamps = sorted(self._timesteps)
+
+        if stale_shape:
+            logger.info(
+                "RRQPE: ignored %d cached scan(s) with a stale shape "
+                "(downsample=%d, expected %d bytes each)",
+                stale_shape, self._downsample, expected_nbytes,
+            )
+        if loaded:
+            logger.info(
+                "RRQPE: rehydrated %d scan(s) from %s (newest %s)",
+                loaded, self._memmap_dir, _fmt_slot(self._sorted_timestamps[-1]),
+            )
+
     def _to_memmap(self, name: str, data: np.ndarray) -> np.ndarray:
         """Write array to disk atomically and return a read-only memmap.
 
-        Atomic write (``.tmp`` → ``os.replace``) ensures readers in other
-        processes never see a half-written file.  The scan store is
-        fetch-side only (radar frames flow through the FrameStore), but
-        the atomic write pattern is kept for consistency with the rest of
-        the project's memmap usage.
+        Delegates to :func:`atomic_memmap_write` (space pre-flight +
+        pid+uuid tmp + ``os.replace``), so a full tmpfs raises an
+        actionable error instead of killing the process with SIGBUS.
         """
-        final = self._memmap_dir / f"{name}.dat"
-        tmp = final.with_suffix(".dat.tmp")
-        mm = np.memmap(tmp, dtype=data.dtype, mode="w+", shape=data.shape)
-        mm[:] = data
-        mm.flush()
-        del mm
-        os.replace(tmp, final)
-        return np.memmap(final, dtype=data.dtype, mode="r", shape=data.shape)
+        return atomic_memmap_write(
+            self._memmap_dir / f"{name}.dat",
+            data,
+            what=f"RRQPE scan {name}",
+        )
 
     # ── Frame → scan matching (constant shift) ────────────────────────
 
@@ -632,6 +712,19 @@ class RRQPEGrid:
                     encoded[start // factor:end // factor] = precip_rate_to_dbz_encoded(
                         downsampled, dbz_offset=dbz_offset,
                     )
+                # The internal checks above only prove the file is
+                # self-consistent.  An upstream product with different
+                # Rows/Columns (a regional file slipping into the GLB-5
+                # listing, a grid change) would otherwise be stored at the
+                # wrong shape and served as garbage coverage.
+                expected = (self._rows, self._cols)
+                if encoded.shape != expected:
+                    logger.warning(
+                        "RRQPE: decoded frame shape %s does not match the "
+                        "expected %s at downsample=%d; rejecting",
+                        encoded.shape, expected, factor,
+                    )
+                    return None
                 return encoded
             finally:
                 with HDF5_LOCK:

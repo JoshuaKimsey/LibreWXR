@@ -10,6 +10,8 @@ from pathlib import Path
 
 import numpy as np
 
+from librewxr.data.memmap_guard import atomic_memmap_write
+
 logger = logging.getLogger(__name__)
 
 
@@ -65,17 +67,15 @@ class FrameStore:
     def _to_memmap(self, timestamp: int, region_name: str, data: np.ndarray) -> np.ndarray:
         """Write array to disk atomically and return a read-only memory-mapped view.
 
-        Atomic write (.tmp → os.replace) ensures readers in other processes
-        never see a half-written file — required for multi-worker safety.
+        Atomic write (pid+uuid .tmp → os.replace) ensures readers in other
+        processes never see a half-written file — required for multi-worker
+        safety.
         """
-        final = self._memmap_dir / f"{timestamp}_{region_name}.dat"
-        tmp = final.with_suffix(".dat.tmp")
-        mm = np.memmap(tmp, dtype=data.dtype, mode="w+", shape=data.shape)
-        mm[:] = data
-        mm.flush()
-        del mm
-        os.replace(tmp, final)
-        return np.memmap(final, dtype=data.dtype, mode="r", shape=data.shape)
+        return atomic_memmap_write(
+            self._memmap_dir / f"{timestamp}_{region_name}.dat",
+            data,
+            what=f"radar frame {timestamp}/{region_name}",
+        )
 
     def _cleanup_timestamp(self, timestamp: int) -> None:
         """Delete memmap files for an evicted timestamp."""

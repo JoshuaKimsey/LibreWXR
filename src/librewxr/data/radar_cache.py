@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
+from librewxr.data.memmap_guard import atomic_memmap_write
 from librewxr.data.regions import RegionDef
 from librewxr.data.store import RadarFrame
 
@@ -79,13 +80,11 @@ class RadarFrameCache:
     ) -> None:
         if data.dtype != DTYPE:
             data = data.astype(DTYPE, copy=False)
-        final = self._file_path(unix_ts, region_name)
-        tmp = final.with_suffix(".dat.tmp")
-        mm = np.memmap(tmp, dtype=DTYPE, mode="w+", shape=data.shape)
-        mm[:] = data
-        mm.flush()
-        del mm
-        os.replace(tmp, final)
+        atomic_memmap_write(
+            self._file_path(unix_ts, region_name),
+            data,
+            what=f"radar cache {unix_ts}/{region_name}",
+        )
 
     def load_frames(
         self, regions: dict[str, RegionDef]

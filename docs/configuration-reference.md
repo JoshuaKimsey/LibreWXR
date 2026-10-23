@@ -1599,7 +1599,9 @@ services:
 
 Set `LIBREWXR_VOLATILE_CACHE_DIR=/dev/shm/librewxr` once in the shared `.env` (compose's `env_file` feeds **both** services from it) - or in an override `environment:` block on each service, which takes precedence over `env_file`.
 
-Host prep: `/dev/shm` defaults to half of host RAM - check `df -h /dev/shm` against the sizing figures above before enabling.
+Host prep: the **host** `/dev/shm` defaults to half of host RAM — check `df -h /dev/shm` against the sizing figures above before enabling. Using the container's own `/dev/shm` is a different story: Docker gives every container a **64 MiB** `/dev/shm` by default, and the host's `df -h /dev/shm` says nothing about it. `docker-compose.yml` now sets `shm_size: "2g"` on both services; read the real figure with `docker compose exec pipeline df -h /dev/shm` and raise it via an override for bigger volatile footprints.
+
+An undersized (or unbacked) volatile directory can surface as a fatal `SIGBUS` mid-write: a memmap fill faults its pages in, and the kernel turns an out-of-space fault into a signal no Python handler can catch, so the pipeline process disappears instead of raising. The memmap writers now pre-flight the free space and raise an actionable `RuntimeError` (naming the directory, the free and needed bytes, and the fix) whenever the shortfall is detectable before the write.
 
 The example is deliberately minimal - an override file can carry any other host-specific deltas alongside (thread caps, cache re-binds, tunnels); the two volume lines are all the volatile routing itself needs.
 
@@ -1610,7 +1612,7 @@ The example is deliberately minimal - an override file can carry any other host-
 - **masks**: ~0.26 MB x (`max_frames` + `nowcast_frames`).
 - **storm cells**: ~9 KB per region.
 
-Recommend at least **1 GB** of headroom for single-region deployments, more for global ones. tmpfs pages count against the container memory limit, so leave room in `LIBREWXR_PIPELINE_MEMORY` / `LIBREWXR_RENDER_MEMORY` (or the host RAM) for the store contents.
+Recommend **2 GB** of headroom for a global deployment: the real footprint lands around 1.2-1.5 GB, and the writers require ~10% slack on top of each payload before starting. Single-region deployments need less. tmpfs pages count against the container memory limit, so leave room in `LIBREWXR_PIPELINE_MEMORY` / `LIBREWXR_RENDER_MEMORY` (or the host RAM) for the store contents.
 
 ---
 
