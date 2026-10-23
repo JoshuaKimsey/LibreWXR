@@ -148,12 +148,14 @@ Returns weather alerts (WMO CAP format) active within a given radius of a point.
 | `certainty` | string | One of `Observed`, `Likely`, `Possible`, `Unlikely`, `Unknown` |
 | `onset` | string | ISO 8601 start time |
 | `expires` | string | ISO 8601 expiry time |
-| `polygon` | list[list[float]] | `None` or a list of `[lon, lat]` coordinate pairs forming the alert polygon |
+| `polygon` | list[list[float]] \| dict | `None`, or the alert geometry — a `Polygon`'s list of `[lon, lat]` rings, or a GeoJSON `MultiPolygon` whose coordinates nest one level deeper for merged alerts |
+| `regions` | list[string] | Affected area names; for a merged alert this is a single semicolon-joined `areaDesc` string |
 | `sender_name` | string | Human-readable name of the issuing agency |
 
 **Behaviour:**
 
 - US zone-based alerts (e.g. Tornado Watches) are resolved to zone polygons at ingest, so the lookup never queries NWS at request time. These appear in the FeatureCollection with their NWS-sourced properties.
+- National area codes are resolved at ingest through the geocode tables (MeteoAlarm EMMA_ID/NUTS2/NUTS3 for Europe, DWD warn cells for Germany, BoM AAC areas for Australia), and each CAP `<info>` is stored as one merged alert: a single `Polygon`, or a `MultiPolygon` when its areas do not form one part. See [docs/alerts.md](alerts.md) for the table registry and entry semantics.
 - Returns an **empty FeatureCollection** (`{"type": "FeatureCollection", "features": []}`) when alerts are disabled by configuration (`LIBREWXR_ALERTS_ENABLED=false`) or when no alerts match the query.
 - Never raises — invalid coordinates, network errors on the upstream API, or missing alert data all result in an empty FeatureCollection.
 

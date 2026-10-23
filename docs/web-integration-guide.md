@@ -232,7 +232,7 @@ GET /v2/alerts?lat={lat}&lon={lon}
 GET /v2/alerts?bbox=west,south,east,north
 ```
 
-Returns active weather alerts as a GeoJSON `FeatureCollection`. Each feature carries the alert polygon plus CAP metadata in its `properties`. The data source is the WMO CAP feed at severeweather.wmo.int (global) plus the NWS API (US, direct); US zone-based alerts like Tornado Watches are resolved to zone polygons at ingest, so every alert carries a geometry.
+Returns active weather alerts as a GeoJSON `FeatureCollection`. Each feature carries the alert geometry (`Polygon`, or `MultiPolygon` for a merged alert whose areas do not form one part) plus CAP metadata in its `properties`. The data source is the WMO CAP feed at severeweather.wmo.int -- each agency's own declared CAP feed, RSS 2.0 or Atom -- plus the NWS API (US, direct), with national area codes resolved through geocode tables and US zone-based alerts like Tornado Watches resolved to zone polygons at ingest, so every alert carries a geometry.
 
 **Query parameters:**
 
@@ -281,7 +281,11 @@ Simplification only affects the geometry in the response — point/bbox filterin
 }
 ```
 
-The `severity` field follows the CAP 1.2 vocabulary (`Extreme` / `Severe` / `Moderate` / `Minor` / `Unknown`), which is convenient for styling — colour polygons by severity and let users filter on it. `time` and `expires` are Unix epochs; `regions` lists the affected area names, and `uri` links to the full alert text.
+The example above shows a single `Polygon`. A merged alert whose areas do not form one part ships a `MultiPolygon` instead, whose `coordinates` nest one level deeper (a list of polygons, each a list of rings).
+
+The `severity` field follows the CAP 1.2 vocabulary (`Extreme` / `Severe` / `Moderate` / `Minor` / `Unknown`), which is convenient for styling — colour polygons by severity and let users filter on it. `time` and `expires` are Unix epochs; `regions` lists the affected area names — for a merged alert that is one semicolon-joined `areaDesc` string — and `uri` links to the full alert text.
+
+See [docs/alerts.md](alerts.md) for the ingest pipeline, the geocode-table registry, and the per-`<info>` entry semantics behind this response.
 
 ### Storm Cells Endpoint
 
@@ -784,7 +788,7 @@ map.on("click", async function (e) {
 });
 ```
 
-US zone-based alerts (e.g., Tornado Watches) are resolved to zone polygons at ingest, so point lookups see them like any polygon alert. Outside the US the response is polygon-only from the WMO feed.
+US zone-based alerts (e.g., Tornado Watches) are resolved to zone polygons at ingest, so point lookups see them like any polygon alert. Elsewhere, coverage comes from the national geocode tables — MeteoAlarm regions across Europe, DWD warn cells in Germany, BoM AAC areas in Australia — and an area whose code no table resolves is dropped rather than guessed. See [docs/alerts.md](alerts.md) for the ingest and table details.
 
 **Layer order:** Add alerts *after* radar/satellite so the polygons sit on top. Use a low fill opacity (~0.15) so radar remains visible beneath the alert area.
 

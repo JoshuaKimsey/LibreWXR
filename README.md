@@ -56,7 +56,7 @@ Beyond compatibility, the goal is a far more customizable API backend for self-h
 - **Precipitation nowcasting (experimental)** — 60-minute short-range forecast by extrapolating recent radar forward using optical flow, with configurable blend mode: smooth radar-to-model blending (default), pure radar extrapolation (closest to Rain Viewer), or pure NWP forecast. The model side is taken from the active NWP chain — HRRR over CONUS, ICON-EU/DINI over Europe, WRF-SMN over the S. American Cone, JMA MSM over Japan + adjacent East Asia, IFS elsewhere. Beyond 60 minutes, always uses pure model. Quality varies by weather pattern — works best for steady, organized precipitation; less reliable for fast-developing convection
 - **Precipitation motion arrows** — optional Dark Sky-style arrows showing storm movement direction and speed, derived from optical flow. Available for both radar and ECMWF data globally. Supports light and dark styles for different map themes via `?arrows=light` or `?arrows=dark` query parameter
 - **Real satellite imagery (GMGSI composite)** — NOAA's hourly global mosaic (GOES-East + GOES-West + Meteosat-9 + Meteosat-10 + Himawari-9, composited by NESDIS) ingested as longwave IR + visible channels and rendered as a VIS-over-LW composite with a natural day/night terminator crossfade. Day side shows continents and clouds as they appear from space; night side shows cold-cloud IR on a transparent basemap. Up to 12 hours of hourly animation with persistent disk caching. Populates the Rain Viewer-compatible `satellite.infrared` endpoint
-- **Weather alerts (WMO CAP + NWS)** — global weather alerts polled every 5 minutes from severeweather.wmo.int, with MeteoAlarm geocodes for European polygon resolution. US alerts come directly from the NWS API, with zone-based alerts (e.g. Tornado Watches) resolved to zone polygons at ingest. Surfaced through a Rain Viewer-extension alerts API (`/v2/alerts`). Configurable via `LIBREWXR_ALERTS_ENABLED`
+- **Weather alerts (WMO CAP + NWS)** — global weather alerts polled every 5 minutes from severeweather.wmo.int, fetching each agency's own declared CAP feed (RSS 2.0 or Atom) and resolving national area codes through geocode tables — MeteoAlarm EMMA_ID/NUTS2/NUTS3 regions for Europe, DWD warn cells for Germany, BoM AAC areas for Australia. US alerts come directly from the NWS API, with zone-based alerts (e.g. Tornado Watches) resolved to zone polygons at ingest. Surfaced through a Rain Viewer-extension alerts API (`/v2/alerts`); see [Weather Alerts](docs/alerts.md). Configurable via `LIBREWXR_ALERTS_ENABLED`
 - **Snow detection** — per-pixel snow/rain classification. Regional NWP sources classify natively from their own 2-metre temperature field (HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, ICON-EU, JMA MSM); ECMWF IFS snowfall ratio fills everywhere else
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
 - **Pipeline + render-worker architecture** — a data pipeline process fetches all radar / NWP / satellite / alerts / lightning data while one or more render workers serve tiles from a shared memmap snapshot. Split across processes so every core can render in parallel instead of being GIL-bound at one. `COMPOSE_PROFILES=multi` is the shipped default; a legacy `single` profile maps to one render worker with the legacy-single defaults
@@ -354,7 +354,7 @@ GET /v2/alerts?lat={lat}&lon={lon}
 GET /v2/alerts?bbox=west,south,east,north
 ```
 
-Returns active weather alerts as a GeoJSON `FeatureCollection` carrying the alert polygon plus CAP metadata (severity, urgency, certainty, event, headline, sender, expiry) — fed by the WMO CAP feed (global) and the NWS API (US direct), with US zone-based alerts (e.g. Tornado Watches) resolved to zone polygons at ingest. Point queries (`lat`/`lon`) return containing alerts; `bbox=W,S,E,N` returns intersecting alerts; `simplify` sets polygon simplification in meters (default 1000, `0` = full resolution). Returns `503` if `LIBREWXR_ALERTS_ENABLED=false`.
+Returns active weather alerts as a GeoJSON `FeatureCollection`. Each feature carries a `Polygon` or a `MultiPolygon` geometry (merged alerts whose areas do not form one part), with `title`, `severity`, `time`, `expires`, `description`, `regions` (the semicolon-joined area descriptions of the merged alert) and `uri` properties — fed by the WMO CAP feed (global, per-agency RSS 2.0 / Atom feeds) and the NWS API (US direct), with national area codes resolved through geocode tables and US zone-based alerts (e.g. Tornado Watches) resolved to zone polygons at ingest. Point queries (`lat`/`lon`) return containing alerts; `bbox=W,S,E,N` returns intersecting alerts; `simplify` sets polygon simplification in meters (default 1000, `0` = full resolution). Returns `503` if `LIBREWXR_ALERTS_ENABLED=false`. See [Weather Alerts](docs/alerts.md).
 
 #### Storm Cells (LibreWXR extension)
 
@@ -508,7 +508,7 @@ an 80-core / 32 GB rack: ~16 GB total RSS, all cores active under load.
    (hourly global mosaic)                (atomic writes)│
                                                        │
 [WMO CAP] ───────> [Alert Store] ──────────────────────┤
-   (severeweather.wmo.int + MeteoAlarm geocodes)
+   (per-agency feeds + MeteoAlarm / DWD / BoM geocodes)
                                                        │
 [GOES GLM] ──────> [Lightning Store] ──────────────────┘
    (NOAA NODD S3, clock-aligned 5-min loop)
@@ -583,7 +583,7 @@ Layered ahead of IFS via specificity-first dispatch (see the [Regional NWP chain
 
 ### Weather alerts
 
-- **WMO CAP** at [severeweather.wmo.int](https://severeweather.wmo.int/) — global weather alerts with MeteoAlarm geocodes for European polygon resolution. Updates every 5 minutes; surfaced through a Rain Viewer-extension alerts API.
+- **WMO CAP** at [severeweather.wmo.int](https://severeweather.wmo.int/) — global weather alerts read from each agency's declared CAP feed (RSS 2.0 or Atom), every 5 minutes. National area codes resolve through geocode tables: MeteoAlarm EMMA_ID/NUTS2/NUTS3 regions for Europe (Pirate Weather's derived tables), DWD Warngebiete warn cells for Germany (© Deutscher Wetterdienst, CC BY 4.0; underlying geometry © GeoBasis-DE / BKG 2021, Daten modifiziert), and BoM AMOC/AAC areas for Australia (© Commonwealth of Australia, Bureau of Meteorology, CC BY 4.0). Surfaced through a Rain Viewer-extension alerts API; see [docs/alerts.md](docs/alerts.md).
 
 ## Examples
 

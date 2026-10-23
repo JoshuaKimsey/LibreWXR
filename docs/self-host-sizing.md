@@ -54,6 +54,17 @@ tile traffic without a CDN in front. Scale vertically: the designed
 shape is one pipeline writer plus N render workers per host - not
 multi-node.
 
+## Weather Alerts Footprint
+
+Weather alerts add a small, fixed footprint next to radar and NWP:
+
+| Item | Cost |
+|---|---|
+| Geocode tables (MeteoAlarm, DWD Warngebiete, BoM AAC) | ~67 MB one-time download, cached under `<cache_dir>/alerts/` |
+| Table memory | resident in the pipeline process only -- render workers never load a table |
+| Alerts slice of `state.json` | roughly 20-25 MB at current global activity |
+| Ingest cadence | one clock-aligned fetch cycle per 300 s (`LIBREWXR_ALERTS_FETCH_INTERVAL`) |
+
 ## Frame Memory per Region
 
 Each enabled radar region keeps `LIBREWXR_MAX_FRAMES` frames (default 12)
