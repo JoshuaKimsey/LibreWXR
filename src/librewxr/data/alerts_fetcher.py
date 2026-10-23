@@ -2,7 +2,6 @@
 # Copyright (C) 2026 Joshua Kimsey
 
 import asyncio
-import csv
 import json
 import logging
 import os
@@ -16,6 +15,12 @@ from shapely.geometry import Polygon, shape
 from shapely.ops import unary_union
 
 from librewxr.config import settings
+from librewxr.data.alert_geocodes import (
+    GeocodeProvider,
+    build_default_providers,
+    ensure_loaded,
+    resolve,
+)
 from librewxr.data.alerts_store import AlertEntry, AlertsStore
 from librewxr.data.retry import retry_get
 
@@ -57,19 +62,14 @@ _EXCLUDED_SOURCE_IDS = frozenset({
     "mv-ndmc-en",
     "us-noaa-nws-en-marine",
     "us-noaa-nws-en",  # handled directly via NWS API
+    # China CMA: excluded for volume/shape, not data quality. Largest source on
+    # the hub (~21% of active items), but its CAPs carry no <polygon>/<circle>
+    # and only "CPEAS" 12-digit admin codes this parser cannot resolve, plus
+    # dual-language (en + zh) info blocks -- so every alert would be downloaded
+    # and then discarded. Revisit once a CPEAS geocode resolver exists.
     "cn-cma-xx",
     "mo-smg-xx",
 })
-
-# MeteoAlarm data URLs (Pirate Weather's GitHub repo, dev branch)
-_METEOALARM_GEOJSON_URL = (
-    "https://raw.githubusercontent.com/Pirate-Weather/"
-    "pirate-weather-code/dev/API/data/meteoalarm_geocodes.json"
-)
-_METEOALARM_ALIASES_URL = (
-    "https://raw.githubusercontent.com/Pirate-Weather/"
-    "pirate-weather-code/dev/API/data/meteoalarm_aliases.csv"
-)
 
 
 # ---------------------------------------------------------------------------
@@ -87,13 +87,14 @@ def _extract_polygons_from_cap(
     cap_xml: str,
     source_id: str,
     cap_url: str,
-    meteoalarm: Optional[dict[str, Polygon]] = None,
+    resolvers: list[GeocodeProvider],
 ) -> list[AlertEntry]:
     """Parse CAP XML and return a list of AlertEntry objects.
 
     Adapted from Pirate Weather's WMO_Alerts_Local.py.
     Handles CAP 1.1/1.2 namespaces, duplicate-language skipping,
-    polygon extraction, and EMMA_ID → polygon conversion.
+    polygon extraction, and geocode -> polygon conversion via the
+    registered ``resolvers`` tables.
     """
     results: list[AlertEntry] = []
     try:
@@ -208,17 +209,14 @@ def _extract_polygons_from_cap(
                         logger.warning("Polygon construction failed for %s: %s", source_id, exc)
                         continue
 
-            # If no polygon but geocode exists, try to resolve via meteoalarm
+            # If no polygon but geocode exists, try the resolver tables
             if not has_polygon:
                 for geocode_name, geocode_value in geocode_entries:
                     if not geocode_name or not geocode_value:
                         continue
-                    poly: Optional[Polygon] = None
-                    if (
-                        geocode_name.upper() in ("EMMA_ID", "NUTS3")
-                        and meteoalarm is not None
-                    ):
-                        poly = meteoalarm.get(geocode_value)
+                    poly: Optional[Polygon] = resolve(
+                        resolvers, geocode_name, geocode_value
+                    )
                     if poly is not None:
                         results.append(
                             AlertEntry(
@@ -235,11 +233,11 @@ def _extract_polygons_from_cap(
                         )
 
         # Fully-processed <info> that produced no entry (no usable <polygon>
-        # and no EMMA_ID/NUTS3 geocode resolved) is dropped — surface it at
+        # and no resolvable geocode) is dropped — surface it at
         # DEBUG so dropped alerts are discoverable.
         if len(results) == n_before:
             logger.debug(
-                "Dropped CAP alert for %s: no usable polygon or EMMA_ID/NUTS3 "
+                "Dropped CAP alert for %s: no usable polygon or resolvable "
                 "geocode (event=%r headline=%r)",
                 source_id,
                 event or "",
@@ -250,65 +248,113 @@ def _extract_polygons_from_cap(
 
 
 # ---------------------------------------------------------------------------
-# MeteoAlarm helpers
+# Feed helpers
 # ---------------------------------------------------------------------------
 
-def _parse_meteoalarm_geojson(path: str) -> dict[str, Polygon]:
-    """Parse MeteoAlarm geocodes GeoJSON into {EMMA_ID: Polygon} dict."""
-    geocodes: dict[str, Polygon] = {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        for feature in data.get("features", []):
-            props = feature.get("properties", {})
-            code = str(props.get("code", "")).strip().upper()
-            geom = feature.get("geometry")
-            if code and geom:
-                try:
-                    poly = shape(geom)
-                    if poly.is_valid:
-                        geocodes[code] = poly
-                except Exception:
-                    continue
-    except Exception as exc:
-        logger.warning("Failed to parse MeteoAlarm geocodes: %s", exc)
-    return geocodes
+# CAP 1.2 XML namespace, used by the ``cap:identifier`` element some Atom
+# feeds (MeteoAlarm) carry alongside the plain Atom ``<id>``.
+_CAP_XML_NS = "urn:oasis:names:tc:emergency:cap:1.2"
 
 
-def _apply_meteoalarm_aliases(
-    geocodes: dict[str, Polygon], alias_csv_path: str
-) -> dict[str, Polygon]:
-    """Duplicate polygon entries for aliased EMMA_ID codes."""
-    try:
-        with open(alias_csv_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                code = str(row.get("CODE", "")).strip().upper()
-                alias = str(row.get("ALIAS_CODE", "")).strip().upper()
-                if code and alias and code in geocodes and alias not in geocodes:
-                    geocodes[alias] = geocodes[code]
-    except Exception as exc:
-        logger.warning("Failed to apply MeteoAlarm aliases: %s", exc)
-    return geocodes
+def _normalize_alert_id(value: str) -> str:
+    """Strip the ``urn:oid:`` prefix the hub applies inconsistently.
+
+    ``wmo_all.json`` mixes ``urn:oid:2.49...`` and bare ``2.49...`` CAP
+    identifiers, and feeds repeat whichever form they happen to publish,
+    so every id is compared prefix-free.
+    """
+    return value.strip().removeprefix("urn:oid:")
 
 
-# ---------------------------------------------------------------------------
-# RSS helpers
-# ---------------------------------------------------------------------------
+def _local_name(tag: object) -> str:
+    """Local part of a (possibly namespaced) lxml tag."""
+    if not isinstance(tag, str):
+        return ""
+    return tag.rsplit("}", 1)[-1]
+
+
+def _child_text(elem: etree._Element, localname: str) -> str:
+    """Text of the first direct child whose tag local name matches."""
+    for child in elem:
+        if _local_name(child.tag) == localname:
+            return (child.text or "").strip()
+    return ""
+
+
+def _is_cap_identifier(tag: object) -> bool:
+    """True for ``cap:identifier`` under any prefix (or no prefix)."""
+    if not isinstance(tag, str):
+        return False
+    if not tag.startswith("{"):
+        return _local_name(tag) == "identifier"
+    ns = tag[1:].split("}", 1)[0]
+    return ns == _CAP_XML_NS and _local_name(tag) == "identifier"
+
 
 def _rss_item_links(feed_bytes: bytes) -> list[tuple[str, Optional[str]]]:
-    """Extract (link, guid) tuples from RSS feed bytes."""
+    """Extract (CAP-doc-href, identifier-candidate) tuples from feed bytes.
+
+    Handles both RSS 2.0 (``<channel>`` / ``<item>``) and Atom
+    (``<feed>`` / ``<entry>``) feeds -- WMO agencies publish both.  Tags are
+    matched by local name so default namespaces, a ``cap:`` prefix, and
+    unprefixed feeds all parse the same way.
+    """
     try:
         root = etree.fromstring(feed_bytes)
     except etree.XMLSyntaxError:
         return []
+
     out: list[tuple[str, Optional[str]]] = []
-    channel = root.find("channel")
+
+    if _local_name(root.tag) == "feed":
+        for entry in root:
+            if _local_name(entry.tag) != "entry":
+                continue
+            links: list[tuple[str, str]] = []
+            cap_identifier: Optional[str] = None
+            entry_id: Optional[str] = None
+            for child in entry:
+                if _local_name(child.tag) == "link":
+                    href = (child.get("href") or "").strip()
+                    if href:
+                        links.append((href, (child.get("type") or "").lower()))
+                elif _is_cap_identifier(child.tag) and cap_identifier is None:
+                    cap_identifier = (child.text or "").strip() or None
+                elif _local_name(child.tag) == "id" and entry_id is None:
+                    entry_id = (child.text or "").strip() or None
+
+            # Prefer the declared CAP document link; then any .xml href; the
+            # entry id is the last resort.  This ordering is what keeps the
+            # decoy MeteoAlarm geocode/region links out.
+            chosen: Optional[str] = None
+            for href, link_type in links:
+                if "cap+xml" in link_type:
+                    chosen = href
+                    break
+            if chosen is None:
+                for href, _link_type in links:
+                    if href.split("?", 1)[0].lower().endswith(".xml"):
+                        chosen = href
+                        break
+            if chosen is None:
+                chosen = entry_id
+            if not chosen:
+                continue
+            out.append((chosen, cap_identifier or entry_id or chosen))
+        return out
+
+    channel = None
+    for child in root:
+        if _local_name(child.tag) == "channel":
+            channel = child
+            break
     if channel is None:
         return out
-    for item in channel.findall("item"):
-        link = (item.findtext("link") or "").strip()
-        guid = (item.findtext("guid") or "").strip() or None
+    for item in channel:
+        if _local_name(item.tag) != "item":
+            continue
+        link = _child_text(item, "link")
+        guid = _child_text(item, "guid") or None
         if link:
             out.append((link, guid))
     return out
@@ -494,8 +540,8 @@ class WMOAlertsFetcher:
         self._concurrency = concurrency
         self._client: Optional[httpx.AsyncClient] = None
         self._task: Optional[asyncio.Task] = None
-        self._meteoalarm: dict[str, Polygon] = {}
-        self._meteoalarm_ready = asyncio.Event()
+        self._geocode_providers = build_default_providers()
+        self._tables_ready = asyncio.Event()
         self._cache_dir = Path(cache_dir) if cache_dir else None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -508,49 +554,40 @@ class WMOAlertsFetcher:
                 limits=limits,
                 timeout=self._timeout,
                 headers={"User-Agent": _USER_AGENT},
+                # Some agency CAP feeds 301 to a www-canonical host, and this
+                # module only issues GETs, so following redirects is safe.
+                follow_redirects=True,
             )
         return self._client
 
-    async def _ensure_meteoalarm_data(self) -> None:
-        """Download or load cached MeteoAlarm geocodes + aliases."""
-        if self._cache_dir is not None:
-            cache_subdir = self._cache_dir / "alerts"
-            cache_subdir.mkdir(parents=True, exist_ok=True)
-            geojson_path = cache_subdir / "meteoalarm_geocodes.json"
-            aliases_path = cache_subdir / "meteoalarm_aliases.csv"
-        else:
-            import tempfile
-            tmp = Path(tempfile.gettempdir()) / "librewxr_alerts"
-            tmp.mkdir(parents=True, exist_ok=True)
-            geojson_path = tmp / "meteoalarm_geocodes.json"
-            aliases_path = tmp / "meteoalarm_aliases.csv"
+    async def _ensure_geocode_tables(self) -> None:
+        """Load every registered geocode table (cache-dir backed).
 
-        # Download if not cached
-        if not geojson_path.exists():
-            logger.info("Downloading MeteoAlarm geocodes (~33 MB)...")
-            await self._download_file(_METEOALARM_GEOJSON_URL, str(geojson_path))
-        if not aliases_path.exists():
-            logger.info("Downloading MeteoAlarm aliases...")
-            await self._download_file(_METEOALARM_ALIASES_URL, str(aliases_path))
-
-        # Parse
-        logger.info("Loading MeteoAlarm geocodes...")
-        geocodes = _parse_meteoalarm_geojson(str(geojson_path))
-        geocodes = _apply_meteoalarm_aliases(geocodes, str(aliases_path))
-        self._meteoalarm = geocodes
-        self._meteoalarm_ready.set()
-        logger.info("MeteoAlarm ready: %d region polygons", len(self._meteoalarm))
-
-    async def _download_file(self, url: str, dest: str) -> None:
+        Each provider is loaded independently: one broken table is logged and
+        skipped so the remaining tables -- and the alerts cycle -- keep
+        working.
+        """
         client = await self._get_client()
-        resp = await retry_get(client, url, log_name="meteoalarm")
-        if resp is None or resp.status_code != 200:
-            raise RuntimeError(f"Failed to download {url}")
-        with open(dest, "wb") as f:
-            f.write(resp.content)
+        cache_base = self._alerts_cache_base()
+        for provider in self._geocode_providers:
+            try:
+                await ensure_loaded(provider, client, cache_base)
+            except Exception as exc:
+                logger.warning(
+                    "Geocode table %s failed to load: %s", provider.name, exc
+                )
+                continue
+            logger.info(
+                "Geocode table %s ready: %d polygons",
+                provider.name,
+                len(provider.polygons),
+            )
+        total = sum(len(p.polygons) for p in self._geocode_providers)
+        self._tables_ready.set()
+        logger.info("Geocode tables ready: %d polygons total", total)
 
     def _alerts_cache_base(self) -> Path:
-        """Cache base shared with ``_ensure_meteoalarm_data`` (same fallback).
+        """Cache base shared with ``_ensure_geocode_tables`` (same fallback).
 
         Multi mode: the pipeline process owns the fetcher, so this disk
         cache has exactly one writer.
@@ -744,8 +781,13 @@ class WMOAlertsFetcher:
         wmo_all_data = resp.json()
         wmo_all_items = wmo_all_data.get("items", [])
 
-        # Build set of current alert IDs
-        current_ids = {item.get("id") for item in wmo_all_items if item.get("id")}
+        # Build set of current alert IDs (normalized: the hub mixes
+        # ``urn:oid:``-prefixed and bare CAP identifiers)
+        current_ids = {
+            _normalize_alert_id(item["id"])
+            for item in wmo_all_items
+            if item.get("id")
+        }
         current_agencies = set()
         for record in wmo_all_items:
             cap_url = record.get("capURL", "") or ""
@@ -754,6 +796,15 @@ class WMOAlertsFetcher:
                 current_agencies.add(cap_url.split("/")[0])
             elif url:
                 current_agencies.add(url.split("/")[0])
+
+        # Agency families: sources.json sourceIds drift on the language
+        # suffix (``de-dwd-en`` vs the hub's ``de-dwd-de``), so match on
+        # (authorityCountry, authorityAbbrev) as a fallback.
+        current_families: set[tuple[str, str]] = set()
+        for segment in current_agencies:
+            parts = segment.split("-")
+            if len(parts) >= 2:
+                current_families.add((parts[0], parts[1]))
 
         # Filter operating sources
         source_ids: list[str] = []
@@ -765,33 +816,74 @@ class WMOAlertsFetcher:
                 continue
             if sid in _EXCLUDED_SOURCE_IDS:
                 continue
-            if sid in current_agencies:
+            country = src.get("authorityCountry")
+            abbrev = src.get("authorityAbbrev")
+            family = (country, abbrev) if country and abbrev else None
+            if sid in current_agencies or (
+                family is not None and family in current_families
+            ):
                 source_ids.append(sid)
 
         logger.debug("Fetching alerts from %d WMO sources", len(source_ids))
 
-        # 3. Fetch RSS feeds and CAP XMLs
+        # 3. Fetch feeds and CAP XMLs
+        # Per-agency feed URLs come from sources.json; a comma-separated
+        # value carries several feeds.  The legacy synthesized URL is only a
+        # fallback for agencies that declare no feed.
+        feed_urls_by_sid: dict[str, list[str]] = {}
+        for entry in sources:
+            src = entry.get("source", {})
+            sid = src.get("sourceId")
+            if not sid:
+                continue
+            declared = src.get("capAlertFeed") or ""
+            urls = [u.strip() for u in declared.split(",") if u.strip()]
+            feed_urls_by_sid[sid] = urls or [
+                f"{_WMO_BASE}/v2/cap-alerts/{sid}/rss.xml"
+            ]
+
         sem = asyncio.Semaphore(self._concurrency)
         all_alerts: list[AlertEntry] = []
+        feeds_ok = 0
+        feeds_failed = 0
+        failed_sids: list[str] = []
 
-        async def process_feed(sid: str) -> None:
-            feed_url = f"{_WMO_BASE}/v2/cap-alerts/{sid}/rss.xml"
+        def _matches_current(identifier: Optional[str]) -> bool:
+            if not identifier:
+                return False
+            nid = _normalize_alert_id(identifier)
+            if not nid:
+                return False
+            if nid in current_ids:
+                return True
+            # Bidirectional substring match: MeteoAlarm appends
+            # ``?index_info=...`` to the hub id and Jamaica embeds the hub id
+            # inside the CAP href, so neither direction alone is enough.
+            return any(nid in cid or cid in nid for cid in current_ids)
+
+        async def process_feed(sid: str, feed_url: str) -> None:
+            nonlocal feeds_ok, feeds_failed
             async with sem:
                 resp = await retry_get(client, feed_url, log_name=f"rss_{sid}")
             if resp is None or resp.status_code != 200:
+                feeds_failed += 1
+                if len(failed_sids) < 10:
+                    failed_sids.append(sid)
                 return
+            feeds_ok += 1
             feed_bytes = resp.content
             items = _rss_item_links(feed_bytes)
 
             # Filter to current alert IDs
-            filtered: list[str] = []
-            for link, guid in items:
-                if not link:
-                    continue
-                if guid and guid in current_ids:
-                    filtered.append(link)
-                elif guid and any(guid in cid for cid in current_ids):
-                    filtered.append(link)
+            filtered: list[str] = [
+                link for link, identifier in items if _matches_current(identifier)
+            ]
+            if not filtered and items:
+                # Tier 2: some agencies (e.g. INMET) publish URL guids whose
+                # scheme never matches hub ids.  Take the newest entries --
+                # feeds list newest first -- and let the serve side
+                # expiry-filter the stale ones that slip through.
+                filtered = [link for link, _identifier in items[:100] if link]
 
             # Fetch CAP XMLs concurrently per feed
             async def fetch_and_extract(cap_link: str) -> list[AlertEntry]:
@@ -800,7 +892,7 @@ class WMOAlertsFetcher:
                 if resp is None or resp.status_code != 200:
                     return []
                 return _extract_polygons_from_cap(
-                    resp.text, sid, cap_link, self._meteoalarm
+                    resp.text, sid, cap_link, self._geocode_providers
                 )
 
             tasks = [asyncio.create_task(fetch_and_extract(link)) for link in filtered]
@@ -811,28 +903,41 @@ class WMOAlertsFetcher:
                 except Exception:
                     continue
 
-        await asyncio.gather(*(process_feed(sid) for sid in source_ids))
+        await asyncio.gather(
+            *(
+                process_feed(sid, url)
+                for sid in source_ids
+                for url in feed_urls_by_sid.get(sid, [])
+            )
+        )
 
         # 4. Merge NWS results
         nws_alerts = await self._await_nws(nws_task)
         all_alerts.extend(nws_alerts)
 
         # 5. Replace store
-        self._store.replace_all(all_alerts)
+        if feeds_failed:
+            logger.warning(
+                "WMO CAP feeds failing: %d of %d feed URLs unreachable (last failures: %s)",
+                feeds_failed, feeds_ok + feeds_failed, ", ".join(dict.fromkeys(failed_sids)),
+            )
+        # Degraded store flag only when feeds were attempted and every feed
+        # URL failed -- an empty feed from a healthy agency is not a failure.
+        self._store.replace_all(
+            all_alerts, fetch_success=(feeds_ok > 0) or not source_ids
+        )
         logger.info(
-            "Alerts updated: %d total (%d WMO + %d NWS) from %d sources",
-            len(all_alerts),
-            len(all_alerts) - len(nws_alerts),
-            len(nws_alerts),
-            len(source_ids),
+            "Alerts updated: %d total (%d WMO + %d NWS) from %d/%d WMO feed URLs",
+            len(all_alerts), len(all_alerts) - len(nws_alerts), len(nws_alerts),
+            feeds_ok, feeds_ok + feeds_failed,
         )
 
     async def _fetch_loop(self) -> None:
-        """Background task: wait for meteoalarm, then fetch→sleep→repeat."""
+        """Background task: wait for geocode tables, then fetch→sleep→repeat."""
         try:
-            await self._ensure_meteoalarm_data()
+            await self._ensure_geocode_tables()
         except Exception:
-            logger.exception("Failed to load MeteoAlarm data, alerts disabled")
+            logger.exception("Failed to load geocode tables, alerts disabled")
             return
 
         # Do an initial fetch immediately

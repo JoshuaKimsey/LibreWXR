@@ -12,11 +12,21 @@ from httpx import ASGITransport, AsyncClient
 from shapely.geometry import Point, Polygon, shape
 
 from librewxr.api import routes
+from librewxr.data.alert_geocodes import (
+    GeocodeProvider,
+    _apply_meteoalarm_aliases,
+    _parse_meteoalarm_geojson,
+    build_default_providers,
+    ensure_loaded,
+    resolve,
+)
 from librewxr.data.alerts_fetcher import (
     WMOAlertsFetcher,
     _ZONE_FAILURE_TTL,
     _extract_polygons_from_cap,
+    _normalize_alert_id,
     _parse_cap_time,
+    _rss_item_links,
 )
 from librewxr.data.alerts_store import AlertEntry, AlertsStore
 from librewxr.data.store import FrameStore
@@ -474,7 +484,9 @@ class TestCAPParsing:
             </area>
           </info>
         </alert>"""
-        entries = _extract_polygons_from_cap(cap_xml, "test-source", "https://example.com/cap")
+        entries = _extract_polygons_from_cap(
+            cap_xml, "test-source", "https://example.com/cap", []
+        )
         assert len(entries) == 1
         assert entries[0].event == "Tornado Watch issued"
         assert entries[0].severity == "Extreme"
@@ -495,7 +507,7 @@ class TestCAPParsing:
             </area>
           </info>
         </alert>"""
-        entries = _extract_polygons_from_cap(cap_xml, "test", "https://example.com")
+        entries = _extract_polygons_from_cap(cap_xml, "test", "https://example.com", [])
         assert len(entries) == 0
 
     def test_extract_polygons_closed_if_needed(self):
@@ -511,7 +523,7 @@ class TestCAPParsing:
             </area>
           </info>
         </alert>"""
-        entries = _extract_polygons_from_cap(cap_xml, "test", "https://example.com")
+        entries = _extract_polygons_from_cap(cap_xml, "test", "https://example.com", [])
         assert len(entries) == 1
         # First and last should be same after auto-close
         coords = list(entries[0].polygon.exterior.coords)
@@ -871,6 +883,11 @@ _WMO_SOURCES_URL = "https://severeweather.wmo.int/json/sources.json"
 _WMO_ALL_URL = "https://severeweather.wmo.int/v2/json/wmo_all.json"
 _NWS_ACTIVE_URL = "https://api.weather.gov/alerts/active"
 
+# An agency-declared CAP feed (the shape sources.json now ships) and the
+# legacy synthesized URL the fetcher must NOT touch when a feed is declared.
+_CAP_FEED_URL = "https://cap-sources.s3.amazonaws.com/fr-meteofrance-xx/rss.xml"
+_LEGACY_FEED_URL = "https://severeweather.wmo.int/v2/cap-alerts/fr-meteofrance-xx/rss.xml"
+
 
 def _nws_poly_feature(alert_id="urn:oid:poly"):
     """NWS feature carrying inline geometry (no zone resolution needed)."""
@@ -1022,15 +1039,14 @@ class TestFetchOnceDegradedPath:
                     {"source": {
                         "sourceId": "fr-meteofrance-xx",
                         "capAlertFeedStatus": "operating",
+                        "capAlertFeed": _CAP_FEED_URL,
                     }},
                 ],
             }),
             _WMO_ALL_URL: _FakeNwsResponse(200, {
                 "items": [{"id": "wmo-alert-1", "capURL": "fr-meteofrance-xx", "url": ""}],
             }),
-            "https://severeweather.wmo.int/v2/cap-alerts/fr-meteofrance-xx/rss.xml": (
-                _FakeNwsResponse(200, content=rss.encode("utf-8"))
-            ),
+            _CAP_FEED_URL: _FakeNwsResponse(200, content=rss.encode("utf-8")),
             "https://severeweather.wmo.int/cap/fr-meteofrance-xx/1.xml": (
                 _FakeNwsResponse(200, text=cap_xml)
             ),
@@ -1038,7 +1054,8 @@ class TestFetchOnceDegradedPath:
 
     async def test_nws_failure_does_not_block_wmo_alerts(self, tmp_path):
         store = AlertsStore()
-        fetcher = self._fetcher(store, self._wmo_ok_client(), tmp_path)
+        client = self._wmo_ok_client()
+        fetcher = self._fetcher(store, client, tmp_path)
 
         async def _boom():
             raise RuntimeError("NWS API down")
@@ -1053,3 +1070,714 @@ class TestFetchOnceDegradedPath:
         assert alerts[0].source_id == "fr-meteofrance-xx"
         assert alerts[0].event == "Severe Thunderstorm Warning issued"
         assert alerts[0].polygon is not None
+        # Declared capAlertFeed wins; the legacy synthesized URL is not probed.
+        assert _CAP_FEED_URL in client.calls
+        assert _LEGACY_FEED_URL not in client.calls
+
+
+# ---------------------------------------------------------------------------
+# WMO feed ingest: per-agency capAlertFeed URLs, RSS 2.0 + Atom, id matching
+# ---------------------------------------------------------------------------
+
+_ATOM_FEED_HEADER = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<feed xmlns="http://www.w3.org/2005/Atom" '
+    'xmlns:cap="urn:oasis:names:tc:emergency:cap:1.2">'
+)
+
+
+def _atom_entry(href, *, identifier=None, entry_id=None):
+    """MeteoAlarm-shaped Atom entry, decoy geocode link first on purpose."""
+    body = "<entry>"
+    if entry_id is not None:
+        body += f"<id>{entry_id}</id>"
+    body += (
+        '<link title="MeteoAlarm" '
+        'href="https://meteoalarm.org?geocode=EMMA_ID=FR802"/>'
+    )
+    body += f'<link type="application/cap+xml" href="{href}"/>'
+    if identifier is not None:
+        body += f"<cap:identifier>{identifier}</cap:identifier>"
+    body += "</entry>"
+    return body
+
+
+def _atom_feed(entries):
+    return _ATOM_FEED_HEADER + "".join(entries) + "</feed>"
+
+
+def _sources_doc(*sources):
+    return _FakeNwsResponse(200, {"sources": [{"source": s} for s in sources]})
+
+
+def _wmo_all_doc(*items):
+    return _FakeNwsResponse(200, {"items": list(items)})
+
+
+@pytest.mark.alerts
+class TestFeedItemLinks:
+    """``_rss_item_links`` handles RSS 2.0 and Atom, namespace-robustly."""
+
+    def test_rss_item_link_and_guid(self):
+        rss = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<rss version="2.0"><channel>'
+            "<item><link>https://example.com/cap/1.xml</link>"
+            "<guid>urn:oid:2.49.0.0.76.0.1</guid></item>"
+            "<item><link>https://example.com/cap/2.xml</link></item>"
+            "<item><guid>urn:oid:nolink</guid></item>"
+            "</channel></rss>"
+        )
+        assert _rss_item_links(rss.encode("utf-8")) == [
+            ("https://example.com/cap/1.xml", "urn:oid:2.49.0.0.76.0.1"),
+            ("https://example.com/cap/2.xml", None),
+        ]
+
+    def test_atom_prefixed_feed_prefers_cap_link_and_identifier(self):
+        feed = _atom_feed([
+            _atom_entry(
+                "https://feeds.meteoalarm.org/cap/1.xml",
+                identifier="2.49.0.0.250.0.FR.1",
+                entry_id="https://feeds.meteoalarm.org/cap/1.xml?index_info=1",
+            ),
+            # Decoy-only entry with no id: nothing to fetch, skipped.
+            '<entry><link href="https://meteoalarm.org?geocode=EMMA_ID=FR802"/></entry>',
+        ])
+        assert _rss_item_links(feed.encode("utf-8")) == [
+            ("https://feeds.meteoalarm.org/cap/1.xml", "2.49.0.0.250.0.FR.1"),
+        ]
+
+    def test_atom_bare_feed_without_namespace(self):
+        feed = (
+            "<feed><entry>"
+            '<link href="https://example.com/cap/9.xml"/>'
+            "<identifier>2.49.0.0.724.0.ES.1</identifier>"
+            "</entry></feed>"
+        )
+        assert _rss_item_links(feed.encode("utf-8")) == [
+            ("https://example.com/cap/9.xml", "2.49.0.0.724.0.ES.1"),
+        ]
+
+    def test_atom_default_namespace_without_cap_identifier_uses_entry_id(self):
+        feed = (
+            '<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+            "<id>https://example.com/cap/7.xml?index_info=abc</id>"
+            '<link href="https://example.com/cap/7.xml"/>'
+            "</entry></feed>"
+        )
+        assert _rss_item_links(feed.encode("utf-8")) == [
+            ("https://example.com/cap/7.xml", "https://example.com/cap/7.xml?index_info=abc"),
+        ]
+
+    def test_atom_alternate_cap_prefix(self):
+        feed = (
+            '<feed xmlns="http://www.w3.org/2005/Atom" '
+            'xmlns:c="urn:oasis:names:tc:emergency:cap:1.2"><entry>'
+            '<link type="application/cap+xml; charset=utf-8" '
+            'href="https://example.com/cap/3.xml"/>'
+            "<c:identifier>2.49.0.0.756.0.CH.3</c:identifier>"
+            "</entry></feed>"
+        )
+        assert _rss_item_links(feed.encode("utf-8")) == [
+            ("https://example.com/cap/3.xml", "2.49.0.0.756.0.CH.3"),
+        ]
+
+    def test_malformed_feed_returns_empty(self):
+        assert _rss_item_links(b"not xml at all") == []
+
+    def test_normalize_alert_id(self):
+        assert _normalize_alert_id("  urn:oid:2.49.0.0.76.0.1 ") == "2.49.0.0.76.0.1"
+        assert _normalize_alert_id("2.49.0.0.76.0.1") == "2.49.0.0.76.0.1"
+
+
+@pytest.mark.alerts
+class TestWmoFeedIngest:
+    """Per-agency ``capAlertFeed`` ingest, Atom parsing, id + family matching."""
+
+    def _fetcher(self, store, client, tmp_path):
+        fetcher = WMOAlertsFetcher(store=store, cache_dir=str(tmp_path))
+
+        async def _get_client():
+            return client
+
+        fetcher._get_client = _get_client  # type: ignore[method-assign]
+        return fetcher
+
+    async def test_client_follows_redirects(self, tmp_path):
+        """Feeds that 301 to a www-canonical host must resolve, not fail."""
+        fetcher = WMOAlertsFetcher(store=AlertsStore(), cache_dir=str(tmp_path))
+        client = await fetcher._get_client()
+        assert client.follow_redirects is True
+        await fetcher.close()
+
+    async def test_atom_feed_with_cap_identifier_is_parsed(self, tmp_path):
+        feed_url = "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-france"
+        cap_url = "https://feeds.meteoalarm.org/cap/fr-meteofrance-xx/1.xml"
+        hub_id = "2.49.0.0.250.0.FR.261023113903fbff72bf485c4fc6bbca"
+        atom = _atom_feed([
+            _atom_entry(cap_url, identifier=hub_id, entry_id=f"{cap_url}?index_info=1"),
+        ])
+        client = _FakeNwsClient({
+            _WMO_SOURCES_URL: _sources_doc({
+                "sourceId": "fr-meteofrance-xx",
+                "capAlertFeedStatus": "operating",
+                "capAlertFeed": feed_url,
+            }),
+            _WMO_ALL_URL: _wmo_all_doc({
+                "id": f"urn:oid:{hub_id}",
+                "capURL": "fr-meteofrance-xx/2026/10/23/11/39/3.xml",
+            }),
+            feed_url: _FakeNwsResponse(200, content=atom.encode("utf-8")),
+            cap_url: _FakeNwsResponse(200, text=_cap_xml_with_polygon()),
+        })
+        store = AlertsStore()
+        await self._fetcher(store, client, tmp_path)._fetch_once()
+
+        assert store.fetch_success is True
+        assert [a.source_id for a in store.alerts] == ["fr-meteofrance-xx"]
+        assert cap_url in client.calls
+        # The decoy MeteoAlarm geocode link is never fetched.
+        assert not any("meteoalarm.org?" in u for u in client.calls)
+
+    async def test_atom_href_embedded_hub_id_matches(self, tmp_path):
+        """No cap:identifier (Jamaica): the hub id lives inside the CAP href."""
+        feed_url = "https://jms.gov.jm/feeds/atom.xml"
+        hub_id = "2.49.0.0.388.0.JM.261023155005.h6xdg95k9yZOmOo8G75n"
+        cap_url = f"https://jms.gov.jm/cap/{hub_id}.xml"
+        atom = _atom_feed([
+            _atom_entry(cap_url, entry_id=f"{cap_url}?index_info=1"),
+        ])
+        client = _FakeNwsClient({
+            _WMO_SOURCES_URL: _sources_doc({
+                "sourceId": "jm-jms-en",
+                "capAlertFeedStatus": "operating",
+                "capAlertFeed": feed_url,
+            }),
+            _WMO_ALL_URL: _wmo_all_doc({
+                "id": hub_id,
+                "capURL": "jm-jms-en/2026/10/23/15/54/58-948-605.xml",
+            }),
+            feed_url: _FakeNwsResponse(200, content=atom.encode("utf-8")),
+            cap_url: _FakeNwsResponse(200, text=_cap_xml_with_polygon()),
+        })
+        store = AlertsStore()
+        await self._fetcher(store, client, tmp_path)._fetch_once()
+
+        assert [a.source_id for a in store.alerts] == ["jm-jms-en"]
+        assert cap_url in client.calls
+
+    async def test_comma_separated_feeds_merged(self, tmp_path):
+        feed_a = "https://cap-sources.s3.amazonaws.com/xx-feed/rss.xml"
+        feed_b = "https://www.dwd.de/DWD/warnungen/cap-feed/de/rss.xml"
+        cap_a = "https://example.com/cap/a.xml"
+        cap_b = "https://example.com/cap/b.xml"
+        hub_a = "2.49.0.0.276.0.DE.aaa"
+        hub_b = "2.49.0.0.276.0.DE.bbb"
+        rss_a = (
+            '<rss version="2.0"><channel><item>'
+            f"<link>{cap_a}</link><guid>urn:oid:{hub_a}</guid>"
+            "</item></channel></rss>"
+        )
+        rss_b = (
+            '<rss version="2.0"><channel><item>'
+            f"<link>{cap_b}</link><guid>{hub_b}</guid>"
+            "</item></channel></rss>"
+        )
+        client = _FakeNwsClient({
+            _WMO_SOURCES_URL: _sources_doc({
+                "sourceId": "de-dwd-en",
+                "capAlertFeedStatus": "operating",
+                "capAlertFeed": f"{feed_a}, {feed_b}",
+            }),
+            _WMO_ALL_URL: _wmo_all_doc(
+                {"id": f"urn:oid:{hub_a}", "capURL": "de-dwd-en/a.xml"},
+                {"id": hub_b, "capURL": "de-dwd-en/b.xml"},
+            ),
+            feed_a: _FakeNwsResponse(200, content=rss_a.encode("utf-8")),
+            feed_b: _FakeNwsResponse(200, content=rss_b.encode("utf-8")),
+            cap_a: _FakeNwsResponse(200, text=_cap_xml_with_polygon()),
+            cap_b: _FakeNwsResponse(200, text=_cap_xml_with_polygon()),
+        })
+        store = AlertsStore()
+        await self._fetcher(store, client, tmp_path)._fetch_once()
+
+        assert feed_a in client.calls and feed_b in client.calls
+        assert {a.url for a in store.alerts} == {cap_a, cap_b}
+        assert store.fetch_success is True
+
+    async def test_family_match_recovers_language_drift(self, tmp_path):
+        """sources.json says de-dwd-en; the hub path segment is de-dwd-de."""
+        feed_url = "https://cap-sources.s3.amazonaws.com/de-dwd-en/rss.xml"
+        cap_url = "https://example.com/cap/dwd.xml"
+        hub_id = "2.49.0.0.276.0.DE.2610231139"
+        rss = (
+            '<rss version="2.0"><channel><item>'
+            f"<link>{cap_url}</link><guid>urn:oid:{hub_id}</guid>"
+            "</item></channel></rss>"
+        )
+        client = _FakeNwsClient({
+            _WMO_SOURCES_URL: _sources_doc({
+                "sourceId": "de-dwd-en",
+                "capAlertFeedStatus": "operating",
+                "capAlertFeed": feed_url,
+                "authorityCountry": "de",
+                "authorityAbbrev": "dwd",
+            }),
+            _WMO_ALL_URL: _wmo_all_doc({
+                "id": f"urn:oid:{hub_id}",
+                "capURL": "de-dwd-de/2026/10/23/11/39/3.xml",
+            }),
+            feed_url: _FakeNwsResponse(200, content=rss.encode("utf-8")),
+            cap_url: _FakeNwsResponse(200, text=_cap_xml_with_polygon()),
+        })
+        store = AlertsStore()
+        await self._fetcher(store, client, tmp_path)._fetch_once()
+
+        assert feed_url in client.calls
+        assert [a.source_id for a in store.alerts] == ["de-dwd-en"]
+
+    async def test_unmatched_agency_without_family_is_not_fetched(self, tmp_path):
+        feed_url = "https://cap-sources.s3.amazonaws.com/zz-other/rss.xml"
+        client = _FakeNwsClient({
+            _WMO_SOURCES_URL: _sources_doc({
+                "sourceId": "zz-other-en",
+                "capAlertFeedStatus": "operating",
+                "capAlertFeed": feed_url,
+            }),
+            _WMO_ALL_URL: _wmo_all_doc({
+                "id": "urn:oid:2.49.0.0.276.0.DE.1",
+                "capURL": "de-dwd-de/2026/10/23/11/39/3.xml",
+            }),
+            feed_url: _FakeNwsResponse(200, content=b"<rss/>"),
+        })
+        store = AlertsStore()
+        await self._fetcher(store, client, tmp_path)._fetch_once()
+
+        assert feed_url not in client.calls
+        assert store.alerts == []
+        # Nothing attempted -> not a degraded cycle.
+        assert store.fetch_success is True
+
+    async def test_all_feeds_failing_marks_fetch_unsuccessful(self, tmp_path, caplog):
+        feed_a = "https://cap-sources.s3.amazonaws.com/aa-one/rss.xml"
+        feed_b = "https://cap-sources.s3.amazonaws.com/bb-two/rss.xml"
+        client = _FakeNwsClient({
+            _WMO_SOURCES_URL: _sources_doc(
+                {"sourceId": "aa-one-en", "capAlertFeedStatus": "operating",
+                 "capAlertFeed": feed_a},
+                {"sourceId": "bb-two-en", "capAlertFeedStatus": "operating",
+                 "capAlertFeed": feed_b},
+            ),
+            _WMO_ALL_URL: _wmo_all_doc(
+                {"id": "urn:oid:2.49.0.0.1.0.X.1", "capURL": "aa-one-en/a.xml"},
+                {"id": "urn:oid:2.49.0.0.2.0.Y.1", "capURL": "bb-two-en/b.xml"},
+            ),
+            feed_a: _FakeNwsResponse(500),
+            feed_b: _FakeNwsResponse(500),
+        })
+        store = AlertsStore()
+        with caplog.at_level("WARNING"):
+            await self._fetcher(store, client, tmp_path)._fetch_once()
+
+        assert store.alerts == []
+        assert store.fetch_success is False
+        assert "WMO CAP feeds failing: 2 of 2 feed URLs unreachable" in caplog.text
+
+    async def test_partial_feed_failure_keeps_success(self, tmp_path, caplog):
+        feed_a = "https://cap-sources.s3.amazonaws.com/aa-one/rss.xml"
+        feed_b = "https://cap-sources.s3.amazonaws.com/bb-two/rss.xml"
+        cap_a = "https://example.com/cap/a.xml"
+        hub_a = "2.49.0.0.1.0.X.1"
+        rss_a = (
+            '<rss version="2.0"><channel><item>'
+            f"<link>{cap_a}</link><guid>urn:oid:{hub_a}</guid>"
+            "</item></channel></rss>"
+        )
+        client = _FakeNwsClient({
+            _WMO_SOURCES_URL: _sources_doc(
+                {"sourceId": "aa-one-en", "capAlertFeedStatus": "operating",
+                 "capAlertFeed": feed_a},
+                {"sourceId": "bb-two-en", "capAlertFeedStatus": "operating",
+                 "capAlertFeed": feed_b},
+            ),
+            _WMO_ALL_URL: _wmo_all_doc(
+                {"id": f"urn:oid:{hub_a}", "capURL": "aa-one-en/a.xml"},
+                {"id": "urn:oid:2.49.0.0.2.0.Y.1", "capURL": "bb-two-en/b.xml"},
+            ),
+            feed_a: _FakeNwsResponse(200, content=rss_a.encode("utf-8")),
+            feed_b: _FakeNwsResponse(500),
+            cap_a: _FakeNwsResponse(200, text=_cap_xml_with_polygon()),
+        })
+        store = AlertsStore()
+        with caplog.at_level("WARNING"):
+            await self._fetcher(store, client, tmp_path)._fetch_once()
+
+        assert [a.source_id for a in store.alerts] == ["aa-one-en"]
+        assert store.fetch_success is True
+        assert "WMO CAP feeds failing: 1 of 2 feed URLs unreachable" in caplog.text
+
+    async def test_tier2_fallback_fetches_unmatched_feed_items(self, tmp_path):
+        """INMET-style URL guids match no hub id -> newest items still parsed."""
+        feed_url = "https://avisos.inmet.gov.br/rss.xml"
+        cap_1 = "https://avisos.inmet.gov.br/cap/1.xml"
+        cap_2 = "https://avisos.inmet.gov.br/cap/2.xml"
+        rss = (
+            '<rss version="2.0"><channel>'
+            "<item><link>%s</link><guid>https://avisos.inmet.gov.br/#1</guid></item>"
+            "<item><link>%s</link><guid>https://avisos.inmet.gov.br/#2</guid></item>"
+            "</channel></rss>"
+        ) % (cap_1, cap_2)
+        client = _FakeNwsClient({
+            _WMO_SOURCES_URL: _sources_doc({
+                "sourceId": "br-inmet-pt",
+                "capAlertFeedStatus": "operating",
+                "capAlertFeed": feed_url,
+            }),
+            _WMO_ALL_URL: _wmo_all_doc({
+                "id": "urn:oid:2.49.0.0.76.0.2026.28553.1",
+                "capURL": "br-inmet-pt/2026/10/23/x.xml",
+            }),
+            feed_url: _FakeNwsResponse(200, content=rss.encode("utf-8")),
+            cap_1: _FakeNwsResponse(200, text=_cap_xml_with_polygon()),
+            cap_2: _FakeNwsResponse(200, text=_cap_xml_with_polygon()),
+        })
+        store = AlertsStore()
+        await self._fetcher(store, client, tmp_path)._fetch_once()
+
+        assert {a.url for a in store.alerts} == {cap_1, cap_2}
+
+    async def test_missing_cap_feed_falls_back_to_legacy_url(self, tmp_path):
+        cap_url = "https://severeweather.wmo.int/cap/fr-meteofrance-xx/1.xml"
+        client = _FakeNwsClient({
+            _WMO_SOURCES_URL: _sources_doc({
+                "sourceId": "fr-meteofrance-xx",
+                "capAlertFeedStatus": "operating",
+                "capAlertFeed": "",
+            }),
+            _WMO_ALL_URL: _wmo_all_doc({
+                "id": "wmo-alert-1",
+                "capURL": "fr-meteofrance-xx/2026/10/23/x.xml",
+            }),
+            _LEGACY_FEED_URL: _FakeNwsResponse(
+                200, content=_rss_with_item().encode("utf-8")),
+            cap_url: _FakeNwsResponse(200, text=_cap_xml_with_polygon()),
+        })
+        store = AlertsStore()
+        await self._fetcher(store, client, tmp_path)._fetch_once()
+
+        assert _LEGACY_FEED_URL in client.calls
+        assert [a.source_id for a in store.alerts] == ["fr-meteofrance-xx"]
+        assert store.fetch_success is True
+
+
+# ---------------------------------------------------------------------------
+# Geocode resolver registry (pluggable area-code tables)
+# ---------------------------------------------------------------------------
+
+_GEOCODE_BOX_A = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)]
+_GEOCODE_BOX_B = [(5.0, 5.0), (6.0, 5.0), (6.0, 6.0), (5.0, 6.0), (5.0, 5.0)]
+
+
+def _geocode_feature(code, geometry):
+    return {
+        "type": "Feature",
+        "properties": {"code": code},
+        "geometry": geometry,
+    }
+
+
+def _geocode_polygon(offset=0.0, size=1.0):
+    x = offset
+    return {
+        "type": "Polygon",
+        "coordinates": [
+            [[x, 0.0], [x + size, 0.0], [x + size, size], [x, size], [x, 0.0]]
+        ],
+    }
+
+
+def _write_geocode_tables(tmp_path, features, alias_rows=()):
+    """Write MeteoAlarm-shaped geocode + alias fixtures, return their paths."""
+    geojson = tmp_path / "meteoalarm_geocodes.json"
+    geojson.write_text(
+        json.dumps({"type": "FeatureCollection", "features": list(features)})
+    )
+    aliases = tmp_path / "meteoalarm_aliases.csv"
+    aliases.write_text(
+        "CODE,ALIAS_CODE,ALIAS_TYPE\n"
+        + "".join(f"{code},{alias},NUTS2\n" for code, alias in alias_rows)
+    )
+    return geojson, aliases
+
+
+def _provider(name, value_names, polygons=None, loader=None, normalize=None):
+    """Build a GeocodeProvider with an inert loader unless one is supplied."""
+
+    async def _unloadable(client, cache_base):  # pragma: no cover - guard
+        raise AssertionError("loader should not be called")
+
+    kwargs = {"normalize": normalize} if normalize is not None else {}
+    return GeocodeProvider(
+        name=name,
+        value_names=frozenset(value_names),
+        loader=loader or _unloadable,
+        polygons=dict(polygons or {}),
+        **kwargs,
+    )
+
+
+def _cap_xml_with_geocode(value_name, value):
+    """CAP 1.2 alert with no <polygon>, only one <geocode> reference."""
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+    <alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">
+      <info>
+        <language>en-US</language>
+        <event>Wind Warning</event>
+        <headline>Wind Warning issued</headline>
+        <description>Strong winds expected</description>
+        <urgency>Immediate</urgency>
+        <severity>Severe</severity>
+        <effective>2026-05-07T00:15:00-05:00</effective>
+        <expires>2099-05-07T06:00:00-05:00</expires>
+        <area>
+          <areaDesc>Test Area</areaDesc>
+          <geocode>
+            <valueName>{value_name}</valueName>
+            <value>{value}</value>
+          </geocode>
+        </area>
+      </info>
+    </alert>"""
+
+
+@pytest.mark.alerts
+class TestGeocodeResolve:
+    def test_first_claiming_provider_wins(self):
+        poly_a = Polygon(_GEOCODE_BOX_A)
+        poly_b = Polygon(_GEOCODE_BOX_B)
+        a = _provider("a", {"EMMA_ID"}, {"1": poly_a})
+        b = _provider("b", {"EMMA_ID"}, {"1": poly_b})
+
+        assert resolve([a, b], "EMMA_ID", "1") is poly_a
+        assert resolve([b, a], "EMMA_ID", "1") is poly_b
+
+    def test_value_name_is_case_insensitive(self):
+        poly = Polygon(_GEOCODE_BOX_A)
+        provider = _provider("p", {"EMMA_ID"}, {"AT001": poly})
+
+        assert resolve([provider], "emma_id", "AT001") is poly
+        assert resolve([provider], "  EMMA_ID  ", "AT001") is poly
+
+    def test_normalize_is_applied(self):
+        poly = Polygon(_GEOCODE_BOX_A)
+        provider = _provider("p", {"EMMA_ID"}, {"AT001": poly})
+
+        # Default normalize strips + upper-cases.
+        assert resolve([provider], "EMMA_ID", " at001 ") is poly
+
+    def test_custom_normalize_is_used(self):
+        poly = Polygon(_GEOCODE_BOX_A)
+        provider = _provider(
+            "p", {"WARNCELLID"}, {"105754000": poly}, normalize=lambda v: v.strip()
+        )
+
+        assert resolve([provider], "WARNCELLID", " 105754000") is poly
+        assert resolve([provider], "WARNCELLID", "10575400X") is None
+
+    def test_miss_falls_through_to_next_claiming_provider(self):
+        poly = Polygon(_GEOCODE_BOX_B)
+        empty = _provider("empty", {"EMMA_ID"}, {})
+        hit = _provider("hit", {"EMMA_ID"}, {"HR806": poly})
+
+        assert resolve([empty, hit], "EMMA_ID", "HR806") is poly
+
+    def test_non_claiming_provider_is_skipped(self):
+        poly_b = Polygon(_GEOCODE_BOX_B)
+        wrong = _provider("wrong", {"WARNCELLID"}, {"1": Polygon(_GEOCODE_BOX_A)})
+        right = _provider("right", {"EMMA_ID"}, {"1": poly_b})
+
+        assert resolve([wrong, right], "EMMA_ID", "1") is poly_b
+
+    def test_unserved_or_empty_inputs_return_none(self):
+        poly = Polygon(_GEOCODE_BOX_A)
+        provider = _provider("p", {"EMMA_ID"}, {"1": poly})
+
+        assert resolve([provider], "WARNCELLID", "1") is None
+        assert resolve([provider], "", "1") is None
+        assert resolve([provider], "EMMA_ID", "") is None
+        assert resolve([], "EMMA_ID", "1") is None
+
+    def test_default_registry_claims_nuts2(self):
+        providers = build_default_providers()
+
+        assert [p.name for p in providers] == ["meteoalarm"]
+        assert providers[0].value_names == frozenset({"EMMA_ID", "NUTS2", "NUTS3"})
+        assert providers[0].polygons == {}
+
+
+@pytest.mark.alerts
+class TestGeocodeCapResolution:
+    def test_nuts2_geocode_resolves_via_alias(self, tmp_path):
+        """Belgium publishes NUTS2 (BE23); the table only carries an alias."""
+        geojson, aliases = _write_geocode_tables(
+            tmp_path,
+            [_geocode_feature("BE003", _geocode_polygon())],
+            [("BE003", "BE23")],
+        )
+        table = _apply_meteoalarm_aliases(
+            _parse_meteoalarm_geojson(str(geojson)), str(aliases)
+        )
+        assert "BE23" in table
+        provider = _provider("meteoalarm", {"EMMA_ID", "NUTS2", "NUTS3"}, table)
+
+        entries = _extract_polygons_from_cap(
+            _cap_xml_with_geocode("NUTS2", "BE23"),
+            "be-irm-en",
+            "https://example.com/cap",
+            [provider],
+        )
+
+        assert len(entries) == 1
+        assert entries[0].source_id == "be-irm-en"
+        assert entries[0].polygon is not None
+        assert entries[0].polygon.area == pytest.approx(1.0)
+
+    def test_emma_id_geocode_still_resolves(self):
+        poly = Polygon(_GEOCODE_BOX_A)
+        provider = _provider("meteoalarm", {"EMMA_ID", "NUTS2", "NUTS3"}, {"HR804": poly})
+
+        entries = _extract_polygons_from_cap(
+            _cap_xml_with_geocode("EMMA_ID", "HR804"),
+            "hr-meteo-hr",
+            "https://example.com/cap",
+            [provider],
+        )
+
+        assert len(entries) == 1
+        assert entries[0].polygon is not None
+
+    def test_unserved_value_name_is_still_dropped(self, caplog):
+        providers = build_default_providers()
+
+        with caplog.at_level("DEBUG"):
+            entries = _extract_polygons_from_cap(
+                _cap_xml_with_geocode("WARNCELLID", "105754000"),
+                "de-dwd-en",
+                "https://example.com/cap",
+                providers,
+            )
+
+        assert entries == []
+        assert "Dropped CAP alert for de-dwd-en" in caplog.text
+
+    def test_invalid_table_polygon_repaired(self, tmp_path):
+        """Self-intersecting table polygon (HR806 shape) is repaired, not lost."""
+        bowtie = {
+            "type": "Polygon",
+            "coordinates": [
+                [[0.0, 0.0], [1.0, 1.0], [1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]
+            ],
+        }
+        geojson, _aliases = _write_geocode_tables(
+            tmp_path,
+            [
+                _geocode_feature("HR806", bowtie),
+                _geocode_feature("X1", _geocode_polygon(2.0)),
+                _geocode_feature("NULLGEOM", None),
+            ],
+        )
+
+        table = _parse_meteoalarm_geojson(str(geojson))
+
+        assert set(table) == {"HR806", "X1"}
+        assert table["HR806"].is_valid
+        assert not table["HR806"].is_empty
+        assert table["HR806"].area > 0
+
+    def test_repaired_polygon_serves_a_cap(self, tmp_path):
+        bowtie = {
+            "type": "Polygon",
+            "coordinates": [
+                [[0.0, 0.0], [1.0, 1.0], [1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]
+            ],
+        }
+        geojson, _aliases = _write_geocode_tables(
+            tmp_path, [_geocode_feature("HR806", bowtie)]
+        )
+        provider = _provider(
+            "meteoalarm", {"EMMA_ID"}, _parse_meteoalarm_geojson(str(geojson))
+        )
+
+        entries = _extract_polygons_from_cap(
+            _cap_xml_with_geocode("EMMA_ID", "HR806"),
+            "hr-meteo-hr",
+            "https://example.com/cap",
+            [provider],
+        )
+
+        assert len(entries) == 1
+        assert entries[0].polygon.is_valid
+
+
+@pytest.mark.alerts
+class TestGeocodeTableLoading:
+    async def test_ensure_loaded_is_idempotent(self, tmp_path):
+        calls: list[object] = []
+        poly = Polygon(_GEOCODE_BOX_A)
+
+        async def _loader(client, cache_base):
+            calls.append(cache_base)
+            return {"AT001": poly}
+
+        provider = _provider("meteoalarm", {"EMMA_ID"}, loader=_loader)
+
+        await ensure_loaded(provider, None, tmp_path)
+        await ensure_loaded(provider, None, tmp_path)
+
+        assert calls == [tmp_path]
+        assert provider.polygons == {"AT001": poly}
+
+    async def test_provider_failure_does_not_stop_others(self, tmp_path, caplog):
+        poly = Polygon(_GEOCODE_BOX_A)
+
+        async def _boom(client, cache_base):
+            raise RuntimeError("table down")
+
+        async def _ok(client, cache_base):
+            return {"AT001": poly}
+
+        fetcher = WMOAlertsFetcher(store=AlertsStore(), cache_dir=str(tmp_path))
+        fetcher._geocode_providers = [
+            _provider("broken", {"WARNCELLID"}, loader=_boom),
+            _provider("good", {"EMMA_ID"}, loader=_ok),
+        ]
+
+        with caplog.at_level("INFO"):
+            await fetcher._ensure_geocode_tables()
+        await fetcher.close()
+
+        assert "Geocode table broken failed to load: table down" in caplog.text
+        assert fetcher._tables_ready.is_set()
+        assert fetcher._geocode_providers[0].polygons == {}
+        assert fetcher._geocode_providers[1].polygons == {"AT001": poly}
+        assert "Geocode table good ready: 1 polygons" in caplog.text
+
+    async def test_default_tables_load_from_cache_dir(self, tmp_path):
+        """Real MeteoAlarm loader against pre-seeded cache files (no HTTP)."""
+        cache_alerts = tmp_path / "alerts"
+        cache_alerts.mkdir(parents=True, exist_ok=True)
+        _write_geocode_tables(
+            cache_alerts,
+            [_geocode_feature("BE003", _geocode_polygon())],
+            [("BE003", "BE23")],
+        )
+
+        fetcher = WMOAlertsFetcher(store=AlertsStore(), cache_dir=str(tmp_path))
+        await fetcher._ensure_geocode_tables()
+        await fetcher.close()
+
+        provider = fetcher._geocode_providers[0]
+        assert provider.name == "meteoalarm"
+        assert "BE003" in provider.polygons
+        assert "BE23" in provider.polygons
+        assert fetcher._tables_ready.is_set()
