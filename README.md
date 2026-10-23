@@ -32,7 +32,7 @@ Rain Viewer recently (as of January 1st, 2026) restricted their free API tier. L
 | Satellite layer | None | Global (GOES / Meteosat / Himawari composite) |
 | Forecast layer | None | 60-minute nowcast (radar extrapolation + NWP blend) |
 | Image formats | PNG | PNG + WebP (configurable quality) |
-| Permitted use | Personal / educational only | Your server, your terms (AGPL-3.0-or-later) |
+| Permitted use | Personal / educational only | Your server: Your terms (AGPL-3.0-or-later)<br /> Public server - api.librewxr.net: CC-BY-4.0 |
 | Uptime & rate limits | Best-effort, none guaranteed | Set by your own infrastructure |
 
 <sub>Rain Viewer free-tier details as published at rainviewer.com/api, current as of October 2026.</sub>
