@@ -7,6 +7,47 @@ and commit the result alongside the version bump.
 
 ---
 
+## [v0.5.0 — WMO alert ingest fix, national geocode tables, SIGBUS guard](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.5.0)
+
+2026-10-23
+
+The headline is a fix for the WMO CAP alert ingest, which had gone silently dark: severeweather.wmo.int retired its legacy per-agency RSS proxy, so every alert source beyond the NWS came back empty while the logs looked healthy. Europe, Germany and Australia are back, alert-code resolution moved into a pluggable registry, and the pipeline can no longer die of a bus error when the volatile cache dir runs out of room (#43).
+
+### WMO CAP alert ingest fix
+
+- severeweather.wmo.int retired the per-agency `v2/cap-alerts/{sid}/rss.xml` proxy (404 for 48 of 49 agencies) and the fetcher ignored the per-agency `capAlertFeed` field, so WMO alerts silently fell to zero while the summary line kept counting attempts. Ingest now follows the declared feeds (comma-split lists included), parses RSS 2.0 and Atom, and matches hub ids with `urn:oid:` normalization in both substring directions, with a bounded fallback for agencies whose id scheme never matches (INMET).
+- Agencies whose `sourceId` language suffix drifts from the hub (`de-dwd-en` vs `de-dwd-de`, likewise `ir-irimo`, `kz-kazhydromet`, `ly-nmc`, `th-tmd`) are recovered by (country, authority) family matching.
+- Failures are visible: failing feed URLs are counted and warned with the agency list, the summary line reports ok/total feed URLs, and `/health` `ingest_ok` degrades only when every attempted feed URL fails. Verified live against the hub: 0 -> ~1,500 WMO alerts across 53 agencies.
+
+### National geocode tables (pluggable registry)
+
+- CAP geocode resolution moves into `alert_geocodes.py` as a `valueName`-routed `GeocodeProvider` registry: adding a nation is a data drop, not parser surgery.
+- MeteoAlarm serves `NUTS2` alongside `EMMA_ID`/`NUTS3` (unlocks most Belgian warnings that were silently dropped) and invalid table polygons are repaired with `buffer(0)` (Croatia HR804/HR806).
+- New tables: DWD Warngebiete WFS GeoJSON (Germany, 11,647 warn cells at municipality resolution) and BoM AAC shapefiles (Australia, 958 areas) fetched over anonymous FTP - the only scheme BoM publishes; HTTPS answers 403. New runtime dependency `pyshp>=2.3` (pure-Python shapefile reader, imported lazily by the BoM loader only).
+- China (CMA) stays excluded: its CPEAS township-level codes have no openly licensed public geometry source; the rationale is documented at the exclusion.
+
+### /v2/alerts: one entry per CAP info
+
+- Multi-area CAP documents now store as one entry per `<info>` block with a single merged geometry (`Polygon` or assembled `MultiPolygon`) instead of one entry per area: a DWD warning listing a hundred warn cells is one alert with multi-part geometry, not a hundred.
+- The response schema and property list are unchanged. `regions` now typically carries one semicolon-joined areaDesc string per feature (the shape WMO feeds natively publish), and MultiPolygon features are more frequent - they were already possible for NWS and WMO multi-area alerts. Library-based map consumers (Leaflet, MapLibre, OpenLayers) handle this natively.
+- Geocodes fully inside an explicit area polygon are pruned, so mixed polygon + geocode alerts keep full coverage without duplicated geometry.
+
+### Pipeline SIGBUS guard (#43)
+
+- An undersized volatile dir (Docker default 64 MiB container `/dev/shm`) killed the pipeline with an uncatchable `Fatal Python error: Bus error` at the memmap write: numpy allocates the backing file lazily, so the file looked full-size at 29,250,000 bytes while the page faults hit ENOSPC and the kernel raised SIGBUS. All memmap writers (RRQPE, the NWP grids, the frame store, the radar disk cache and GMGSI) now pre-flight the filesystem for space and write through unique pid+uuid tmp names, raising an actionable error naming the path and the fixes instead of dying by signal. The deterministic tmp names were the same truncation-under-overlapping-writers class the per-cycle stores already fixed after a production incident.
+- The RRQPE scan store rehydrates from disk at startup, so a restart no longer re-downloads the whole 15-16 slot window (~5.3 GB).
+- `docker-compose.yml` sets `shm_size: "2g"` on pipeline and renderer (tmpfs pages count against the service memory limit; override higher for global volatile footprints).
+
+### Docs
+
+- New `docs/alerts.md`: the ingest pipeline, the geocode-table registry, entry semantics, REST/MCP semantics and attribution credits. Stale alerts mentions fixed across README, the MCP doc, the web-integration guide, the configuration reference and the self-host sizing notes (2 GB volatile headroom; host `df` does not describe the container shm).
+
+### Upgrading
+
+Pull, rebuild, restart (`docker compose up -d --build`, or `python -m librewxr.main` on bare metal). First pipeline start downloads ~67 MB of geocode tables once (MeteoAlarm ~33 MB, DWD ~12 MB, BoM ~22 MB over plain FTP - make sure outbound FTP is allowed; if it is not, Australia stays empty with one warning while everything else keeps working). API consumers: feature granularity and the `regions` string shape change as described above (response schemas unchanged). No config keys were renamed; volatile-cache users should check shm sizing against docs/self-host-sizing.md.
+
+---
+
 ## [v0.4.0 - RRQPE decode fix, true-rate MCP sampling, Docker port pin](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.4.0)
 
 2026-10-19
