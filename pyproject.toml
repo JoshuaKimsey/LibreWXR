@@ -39,6 +39,11 @@ dependencies = [
     "netCDF4>=1.7",
     "lxml>=5.0",
     "shapely>=2.0",
+    # Pure-Python ESRI shapefile reader for the BoM AMOC/AAC geocode table
+    # (the AAC area polygons ship as shapefile zips on BoM's FTP).  Imported
+    # lazily inside the loader so a deployment that never reinstalls only
+    # loses that one table, with a warning.
+    "pyshp>=2.3",
     # GeoTIFF decoder for the DPC Italian radar source (Cloud-Optimized
     # GeoTIFF with LZW compression).  ``imagecodecs`` is required for
     # LZW decode; ``tifffile`` is the pure-Python COG reader on top.

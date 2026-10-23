@@ -1502,7 +1502,7 @@ Deadline for one satellite fetch pass (list + download + decode). A hung S3 conn
 
 ## Weather Alerts (WMO CAP)
 
-Fetches global weather alerts from severeweather.wmo.int. MeteoAlarm geocodes are downloaded on first startup and cached locally. Updates are clock-aligned (:00, :05, :10, …). US alerts come directly from the NWS API; zone-based alerts (e.g. Tornado Watches) are resolved to zone polygons at ingest, with zone geometries disk-cached for 30 days — no per-request NWS queries are needed.
+Fetches global weather alerts from severeweather.wmo.int. The geocode tables used to turn national area codes into polygons are downloaded on first startup and cached locally: MeteoAlarm geocodes (~33 MB), the DWD Warngebiete WFS GeoJSON layers (~12 MB) and the BoM AAC shapefiles (~22 MB, fetched over FTP). They are loaded once per process lifetime. Updates are clock-aligned (:00, :05, :10, …). US alerts come directly from the NWS API; zone-based alerts (e.g. Tornado Watches) are resolved to zone polygons at ingest, with zone geometries disk-cached for 30 days — no per-request NWS queries are needed.
 
 ### `LIBREWXR_ALERTS_ENABLED`
 
@@ -1532,7 +1532,7 @@ Max concurrent HTTP connections when polling the WMO endpoints.
 
 ### `LIBREWXR_ALERTS_CACHE_DIR`
 
-Cache directory for the downloaded MeteoAlarm geocode data. Empty = system temp.
+Cache directory for the downloaded geocode tables (MeteoAlarm geocodes, DWD Warngebiete layers, BoM AAC shapefiles) and the NWS zone cache. Empty = system temp.
 
 | | |
 |---|---|

@@ -569,7 +569,7 @@ class Settings(BaseSettings):
     # WMO CAP Weather Alerts
     alerts_enabled: bool = True
     alerts_fetch_interval: int = 300  # 5 minutes, aligned to clock boundaries
-    alerts_cache_dir: str = ""  # Cache dir for meteoalarm data; empty = system temp
+    alerts_cache_dir: str = ""  # Cache dir for geocode tables + NWS zones; empty = system temp
     alerts_concurrency: int = 5  # Max concurrent WMO HTTP connections
 
     # Tile request tracking — observational only; surfaces hot tiles in /health

@@ -11,8 +11,9 @@ from typing import Optional
 
 import httpx
 from lxml import etree
-from shapely.geometry import Polygon, shape
+from shapely.geometry import MultiPolygon, Polygon, shape
 from shapely.ops import unary_union
+from shapely.prepared import prep
 
 from librewxr.config import settings
 from librewxr.data.alert_geocodes import (
@@ -92,9 +93,18 @@ def _extract_polygons_from_cap(
     """Parse CAP XML and return a list of AlertEntry objects.
 
     Adapted from Pirate Weather's WMO_Alerts_Local.py.
-    Handles CAP 1.1/1.2 namespaces, duplicate-language skipping,
-    polygon extraction, and geocode -> polygon conversion via the
-    registered ``resolvers`` tables.
+    Handles CAP 1.1/1.2 namespaces, duplicate-language skipping, polygon
+    extraction, and geocode -> polygon conversion via the registered
+    ``resolvers`` tables.
+
+    Each ``<info>`` block yields at most ONE ``AlertEntry``: the info's
+    explicit ``<polygon>`` areas and its geocode-resolved polygons are
+    collected together, resolved polygons already covered by an explicit one
+    are pruned, and the remainder is merged -- kept as a single ``Polygon``
+    when only one survives, otherwise assembled into a ``MultiPolygon`` from
+    the exact parts (no ``unary_union``, no repair).  That keeps a
+    municipality-resolution feed like DWD at one entry per document instead
+    of one per warn cell.
     """
     results: list[AlertEntry] = []
     try:
@@ -145,11 +155,21 @@ def _extract_polygons_from_cap(
         effective = _cap_text(info, "effective", ns) or _cap_text(info, "onset", ns)
         expires = _cap_text(info, "expires", ns)
 
-        n_before = len(results)
+        # One entry per <info>: every area of the info contributes to a single
+        # merged geometry.  Per-area entries multiplied the store ~8x for
+        # municipality-resolution feeds (DWD ships one WARNCELLID area per
+        # Gemeinde), so the areas are collected and merged instead.
+        explicit_polys: list[Polygon] = []
+        resolved_polys: list[Polygon] = []
+        resolved_ids: set[int] = set()
+        area_descs: list[str] = []
+
         for area in info.findall("cap:area" if ns else "area", ns):
             area_desc = (
                 area.findtext("cap:areaDesc" if ns else "areaDesc", "", ns) or ""
             ).strip()
+            if area_desc and area_desc not in area_descs:
+                area_descs.append(area_desc)
 
             # Extract geocode entries
             geocode_entries: list[tuple[Optional[str], Optional[str]]] = []
@@ -170,8 +190,7 @@ def _extract_polygons_from_cap(
                 seen_geocodes.add(normalized)
                 geocode_entries.append((value_name or None, value))
 
-            # Process polygons
-            has_polygon = False
+            # Collect explicit <polygon> areas
             for poly_elem in area.findall("cap:polygon" if ns else "polygon", ns):
                 polygon_text = (poly_elem.text or "").strip()
                 if not polygon_text:
@@ -190,52 +209,32 @@ def _extract_polygons_from_cap(
                     if coords[0] != coords[-1]:
                         coords.append(coords[0])
                     try:
-                        poly = Polygon(coords)
-                        has_polygon = True
-                        results.append(
-                            AlertEntry(
-                                source_id=source_id,
-                                event=event_text,
-                                description=description_text,
-                                severity=severity,
-                                effective=effective,
-                                expires=expires,
-                                area_desc=area_desc,
-                                url=cap_url,
-                                polygon=poly,
-                            )
-                        )
+                        explicit_polys.append(Polygon(coords))
                     except Exception as exc:
                         logger.warning("Polygon construction failed for %s: %s", source_id, exc)
                         continue
 
-            # If no polygon but geocode exists, try the resolver tables
-            if not has_polygon:
-                for geocode_name, geocode_value in geocode_entries:
-                    if not geocode_name or not geocode_value:
-                        continue
-                    poly: Optional[Polygon] = resolve(
-                        resolvers, geocode_name, geocode_value
-                    )
-                    if poly is not None:
-                        results.append(
-                            AlertEntry(
-                                source_id=source_id,
-                                event=event_text,
-                                description=description_text,
-                                severity=severity,
-                                effective=effective,
-                                expires=expires,
-                                area_desc=area_desc,
-                                url=cap_url,
-                                polygon=poly,
-                            )
-                        )
+            # Resolve geocodes regardless of explicit polygons: a CAP may mix
+            # <polygon> areas with geocode areas, and both describe coverage.
+            for geocode_name, geocode_value in geocode_entries:
+                if not geocode_name or not geocode_value:
+                    continue
+                poly: Optional[Polygon] = resolve(
+                    resolvers, geocode_name, geocode_value
+                )
+                if poly is None:
+                    continue
+                # Two areas naming the same code resolve to the very same
+                # table object; keep it once.
+                if id(poly) in resolved_ids:
+                    continue
+                resolved_ids.add(id(poly))
+                resolved_polys.append(poly)
 
-        # Fully-processed <info> that produced no entry (no usable <polygon>
-        # and no resolvable geocode) is dropped — surface it at
-        # DEBUG so dropped alerts are discoverable.
-        if len(results) == n_before:
+        if not explicit_polys and not resolved_polys:
+            # Fully-processed <info> that produced no entry (no usable
+            # <polygon> and no resolvable geocode) is dropped — surface it at
+            # DEBUG so dropped alerts are discoverable.
             logger.debug(
                 "Dropped CAP alert for %s: no usable polygon or resolvable "
                 "geocode (event=%r headline=%r)",
@@ -243,6 +242,43 @@ def _extract_polygons_from_cap(
                 event or "",
                 headline or "",
             )
+            continue
+
+        # Containment pruning: DWD publishes one aggregate <polygon> plus a
+        # WARNCELLID area per municipality; the warn cells sit entirely inside
+        # the aggregate, so keeping both only duplicates coverage.
+        if explicit_polys and resolved_polys:
+            prepared = [prep(poly) for poly in explicit_polys]
+            resolved_polys = [
+                poly
+                for poly in resolved_polys
+                if not any(prep_explicit.contains(poly) for prep_explicit in prepared)
+            ]
+
+        polygons = explicit_polys + resolved_polys
+        if len(polygons) == 1:
+            merged: Polygon = polygons[0]
+        else:
+            # Cheap exact assembly (no unary_union): the parts are already the
+            # right geometries, and multi-part table polygons are flattened so
+            # MultiPolygon() only ever sees Polygons.
+            merged = MultiPolygon(
+                [part for poly in polygons for part in getattr(poly, "geoms", [poly])]
+            )
+
+        results.append(
+            AlertEntry(
+                source_id=source_id,
+                event=event_text,
+                description=description_text,
+                severity=severity,
+                effective=effective,
+                expires=expires,
+                area_desc="; ".join(area_descs),
+                url=cap_url,
+                polygon=merged,
+            )
+        )
 
     return results
 
