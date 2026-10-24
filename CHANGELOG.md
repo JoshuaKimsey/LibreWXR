@@ -7,6 +7,35 @@ and commit the result alongside the version bump.
 
 ---
 
+## [v0.6.0 — Container image distribution](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.6.0)
+
+2026-10-24
+
+The headline of this release is container image distribution (#44): LibreWXR now publishes multi-arch images to GitHub Container Registry for every release, and self-hosting moves from git-pull + source rebuild to `docker compose pull`. No image publishing existed before 0.6.0; images ship routinely from here on, so the publish pipeline gets exercised by every future release before 1.0.
+
+### Published images (#44)
+
+- New release-tagged workflow `.github/workflows/docker-publish.yml`: builds on native runners (`ubuntu-24.04` for amd64, `ubuntu-24.04-arm` for arm64 - no QEMU emulation), each arch pushes by digest, and a merge job assembles the multi-arch manifest list. A full run takes ~2 minutes; `workflow_dispatch` runs publish only a `sha-*` tag, which is how the pipeline was validated before the release.
+- Images publish to `ghcr.io/joshuakimsey/librewxr`, anonymously pullable. Tags: exact semver with the `v` stripped (`0.6.0`), `latest` on release tags, and `sha-<short>` per build. The workflow's `GITHUB_TOKEN` with `packages: write` is the only auth - no stored secrets.
+- The Dockerfile gains standard OCI labels (title, description, source, url, license AGPL-3.0-or-later) and now ships the LICENSE file; the image is otherwise unchanged (same `python:3.12-slim` base, no compilation on either arch).
+
+### Pull-based deployment and updates
+
+- `docker-compose.yml` carries `image: ghcr.io/joshuakimsey/librewxr:${LIBREWXR_IMAGE_TAG:-latest}` on both services alongside `build: .` - pulling published images and building from a checkout coexist. Pin a release with `LIBREWXR_IMAGE_TAG=0.6.0` in `.env` (defaults to `latest`; compose interpolation only, config.py never reads it).
+- New `scripts/update.sh` is the image-based update helper: fast-forwards the checkout for the compose file, reconciles `.env` against `.env.example` (append-only, `.env.bak` first, existing values never modified), then `docker compose pull` + `up -d`. Same opt-in sentinel, flock and `--dry-run`/`--env` flags as the legacy script; `--build` keeps a source-rebuild path.
+- `scripts/auto-update.sh` remains for source-based deployments and fixes a latent idempotence bug: a prose-only mention of `LIBREWXR_WARMER_THREADS` in `.env.example` counted as missing on every run and re-appended an empty banner block.
+
+### Docs
+
+- README quickstart leads with the pull flow (clone for the compose file and `.env.example`, `docker compose pull`, `up -d`) with a `docker pull` one-liner; build-from-source moves to its own subsection. The auto-update section documents `scripts/update.sh` with the same cron example and sentinel opt-in.
+- Self-hosting docs swept: `docs/configuration-reference.md` gains a `LIBREWXR_IMAGE_TAG` section and pull commands in the deployment prose and production recipe, `docs/single-mode-migration.md` step 3 is pull-based, `docs/self-host-sizing.md` cross-links the pull flow, and `docs/mcp-server.md` notes the image ships the `[mcp]` extra.
+
+### Upgrading
+
+Image deployments: `docker compose pull` && `docker compose up -d`. Cron users: switch scheduled updates to `scripts/update.sh` (same sentinel opt-in); `scripts/auto-update.sh` still works for source builds. Building from a checkout is unchanged (`docker compose up -d --build`). No config keys renamed; one new compose-only var (`LIBREWXR_IMAGE_TAG`). Response schemas unchanged.
+
+---
+
 ## [v0.5.0 — WMO alert ingest fix, national geocode tables, SIGBUS guard](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.5.0)
 
 2026-10-23
