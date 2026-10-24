@@ -65,7 +65,7 @@ jobs:
           retention-days: 1
 
   merge:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build
     timeout-minutes: 15
     steps:
@@ -102,6 +102,7 @@ jobs:
             type=sha
 
       - name: Create manifest list and push
+        working-directory: /tmp/digests
         env:
           # metadata-action's JSON output, passed through env so the shell
           # sees it as a single value instead of raw JSON spliced into the
@@ -110,7 +111,7 @@ jobs:
         run: |
           TAGS=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$META_JSON")
           docker buildx imagetools create $TAGS \
-            $(printf 'ghcr.io/joshuakimsey/librewxr@sha256:%s ' /tmp/digests/*)
+            $(printf 'ghcr.io/joshuakimsey/librewxr@sha256:%s ' *)
 
       - name: Inspect image
         run: |
