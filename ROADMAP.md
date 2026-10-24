@@ -10,35 +10,35 @@ status, as this file and the issues are kept in sync. The lists are not exhausti
 
 ## The path to 1.0.0
 
-The current version is 0.5.0, and the next planned release is 0.6.0 (container image
-distribution). Every other section below is an unordered theme: each ships as its own 0.x
-release whenever it is next in line, with the version number assigned at release time.
+The current version is 0.6.0. Every section below is an unordered theme: each ships as its
+own 0.x release whenever it is next in line, with the version number assigned at release
+time.
 
 ### 0.6.0 - Container image distribution
 
 Tracked in issue #44.
 
-- [ ] Add a release-tagged GitHub Actions workflow building multi-arch images
-  (linux/amd64 + linux/arm64) with docker/build-push-action; no image publishing exists
-  today (current workflows: test.yml, dco.yml, docs-check.yml).
-- [ ] Publish to GitHub Container Registry as the primary registry
+- [x] Add a release-tagged GitHub Actions workflow building multi-arch images
+  (linux/amd64 + linux/arm64) with docker/build-push-action.
+- [x] Publish to GitHub Container Registry as the primary registry
   (`ghcr.io/joshuakimsey/librewxr`) - free, tied to this repository, OIDC-based with no
   extra stored secrets.
-- [ ] Optionally mirror to Docker Hub for broader discoverability; the two can coexist -
-  decide once during this release.
-- [ ] Tag scheme: exact semver tags (e.g. `0.6.0`), `latest`, and a commit-SHA tag.
+- [x] Optionally mirror to Docker Hub for broader discoverability; the two can coexist -
+  decide once during this release. (decided during 0.6.0: GHCR only for now; the two can
+  coexist later if there is demand)
+- [x] Tag scheme: exact semver tags (e.g. `0.6.0`), `latest`, and a commit-SHA tag.
 Note: images ship routinely for every future release from here on, so the
   publish pipeline is exercised many times before 1.0.
-- [ ] Extend the README quickstart with `docker pull` / `docker compose pull` instructions
-  alongside the existing build-from-source flow (README currently documents only local
-  `docker compose up` / `--build`).
-- [ ] Add standard OCI image labels (source, license AGPL-3.0-or-later, description).
+- [x] Extend the README quickstart with `docker pull` / `docker compose pull` instructions
+  alongside the existing build-from-source flow.
+- [x] Add standard OCI image labels (source, license AGPL-3.0-or-later, description).
 - [ ] Retire the git-pull + source-rebuild self-update flow in `scripts/auto-update.sh` once
   published images exist: self-updating becomes `docker compose pull` + `up -d` against
   image tags instead of `git pull` + rebuild. Replace rather than patch; do not remove the
   old script until 0.6.0 images are live so source-based deployments keep a working update
-  path in the meantime.
-- [ ] Carry over the one genuinely useful piece: `.env` vs `.env.example` reconciliation
+  path in the meantime. (scripts/update.sh shipped in 0.6.0; removing the legacy script is
+  deferred to a later release)
+- [x] Carry over the one genuinely useful piece: `.env` vs `.env.example` reconciliation
   (append missing `LIBREWXR_*` vars with their explanatory comments, write `.env.bak`
   first, never modify existing values), then sweep references to the old flow (AGENTS.md,
   README, docs).
