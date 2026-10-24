@@ -4,8 +4,9 @@ This file tracks the path to version 1.0.0 and beyond. Each major addition ships
 release rather than in a single batch, but releases are not numbered ahead of time - work
 happens in whatever order makes sense, and the version a feature lands in gets decided when
 it ships. Checkboxes reflect current progress, unchecked items are candidates, and what
-actually ships is recorded in CHANGELOG.md (generated from published GitHub releases). The
-lists are not exhaustive.
+actually ships is recorded in CHANGELOG.md (generated from published GitHub releases). Each
+actionable section also references its GitHub tracking issue (#NN) - check there for live
+status, as this file and the issues are kept in sync. The lists are not exhaustive.
 
 ## The path to 1.0.0
 
@@ -14,6 +15,8 @@ distribution). Every other section below is an unordered theme: each ships as it
 release whenever it is next in line, with the version number assigned at release time.
 
 ### 0.6.0 - Container image distribution
+
+Tracked in issue #44.
 
 - [ ] Add a release-tagged GitHub Actions workflow building multi-arch images
   (linux/amd64 + linux/arm64) with docker/build-push-action; no image publishing exists
@@ -42,6 +45,8 @@ Note: images ship routinely for every future release from here on, so the
 
 ### Along the way - MCP Registry listing (hosted api.librewxr.net)
 
+Tracked in issue #45.
+
 A parallel workstream, not a feature release - it is mostly ops plus a small name-constant
 alignment, so it can land alongside any release.
 
@@ -65,6 +70,8 @@ alignment, so it can land alongside any release.
 
 ### Along the way - Landing site refresh (librewxr-site/)
 
+Tracked in issue #46.
+
 A parallel workstream like the MCP registry listing: polish the gitignored landing site so
 it is visually appealing and eye-catching rather than purely utilitarian, ready before the
 1.0 announcement.
@@ -76,6 +83,8 @@ it is visually appealing and eye-catching rather than purely utilitarian, ready 
   public launch (Docker images, README quickstart).
 
 ### External color palettes
+
+Tracked in issue #47.
 
 - [ ] Add `LIBREWXR_COLOR_SCHEMES_FILE`: load scheme definitions from an external CSV in the
   existing `color_table.csv` format, merged over the built-in schemes (built-ins currently
@@ -93,6 +102,8 @@ it is visually appealing and eye-catching rather than purely utilitarian, ready 
 
 ### Health dashboard
 
+Tracked in issue #48.
+
 - [ ] Ship a static dashboard (e.g. served at `/dashboard`) rendering the existing `/health`
   payload: cluster section (per-worker RSS, hit ratios, cgroup split), per-NWP-grid health,
   sources, frames, tile cache.
@@ -104,6 +115,8 @@ it is visually appealing and eye-catching rather than purely utilitarian, ready 
 
 ### WebSocket support
 
+Tracked in issue #49.
+
 - [ ] v1 scope: a WebSocket endpoint that pushes the weather-maps.json payload when the
   frame list changes, built on the snapshot change-detection the render workers already use.
 - [ ] HTTP JSON API remains canonical for Rain Viewer compatibility; WebSocket is additive,
@@ -114,6 +127,8 @@ Note: deeper topics (alerts, storm cells, lightning streams) are deferred
 to post-1.0.
 
 ### 1.0.0 - Stability, split-mode docs, and the freeze
+
+Tracked in issue #50.
 
 - [ ] Split mode, phase 1: support and document render workers on separate hosts mounting one
   shared filesystem (NFS or object-store-backed volume), including memmap-over-network
@@ -136,6 +151,8 @@ Unordered candidates; nothing here is committed.
 
 ### Network split mode (true "split")
 
+Tracked in issue #51.
+
 - [ ] Design spike first: replace the shared-filesystem handoff with a network artifact
   handoff so the pipeline and renderers can run on entirely separate servers (candidates:
   object storage or an HTTP snapshot service the renderers pull from).
@@ -146,15 +163,21 @@ Note: this redesigns the memmap + shared-store coupling - state.json,
 
 ### WebSocket topic extensions
 
+Tracked in issue #52.
+
 - [ ] Alerts, storm-cell, and lightning streams as additional topics alongside the
   weather-maps channel.
 
 ### Dashboard v2
 
+Tracked in issue #53.
+
 - [ ] Historical views: ring-buffered health snapshots for time-series trends and per-region
   load views.
 
 ### Palette ecosystem
+
+Tracked in issue #54.
 
 - [ ] First-class support for community palettes: external-palette documentation and preview
   generation for user-supplied CSVs.
