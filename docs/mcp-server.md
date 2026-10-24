@@ -12,6 +12,8 @@ The MCP server requires the optional `[mcp]` extra, which pulls in `fastmcp`:
 pip install -e ".[mcp]"
 ```
 
+The published Docker image already ships the `[mcp]` extra, so the HTTP transport at `/mcp` works out of the box on Docker deployments; the pip command above is for source installs and the stdio transport (`python -m librewxr.mcp`).
+
 Without this extra, the HTTP transport is silently disabled at startup (a warning is logged), and the stdio console entry point (`python -m librewxr.mcp` / `librewxr-mcp`) will not import. The base LibreWXR installation works fine without it — MCP is entirely optional.
 
 ---

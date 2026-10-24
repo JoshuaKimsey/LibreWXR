@@ -23,6 +23,11 @@ alerts, and lightning - serving real public traffic at ~15 requests/s average
 
 ## Deployment Shape
 
+Deployments run the prebuilt images from
+`ghcr.io/joshuakimsey/librewxr` (see the README quickstart for the pull
+flow); the sizing guidance below applies to pulled and locally built
+images alike.
+
 LibreWXR has one shape now: a data pipeline plus N render workers. Size
 the worker count to the box:
 

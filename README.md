@@ -128,16 +128,48 @@ full architecture.
 
 ### Docker
 
-`docker-compose.yml` starts a `pipeline` service (fetches all data and
-writes a shared snapshot) and a `renderer` service (serves tiles). Set
-`COMPOSE_PROFILES=multi` in your `.env`:
+Prebuilt images are published to GitHub Container Registry for every
+release at `ghcr.io/joshuakimsey/librewxr`, built multi-arch for
+`linux/amd64` and `linux/arm64`. Pulling is the default path - a normal
+deployment never builds locally. The image only supplies the
+application; the compose file and `.env.example` come from the
+repository, so clone first:
 
 ```bash
 git clone https://github.com/JoshuaKimsey/LibreWXR.git
 cd LibreWXR
 cp .env.example .env
-# Edit .env — set COMPOSE_PROFILES=multi and size LIBREWXR_WORKERS to your box
+# Edit .env - set COMPOSE_PROFILES=multi and size LIBREWXR_WORKERS to your box
+docker compose pull
 docker compose up -d
+```
+
+`docker-compose.yml` starts a `pipeline` service (fetches all data and
+writes a shared snapshot) and a `renderer` service (serves tiles); both
+run the published image, selected by `LIBREWXR_IMAGE_TAG` in `.env`
+(default `latest`; set e.g. `LIBREWXR_IMAGE_TAG=0.6.0` to stay on a
+release, or a `sha-*` tag to follow a specific build). Profile,
+worker-count, and cache defaults are identical to the build path - see
+[Docker (build from source)](#docker-build-from-source) below.
+
+To fetch an image directly, without the clone:
+
+```bash
+docker pull ghcr.io/joshuakimsey/librewxr:0.6.0
+```
+
+### Docker (build from source)
+
+To build from the checkout instead of pulling - for example when
+patching the source or running a local commit - the compose file keeps
+`build: .` on both services, and these commands build and deploy it:
+
+```bash
+git clone https://github.com/JoshuaKimsey/LibreWXR.git
+cd LibreWXR
+cp .env.example .env
+# Edit .env - set COMPOSE_PROFILES=multi and size LIBREWXR_WORKERS to your box
+docker compose up -d --build
 ```
 
 The app reads `COMPOSE_PROFILES` to pick sensible defaults for worker
@@ -196,11 +228,12 @@ directory. When it is unset, the app falls back to a per-host tempdir
 
 ### Auto-updating a Docker deployment
 
-`scripts/auto-update.sh` is an optional helper for self-hosters running LibreWXR from a git checkout with `docker compose`. When run, it:
+`scripts/update.sh` is the optional update helper for image deployments.
+When run, it:
 
-1. Fetches `origin` and checks whether the tracked branch has new commits.
-2. If so, fast-forwards the working tree and runs `docker compose up -d --build` to rebuild and redeploy.
-3. Otherwise exits quietly — it's safe to schedule via cron or a systemd timer.
+1. Fetches `origin` and fast-forwards the checkout - the compose file, `.env.example`, and the scripts come from git, not from the image.
+2. Reconciles `.env` against the pulled `.env.example`, appending settings added upstream so new `LIBREWXR_*` variables land before the restart (existing values are never modified; a backup is written to `.env.bak`).
+3. Runs `docker compose pull` then `docker compose up -d` to move both services onto the current `LIBREWXR_IMAGE_TAG`. A pull with nothing new is cheap, so the script is safe to schedule via cron or a systemd timer.
 
 The script is a **no-op by default** on any host. To opt in on a production host:
 
@@ -213,10 +246,12 @@ touch /path/to/LibreWXR/.auto-update-enabled
 A typical cron entry for hourly updates:
 
 ```cron
-0 * * * * /path/to/LibreWXR/scripts/auto-update.sh >> /var/log/librewxr-update.log 2>&1
+0 * * * * /path/to/LibreWXR/scripts/update.sh >> /var/log/librewxr-update.log 2>&1
 ```
 
-Use `scripts/auto-update.sh --dry-run` to see what the script would do without making any changes; dry-run is always allowed regardless of the sentinel.
+Use `scripts/update.sh --dry-run` to see what the script would do without making any changes; dry-run is always allowed regardless of the sentinel. `--help` prints the full mode list. `--env` reconciles `.env` with `.env.example` on its own (no pull, no restart).
+
+Deployments that build the image locally instead of pulling a published one are still supported: `scripts/update.sh --build` performs a source rebuild (`docker compose up -d --build`) rather than pulling an image, and the legacy `scripts/auto-update.sh` (git pull + rebuild) remains available for now.
 
 ## Usage
 

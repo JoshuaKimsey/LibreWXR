@@ -582,6 +582,17 @@ A legacy `single` token - `COMPOSE_PROFILES=single` or `LIBREWXR_MODE=single` - 
 
 `LIBREWXR_WORKERS`, `LIBREWXR_TILE_CACHE_MB`, `LIBREWXR_COORD_CACHE_SIZE`, `LIBREWXR_COORD_STORE_MB`, `LIBREWXR_WARM_COORD_ZOOM`, and `LIBREWXR_RENDER_THREADS` all pick profile-appropriate defaults from this setting when left at `0` (or unset).
 
+### `LIBREWXR_IMAGE_TAG`
+
+Tag of the published image that Docker Compose pulls from `ghcr.io/joshuakimsey/librewxr`; an image publishes there for every release, and `docker compose pull` plus `docker compose up -d` use this tag. Compose interpolation only - the application never reads it (`config.py` does not see it), and `.env.example` ships it as a commented line.
+
+| | |
+|---|---|
+| **Default** | `latest` (the compose fallback) |
+| **Type** | string (`0.6.0` to pin a release, `latest`, or a `sha-*` CI build tag) |
+
+Pinning a release keeps `docker compose pull` from advancing to a newer image until you choose to upgrade. When you build from a checkout, the same tag is applied to the locally built image.
+
 ### `LIBREWXR_WORKERS`
 
 Number of uvicorn render-worker processes. The default is 16 (sized for a multi-core rack); the legacy-single profile defaults to 1.
@@ -646,7 +657,7 @@ Production observation on an 80-core / 32 GB rack (32 render workers): ~16 GB to
 
 This is THE LibreWXR architecture: a data pipeline process plus N tile-server worker processes alongside it, all sharing `LIBREWXR_CACHE_DIR` via memmap files + a single `state.json` snapshot. It bypasses Python's GIL on the tile-render path so a rack's full core count can actually do work, and keeps a fetch crash from taking the tile server down.
 
-Docker Compose starts both services with `COMPOSE_PROFILES=multi` (`docker compose up -d`). To run the two processes manually:
+Docker Compose starts both services with `COMPOSE_PROFILES=multi`, running the published `ghcr.io/joshuakimsey/librewxr` image pulled with `docker compose pull` then started with `docker compose up -d` (a locally built image instead when you run from a checkout with `docker compose up -d --build`). To run the two processes manually:
    ```bash
    python -m librewxr.data_pipeline                       # pipeline (fetcher)
    LIBREWXR_RENDER_ONLY=1 python -m librewxr.main         # dedicated render server
@@ -1775,6 +1786,7 @@ LIBREWXR_WRF_SMN_ENABLED=true
 
 Then run:
 ```bash
+docker compose pull
 docker compose up -d
 ```
 

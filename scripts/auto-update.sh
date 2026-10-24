@@ -121,6 +121,13 @@ sync_env_with_example() {
     local var
     while IFS= read -r var; do
         [[ -z "${var}" ]] && continue
+        # Only names that actually have an assignment line in .env.example
+        # are addable. A bare prose mention (e.g. "# LIBREWXR_FOO is still
+        # accepted as an alias.") has no line to copy, and treating it as
+        # missing would re-append it on every run.
+        if ! grep -qE "^#?[[:space:]]*${var}=" "${example}"; then
+            continue
+        fi
         # A var that's present commented or uncommented counts as
         # "the user has seen it" — don't re-add.
         if ! grep -qE "^#?[[:space:]]*${var}=" "${env_file}"; then

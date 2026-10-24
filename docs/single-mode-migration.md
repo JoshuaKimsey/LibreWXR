@@ -50,7 +50,15 @@ COMPOSE_PROFILES=multi
 LIBREWXR_WORKERS=1        # or 2 on a small multi-core box
 ```
 
-3. Run `docker compose up -d --build`.
+3. Pull the updated stack and restart:
+
+   ```bash
+   docker compose pull
+   docker compose up -d
+   ```
+
+   (If you build the images from a local checkout instead of pulling,
+   `docker compose up -d --build` still works.)
 
 If you leave `COMPOSE_PROFILES=single`, you get the exact same pair with
 1 worker and the legacy-single cache sizes, but the app logs a warning

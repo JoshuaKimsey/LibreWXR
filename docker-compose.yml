@@ -16,7 +16,8 @@
 #                              render worker with legacy single-sized
 #                              caches and logs a startup warning)
 #
-# Deploy:  docker compose up --build -d
+# Deploy:  docker compose pull && docker compose up -d
+#          (or build from source: docker compose up --build -d)
 #
 # See docs/single-mode-migration.md for the migration guide.  True
 # single mode (one container doing fetch + render) was removed; the git
@@ -42,6 +43,7 @@ services:
   # and the memory limits down for smaller hardware.
   pipeline:
     profiles: ["multi", "single"]
+    image: ghcr.io/joshuakimsey/librewxr:${LIBREWXR_IMAGE_TAG:-latest}
     build: .
     command: ["python", "-m", "librewxr.data_pipeline"]
     env_file:
@@ -96,6 +98,7 @@ services:
 
   renderer:
     profiles: ["multi", "single"]
+    image: ghcr.io/joshuakimsey/librewxr:${LIBREWXR_IMAGE_TAG:-latest}
     build: .
     command: ["python", "-m", "librewxr.main"]
     # Host side follows LIBREWXR_PORT; container side is pinned 8080 below.
