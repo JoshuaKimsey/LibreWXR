@@ -157,6 +157,34 @@ release, or a `sha-*` tag to follow a specific build). Profile,
 worker-count, and cache defaults are identical to the build path - see
 [Docker (build from source)](#docker-build-from-source) below.
 
+### Customizing the deployment (.env)
+
+`.env` works the same whether you pulled the image or built it - compose
+feeds both services from it (`env_file: .env`), and nothing is baked into
+the image. Most `LIBREWXR_*` settings take effect by editing `.env` and
+recreating: `docker compose up -d` (a plain `restart` will not re-read
+`.env`, and the vars below are consumed by compose, not the container).
+
+A few vars are managed by the compose file instead of `.env`:
+
+- **Compose interpolation only** - read by the YAML itself, never passed
+  to the app: `COMPOSE_PROFILES`, `LIBREWXR_IMAGE_TAG`, `LIBREWXR_PORT`
+  (the host side of the published port mapping),
+  `LIBREWXR_PIPELINE_MEMORY`, `LIBREWXR_RENDER_MEMORY`.
+- **Pinned by compose** - the `environment:` block in the YAML beats
+  `.env` inside the container: `LIBREWXR_CACHE_DIR` (`/data/cache`,
+  backed by a named volume), `LIBREWXR_LOG_FILE` (`/logs/librewxr.log`,
+  bind-mounted to `./logs`), and on the renderer `LIBREWXR_PORT`
+  (container side, always 8080) and `LIBREWXR_RENDER_ONLY` (`1`).
+  Setting any of these in `.env` has no effect under the stock compose
+  file.
+
+Knobs that need container-level changes - a volatile-cache tmpfs mount,
+TLS cert files, a custom cache path - go in a gitignored
+`docker-compose.override.yml`: compose merges it automatically and it
+survives `git pull`. Recipes and the full per-variable reference:
+[`docs/configuration-reference.md`](docs/configuration-reference.md).
+
 ### Docker (build from source)
 
 To build from the checkout instead of pulling - for example when
@@ -470,6 +498,11 @@ LIBREWXR_CACHE_DIR=/var/lib/librewxr            # persistent disk cache shared b
 LIBREWXR_ENABLED_REGIONS=ALL                    # radar regions to enable (see [Coverage](#radar-regions))
 LIBREWXR_WORKERS=8                              # render workers, ideally one per physical core
 ```
+
+(Under the stock `docker-compose.yml`, `LIBREWXR_CACHE_DIR` is pinned to
+`/data/cache` in-container via the `librewxr-cache` named volume - that
+line is the bare-metal form; a custom container path needs a
+`docker-compose.override.yml`.)
 
 Per-source toggles — every radar source, regional NWP model, satellite channel, and the alerts feed — all default to `true`; sources enable by convention, so you only turn off what you don't need.
 
