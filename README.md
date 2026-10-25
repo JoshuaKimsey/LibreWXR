@@ -128,12 +128,17 @@ full architecture.
 
 ### Docker
 
-Prebuilt images are published to GitHub Container Registry for every
-release at `ghcr.io/joshuakimsey/librewxr`, built multi-arch for
-`linux/amd64` and `linux/arm64`. Pulling is the default path - a normal
-deployment never builds locally. The image only supplies the
-application; the compose file and `.env.example` come from the
-repository, so clone first:
+The image is on GitHub Container Registry - multi-arch (`linux/amd64` +
+`linux/arm64`), published for every release, anonymously pullable:
+
+```bash
+docker pull ghcr.io/joshuakimsey/librewxr:0.6.0
+```
+
+That fetches the application image on its own - use it for a custom
+compose file, `docker run`, or another orchestrator. The standard
+deployment also needs the compose file and `.env.example`, which live in
+the repository, so clone first, then pull and start:
 
 ```bash
 git clone https://github.com/JoshuaKimsey/LibreWXR.git
@@ -151,12 +156,6 @@ run the published image, selected by `LIBREWXR_IMAGE_TAG` in `.env`
 release, or a `sha-*` tag to follow a specific build). Profile,
 worker-count, and cache defaults are identical to the build path - see
 [Docker (build from source)](#docker-build-from-source) below.
-
-To fetch an image directly, without the clone:
-
-```bash
-docker pull ghcr.io/joshuakimsey/librewxr:0.6.0
-```
 
 ### Docker (build from source)
 
@@ -251,7 +250,30 @@ A typical cron entry for hourly updates:
 
 Use `scripts/update.sh --dry-run` to see what the script would do without making any changes; dry-run is always allowed regardless of the sentinel. `--help` prints the full mode list. `--env` reconciles `.env` with `.env.example` on its own (no pull, no restart).
 
-Deployments that build the image locally instead of pulling a published one are still supported: `scripts/update.sh --build` performs a source rebuild (`docker compose up -d --build`) rather than pulling an image, and the legacy `scripts/auto-update.sh` (git pull + rebuild) remains available for now.
+Deployments that build the image locally instead of pulling a published one are still supported: `scripts/update.sh --build` performs a source rebuild (`docker compose up -d --build`) rather than pulling an image, and the legacy `scripts/auto-update.sh` (git pull + rebuild) remains available for now. To move such a deployment onto the published images, see [Transitioning a source-built deployment to the published images](#transitioning-a-source-built-deployment-to-the-published-images) below.
+
+### Transitioning a source-built deployment to the published images
+
+Deployments that built from source (`docker compose up -d --build`, or
+the legacy `scripts/auto-update.sh` cron) switch to pulled images in
+place - the cache volume, bind mounts, logs, and gitignored
+`docker-compose.override.yml` all survive. One-time steps:
+
+```bash
+git pull --ff-only   # brings the compose image: keys and scripts/update.sh
+# in .env: set LIBREWXR_IMAGE_TAG=0.6.0 (optional but recommended - a pinned
+# tag means docker compose pull never advances until you choose to upgrade)
+docker compose pull    # ~370 MB on first pull
+docker compose up -d   # no --build from here on
+```
+
+Extra services declared in the override file (a tunnel, a proxy) are
+untouched - compose only recreates services whose image or config
+changed. Verify with `docker compose ps` (both services show the `0.6.0`
+image) and `/health`. If anything looks wrong, `docker compose up -d --build`
+drops you straight back onto a local build from the checkout. Finally
+point the cron entry at `scripts/update.sh` (same sentinel opt-in and
+flags) - from then on updates are pulls, not rebuilds.
 
 ## Usage
 
