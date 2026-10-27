@@ -7,6 +7,24 @@ and commit the result alongside the version bump.
 
 ---
 
+## [v0.6.1 - Invalid CAP polygon crash fix](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.6.1)
+
+2026-10-27
+
+Fixes a production crash where a self-intersecting (bow-tie) CAP alert polygon - observed from the Indonesian BMKG feed - raised GEOSException (TopologyException: side location conflict) at the group unary_union in the /v2/alerts endpoint, returning HTTP 500 for every request while the offending alert sat in the store.
+
+Highlights:
+
+- New shared ensure_valid_polygon() repair helper: make_valid with a buffer(0) fallback, matching the geocode-table repair convention, and a fast no-op path for already-valid geometry.
+- Ingest repair for explicit CAP <polygon> rings, merged multi-area footprints, and NWS zone-geometry unions.
+- Store invariant: AlertsStore repairs polygons on both entry points (replace_all and __setstate__), so snapshots written by older revisions - including already-poisoned live ones - heal on render-worker load without waiting for a fetch cycle.
+- Defensive guards in /v2/alerts (union and simplify) and the MCP alerts radius tool: invalid geometry degrades to a repaired footprint or a geometry-less alert instead of raising.
+- Bow-tie regression tests across the endpoint, ingest, snapshot load, and the MCP tool.
+
+Deployments pulling published images: set LIBREWXR_IMAGE_TAG=0.6.1 and restart; no configuration changes are needed.
+
+---
+
 ## [v0.6.0 — Container image distribution](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.6.0)
 
 2026-10-24
