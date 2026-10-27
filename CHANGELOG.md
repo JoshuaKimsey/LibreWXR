@@ -7,6 +7,20 @@ and commit the result alongside the version bump.
 
 ---
 
+## [v0.6.2 - Quieter memory pressure logging and raised thresholds](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.6.2)
+
+2026-10-27
+
+Cuts the repeated memory-pressure WARNING spam that filled the rotating log file during sustained pressure episodes and made real errors hard to spot, and raises the pressure thresholds to give caches more headroom before eviction.
+
+- Each action tier (tile-cache eviction at 90%, full tile + coordinate cache clearing at 95%) now writes exactly one WARNING per render worker per pressure episode - repeats log at INFO, console only. The latch re-arms after usage falls back below the warn band, so a fresh pressure episode always logs its own warning.
+- Thresholds raised from 80/85/90 to 85/90/95 of the memory limit: elevated usage logs an info line at 85%, each worker evicts half its tile cache at 90%, and tile + coordinate caches are cleared at 95%. All actions are self-healing cache drops; per-worker jitter and the two-consecutive-check hysteresis are unchanged.
+- The LIBREWXR_MEMORY_LIMIT_MB documentation now matches the actual logging behavior and the new thresholds.
+
+Deployments pulling published images: set LIBREWXR_IMAGE_TAG=0.6.2 and restart; no configuration changes are needed.
+
+---
+
 ## [v0.6.1 - Invalid CAP polygon crash fix](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.6.1)
 
 2026-10-27
