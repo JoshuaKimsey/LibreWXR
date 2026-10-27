@@ -44,9 +44,9 @@ def release_memory() -> None:
         pass  # Non-glibc platform (musl, macOS) — gc.collect() is enough
 
 # Eviction thresholds (fraction of memory limit)
-_WARN_THRESHOLD = 0.80
-_EVICT_TILES_THRESHOLD = 0.85
-_EVICT_ALL_THRESHOLD = 0.90
+_WARN_THRESHOLD = 0.85
+_EVICT_TILES_THRESHOLD = 0.90
+_EVICT_ALL_THRESHOLD = 0.95
 
 
 def detect_memory_limit_mb(override_mb: int = 0) -> int:
@@ -322,6 +322,12 @@ class MemoryMonitor:
         # resets whenever a check falls below the level.
         self._evict_streak = 0
         self._clear_streak = 0
+        # Log latches: each action tier writes its first firing of a pressure
+        # episode at WARNING (so it reaches the rotating log file exactly once);
+        # repeats log at INFO.  Both re-arm only after usage falls back below the
+        # warn band, so a fresh pressure episode always gets one WARNING per tier.
+        self._logged_evict_episode = False
+        self._logged_clear_episode = False
         # One-time debug log when memory.stat can't be parsed and the raw
         # cgroup usage file is used for decisions instead.
         self._logged_usage_fallback = False
@@ -450,7 +456,13 @@ class MemoryMonitor:
             self._clear_streak += 1
             self._evict_streak = 0
             if self._clear_streak >= 2:
-                logger.warning(
+                # Only the first action firing of a pressure episode goes
+                # to WARNING (so the rotating log file gets exactly one
+                # line per episode instead of spam that drowns real
+                # errors); repeats while still latched log at INFO.
+                _log = logger.warning if not self._logged_clear_episode else logger.info
+                self._logged_clear_episode = True
+                _log(
                     "Memory critical: %d MB (%s) / %d MB (%.0f%%; cgroup total %d MB) — "
                     "clearing tile + coord caches",
                     decision_mb, label, self._limit_mb, usage * 100, total_mb,
@@ -465,7 +477,12 @@ class MemoryMonitor:
             if self._evict_streak >= 2:
                 freed = self._tile_cache.evict_half()
                 release_memory()
-                logger.warning(
+                # Same once-per-episode WARNING latch as the clear tier
+                # above; logged after the eviction so ``freed`` can be
+                # reported.
+                _log = logger.warning if not self._logged_evict_episode else logger.info
+                self._logged_evict_episode = True
+                _log(
                     "Memory pressure: %d MB (%s) / %d MB (%.0f%%; cgroup total %d MB) — "
                     "evicted %.1f MB of tiles",
                     decision_mb, label, self._limit_mb, usage * 100, total_mb,
@@ -481,5 +498,12 @@ class MemoryMonitor:
             )
 
         else:
+            # Below the warn band means the pressure episode is over: reset
+            # the hysteresis streaks AND re-arm both log latches so the next
+            # episode gets its own single WARNING per tier.  The warn band
+            # itself and above deliberately leave the latches armed - the
+            # episode is still ongoing there.
             self._evict_streak = 0
             self._clear_streak = 0
+            self._logged_evict_episode = False
+            self._logged_clear_episode = False

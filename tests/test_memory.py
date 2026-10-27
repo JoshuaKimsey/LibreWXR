@@ -217,8 +217,8 @@ class TestCgroupFallback:
         monkeypatch.setattr(
             "librewxr.memory._read_cgroup_memory_usage",
             lambda: CgroupUsage(
-                int(0.95 * 1000 * 1024 * 1024),
-                int(0.95 * 1000 * 1024 * 1024),
+                int(0.98 * 1000 * 1024 * 1024),
+                int(0.98 * 1000 * 1024 * 1024),
                 "cgroup",
                 False,
             ),
@@ -234,7 +234,7 @@ class TestCgroupFallback:
 
         class _FakeProc:
             def memory_info(self):
-                return SimpleNamespace(rss=int(0.95 * limit_bytes))
+                return SimpleNamespace(rss=int(0.98 * limit_bytes))
 
         monkeypatch.setattr(monitor, "_process", _FakeProc())
         monitor._check()
@@ -282,9 +282,9 @@ class TestThresholdJitter:
             for seed in range(500):
                 random.seed(seed)
                 warn, evict, clear = _jittered_thresholds()
-                assert 0.79 <= warn <= 0.81
-                assert 0.83 <= evict <= 0.87
-                assert 0.88 <= clear <= 0.92
+                assert 0.84 <= warn <= 0.86
+                assert 0.88 <= evict <= 0.92
+                assert 0.93 <= clear <= 0.97
                 assert warn < evict < clear
         finally:
             random.setstate(state)
@@ -317,20 +317,20 @@ class TestThresholdJitter:
 
 class TestHysteresis:
     # Usage fractions are chosen to be in-band for EVERY possible jitter:
-    # warn in [0.79, 0.81], evict in [0.83, 0.87], clear in [0.88, 0.92].
-    # 0.82 is always warn-only, 0.875 always evict-band, 0.95 always
+    # warn in [0.84, 0.86], evict in [0.88, 0.92], clear in [0.93, 0.97].
+    # 0.87 is always warn-only, 0.925 always evict-band, 0.98 always
     # clear-band, 0.70 always below everything.
 
     def test_single_high_check_does_not_evict(self, monkeypatch):
         monitor, tile_cache, _ = _make_monitor(monkeypatch)
-        _fake_cgroup_usage(monkeypatch, fraction=0.875)
+        _fake_cgroup_usage(monkeypatch, fraction=0.925)
         monitor._check()
         assert tile_cache.evict_calls == 0
         assert tile_cache.clear_calls == 0
 
     def test_two_consecutive_checks_evict_half(self, monkeypatch):
         monitor, tile_cache, coord_calls = _make_monitor(monkeypatch)
-        _fake_cgroup_usage(monkeypatch, fraction=0.875)
+        _fake_cgroup_usage(monkeypatch, fraction=0.925)
         monitor._check()
         monitor._check()
         assert tile_cache.evict_calls == 1
@@ -339,11 +339,11 @@ class TestHysteresis:
 
     def test_below_threshold_check_resets_evict_streak(self, monkeypatch):
         monitor, tile_cache, _ = _make_monitor(monkeypatch)
-        state = _fake_cgroup_usage(monkeypatch, fraction=0.875)
+        state = _fake_cgroup_usage(monkeypatch, fraction=0.925)
         monitor._check()                      # streak 1
         state["fraction"] = 0.70              # below warn: reset
         monitor._check()
-        state["fraction"] = 0.875
+        state["fraction"] = 0.925
         monitor._check()                      # streak 1 again
         assert tile_cache.evict_calls == 0
         monitor._check()                      # streak 2: act
@@ -351,11 +351,11 @@ class TestHysteresis:
 
     def test_warn_band_resets_evict_streak(self, monkeypatch):
         monitor, tile_cache, _ = _make_monitor(monkeypatch)
-        state = _fake_cgroup_usage(monkeypatch, fraction=0.875)
+        state = _fake_cgroup_usage(monkeypatch, fraction=0.925)
         monitor._check()                      # streak 1
-        state["fraction"] = 0.82              # warn-only band: reset evict streak
+        state["fraction"] = 0.87              # warn-only band: reset evict streak
         monitor._check()
-        state["fraction"] = 0.875
+        state["fraction"] = 0.925
         monitor._check()                      # streak 1 again
         assert tile_cache.evict_calls == 0
         monitor._check()                      # streak 2: act
@@ -363,7 +363,7 @@ class TestHysteresis:
 
     def test_clear_level_requires_two_checks_and_clears_coords(self, monkeypatch):
         monitor, tile_cache, coord_calls = _make_monitor(monkeypatch)
-        _fake_cgroup_usage(monkeypatch, fraction=0.95)
+        _fake_cgroup_usage(monkeypatch, fraction=0.98)
         monitor._check()
         assert tile_cache.clear_calls == 0
         monitor._check()
@@ -373,11 +373,11 @@ class TestHysteresis:
 
     def test_clear_streak_resets_when_usage_drops_to_evict_band(self, monkeypatch):
         monitor, tile_cache, _ = _make_monitor(monkeypatch)
-        state = _fake_cgroup_usage(monkeypatch, fraction=0.95)
+        state = _fake_cgroup_usage(monkeypatch, fraction=0.98)
         monitor._check()                      # clear streak 1
-        state["fraction"] = 0.875             # below clear: reset clear streak
+        state["fraction"] = 0.925             # below clear: reset clear streak
         monitor._check()
-        state["fraction"] = 0.95
+        state["fraction"] = 0.98
         monitor._check()                      # clear streak 1 again
         assert tile_cache.clear_calls == 0
         monitor._check()                      # clear streak 2: act
@@ -385,7 +385,7 @@ class TestHysteresis:
 
     def test_warn_level_logs_on_first_crossing(self, monkeypatch, caplog):
         monitor, tile_cache, _ = _make_monitor(monkeypatch)
-        _fake_cgroup_usage(monkeypatch, fraction=0.82)
+        _fake_cgroup_usage(monkeypatch, fraction=0.87)
         with caplog.at_level("INFO", logger="librewxr.memory"):
             monitor._check()
         assert any("Memory usage elevated" in r.message for r in caplog.records)
@@ -394,7 +394,7 @@ class TestHysteresis:
 
     def test_eviction_acts_every_check_once_past_hysteresis(self, monkeypatch):
         monitor, tile_cache, _ = _make_monitor(monkeypatch)
-        _fake_cgroup_usage(monkeypatch, fraction=0.875)
+        _fake_cgroup_usage(monkeypatch, fraction=0.925)
         for _ in range(4):
             monitor._check()
         assert tile_cache.evict_calls == 3  # checks 2, 3, 4 all act
@@ -406,6 +406,84 @@ class TestHysteresis:
         monitor._check()
         # decision == 500 MB, raw cgroup total == decision + 17 MB
         assert monitor.cgroup_total_mb == 517
+
+
+class TestPressureLogLatching:
+    """Each action tier writes one WARNING per pressure episode, then INFO.
+
+    Repeated WARNING lines used to fill the rotating log file during a long
+    pressure episode and drown out real errors, so only the first action
+    firing of an episode reaches WARNING; the latch re-arms once usage falls
+    back below the warn band.
+    """
+
+    @staticmethod
+    def _records(caplog, level: str, needle: str):
+        return [
+            record for record in caplog.records
+            if record.levelname == level and needle in record.getMessage()
+        ]
+
+    def test_first_eviction_warns_once_then_repeats_at_info(self, monkeypatch, caplog):
+        monitor, tile_cache, _ = _make_monitor(monkeypatch)
+        _fake_cgroup_usage(monkeypatch, fraction=0.925)
+        with caplog.at_level("INFO", logger="librewxr.memory"):
+            monitor._check()
+            monitor._check()                  # streak 2: first action firing
+            assert tile_cache.evict_calls == 1
+            assert monitor._logged_evict_episode is True
+            monitor._check()                  # streak 3: repeat
+            monitor._check()                  # streak 4: repeat
+        assert len(self._records(caplog, "WARNING", "Memory pressure:")) == 1
+        assert len(self._records(caplog, "INFO", "Memory pressure:")) >= 1
+        assert tile_cache.evict_calls == 3
+
+    def test_first_clear_warns_once_then_repeats_at_info(self, monkeypatch, caplog):
+        monitor, tile_cache, _ = _make_monitor(monkeypatch)
+        _fake_cgroup_usage(monkeypatch, fraction=0.98)
+        with caplog.at_level("INFO", logger="librewxr.memory"):
+            monitor._check()
+            monitor._check()                  # streak 2: first action firing
+            assert tile_cache.clear_calls == 1
+            assert monitor._logged_clear_episode is True
+            monitor._check()                  # streak 3: repeat
+            monitor._check()                  # streak 4: repeat
+        assert len(self._records(caplog, "WARNING", "Memory critical:")) == 1
+        assert len(self._records(caplog, "INFO", "Memory critical:")) >= 1
+        assert tile_cache.clear_calls == 3
+
+    def test_latch_rearms_after_recovery(self, monkeypatch, caplog):
+        monitor, tile_cache, _ = _make_monitor(monkeypatch)
+        state = _fake_cgroup_usage(monkeypatch, fraction=0.925)
+        with caplog.at_level("INFO", logger="librewxr.memory"):
+            monitor._check()
+            monitor._check()                  # first episode: one WARNING
+            assert len(self._records(caplog, "WARNING", "Memory pressure:")) == 1
+            state["fraction"] = 0.70          # full recovery re-arms the latch
+            monitor._check()
+            assert monitor._logged_evict_episode is False
+            state["fraction"] = 0.925
+            monitor._check()                  # streak 1 of the new episode
+            monitor._check()                  # streak 2: WARNING again
+        assert len(self._records(caplog, "WARNING", "Memory pressure:")) == 2
+        assert tile_cache.evict_calls == 2
+
+    def test_elevated_band_does_not_rearm_latches(self, monkeypatch, caplog):
+        monitor, tile_cache, _ = _make_monitor(monkeypatch)
+        state = _fake_cgroup_usage(monkeypatch, fraction=0.925)
+        with caplog.at_level("INFO", logger="librewxr.memory"):
+            monitor._check()
+            monitor._check()                  # first episode: one WARNING
+            assert len(self._records(caplog, "WARNING", "Memory pressure:")) == 1
+            state["fraction"] = 0.87          # elevated band: episode ongoing
+            monitor._check()
+            assert monitor._logged_evict_episode is True
+            state["fraction"] = 0.925
+            monitor._check()                  # streak 1 again
+            monitor._check()                  # streak 2: INFO, not WARNING
+        assert len(self._records(caplog, "WARNING", "Memory pressure:")) == 1
+        assert len(self._records(caplog, "INFO", "Memory pressure:")) >= 1
+        assert tile_cache.evict_calls == 2
 
 
 # ---------------------------------------------------------------------------
