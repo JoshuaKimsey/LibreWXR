@@ -10,7 +10,7 @@ status, as this file and the issues are kept in sync. The lists are not exhausti
 
 ## The path to 1.0.0
 
-The current version is 0.6.1. Every section below is an unordered theme: each ships as its
+The current version is 0.6.2. Every section below is an unordered theme: each ships as its
 own 0.x release whenever it is next in line, with the version number assigned at release
 time.
 
@@ -57,7 +57,7 @@ alignment, so it can land alongside any release.
   record + `mcp-publisher login dns`); the GitHub namespace is treated as unusable for the
   `api.librewxr.net` remote under the domain-matching rule.
 - [ ] Create `server.json` at the repo root per the runbook template; `version` tracks
-  `pyproject.toml` at publish time (0.6.1 today - re-check when executing).
+  `pyproject.toml` at publish time (0.6.2 today - re-check when executing).
 - [ ] Publish the hosted instance; published `(name, version)` pairs are immutable, so the
   registry is only touched on real `pyproject.toml` version bumps.
 - [ ] Follow-up: align the SEP-2127 server card name with the chosen namespace - one
