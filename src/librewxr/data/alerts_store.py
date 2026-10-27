@@ -6,7 +6,9 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from shapely.geometry import Polygon, shape
+from shapely.errors import GEOSException
+from shapely.geometry import MultiPolygon, Polygon, shape
+from shapely.validation import make_valid
 
 
 @dataclass
@@ -21,6 +23,67 @@ class AlertEntry:
     area_desc: str
     url: str
     polygon: Optional[Polygon] = None
+
+
+def _as_polygonal(geom) -> Optional[Polygon]:
+    """Normalize a geometry to a non-empty Polygon/MultiPolygon, or None.
+
+    Flattens GeometryCollections to their polygonal members (the shape
+    ``make_valid`` returns for a self-intersection that separates into two
+    lobes) and reports any non-polygonal or empty result as None.
+    """
+    if isinstance(geom, Polygon):
+        parts: list[Polygon] = [] if geom.is_empty else [geom]
+    elif isinstance(geom, MultiPolygon):
+        parts = [part for part in geom.geoms if not part.is_empty]
+    elif getattr(geom, "geom_type", "") == "GeometryCollection":
+        parts = []
+        for member in geom.geoms:
+            if isinstance(member, Polygon):
+                if not member.is_empty:
+                    parts.append(member)
+            elif isinstance(member, MultiPolygon):
+                parts.extend(part for part in member.geoms if not part.is_empty)
+    else:
+        return None
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    return MultiPolygon(parts)
+
+
+def ensure_valid_polygon(geom: Optional[Polygon]) -> Optional[Polygon]:
+    """Return a valid Polygon/MultiPolygon, repairing invalid geometry.
+
+    ``None`` in -> ``None`` out, and an already-valid geometry is returned
+    unchanged (same object, no copy) so the common ingest path stays
+    allocation-free.  Invalid geometry is repaired with ``make_valid``; a
+    GeometryCollection repair result keeps only its polygonal members
+    (0 usable parts -> None, 1 -> that part, more -> MultiPolygon).  If the
+    repair is non-polygonal (collapsed to a line/point) or empty the result is
+    None, and geometry still invalid after ``make_valid`` gets one last
+    ``buffer(0)`` attempt (the table-repair convention in
+    ``data/alert_geocodes.py``).  Never raises: an unrecoverable polygon is
+    reported as None, which callers treat as the supported "alert without
+    geometry" case.
+    """
+    if geom is None:
+        return None
+    try:
+        if geom.is_valid:
+            return geom
+        repaired = _as_polygonal(make_valid(geom))
+        if repaired is None:
+            return None
+        if repaired.is_valid:
+            return repaired
+        fixed = _as_polygonal(repaired.buffer(0))
+        if fixed is None or not fixed.is_valid:
+            return None
+        return fixed
+    except GEOSException:
+        return None
 
 
 class AlertsStore:
@@ -41,6 +104,13 @@ class AlertsStore:
         self, alerts: list[AlertEntry], *, fetch_success: bool = True
     ) -> None:
         with self._lock:
+            # Store invariant: every polygon is a valid Polygon/MultiPolygon
+            # (or None).  Ingest repairs at construction; this catches anything
+            # that slips past it, since invalid geometry raises
+            # GEOSException at the request-time unary_union.
+            for a in alerts:
+                if a.polygon is not None:
+                    a.polygon = ensure_valid_polygon(a.polygon)
             self._alerts = alerts
             self.last_updated = time.time()
             self._fetch_success = fetch_success
@@ -104,7 +174,13 @@ class AlertsStore:
                     expires=a["expires"],
                     area_desc=a["area_desc"],
                     url=a["url"],
-                    polygon=shape(a["polygon"]) if a.get("polygon") else None,
+                    # Repair on load too: a snapshot written by an older
+                    # revision may carry geometry the current ingest would
+                    # have fixed, and a render worker must never hold an
+                    # invalid polygon (it 500s the alerts endpoint).
+                    polygon=ensure_valid_polygon(
+                        shape(a["polygon"]) if a.get("polygon") else None
+                    ),
                 )
                 for a in state.get("alerts", [])
             ]

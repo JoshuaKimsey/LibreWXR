@@ -5,7 +5,7 @@
 filtering against the merged WMO + NWS store."""
 
 import pytest
-from shapely.geometry import MultiPolygon, Polygon
+from shapely.geometry import MultiPolygon, Polygon, shape
 
 from librewxr.api.models import AlertsResponse
 from librewxr.data.alerts_store import AlertEntry
@@ -195,3 +195,29 @@ async def test_alerts_within_radius_multipolygon():
     # The geometry should be the original MultiPolygon (mapping() handles both)
     assert result.features[0].geometry is not None
     assert result.features[0].geometry["type"] == "MultiPolygon"
+
+
+@pytest.mark.mcp
+async def test_invalid_polygon_repaired_not_raised():
+    """A self-intersecting CAP polygon must not raise out of the tool.
+
+    Regression: intersects/contains on invalid geometry raise
+    ``GEOSException: TopologyException``.  The query repairs the alert polygon
+    first, so the tool still returns the matching alert with valid geometry.
+    """
+    lat, lon = 0.0, 0.0
+    # Bow-tie around the query point: the two lobes meet at (0, 0), so the
+    # repaired MultiPolygon still touches the query circle.
+    bow_tie = Polygon([
+        (-0.2, -0.2), (0.2, -0.2), (-0.2, 0.2), (0.2, 0.2), (-0.2, -0.2),
+    ])
+    assert bow_tie.is_valid is False  # fixture sanity: this is the bad input
+
+    store = _MockAlertsStore([_make_alert("Bow Tie", "Severe", bow_tie)])
+    result = await alerts_within_radius(store, lat, lon, radius_km=25.0)
+
+    assert len(result.features) == 1
+    feature = result.features[0]
+    assert feature.properties.title == "Bow Tie"
+    assert feature.geometry is not None
+    assert shape(feature.geometry).is_valid is True

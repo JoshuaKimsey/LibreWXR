@@ -13,10 +13,12 @@ Uses an equirectangular cos(lat) approximation for the km-plane reprojection:
 import math
 import time
 
+from shapely.errors import GEOSException
 from shapely.geometry import Point, Polygon, MultiPolygon, mapping
 
 from librewxr.api.models import AlertsResponse, GeoJSONFeature, AlertProperties
 from librewxr.api.routes import _alert_not_expired, _parse_cap_time
+from librewxr.data.alerts_store import ensure_valid_polygon
 
 
 def _reproject_to_km_plane(
@@ -99,22 +101,30 @@ async def alerts_within_radius(
         if severity is not None and alert.severity != severity:
             continue
 
-        # Need a polygon to do geometry-based filtering
-        if alert.polygon is None:
+        # Need a valid polygon for geometry filtering; repair invalid CAP
+        # geometry (intersects/contains raise GEOSException on it) and skip
+        # unrecoverable entries -- this tool never raises.
+        polygon = (
+            ensure_valid_polygon(alert.polygon) if alert.polygon is not None else None
+        )
+        if polygon is None:
             continue
 
         # Radius filter: reproject the alert's polygon (which may be a
         # MultiPolygon for alerts spanning disjoint areas, e.g. multi-
         # county warnings) to a local km-plane centred on (lon, lat),
         # then test intersection with a circle of the given radius.
-        reprojected = _reproject_to_km_plane(
-            alert.polygon, lon, lat, deg_to_km_lon, deg_to_km_lat,
-        )
+        try:
+            reprojected = _reproject_to_km_plane(
+                polygon, lon, lat, deg_to_km_lon, deg_to_km_lat,
+            )
 
-        within_radius = (
-            circle.intersects(reprojected)
-            or alert.polygon.contains(query_point)
-        )
+            within_radius = (
+                circle.intersects(reprojected)
+                or polygon.contains(query_point)
+            )
+        except GEOSException:
+            continue
 
         if not within_radius:
             continue
@@ -138,7 +148,7 @@ async def alerts_within_radius(
                     regions=[alert.area_desc] if alert.area_desc else [],
                     uri=uri,
                 ),
-                geometry=mapping(alert.polygon) if alert.polygon is not None else None,
+                geometry=mapping(polygon),
             )
         )
 

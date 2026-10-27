@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from shapely.errors import GEOSException
 from shapely.geometry import MultiPolygon, Point, Polygon, shape
 
 from librewxr.api import routes
@@ -37,7 +38,7 @@ from librewxr.data.alerts_fetcher import (
     _parse_cap_time,
     _rss_item_links,
 )
-from librewxr.data.alerts_store import AlertEntry, AlertsStore
+from librewxr.data.alerts_store import AlertEntry, AlertsStore, ensure_valid_polygon
 from librewxr.data.store import FrameStore
 from librewxr.tiles.cache import TileCache
 
@@ -467,6 +468,172 @@ class TestAlertsStoreSnapshot:
         consumer.__setstate__(snapshot)
         assert consumer.alerts == []
         assert consumer.fetch_success is False
+
+
+@pytest.mark.alerts
+class TestInvalidPolygonHandling:
+    """Self-intersecting (bow-tie) CAP polygons previously 500ed /v2/alerts.
+
+    An invalid polygon raises ``GEOSException: TopologyException: side location
+    conflict`` at the group ``unary_union`` in ``get_alerts``, taking the whole
+    endpoint down while the offending alert sat in the store.  Repair happens
+    at ingest, the store enforces "valid or None" on both entry points, and the
+    request paths keep a defensive fallback.
+    """
+
+    @staticmethod
+    def _bow_tie():
+        """Self-intersecting ring: two lobes meeting at a point."""
+        poly = Polygon([(0.0, 0.0), (2.0, 0.0), (0.0, 2.0), (2.0, 2.0), (0.0, 0.0)])
+        assert poly.is_valid is False  # fixture sanity: this is the bad input
+        return poly
+
+    @staticmethod
+    def _entry(url, polygon, event="Heat Wave", area_desc="Region"):
+        return AlertEntry(
+            source_id="bg-plovdiv-xx",
+            event=event,
+            description="Extreme heat",
+            severity="Severe",
+            effective="2026-05-07T00:00:00+03:00",
+            expires="2099-05-07T23:00:00+03:00",
+            area_desc=area_desc,
+            url=url,
+            polygon=polygon,
+        )
+
+    @staticmethod
+    async def _get(entries, path):
+        store = AlertsStore()
+        store.replace_all(entries)
+        app = FastAPI()
+        app.include_router(routes.router)
+        routes.alerts_store = store
+        routes.alerts_enabled = True
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            return await ac.get(path)
+
+    def test_ensure_valid_polygon_repairs_bowtie(self):
+        bow_tie = self._bow_tie()
+        repaired = ensure_valid_polygon(bow_tie)
+        assert repaired is not None
+        assert repaired.is_valid is True
+        assert repaired.is_empty is False
+        assert repaired.geom_type in ("Polygon", "MultiPolygon")
+        # The two lobes survive the repair (area 1 each).
+        assert repaired.area == pytest.approx(2.0)
+
+        # Fast path: already-valid input is returned unchanged, no copy.
+        square = Polygon([(0, 0), (2, 0), (2, 2), (0, 2), (0, 0)])
+        assert ensure_valid_polygon(square) is square
+
+        assert ensure_valid_polygon(None) is None
+
+    async def test_endpoint_renders_invalid_polygon_alert(self):
+        """Regression: a bow-tie alert in the store must not 500 /v2/alerts."""
+        resp = await self._get(
+            [self._entry("https://example.com/bowtie", self._bow_tie())],
+            "/v2/alerts",
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["features"]) == 1
+        geometry = data["features"][0]["geometry"]
+        assert geometry is not None
+        assert shape(geometry).is_valid is True
+
+    async def test_union_failure_falls_back_to_first_polygon(self, monkeypatch):
+        """A union that still raises must degrade to the first polygon, not 500."""
+        poly_a = Polygon([
+            (20.0, 41.0), (22.0, 41.0), (22.0, 43.0), (20.0, 43.0), (20.0, 41.0),
+        ])
+        poly_b = Polygon([
+            (26.0, 43.0), (28.0, 43.0), (28.0, 45.0), (26.0, 45.0), (26.0, 43.0),
+        ])
+        entries = [
+            self._entry("https://example.com/union", poly_a, area_desc="Region A"),
+            self._entry("https://example.com/union", poly_b, area_desc="Region B"),
+        ]
+
+        def _explode(*args, **kwargs):
+            raise GEOSException("TopologyException: side location conflict")
+
+        # get_alerts imports unary_union lazily inside the function, so the
+        # attribute lookup happens at call time and this patch takes effect.
+        monkeypatch.setattr("shapely.ops.unary_union", _explode)
+
+        resp = await self._get(entries, "/v2/alerts?simplify=0")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["features"]) == 1
+        geometry = data["features"][0]["geometry"]
+        assert geometry is not None
+        assert shape(geometry).equals(poly_a)
+
+    def test_extract_polygons_repairs_invalid_ring(self):
+        """A self-intersecting CAP <polygon> is repaired at ingest."""
+        cap_xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">
+          <info>
+            <language>en-US</language>
+            <event>Severe Heat</event>
+            <severity>Severe</severity>
+            <effective>2026-05-07T00:15:00-05:00</effective>
+            <expires>2099-05-07T06:00:00-05:00</expires>
+            <area>
+              <areaDesc>Bow Tie Area</areaDesc>
+              <polygon>0,0 0,2 2,0 2,2 0,0</polygon>
+            </area>
+          </info>
+        </alert>"""
+        entries = _extract_polygons_from_cap(
+            cap_xml, "test-source", "https://example.com/cap", []
+        )
+        assert len(entries) == 1
+        assert entries[0].polygon is not None
+        assert entries[0].polygon.is_valid is True
+        assert entries[0].polygon.is_empty is False
+
+    def test_replace_all_repairs_invalid_polygon(self):
+        store = AlertsStore()
+        store.replace_all([self._entry("https://example.com/repair", self._bow_tie())])
+        assert len(store.alerts) == 1
+        assert store.alerts[0].polygon is not None
+        assert store.alerts[0].polygon.is_valid is True
+
+    def test_setstate_repairs_invalid_polygon(self):
+        """Snapshots written by older revisions are repaired on load."""
+        bow_tie = self._bow_tie()
+        snapshot = {
+            "last_updated": 123.0,
+            "fetch_success": True,
+            "alerts": [
+                {
+                    "source_id": "legacy-1",
+                    "event": "Legacy Alert",
+                    "description": "Snapshot from an older revision",
+                    "severity": "Severe",
+                    "effective": "2026-05-08T20:00:00Z",
+                    "expires": "2099-05-08T21:00:00Z",
+                    "area_desc": "Legacy Area",
+                    "url": "https://example.com/legacy",
+                    "polygon": bow_tie.__geo_interface__,
+                }
+            ],
+        }
+        # Mirror what dump_state/load_state do (JSON round-trip).
+        snapshot = json.loads(json.dumps(snapshot))
+
+        store = AlertsStore()
+        store.__setstate__(snapshot)
+
+        assert len(store.alerts) == 1
+        restored = store.alerts[0].polygon
+        assert restored is not None
+        assert restored.is_valid is True
+        assert restored.is_empty is False
+        assert restored.area == pytest.approx(2.0)
 
 
 class TestCAPParsing:

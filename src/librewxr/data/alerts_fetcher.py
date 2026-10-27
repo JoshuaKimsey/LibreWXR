@@ -11,6 +11,7 @@ from typing import Optional
 
 import httpx
 from lxml import etree
+from shapely.errors import GEOSException
 from shapely.geometry import MultiPolygon, Polygon, shape
 from shapely.ops import unary_union
 from shapely.prepared import prep
@@ -22,7 +23,7 @@ from librewxr.data.alert_geocodes import (
     ensure_loaded,
     resolve,
 )
-from librewxr.data.alerts_store import AlertEntry, AlertsStore
+from librewxr.data.alerts_store import AlertEntry, AlertsStore, ensure_valid_polygon
 from librewxr.data.retry import retry_get
 
 logger = logging.getLogger(__name__)
@@ -104,7 +105,8 @@ def _extract_polygons_from_cap(
     collected together, resolved polygons already covered by an explicit one
     are pruned, and the remainder is merged -- kept as a single ``Polygon``
     when only one survives, otherwise assembled into a ``MultiPolygon`` from
-    the exact parts (no ``unary_union``, no repair).  That keeps a
+    the exact parts (no ``unary_union``), then repaired to a valid polygon.
+    That keeps a
     municipality-resolution feed like DWD at one entry per document instead
     of one per warn cell.
     """
@@ -211,10 +213,18 @@ def _extract_polygons_from_cap(
                     if coords[0] != coords[-1]:
                         coords.append(coords[0])
                     try:
-                        explicit_polys.append(Polygon(coords))
+                        poly_raw = Polygon(coords)
                     except Exception as exc:
                         logger.warning("Polygon construction failed for %s: %s", source_id, exc)
                         continue
+                    # A self-intersecting CAP ring is invalid geometry that
+                    # raises GEOSException at the request-time unary_union;
+                    # repair it here, drop it if unrecoverable.
+                    poly = ensure_valid_polygon(poly_raw)
+                    if poly is None:
+                        logger.warning("Dropping unrecoverable polygon for %s", source_id)
+                        continue
+                    explicit_polys.append(poly)
 
             # Resolve geocodes regardless of explicit polygons: a CAP may mix
             # <polygon> areas with geocode areas, and both describe coverage.
@@ -259,13 +269,28 @@ def _extract_polygons_from_cap(
 
         polygons = explicit_polys + resolved_polys
         if len(polygons) == 1:
-            merged: Polygon = polygons[0]
+            merged: Optional[Polygon] = polygons[0]
         else:
             # Cheap exact assembly (no unary_union): the parts are already the
             # right geometries, and multi-part table polygons are flattened so
             # MultiPolygon() only ever sees Polygons.
             merged = MultiPolygon(
                 [part for poly in polygons for part in getattr(poly, "geoms", [poly])]
+            )
+
+        # Overlapping parts make the assembled MultiPolygon invalid even when
+        # every part is valid, and an invalid polygon raises
+        # GEOSException (TopologyException: side location conflict) at the
+        # request-time unary_union, 500ing the whole alerts endpoint.  Repair
+        # the merged footprint; None keeps the alert geometry-less, an
+        # already-supported case.
+        merged = ensure_valid_polygon(merged)
+        if merged is None:
+            logger.warning(
+                "Unrecoverable merged polygon for %s (event=%r): keeping the "
+                "alert without geometry",
+                source_id,
+                event_text,
             )
 
         results.append(
@@ -436,10 +461,15 @@ def _polygonal(geom: dict | None) -> Optional[Polygon]:
         ]
         if not members:
             return None
-        parsed = unary_union(members)
+        try:
+            parsed = unary_union(members)
+        except GEOSException:
+            return None
     if parsed.is_empty or parsed.geom_type not in ("Polygon", "MultiPolygon"):
         return None
-    return parsed
+    # Zone geometries can be self-intersecting too; hand back valid geometry
+    # or None so no invalid polygon ever reaches the store.
+    return ensure_valid_polygon(parsed)
 
 
 def _nws_zone_urls(props: dict) -> list[str]:
