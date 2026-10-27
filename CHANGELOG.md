@@ -7,6 +7,20 @@ and commit the result alongside the version bump.
 
 ---
 
+## [v0.6.3 - Radar frame eviction race fix](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.6.3)
+
+2026-10-27
+
+Fixes render-worker errors of the form "Failed to apply state for store 'frame_store'" with FileNotFoundError on a radar frame .dat, triggered when the pipeline evicted a frame file that the currently published state.json still named - most reliably at deploy restarts, when a booting render worker re-opens every frame the snapshot lists.
+
+- Tolerance: FrameStore's state apply now skips a frame whose file is missing - one WARNING line with the timestamp instead of an ERROR traceback and a failed store refresh - matching the NowcastStore/PrecipMaskStore stale-file precedent. The rest of the ring keeps refreshing; the dropped slot simply falls out of listings until it ages past.
+- Prevention: eviction and radar-cache cleanup now linger evicted frame files for one fetch interval (minimum 60 s, derived from LIBREWXR_FETCH_INTERVAL) before deleting them, spanning the window in which the previous snapshot can still name them. Both deleters share the same window, and cleanup reaps all of an elapsed timestamp's files in one pass.
+- Boot hygiene: render workers and the MCP stdio transport no longer sweep the shared radar *.tmp files at boot; only the pipeline sweeps (at its own boot), so a worker boot cannot delete the pipeline's in-flight atomic write and abort its fetch cycle.
+
+Deployments pulling published images: set LIBREWXR_IMAGE_TAG=0.6.3 and restart; no configuration changes are needed.
+
+---
+
 ## [v0.6.2 - Quieter memory pressure logging and raised thresholds](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.6.2)
 
 2026-10-27
