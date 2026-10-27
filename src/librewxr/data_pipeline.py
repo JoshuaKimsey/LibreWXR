@@ -114,7 +114,21 @@ async def run_pipeline() -> None:
 
     # All persistent stores share the same cache_dir so render workers can
     # memmap the same files and __setstate__ from a single state.json.
-    store = FrameStore(max_frames=settings.max_frames, cache_dir=cache_dir)
+    #
+    # Eviction/cleanup grace: a frame's memmap files must outlive the
+    # snapshot that names them.  state.json is published at the end of a
+    # cycle while eviction may happen at any point in the next one, and a
+    # booting render worker re-opens every frame in whatever snapshot it
+    # reads -- deleting a file while that snapshot is still current turns
+    # apply_state into a FileNotFoundError.  One fetch interval (min 60 s)
+    # spans that publish lag.  The RadarFrameCache below MUST use the same
+    # window: it walks the same directory later in the cycle.
+    evict_grace_s = max(60.0, float(settings.fetch_interval))
+    store = FrameStore(
+        max_frames=settings.max_frames,
+        cache_dir=cache_dir,
+        evict_grace_s=evict_grace_s,
+    )
     tile_cache = TileCache(max_mb=1)  # noop-effect (see module docstring)
 
     # Walk the auto-discovered NWP providers under ``librewxr.sources``;
@@ -206,7 +220,9 @@ async def run_pipeline() -> None:
     # FrameStore from the prior session's frames before the first fetch
     # completes — without it, render workers would see an empty
     # state.json on cold start.
-    radar_cache = RadarFrameCache(cache_dir)
+    # Same grace as the FrameStore's eviction (it walks the same radar
+    # directory and would otherwise reap what eviction deliberately kept).
+    radar_cache = RadarFrameCache(cache_dir, grace_s=evict_grace_s)
     regions_by_name = {name: REGIONS[name] for name in enabled}
     restored = radar_cache.load_frames(regions_by_name)
     if restored:

@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -35,7 +36,13 @@ class FrameStore:
     cache — the foundation of the multi-worker tile-server split.
     """
 
-    def __init__(self, max_frames: int = 12, cache_dir: Path | None = None):
+    def __init__(
+        self,
+        max_frames: int = 12,
+        cache_dir: Path | None = None,
+        evict_grace_s: float = 0.0,
+        cleanup_tmp: bool = True,
+    ):
         self._max_frames = max_frames
         self._frames: list[RadarFrame] = []
         # O(1) timestamp -> frame index, kept in sync with ``_frames`` on
@@ -47,6 +54,13 @@ class FrameStore:
         # previous state.json snapshot to decide which cached tiles stay
         # valid across fetch cycles.
         self._frame_versions: dict[int, int] = {}
+        # Seconds an evicted timestamp's memmap files are left on disk
+        # before a later eviction reaps them (see _cleanup_timestamp).
+        # 0 keeps the legacy immediate unlink.
+        self._evict_grace_s = evict_grace_s
+        # timestamp -> monotonic time at which it was evicted but its files
+        # were deliberately kept.  Only populated while evict_grace_s > 0.
+        self._evict_pending: dict[int, float] = {}
         self._lock = asyncio.Lock()
         if cache_dir is not None:
             self._memmap_dir = Path(cache_dir) / "radar"
@@ -56,9 +70,15 @@ class FrameStore:
             self._persistent = False
         self._memmap_dir.mkdir(parents=True, exist_ok=True)
         # Drop stale .tmp files from a crash mid-write so subsequent
-        # atomic writes don't trip on existing files.
-        for path in self._memmap_dir.glob("*.tmp"):
-            path.unlink(missing_ok=True)
+        # atomic writes don't trip on existing files.  Consumers that
+        # share this directory with the pipeline (render workers, the MCP
+        # stdio transport) pass cleanup_tmp=False: the pipeline may be
+        # mid-write, and unlinking its in-flight
+        # ``<name>.dat.<pid>.<uuid>.tmp`` makes its os.replace raise and
+        # aborts the fetch cycle.  The sweep stays the writer's job.
+        if cleanup_tmp:
+            for path in self._memmap_dir.glob("*.tmp"):
+                path.unlink(missing_ok=True)
         logger.debug(
             "Frame memmap directory: %s (persistent=%s)",
             self._memmap_dir, self._persistent,
@@ -78,12 +98,49 @@ class FrameStore:
         )
 
     def _cleanup_timestamp(self, timestamp: int) -> None:
-        """Delete memmap files for an evicted timestamp."""
-        for path in self._memmap_dir.glob(f"{timestamp}_*.dat"):
-            try:
-                path.unlink()
-            except OSError:
-                pass
+        """Reclaim the memmap files of an evicted timestamp.
+
+        With ``evict_grace_s`` <= 0 this unlinks immediately (legacy
+        behaviour).  With a grace it only *records* the eviction and a
+        later eviction reaps whatever has been lingering long enough.
+
+        Why linger at all: the currently published ``state.json`` still
+        names the evicted timestamp until the next publish, and consumers
+        may be applying exactly that snapshot while we evict -- a booting
+        render worker re-opens every frame it names, so deleting here
+        turns its ``apply_state`` into a FileNotFoundError.  The grace
+        spans that publish lag.
+
+        This MUST ship together with ``RadarFrameCache.cleanup``'s own
+        grace: that pass runs later in the same cycle over the same
+        directory and would otherwise delete precisely what eviction
+        deliberately lingers.
+
+        A grace-lingering file the pipeline never reaps here can be
+        picked up by its startup disk scan and evicted a second time --
+        the grace then rolls forward from that eviction, which is benign.
+        """
+        if self._evict_grace_s <= 0:
+            for path in self._memmap_dir.glob(f"{timestamp}_*.dat"):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            return
+        now = time.monotonic()
+        # Reap the entries whose grace has elapsed first; a file that is
+        # already gone (unlinked by a sibling worker) is tolerated.
+        for ts, evicted_at in list(self._evict_pending.items()):
+            if now - evicted_at < self._evict_grace_s:
+                continue
+            for path in self._memmap_dir.glob(f"{ts}_*.dat"):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            self._evict_pending.pop(ts, None)
+        # Then record this eviction instead of unlinking its files.
+        self._evict_pending[timestamp] = now
 
     def _resolve_region_array(
         self,
@@ -320,6 +377,11 @@ class FrameStore:
         live memmap still matches the payload.  The payload descriptor
         (basename, dtype, shape) is also verified against the live array
         before reuse; anything that fails the check is re-opened fresh.
+
+        A frame whose files vanished between the snapshot and this call
+        (the pipeline evicted it and a cleanup removed the memmaps) is
+        skipped instead of raising -- see the FileNotFoundError handler
+        in the frame loop.
         """
         max_frames = state["max_frames"]
         memmap_dir = Path(state["memmap_dir"])
@@ -343,24 +405,44 @@ class FrameStore:
                 and new_versions.get(ts) is not None
                 and old_versions.get(ts) == new_versions.get(ts)
             )
-            for name, (basename, dtype_str, shape) in f_info["regions"].items():
-                old_arr = old_frame.regions.get(name) if old_frame is not None else None
-                if (
-                    version_ok
-                    and old_arr is not None
-                    and os.path.basename(str(old_arr.filename)) == basename
-                    and old_arr.dtype.str == dtype_str
-                    and list(old_arr.shape) == list(shape)
-                ):
-                    frame.regions[name] = old_arr
-                    reused += 1
-                else:
-                    frame.regions[name] = np.memmap(
-                        memmap_dir / basename,
-                        dtype=np.dtype(dtype_str), mode="r",
-                        shape=tuple(shape),
-                    )
-                    reopened += 1
+            missing = ""
+            try:
+                for name, (basename, dtype_str, shape) in f_info["regions"].items():
+                    missing = basename
+                    old_arr = old_frame.regions.get(name) if old_frame is not None else None
+                    if (
+                        version_ok
+                        and old_arr is not None
+                        and os.path.basename(str(old_arr.filename)) == basename
+                        and old_arr.dtype.str == dtype_str
+                        and list(old_arr.shape) == list(shape)
+                    ):
+                        frame.regions[name] = old_arr
+                        reused += 1
+                    else:
+                        frame.regions[name] = np.memmap(
+                            memmap_dir / basename,
+                            dtype=np.dtype(dtype_str), mode="r",
+                            shape=tuple(shape),
+                        )
+                        reopened += 1
+            except FileNotFoundError:
+                # Stale frame file race -- the pipeline published this
+                # snapshot before it evicted, and a cleanup in between
+                # removed the file.  Skip the WHOLE frame: a partial frame
+                # would render misleading partial tiles.  Dropping the ts
+                # from new_versions keeps the version map consistent with
+                # the frames we actually hold (otherwise a later snapshot
+                # could consider the missing timestamp "unchanged" and
+                # reuse nothing).  Only FileNotFoundError is tolerated --
+                # anything else is a corrupt snapshot and must surface.
+                logger.warning(
+                    "FrameStore: skipping stale frame %d -- %s is gone "
+                    "(the published snapshot outlived its files)",
+                    ts, missing,
+                )
+                new_versions.pop(ts, None)
+                continue
             new_frames.append(frame)
         new_frames.sort(key=lambda f: f.timestamp)
 

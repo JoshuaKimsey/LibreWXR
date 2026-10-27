@@ -278,6 +278,128 @@ async def test_render_only_lifespan_storm_cell_store_skips_tmp_sweep(
 
 
 @pytest.mark.asyncio
+async def test_render_only_lifespan_frame_store_skips_tmp_sweep(
+    tmp_path, monkeypatch,
+):
+    """Render workers construct their FrameStore with ``cleanup_tmp=False``.
+
+    The pipeline writes radar memmaps into ``<cache_dir>/radar`` and may
+    be mid-write when a worker boots; a default ``True`` sweep in
+    ``__init__`` would unlink its in-flight ``*.tmp`` files, making the
+    pipeline's ``os.replace`` raise and abort its fetch cycle.  Capture
+    the constructor kwargs on the boot path.
+    """
+    from librewxr.config import settings
+    from librewxr.data.master_state import dump_state
+    from librewxr.data.store import FrameStore, RadarFrame
+    from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
+    from librewxr import main as main_module
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+
+    producer = FrameStore(max_frames=4, cache_dir=cache_dir)
+    arr = np.zeros((COMPOSITE_HEIGHT, COMPOSITE_WIDTH), dtype=np.uint8)
+    await producer.add_frame(RadarFrame(timestamp=42, regions={"USCOMP": arr}))
+    dump_state({"frame_store": producer}, cache_dir)
+
+    monkeypatch.setattr(settings, "render_only", True)
+    monkeypatch.setattr(settings, "cache_dir", str(cache_dir))
+    monkeypatch.setattr(settings, "satellite_enabled", False)
+    monkeypatch.setattr(settings, "nowcast_enabled", False)
+    monkeypatch.setattr(settings, "arrow_flow_enabled", False)
+    monkeypatch.setattr(settings, "alerts_enabled", False)
+    monkeypatch.setattr(settings, "state_wait_timeout", 5.0)
+    monkeypatch.setattr(settings, "state_poll_interval", 0.1)
+    monkeypatch.setattr(settings, "warm_coord_zoom", 2)
+    monkeypatch.setattr(main_module, "_WARM_JITTER_MAX_S", 0.0)
+
+    captured: list[dict] = []
+    real_frame_store = main_module.FrameStore
+
+    def _capturing_frame_store(*args, **kwargs):
+        captured.append(kwargs)
+        return real_frame_store(*args, **kwargs)
+
+    monkeypatch.setattr(main_module, "FrameStore", _capturing_frame_store)
+
+    class _StubApp:
+        pass
+
+    async with main_module._render_only_lifespan(_StubApp()):
+        assert captured, "render-only boot did not construct FrameStore"
+        assert all(
+            kwargs.get("cleanup_tmp") is False for kwargs in captured
+        )
+
+
+def test_pipeline_stores_use_frame_deletion_grace(tmp_path, monkeypatch):
+    """The pipeline builds a lingering FrameStore + matching cache grace.
+
+    Both layers are required together: a snapshot published this cycle
+    still names a timestamp the pipeline evicts next cycle, and the
+    ``RadarFrameCache`` cleanup walks the same directory.  Capture the
+    construction kwargs and abort the pipeline right there (everything
+    after that point touches the network / real fetch loop).
+    """
+    from librewxr.config import settings
+    from librewxr import data_pipeline
+
+    class _Stop(Exception):
+        """Abort run_pipeline once both construction sites were captured."""
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+
+    monkeypatch.setattr(settings, "cache_dir", str(cache_dir))
+    monkeypatch.setattr(settings, "volatile_cache_dir", "")
+    monkeypatch.setattr(settings, "nowcast_enabled", False)
+    monkeypatch.setattr(settings, "arrow_flow_enabled", False)
+    monkeypatch.setattr(settings, "storm_cells_enabled", False)
+
+    # Stub the source walkers / coverage builders the pipeline runs before
+    # the two construction sites this test cares about.
+    monkeypatch.setattr(data_pipeline, "collect_nwp_contributions", lambda *a, **k: [])
+    monkeypatch.setattr(
+        data_pipeline, "collect_satellite_contributions", lambda *a, **k: [],
+    )
+    monkeypatch.setattr(
+        data_pipeline, "collect_radar_coverage_metadata",
+        lambda *a, **k: ({}, {}, []),
+    )
+    monkeypatch.setattr(data_pipeline, "build_coverage_masks", lambda *a, **k: None)
+    monkeypatch.setattr(data_pipeline, "build_feather_masks", lambda *a, **k: None)
+    monkeypatch.setattr(
+        data_pipeline, "persist_masks_in_background", lambda *a, **k: None,
+    )
+
+    captured: dict[str, dict] = {}
+    real_frame_store = data_pipeline.FrameStore
+
+    def _capturing_frame_store(*args, **kwargs):
+        captured["frame_store"] = kwargs
+        return real_frame_store(*args, **kwargs)
+
+    def _capturing_radar_cache(*args, **kwargs):
+        captured["radar_cache"] = kwargs
+        raise _Stop
+
+    monkeypatch.setattr(data_pipeline, "FrameStore", _capturing_frame_store)
+    monkeypatch.setattr(data_pipeline, "RadarFrameCache", _capturing_radar_cache)
+
+    with pytest.raises(_Stop):
+        asyncio.run(data_pipeline.run_pipeline())
+
+    expected = max(60.0, float(settings.fetch_interval))
+    assert captured["frame_store"]["evict_grace_s"] == expected
+    assert captured["frame_store"]["evict_grace_s"] > 0
+    # The radar-cache cleanup walks the same directory and must use the
+    # same window, or it deletes exactly what eviction deliberately kept.
+    assert captured["radar_cache"]["grace_s"] == expected
+    assert captured["radar_cache"]["grace_s"] > 0
+
+
+@pytest.mark.asyncio
 async def test_render_only_lifespan_yields_before_coord_warm(tmp_path, monkeypatch):
     """The coordinate warm must never block a render worker's readiness.
 

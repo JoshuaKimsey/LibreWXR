@@ -182,6 +182,129 @@ class TestFrameStorePersistence:
         assert second is not first
         np.testing.assert_array_equal(second, arr)
 
+    @pytest.mark.asyncio
+    async def test_setstate_skips_frame_with_missing_file(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        """A frame file deleted after the snapshot was published is skipped.
+
+        The pipeline can evict (and delete) a frame between publishing
+        state.json and a render worker applying it.  Applying the whole
+        snapshot must not fail on that one frame.
+        """
+        cache = tmp_path / "cache"
+        producer = FrameStore(max_frames=4, cache_dir=cache)
+        arr = np.zeros((4, 4), dtype=np.uint8)
+        await producer.add_frame(RadarFrame(timestamp=1700000000, regions={"A": arr}))
+        await producer.add_frame(RadarFrame(timestamp=1700000600, regions={"A": arr}))
+        snapshot = _roundtrip(producer.__getstate__())
+
+        (cache / "radar" / "1700000000_A.dat").unlink()
+
+        consumer = FrameStore(max_frames=4)
+        with caplog.at_level("WARNING", logger="librewxr.data.store"):
+            consumer.__setstate__(snapshot)
+
+        # The surviving frame is applied, the stale one is dropped whole.
+        assert await consumer.get_timestamps() == [1700000600]
+        assert 1700000000 not in consumer._frame_versions
+        assert consumer._frame_versions == {1700000600: 1}
+        warnings = [
+            r for r in caplog.records
+            if r.name == "librewxr.data.store" and r.levelname == "WARNING"
+        ]
+        assert len(warnings) == 1
+        assert "1700000000" in warnings[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_setstate_missing_file_skips_whole_frame(
+        self, tmp_path: Path,
+    ) -> None:
+        """Never a partial frame: one missing region drops the whole timestamp."""
+        cache = tmp_path / "cache"
+        producer = FrameStore(max_frames=4, cache_dir=cache)
+        arr = np.zeros((4, 4), dtype=np.uint8)
+        await producer.add_frame(
+            RadarFrame(timestamp=1700000000, regions={"A": arr, "B": arr})
+        )
+        snapshot = _roundtrip(producer.__getstate__())
+
+        # Drop only the FIRST region of the frame.
+        (cache / "radar" / "1700000000_A.dat").unlink()
+
+        consumer = FrameStore(max_frames=4)
+        consumer.__setstate__(snapshot)
+
+        assert await consumer.get_timestamps() == []
+        assert await consumer.get_frame(1700000000) is None
+        assert consumer._by_ts == {}
+        assert consumer._frame_versions == {}
+
+    @pytest.mark.asyncio
+    async def test_eviction_grace_defers_and_reaps(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """With evict_grace_s the evicted files linger, then a later eviction reaps."""
+        from librewxr.data import store as store_module
+
+        class _Clock:
+            """Controllable stand-in for the ``time`` module (monotonic only)."""
+
+            def __init__(self) -> None:
+                self.now = 1000.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = _Clock()
+        monkeypatch.setattr(store_module, "time", clock)
+
+        cache = tmp_path / "cache"
+        store = FrameStore(max_frames=2, cache_dir=cache, evict_grace_s=100.0)
+        arr = np.zeros((4, 4), dtype=np.uint8)
+        await store.add_frame(RadarFrame(timestamp=1700000000, regions={"A": arr}))
+        await store.add_frame(RadarFrame(timestamp=1700000600, regions={"A": arr}))
+        # Third frame evicts 1700000000 -> files deliberately linger.
+        await store.add_frame(RadarFrame(timestamp=1700001200, regions={"A": arr}))
+        assert (cache / "radar" / "1700000000_A.dat").exists()
+        assert store._evict_pending == {1700000000: 1000.0}
+
+        # Still inside the grace: a later eviction must not reap yet.
+        clock.now += 50.0
+        await store.add_frame(RadarFrame(timestamp=1700001800, regions={"A": arr}))
+        assert (cache / "radar" / "1700000000_A.dat").exists()
+
+        # Past the grace: the next eviction reaps the lingering files.
+        clock.now += 51.0
+        await store.add_frame(RadarFrame(timestamp=1700002400, regions={"A": arr}))
+        assert not (cache / "radar" / "1700000000_A.dat").exists()
+        # The just-evicted timestamp is clocked, not deleted.
+        assert 1700000600 in store._evict_pending
+        assert (cache / "radar" / "1700000600_A.dat").exists()
+
+        # Default (evict_grace_s=0) keeps the legacy immediate unlink.
+        immediate = FrameStore(max_frames=2, cache_dir=tmp_path / "legacy")
+        await immediate.add_frame(RadarFrame(timestamp=1700000000, regions={"A": arr}))
+        await immediate.add_frame(RadarFrame(timestamp=1700000600, regions={"A": arr}))
+        await immediate.add_frame(RadarFrame(timestamp=1700001200, regions={"A": arr}))
+        assert not (tmp_path / "legacy" / "radar" / "1700000000_A.dat").exists()
+        assert immediate._evict_pending == {}
+
+    def test_cleanup_tmp_false_leaves_tmp_files(self, tmp_path: Path) -> None:
+        """Consumers sharing the dir with the pipeline must not sweep its tmps."""
+        memmap_dir = tmp_path / "cache" / "radar"
+        memmap_dir.mkdir(parents=True)
+        stray = memmap_dir / "1700000000_A.dat.4242.deadbeef.tmp"
+        stray.write_bytes(b"in-flight pipeline write")
+
+        keeper = FrameStore(cache_dir=tmp_path / "cache", cleanup_tmp=False)
+        assert keeper._memmap_dir == memmap_dir
+        assert stray.exists()
+
+        # The default (writer-side) sweep still cleans stale tmps up.
+        FrameStore(cache_dir=tmp_path / "cache")
+        assert not stray.exists()
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # NowcastStore — populated round-trip

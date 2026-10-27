@@ -435,7 +435,16 @@ async def _render_only_lifespan(app: FastAPI):
     # present in the snapshot.  Sources disabled by config produce no
     # contribution and so won't be loaded even if the snapshot includes
     # them — keep settings in sync between pipeline and render workers.
-    store = FrameStore(max_frames=settings.max_frames, cache_dir=cache_dir)
+    store = FrameStore(
+        max_frames=settings.max_frames,
+        cache_dir=cache_dir,
+        # The pipeline owns the shared radar memmap dir and may be
+        # mid-write; a worker boot must never delete its in-flight
+        # ``<name>.dat.<pid>.<uuid>.tmp`` (the pipeline's os.replace would
+        # then raise and abort the cycle).  The stale-tmp sweep stays the
+        # pipeline's job at its own boot.
+        cleanup_tmp=False,
+    )
     cache = TileCache(max_mb=settings.tile_cache_mb)
     # Shared on-disk encoded-tile store: one worker's encode serves all
     # workers (plain past-frame tiles only; see routes.radar_tile).  The
