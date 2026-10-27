@@ -1003,7 +1003,7 @@ def _rewritten_start(start_message, compressed_len: int):
     return new_message
 
 
-app = FastAPI(title="LibreWXR", version="0.6.2", lifespan=combined_lifespan)
+app = FastAPI(title="LibreWXR", version="0.6.3", lifespan=combined_lifespan)
 
 # Register gzip before CORS so CORS is added last and stays outermost.
 app.add_middleware(JsonGZipMiddleware)
