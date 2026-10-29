@@ -37,7 +37,7 @@ from librewxr.api.models import (
 from librewxr.api.conditional import compute_etag, conditional_response
 from librewxr.colors.schemes import SCHEME_NAMES
 from librewxr.config import settings
-from librewxr.data.alerts_store import ensure_valid_polygon
+from librewxr.data.alerts_store import AlertEntry, ensure_valid_polygon
 from librewxr.data.lightning_store import LightningStore
 from librewxr.data.store import FrameStore
 from librewxr.data.worker_pulse import read_worker_pulses
@@ -162,6 +162,11 @@ alerts_enabled: bool = False
 mcp_mounted: bool = False
 mcp_path: str = "/mcp"
 mcp_tools: list[str] = []
+
+# WebSocket push hub: set by main.py during startup (None when
+# ``settings.websocket_enabled`` is False).  ``/health`` reports its
+# connection/topic counts; the WS endpoint rejects connections while None.
+ws_hub = None  # WebSocketHub | None
 
 
 def _nwp_grid_health_blocks() -> dict[str, dict]:
@@ -597,6 +602,18 @@ async def health():
     else:
         lightning_health = {"enabled": False}
 
+    # WebSocket push channel: unwired (disabled by config) degrades to the
+    # small shape, mirroring the lightning / storm-cells blocks.
+    if ws_hub is not None:
+        websocket_health = {
+            "enabled": True,
+            "path": settings.websocket_path,
+            "connections": ws_hub.connection_count(),
+            "topics": ws_hub.topic_counts(),
+        }
+    else:
+        websocket_health = {"enabled": False}
+
     return {
         "status": "ok" if frame_count > 0 else "degraded",
         "uptime_seconds": uptime,
@@ -702,6 +719,7 @@ async def health():
             "per_region": await storm_cell_store.get_counts() if storm_cell_store is not None else {},
         } if settings.storm_cells_enabled else {"enabled": False},
         "lightning": lightning_health,
+        "websocket": websocket_health,
     }
 
 
@@ -709,9 +727,13 @@ def _content_type(ext: str) -> str:
     return "image/webp" if ext == "webp" else "image/png"
 
 
-@router.get("/public/weather-maps.json")
-async def weather_maps() -> WeatherMapsResponse:
-    """Rain Viewer-compatible metadata endpoint."""
+async def build_weather_maps_response() -> WeatherMapsResponse:
+    """Build the Rain Viewer-compatible metadata payload.
+
+    Shared by the ``/public/weather-maps.json`` route and the WebSocket
+    ``weather-maps`` topic.  Reads the ``routes`` module globals at call
+    time, like the route handlers do.
+    """
     timestamps = await frame_store.get_timestamps()
     host = settings.public_url.rstrip("/")
 
@@ -758,6 +780,12 @@ async def weather_maps() -> WeatherMapsResponse:
         radar=RadarData(past=past, nowcast=nowcast, colorSchemes=color_schemes),
         satellite=SatelliteData(infrared=infrared),
     )
+
+
+@router.get("/public/weather-maps.json")
+async def weather_maps() -> WeatherMapsResponse:
+    """Rain Viewer-compatible metadata endpoint."""
+    return await build_weather_maps_response()
 
 
 async def _latest_timestamps_cached() -> list[int]:
@@ -1775,46 +1803,15 @@ def _alert_not_expired(alert, now_utc: int) -> bool:
     return expires is None or expires > now_utc
 
 
-@router.get("/v2/alerts", response_model=AlertsResponse)
-async def get_alerts(
-    lat: float | None = Query(None, ge=-90, le=90, description="Latitude for point lookup"),
-    lon: float | None = Query(None, ge=-180, le=180, description="Longitude for point lookup"),
-    bbox: str | None = Query(None, description="Bounding box: west,south,east,north"),
-    simplify: float = Query(1000.0, ge=0, description="Polygon simplification tolerance in meters (0=off)"),
-):
-    """Weather alerts as GeoJSON FeatureCollection.
+def build_alerts_response(
+    alerts: list[AlertEntry], *, simplify: float = 1000.0,
+) -> AlertsResponse:
+    """Build the alerts GeoJSON payload from an (already geo-filtered) list.
 
-    - No params: all active alerts worldwide.
-    - lat+lon: alerts containing that point.  Zone-based alerts (e.g.
-      Tornado Watches) are resolved to zone polygons at ingest, so every
-      alert is visible in point lookups without any per-request NWS query.
-    - bbox: alerts intersecting the bounding box (polygon-only).
+    Shared by the ``/v2/alerts`` route and the WebSocket ``alerts`` topic.
+    Sync on purpose: the shapely union / simplify pass is the expensive
+    part and callers run this in a worker thread.
     """
-    if not alerts_enabled or alerts_store is None:
-        raise HTTPException(status_code=503, detail="Alerts not available")
-
-    alerts = alerts_store.alerts
-
-    # Filter by point
-    if lat is not None and lon is not None:
-        from shapely.geometry import Point
-        point = Point(lon, lat)
-        alerts = [a for a in alerts if a.polygon is not None and a.polygon.intersects(point)]
-    # Filter by bbox
-    elif bbox is not None:
-        parts = bbox.split(",")
-        if len(parts) != 4:
-            raise HTTPException(status_code=400, detail="bbox must be: west,south,east,north")
-        try:
-            w, s, e, n = map(float, parts)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="bbox values must be numeric")
-        if w < -180 or e > 180 or s < -90 or n > 90 or w > e or s > n:
-            raise HTTPException(status_code=400, detail="bbox values out of range")
-        from shapely.geometry import box
-        bbox_poly = box(w, s, e, n)
-        alerts = [a for a in alerts if a.polygon is not None and a.polygon.intersects(bbox_poly)]
-
     # Expiry filter
     now_utc = int(time.time())
     alerts = [a for a in alerts if _alert_not_expired(a, now_utc)]
@@ -1884,9 +1881,80 @@ async def get_alerts(
     return AlertsResponse(type="FeatureCollection", features=features)
 
 
+@router.get("/v2/alerts", response_model=AlertsResponse)
+async def get_alerts(
+    lat: float | None = Query(None, ge=-90, le=90, description="Latitude for point lookup"),
+    lon: float | None = Query(None, ge=-180, le=180, description="Longitude for point lookup"),
+    bbox: str | None = Query(None, description="Bounding box: west,south,east,north"),
+    simplify: float = Query(1000.0, ge=0, description="Polygon simplification tolerance in meters (0=off)"),
+):
+    """Weather alerts as GeoJSON FeatureCollection.
+
+    - No params: all active alerts worldwide.
+    - lat+lon: alerts containing that point.  Zone-based alerts (e.g.
+      Tornado Watches) are resolved to zone polygons at ingest, so every
+      alert is visible in point lookups without any per-request NWS query.
+    - bbox: alerts intersecting the bounding box (polygon-only).
+    """
+    if not alerts_enabled or alerts_store is None:
+        raise HTTPException(status_code=503, detail="Alerts not available")
+
+    alerts = alerts_store.alerts
+
+    # Filter by point
+    if lat is not None and lon is not None:
+        from shapely.geometry import Point
+        point = Point(lon, lat)
+        alerts = [a for a in alerts if a.polygon is not None and a.polygon.intersects(point)]
+    # Filter by bbox
+    elif bbox is not None:
+        parts = bbox.split(",")
+        if len(parts) != 4:
+            raise HTTPException(status_code=400, detail="bbox must be: west,south,east,north")
+        try:
+            w, s, e, n = map(float, parts)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="bbox values must be numeric")
+        if w < -180 or e > 180 or s < -90 or n > 90 or w > e or s > n:
+            raise HTTPException(status_code=400, detail="bbox values out of range")
+        from shapely.geometry import box
+        bbox_poly = box(w, s, e, n)
+        alerts = [a for a in alerts if a.polygon is not None and a.polygon.intersects(bbox_poly)]
+
+    return build_alerts_response(alerts, simplify=simplify)
+
+
 # ---------------------------------------------------------------------------
 # Storm-cell helpers
 # ---------------------------------------------------------------------------
+
+def build_storm_cells_geojson(cells: list[dict]) -> StormCellsResponse:
+    """Wrap cell dicts (from the MCP query) as a GeoJSON FeatureCollection.
+
+    Shared by the ``/v2/storm-cells`` route and the WebSocket
+    ``storm-cells`` topic.  Sync on purpose: the per-cell Pydantic
+    construction + serialization is cheap but callers may still run it in
+    a worker thread.
+    """
+    features: list[StormCellFeature] = []
+    for cell in cells:
+        features.append(
+            StormCellFeature(
+                type="Feature",
+                properties=StormCellProperties(**{
+                    key: value
+                    for key, value in cell.items()
+                    if key not in ("lat", "lon")
+                }),
+                geometry={
+                    "type": "Point",
+                    "coordinates": [cell["lon"], cell["lat"]],
+                },
+            )
+        )
+
+    return StormCellsResponse(type="FeatureCollection", features=features)
+
 
 @router.get("/v2/storm-cells")
 async def get_storm_cells_rest(
@@ -1925,29 +1993,38 @@ async def get_storm_cells_rest(
             cells=cells,
         )
 
-    features: list[StormCellFeature] = []
-    for cell in cells:
-        features.append(
-            StormCellFeature(
-                type="Feature",
-                properties=StormCellProperties(**{
-                    key: value
-                    for key, value in cell.items()
-                    if key not in ("lat", "lon")
-                }),
-                geometry={
-                    "type": "Point",
-                    "coordinates": [cell["lon"], cell["lat"]],
-                },
-            )
-        )
-
-    return StormCellsResponse(type="FeatureCollection", features=features)
+    return build_storm_cells_geojson(cells)
 
 
 # ---------------------------------------------------------------------------
 # Lightning
 # ---------------------------------------------------------------------------
+
+def build_lightning_geojson(strikes: list[dict]) -> LightningResponse:
+    """Wrap strike dicts (from the MCP query / strike converter) as GeoJSON.
+
+    Shared by the ``/v2/lightning`` route and the WebSocket ``lightning``
+    topic.  Input order is preserved.
+    """
+    features: list[LightningFeature] = []
+    for s in strikes:
+        features.append(
+            LightningFeature(
+                type="Feature",
+                properties=LightningProperties(
+                    utc=s["utc"],
+                    energy=s["energy"],
+                    satellite=s["satellite"],
+                ),
+                geometry={
+                    "type": "Point",
+                    "coordinates": [s["lon"], s["lat"]],
+                },
+            )
+        )
+
+    return LightningResponse(type="FeatureCollection", features=features)
+
 
 @router.get("/v2/lightning", response_model=LightningResponse)
 async def get_lightning(
@@ -2007,21 +2084,4 @@ async def get_lightning(
         lightning_store, lat, lon, radius_km, bbox_tuple, minutes, limit,
     )
 
-    features: list[LightningFeature] = []
-    for s in strikes:
-        features.append(
-            LightningFeature(
-                type="Feature",
-                properties=LightningProperties(
-                    utc=s["utc"],
-                    energy=s["energy"],
-                    satellite=s["satellite"],
-                ),
-                geometry={
-                    "type": "Point",
-                    "coordinates": [s["lon"], s["lat"]],
-                },
-            )
-        )
-
-    return LightningResponse(type="FeatureCollection", features=features)
+    return build_lightning_geojson(strikes)

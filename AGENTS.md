@@ -31,7 +31,7 @@ pytest tests/test_renderer.py     # single file
 pytest -k "test_tile_render"      # by name pattern
 ```
 
-Test markers (defined in `pyproject.toml`): `api`, `ecmwf`, `nowcast`, `sources`, `tiles`, `store`, `hrrr`, `hrrr_alaska`, `icon_eu`, `dmi_dini`, `hrdps`, `arome_antilles`, `arome_guyane`, `arome_indien`, `arome_ncaled`, `arome_polyn`, `wrf_smn`, `jma_msm`, `rrqpe`, `alerts`, `mcp`, `storm_cells`, `lightning`.
+Test markers (defined in `pyproject.toml`): `api`, `ecmwf`, `nowcast`, `sources`, `tiles`, `store`, `hrrr`, `hrrr_alaska`, `icon_eu`, `dmi_dini`, `hrdps`, `arome_antilles`, `arome_guyane`, `arome_indien`, `arome_ncaled`, `arome_polyn`, `wrf_smn`, `jma_msm`, `rrqpe`, `alerts`, `mcp`, `websocket`, `storm_cells`, `lightning`.
 
 All tests are auto-async (`asyncio_mode = "auto"` in pyproject.toml). No explicit `@pytest.mark.asyncio` needed on individual async tests (though some older tests still have it).
 
@@ -115,6 +115,10 @@ src/librewxr/
     context.py       # Stdio-mode lifespan (builds stores from state.json)
     alerts_query.py  # Alerts-within-radius queries (merged WMO + NWS store)
     storm_cells.py   # Inverse-projection helpers for get_storm_cells
+  ws/                                # WebSocket push channel (LIBREWXR_WEBSOCKET_PATH, default /v2/ws)
+    endpoint.py                      # APIRouter websocket route (reads routes.ws_hub)
+    hub.py                           # WebSocketHub: connections, per-client queues, push diffing
+    topics.py                        # Topic registry + payload builders shared with HTTP routes
   colors/
     schemes.py       # Color scheme definitions
     color_table.csv  # Shared color stop table for the scheme generators
@@ -149,6 +153,8 @@ Docker Compose uses profiles: `COMPOSE_PROFILES=multi` starts the `pipeline` + `
 - **Storm cells:** `data/storm_cells.py` thresholds the latest radar frame per region (default 40 dBZ), groups contiguous pixels with cv2 connected components, filters cells under 25 km², and derives each cell's motion vector from the same optical-flow field as `?arrows=`; cells live in `StormCellStore` and are drawn as a present-time `?cells=light|dark` tile overlay (does not affect the geometry cache). See `docs/storm-cells.md`.
 - **Lightning:** NOAA GOES GLM flash points (GOES-East + GOES-West) fetched by `data/lightning_fetcher.py` on their own clock-aligned loop (default 300 s) into a shared on-disk artifact `<cache_dir>/lightning/current.npz` with per-satellite watermarks in `<cache_dir>/lightning/watermark.json` — deliberately NO `state.json` section (the artifact is the cross-process handoff, the shared-tile-store/precip-mask pattern). The store (`data/lightning_store.py`) holds structured flash points under a 500k RAM ceiling; render workers and the stdio MCP transport refresh via a cheap `mtime` stat on demand. The `?lightning=1|true|dots|bolts` tile overlay draws dots or a hand-authored vector-bolt glyph (constant brightness, no age fade) on every requested frame's own 10-minute slot window `(T-600, T]` (boundary strikes belong to the earlier frame; slots older than `LIBREWXR_LIGHTNING_MAX_AGE` render plain), with the overlay cache keyed by a deterministic content fingerprint of the tile's slot strikes, and a presentational strongest-by-energy draw cap (`LIBREWXR_LIGHTNING_MAX_DRAW_PER_TILE`) — the store always keeps every flash in the window; unknown values fall back to off silently. MCP `get_recent_lightning` runs on both transports and takes `lat` / `lon` / `radius_km` / `minutes` / `limit` plus a `bbox`; `/v2/lightning` returns the same strikes as a GeoJSON `FeatureCollection` (no-args full window, or `lat` + `lon` + `radius_km`, or `bbox`; `minutes` clamped to `LIBREWXR_LIGHTNING_MAX_AGE`; `limit` newest-first); `/health` gains an additive `lightning` section. Large JSON responses (>= 1 KiB, `application/json` only, client-advertised gzip only) are gzipped by a pure-ASGI middleware in `main.py` - tiles and streaming responses are never compressed. See `docs/lightning.md`.
 - **MCP server:** FastMCP HTTP transport mounted inside the FastAPI app at `LIBREWXR_MCP_PATH` (default `/mcp`) when `LIBREWXR_MCP_ENABLED`; stdio transport via `python -m librewxr.mcp` or the `librewxr-mcp` console script. Tools in `mcp/tools.py` are pure store-passing functions shared by both transports (HTTP reads the `routes` globals; stdio builds its own stores from `state.json`). Discovery metadata: MCP Server Card at `<mcp_path>/server-card` (SEP-2127 draft) and AI Catalog at `/.well-known/ai-catalog.json`. Requires the `fastmcp` `[mcp]` extra (the Dockerfile installs it). See `docs/mcp-server.md`.
+
+- **WebSocket push channel:** additive, at `LIBREWXR_WEBSOCKET_PATH` (default `/v2/ws`) when `LIBREWXR_WEBSOCKET_ENABLED` (default true) - disabled means the route is not mounted at all. Topics `weather-maps`, `alerts`, `storm-cells`, `lightning`; the first three push the exact HTTP payloads on `state.json` content change (canonical-JSON fingerprint diff that excludes the volatile weather-maps `generated` timestamp) via a hook in the render lifespan's `_poll_state` - no second poller. `lightning` pushes per-connection watermark deltas gated on the lightning artifact version (`on_poll_tick`, which runs before the poller's "nothing changed" early-out). One hub per render worker (`routes.ws_hub`, endpoint reads it; never DI), bounded per-client queues so a slow consumer is dropped instead of stalling the poller. `/health` carries a `websocket` section (enabled / path / connections / per-topic counts). HTTP JSON stays canonical.
 
 ## Configuration
 
@@ -204,6 +210,10 @@ All config via `LIBREWXR_*` env vars or `.env` file. Settings defined in `src/li
 **MCP:**
 - `LIBREWXR_MCP_ENABLED`: mount the MCP HTTP transport inside the FastAPI app (default true)
 - `LIBREWXR_MCP_PATH`: mount path for the MCP HTTP transport (default `/mcp`)
+
+**WebSocket:**
+- `LIBREWXR_WEBSOCKET_ENABLED`: mount the WebSocket push channel at `LIBREWXR_WEBSOCKET_PATH` (default true; false leaves no route at all)
+- `LIBREWXR_WEBSOCKET_PATH`: WebSocket push endpoint path (default `/v2/ws`)
 
 **Storm cells:**
 - `LIBREWXR_STORM_CELLS_ENABLED`: storm-cell detection feeding the `?cells=` tile overlay (default true)

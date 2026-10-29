@@ -32,6 +32,7 @@ This document is the **full** reference for every setting LibreWXR understands. 
 - [Performance and Reliability](#performance-and-reliability)
 - [Tile Request Tracking](#tile-request-tracking)
 - [MCP Server](#mcp-server)
+- [WebSocket Push Channel](#websocket-push-channel)
 - [RAM Sizing Guide](#ram-sizing-guide)
 - [Example Configurations](#example-configurations)
 
@@ -1704,6 +1705,27 @@ URL path where the MCP HTTP transport is mounted inside the FastAPI app. Change 
 |---|---|
 | **Default** | `/mcp` |
 | **Type** | string |
+
+---
+
+## WebSocket Push Channel
+
+LibreWXR can push live data to browsers instead of making them poll. The channel is additive: the HTTP JSON API remains the canonical, Rain Viewer-compatible surface, and every topic ships the exact payload its HTTP route returns.
+
+Four topics are available: `weather-maps` (the `/public/weather-maps.json` payload), `alerts` (`/v2/alerts`), `storm-cells` (`/v2/storm-cells`), and `lightning` (a strike stream, snapshot plus per-connection watermark deltas). The three state-derived topics push only when their content actually changes, at the pipeline snapshot cadence; `lightning` pushes on its own fetch loop. Client integration is documented in [`web-integration-guide.md`](web-integration-guide.md#websocket-endpoint).
+
+`LIBREWXR_CORS_ORIGINS` applies to WebSocket connections too: while it is `*` (the default) any origin may connect, and once it lists explicit origins a browser handshake whose `Origin` header is not in the list is closed with code `1008`. Non-browser clients (no `Origin` header) are always allowed. Per-worker connection counts and per-topic subscriber counts are reported in the `websocket` section of `/health`.
+
+### `LIBREWXR_WEBSOCKET_ENABLED` / `LIBREWXR_WEBSOCKET_PATH`
+
+`LIBREWXR_WEBSOCKET_ENABLED` is the master switch for the push channel. When `false`, no WebSocket route is mounted at all - a connect attempt is a plain failed handshake (HTTP 404) rather than a distinguishable "disabled" close - and `/health` reports `{"enabled": false}` without the connection counters. The HTTP JSON API, the tile endpoints, and the MCP server are unaffected.
+
+`LIBREWXR_WEBSOCKET_PATH` is the URL path the endpoint is served on, read at import time the same way `LIBREWXR_MCP_PATH` is. Change it if your reverse proxy already uses `/v2/ws` for something else, or if you want the channel under an API prefix. Use `wss://` from the browser when TLS terminates at the server or at a proxy in front of it.
+
+| | |
+|---|---|
+| **Default** | `true` / `/v2/ws` |
+| **Type** | boolean / string |
 
 ---
 

@@ -16,6 +16,7 @@ A tutorial for adding live weather radar to a website using LibreWXR. No prior e
   - [Storm Cells Endpoint](#storm-cells-endpoint)
   - [Lightning Endpoint](#lightning-endpoint)
   - [Health Endpoint](#health-endpoint)
+  - [WebSocket Endpoint](#websocket-endpoint)
 - [Step-by-Step: Leaflet Integration](#step-by-step-leaflet-integration)
   - [1. Basic Map Setup](#1-basic-map-setup)
   - [2. Fetching Radar Metadata](#2-fetching-radar-metadata)
@@ -337,7 +338,229 @@ Each GeoJSON feature's `properties` carries `utc` (ISO 8601), `energy` (joules),
 GET /health
 ```
 
-Returns server status, frame count, cache usage, RAM stats, NWP chain state, alerts status, satellite cache state, and a cluster-wide worker aggregation (multi-worker deployments). Useful for monitoring, not typically needed for web integration.
+Returns server status, frame count, cache usage, RAM stats, NWP chain state, alerts status, satellite cache state, a cluster-wide worker aggregation (multi-worker deployments), and a per-worker `websocket` block (enabled flag, path, connection count, per-topic subscriber counts). Useful for monitoring, not typically needed for web integration.
+
+### WebSocket Endpoint
+
+```
+WS /v2/ws
+WS /v2/ws?topics=weather-maps,lightning
+```
+
+A **push channel** for data you would otherwise poll for. The HTTP JSON API remains the canonical, Rain Viewer-compatible surface - the WebSocket is strictly additive. Every topic ships the exact payload object its HTTP route returns, so your tile layers keep working unchanged and you only replace the "when do I re-fetch?" half of the integration.
+
+The channel is on by default (`LIBREWXR_WEBSOCKET_ENABLED=true`) and served at `LIBREWXR_WEBSOCKET_PATH` (default `/v2/ws`). When it is disabled the route is not mounted at all, so a connect attempt is a plain failed handshake (HTTP 404). On a TLS deployment use `wss://` - everything else about the URL is identical.
+
+**Connecting:** open `ws://<host>:<port>/v2/ws`, optionally with a comma-separated `?topics=` list of the topics you want at connect time. The default is `weather-maps` alone.
+
+```javascript
+var ws = new WebSocket("ws://localhost:8080/v2/ws?topics=weather-maps,lightning");
+```
+
+On connect the server sends a `hello` message, then one `error` message for any topic name it could not use, then one `snapshot` per subscribed topic **in the order you requested them**. Unknown names are ignored (you get the error, not the data). A topic whose backing data is not wired up on this server (feature disabled, or nothing loaded yet) is left out of `hello`'s `available` list and never subscribed: requesting one - at connect time or via a later `subscribe` - gets you a `topic unavailable` `error` frame and no snapshot, so there is no half-subscribed state to recover from.
+
+**Topics:**
+
+| Topic | `data` payload | Pushed when | Cadence |
+|-------|----------------|-------------|---------|
+| `weather-maps` | Exactly the `GET /public/weather-maps.json` response | The frame lists actually change (the volatile `generated` timestamp is excluded from change detection - it just records when that payload version was built) | Pipeline snapshot cadence: the radar fetch cycle (`LIBREWXR_FETCH_INTERVAL`, default `600` s) as picked up by the render worker's `state.json` poll |
+| `alerts` | Exactly the `GET /v2/alerts` GeoJSON `FeatureCollection` (unfiltered, default polygon simplification) | The feature collection content changes | Same snapshot cadence |
+| `storm-cells` | Exactly the `GET /v2/storm-cells` GeoJSON `FeatureCollection` | The cell list content changes | Same snapshot cadence |
+| `lightning` | GeoJSON `FeatureCollection` of GOES GLM strikes - full current window on subscribe, only not-yet-delivered strikes on `update` | New strikes land in the shared lightning artifact | The lightning fetch loop (`LIBREWXR_LIGHTNING_FETCH_INTERVAL`, default `300` s) |
+
+Satellite refills and nowcast frame merges ride the same pipeline snapshot, so they can also refresh the three state-derived topics. Nothing is pushed while the underlying content is unchanged, so an idle page costs nothing between fetch cycles.
+
+**Message protocol.** All frames are JSON text frames. Server-to-client message types:
+
+`hello` - sent once, immediately after connecting. `protocol` is the protocol version (`1`); `available` lists the topics this server can serve right now; `subscribed` lists the requested topics that were accepted, in request order.
+
+```json
+{"type":"hello","protocol":1,"available":["weather-maps","alerts","storm-cells","lightning"],"subscribed":["weather-maps","lightning"]}
+```
+
+`snapshot` - one per subscribed topic on connect (and again after every successful `subscribe`). `data` is the topic payload described in the table above.
+
+```json
+{"type":"snapshot","topic":"weather-maps","data":{"version":"2.0","generated":1700000000,"host":"http://localhost:8080","radar":{"past":[{"time":1699999200,"path":"/v2/radar/1699999200"}]}}}
+```
+
+`update` - pushed when the topic's content changes. Same `data` shape as the snapshot for that topic.
+
+```json
+{"type":"update","topic":"storm-cells","data":{"type":"FeatureCollection","features":[]}}
+```
+
+`subscribed` / `unsubscribed` - acknowledgements for your client actions. Each newly subscribed topic gets a fresh `snapshot` right after the ack. Re-subscribing is idempotent: you get the ack and another snapshot (for `lightning` that also moves this connection's delta watermark to the newest strike in the window).
+
+```json
+{"type":"subscribed","topics":["alerts","lightning"]}
+{"type":"unsubscribed","topics":["storm-cells"]}
+```
+
+`error` - malformed JSON, a non-object message, an unknown action, an unknown topic name, an unavailable topic, or a snapshot that could not be built. The connection stays open; the message text says what went wrong.
+
+```json
+{"type":"error","message":"unknown topic(s): radar"}
+```
+
+Client-to-server messages are actions:
+
+```json
+{"action":"subscribe","topics":["alerts","lightning"]}
+{"action":"unsubscribe","topics":["storm-cells"]}
+```
+
+The single-topic form `{"action":"subscribe","topic":"alerts"}` is accepted too. Anything else is answered with an `error` frame, so a typo never silently stalls your subscription.
+
+**Per-topic notes:**
+
+- **`lightning` is a stream, not a listing.** The snapshot holds every strike in the retained window (`LIBREWXR_LIGHTNING_MAX_AGE`, default `1800` s / 30 min), in **ascending chronological order** - oldest first. That is deliberately the opposite of `GET /v2/lightning`, which returns newest-first by default: with a stream you append to the end, so the ordering is part of the protocol.
+- **Updates are deltas.** Each connection carries a watermark, set from the newest strike in the snapshot it was served. `update` messages carry only strikes strictly newer than anything already delivered to that connection, so a strike is never delivered twice and an empty delta sends no frame at all.
+- **Late-published strikes are a known gap.** GLM flashes from GOES-East and GOES-West arrive independently. If one satellite publishes a batch *after* a newer strike from the other has already been delivered, those older-but-late strikes never appear in the live tail. Reconnect (or re-send `subscribe` for `lightning`) to reset the watermark and re-sync against the full window.
+- **`alerts` can lag by one refresh cycle.** Payloads are built when the pipeline refreshes its alert store, so an alert that has just expired can linger in the pushed collection for up to one refresh cycle.
+- **`weather-maps` is the whole map's worth of metadata**, including nowcast and satellite frame lists, `colorSchemes`, and `host` - swap it in wholesale rather than patching individual fields.
+
+**Close codes:**
+
+| Code | Meaning |
+|------|---------|
+| `1008` | Policy violation: the browser's `Origin` is not in `LIBREWXR_CORS_ORIGINS`, or the channel is shutting down. |
+| `1013` | Try again later: this render worker is at its 256-connection cap, or your client was dropped as a slow consumer (its outbound queue overflowed). |
+| `1001` | Going away: the server is shutting down, or a write to your socket failed (including the 10 s send timeout). Reconnect with backoff. |
+
+The client should treat every close as "reconnect later" - a `1008` due to origin will simply keep failing, which surfaces a genuine misconfiguration instead of silently dropping data.
+
+**Complete client example.** Framework-free vanilla JS: one socket, auto-reconnect with exponential backoff, `weather-maps` + `lightning` subscribed at connect, and an `update` handler that swaps the animation's frame list or appends strikes.
+
+```javascript
+// --- WebSocket push channel ----------------------------------------------
+var WS_URL = (location.protocol === "https:" ? "wss://" : "ws://") +
+             location.host + "/v2/ws";
+
+var socket = null;
+var backoffMs = 1000;          // 1s, doubling...
+var BACKOFF_MAX_MS = 30000;
+var reconnectTimer = null;
+var shuttingDown = false;
+
+var currentFrames = [];        // {time, path} pairs for the animation
+var lightningStrikes = [];     // GeoJSON Point features, oldest first
+
+function connect() {
+    socket = new WebSocket(WS_URL + "?topics=weather-maps,lightning");
+
+    socket.onopen = function () {
+        backoffMs = 1000;      // a good connection resets the schedule
+    };
+
+    socket.onmessage = function (event) {
+        var msg;
+        try {
+            msg = JSON.parse(event.data);
+        } catch (e) {
+            return;            // never trust the frame blindly
+        }
+
+        switch (msg.type) {
+            case "hello":
+                // msg.protocol === 1; msg.available tells you what this
+                // server can actually serve right now.
+                break;
+            case "snapshot":
+                handlePayload(msg.topic, msg.data, true);
+                break;
+            case "update":
+                handlePayload(msg.topic, msg.data, false);
+                break;
+            case "subscribed":
+            case "unsubscribed":
+                break;         // acks; a snapshot follows for new topics
+            case "error":
+                console.warn("ws error:", msg.message);
+                break;
+        }
+    };
+
+    socket.onclose = function (event) {
+        socket = null;
+        if (shuttingDown) return;
+        console.warn("ws closed", event.code, "- retrying in", backoffMs, "ms");
+        reconnectTimer = setTimeout(function () {
+            backoffMs = Math.min(backoffMs * 2, BACKOFF_MAX_MS);
+            connect();
+        }, backoffMs);
+    };
+    // onerror always precedes onclose; the retry schedule lives in onclose.
+}
+
+function handlePayload(topic, data, isSnapshot) {
+    if (topic === "weather-maps") {
+        // data === /public/weather-maps.json, so the frame lists are the
+        // same objects your HTTP integration already builds tile URLs from.
+        var frames = (data.radar.past || []).slice();
+        if (data.radar.nowcast && data.radar.nowcast.length) {
+            frames = frames.concat(data.radar.nowcast);
+        }
+        currentFrames = frames;
+        restartAnimation(frames);          // your existing scrubber/animation
+    } else if (topic === "lightning") {
+        if (isSnapshot) {
+            lightningStrikes = data.features.slice();   // full window, oldest first
+        } else {
+            lightningStrikes = lightningStrikes.concat(data.features); // delta
+        }
+        drawLightning(lightningStrikes);
+    } else if (topic === "alerts") {
+        setAlerts(data);
+    } else if (topic === "storm-cells") {
+        setStormCells(data);
+    }
+}
+
+// Runtime subscription changes - no reconnect needed.
+function subscribe(topics) {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ action: "subscribe", topics: topics }));
+    }
+}
+
+function unsubscribe(topics) {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ action: "unsubscribe", topics: topics }));
+    }
+}
+
+window.addEventListener("beforeunload", function () {
+    shuttingDown = true;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    if (socket) socket.close();
+});
+
+connect();
+```
+
+`restartAnimation`, `drawLightning`, `setAlerts`, and `setStormCells` stand in for whatever your existing layer code already does - the point is that they now run on push instead of on a timer.
+
+**Reverse proxy configuration.** The upgrade needs HTTP/1.1 and the two hop-by-hop headers passed through. nginx:
+
+```nginx
+location /v2/ws {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_read_timeout 300s;
+}
+```
+
+Two things matter: `proxy_http_version 1.1;` (without it the `Upgrade` header is dropped and the handshake fails), and a `proxy_read_timeout` comfortably above the idle gap. The server sends protocol-level WebSocket pings roughly every 20 seconds, which is enough to keep an idle connection alive through any sane timeout - 60 s or more is safe, and the sample above uses 300 s. If you terminate TLS at the proxy, remember the browser side becomes `wss://`. Caddy and Traefik handle the upgrade automatically.
+
+**Multi-worker deployments:** each render worker runs its own hub. Every worker polls the shared `state.json` snapshot independently, so a client receives every push regardless of which worker it landed on - no sticky sessions or shared hub process are needed. A page normally wants one socket no matter how many layers it renders.
+
+**Origin restriction:** `LIBREWXR_CORS_ORIGINS` applies to the WebSocket handshake as well. While it stays at the default `["*"]` any origin may connect; once you list explicit origins, a browser connection whose `Origin` header is not in the list is closed with `1008`. Non-browser clients (no `Origin` header, e.g. a server-side consumer or `wscat`) are always allowed.
+
+**Connection limits:** 256 concurrent sockets per render worker. Each client has a bounded outbound queue (32 frames); a client that cannot drain it - a backgrounded tab on a dead link, typically - is dropped with `1013` rather than being allowed to stall the push loop for everyone else. The reconnect logic in the example above recovers from that automatically.
 
 ---
 
@@ -1177,6 +1400,8 @@ setInterval(function () {
     });
 }, 5 * 60 * 1000);
 ```
+
+If you would rather be told when something changed than poll for it, use the [WebSocket endpoint](#websocket-endpoint): subscribe to `weather-maps` and the server pushes the new payload only when the frame lists actually change, which turns the snippet above into an event handler instead of a `setInterval`.
 
 ---
 

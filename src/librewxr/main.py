@@ -65,6 +65,8 @@ from librewxr.tiles.coordinates import (
 )
 from librewxr.tiles.request_tracker import TileRequestTracker
 from librewxr.tiles.shared_tile_store import SharedTileStore
+from librewxr.ws import WebSocketHub
+from librewxr.ws.endpoint import router as ws_router
 
 # Centralized logging: Rich-tagged handler at LIBREWXR_LOG_LEVEL (default
 # INFO).  Called at module scope so import-time logging is configured,
@@ -672,6 +674,13 @@ async def _render_only_lifespan(app: FastAPI):
     # the ``cluster.memory.container`` block.
     routes.memory_monitor = monitor
 
+    # WebSocket push hub: created once per process (None when disabled), so
+    # the endpoint, /health, and the poller hooks all see the same instance.
+    # The endpoint reads it through ``routes.ws_hub`` (no DI, like every
+    # other render-side singleton here).
+    ws_hub = WebSocketHub() if settings.websocket_enabled else None
+    routes.ws_hub = ws_hub
+
     last_mtime = state_mtime(cache_dir)
     # Seed the diff from the boot payload so the first poll skips unchanged stores.
     last_payload: dict | None = payload
@@ -693,6 +702,16 @@ async def _render_only_lifespan(app: FastAPI):
             except asyncio.TimeoutError:
                 pass
             mtime = state_mtime(cache_dir)
+            # WebSocket tick hook, before the "nothing changed" early-out:
+            # lightning lives outside state.json, so its own artifact has to
+            # be checked every tick regardless of the snapshot.  Guarded --
+            # an unguarded hub error here (outside the try below) would kill
+            # the poller task and silently stop all state refresh.
+            if ws_hub is not None:
+                try:
+                    await ws_hub.on_poll_tick()
+                except Exception:
+                    logger.exception("WebSocket hub tick failed")
             if mtime is None or mtime == last_mtime:
                 continue
             try:
@@ -754,6 +773,15 @@ async def _render_only_lifespan(app: FastAPI):
                 last_payload = payload
             except Exception:
                 logger.exception("Failed to refresh state from %s", cache_dir)
+            # WebSocket fan-out for the topics that ride the snapshot.  Kept
+            # outside the try above so a hub failure is never logged as a
+            # state-refresh failure (and the ``continue`` paths inside the
+            # try correctly skip it).
+            if ws_hub is not None:
+                try:
+                    await ws_hub.on_state_refreshed()
+                except Exception:
+                    logger.exception("WebSocket hub refresh failed")
 
     poller_task = asyncio.create_task(_poll_state())
     # Cluster /health pulse: this worker's share of the shared cache-dir
@@ -800,6 +828,9 @@ async def _render_only_lifespan(app: FastAPI):
             await poller_task
         except Exception:
             logger.exception("Poller shutdown error")
+        if ws_hub is not None:
+            routes.ws_hub = None
+            await ws_hub.stop()
         try:
             await pulse_task
         except Exception:
@@ -1016,6 +1047,9 @@ app.add_middleware(
 )
 
 app.include_router(routes.router)
+
+if settings.websocket_enabled:
+    app.include_router(ws_router)
 
 if mcp_app is not None:
     app.mount(settings.mcp_path, mcp_app)

@@ -308,6 +308,30 @@ async def get_storm_cells(
 _SATELLITE_NAMES = {18: "goes18", 19: "goes19"}
 
 
+def lightning_strike_dicts(points: np.ndarray) -> list[dict]:
+    """Convert a structured strike array to per-strike response dicts.
+
+    Pure sync helper shared by the MCP tool, the HTTP route, and the
+    WebSocket topic builders, so every surface emits the same shape.
+    Input order is preserved (callers decide whether that is newest
+    first or ascending chronological).
+    """
+    results: list[dict] = []
+    for point in points:
+        sat = int(point["satellite"])
+        results.append({
+            "lat": float(point["lat"]),
+            "lon": float(point["lon"]),
+            "utc": datetime.fromtimestamp(
+                int(point["time_s"]), tz=timezone.utc,
+            ).isoformat(),
+            "energy": float(point["energy"]),
+            "satellite": _SATELLITE_NAMES.get(sat, f"goes{sat}"),
+        })
+
+    return results
+
+
 async def get_recent_lightning(
     lightning_store,
     lat: float | None = None,
@@ -419,17 +443,4 @@ async def get_recent_lightning(
     if limit is not None:
         selected = selected[:limit]
 
-    results: list[dict] = []
-    for point in selected:
-        sat = int(point["satellite"])
-        results.append({
-            "lat": float(point["lat"]),
-            "lon": float(point["lon"]),
-            "utc": datetime.fromtimestamp(
-                int(point["time_s"]), tz=timezone.utc,
-            ).isoformat(),
-            "energy": float(point["energy"]),
-            "satellite": _SATELLITE_NAMES.get(sat, f"goes{sat}"),
-        })
-
-    return results
+    return lightning_strike_dicts(selected)

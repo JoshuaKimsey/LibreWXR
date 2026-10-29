@@ -117,14 +117,14 @@ Tracked in issue #48.
 
 Tracked in issue #49.
 
-- [ ] v1 scope: a WebSocket endpoint that pushes the weather-maps.json payload when the
+- [x] v1 scope: a WebSocket endpoint that pushes the weather-maps.json payload when the
   frame list changes, built on the snapshot change-detection the render workers already use.
-- [ ] HTTP JSON API remains canonical for Rain Viewer compatibility; WebSocket is additive,
+- [x] HTTP JSON API remains canonical for Rain Viewer compatibility; WebSocket is additive,
   never a replacement.
-- [ ] Document in `docs/web-integration-guide.md`.
+- [x] Document in `docs/web-integration-guide.md`.
 
-Note: deeper topics (alerts, storm cells, lightning streams) are deferred
-to post-1.0.
+Note: the alerts, storm-cell, and lightning topics originally deferred to post-1.0 (#52)
+were pulled forward and shipped as part of this release.
 
 ### 1.0.0 - Stability, split-mode docs, and the freeze
 
@@ -165,8 +165,11 @@ Note: this redesigns the memmap + shared-store coupling - state.json,
 
 Tracked in issue #52.
 
-- [ ] Alerts, storm-cell, and lightning streams as additional topics alongside the
+- [x] Alerts, storm-cell, and lightning streams as additional topics alongside the
   weather-maps channel.
+
+Pulled forward from the post-1.0 list and shipped alongside the initial WebSocket channel
+(see #49): all three topics are live in `docs/web-integration-guide.md`.
 
 ### Dashboard v2
 

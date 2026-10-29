@@ -160,3 +160,25 @@ def test_resolve_volatile_dir_uses_configured_path(monkeypatch, tmp_path):
     target = tmp_path / "volatile"
     monkeypatch.setattr(s, "volatile_cache_dir", str(target))
     assert resolve_volatile_dir(s) == target
+
+
+# ---------------------------------------------------------------------------
+# WebSocket push channel settings
+# ---------------------------------------------------------------------------
+
+def test_websocket_defaults(monkeypatch):
+    """The push channel is on by default at /v2/ws."""
+    monkeypatch.delenv("LIBREWXR_WEBSOCKET_ENABLED", raising=False)
+    monkeypatch.delenv("LIBREWXR_WEBSOCKET_PATH", raising=False)
+    s = _fresh_settings(monkeypatch, mode="multi")
+    assert s.websocket_enabled is True
+    assert s.websocket_path == "/v2/ws"
+
+
+def test_websocket_env_overrides(monkeypatch):
+    """LIBREWXR_WEBSOCKET_* env vars drive enable + mount path."""
+    monkeypatch.setenv("LIBREWXR_WEBSOCKET_ENABLED", "false")
+    monkeypatch.setenv("LIBREWXR_WEBSOCKET_PATH", "/custom/ws")
+    s = _fresh_settings(monkeypatch, mode="multi")
+    assert s.websocket_enabled is False
+    assert s.websocket_path == "/custom/ws"

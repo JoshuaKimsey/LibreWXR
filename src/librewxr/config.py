@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     mcp_enabled: bool = True
     mcp_path: str = "/mcp"
 
+    # WebSocket push channel.  When enabled (default) a WebSocket
+    # endpoint is mounted at ``websocket_path`` that pushes topic
+    # payloads (weather-maps, alerts, storm-cells, lightning) to
+    # connected clients when the underlying data changes.
+    websocket_enabled: bool = True
+    websocket_path: str = "/v2/ws"
+
     # Optional direct TLS termination.  Leave both unset (the default) to
     # serve plain HTTP and let a reverse proxy / tunnel handle TLS.  Set
     # both to absolute paths to have uvicorn serve HTTPS itself.
