@@ -240,7 +240,7 @@ async def test_mcp_initialize_server_info_matches_server_card():
     try:
         expected_version = importlib.metadata.version("librewxr")
     except PackageNotFoundError:
-        expected_version = "0.6.3"
+        expected_version = "0.7.0"
     mcp_app = build_mcp_http_app()
     app = FastAPI()
     app.mount("/mcp", mcp_app)
