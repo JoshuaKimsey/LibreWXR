@@ -192,6 +192,10 @@ request time: features are filtered to `expires` in the future, and
 alerts with no expiry always pass. Returns `503 Service Unavailable`
 when alerts are disabled (`LIBREWXR_ALERTS_ENABLED=false`).
 
+The same payload is also pushed over the WebSocket channel
+(`/v2/ws`, topic `alerts`) -- see
+[docs/web-integration-guide.md](web-integration-guide.md#websocket-endpoint).
+
 ## MCP tool
 
 The same alerts are available to AI agents through the MCP

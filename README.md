@@ -63,10 +63,11 @@ Beyond compatibility, the goal is a far more customizable API backend for self-h
 - **Persistent disk cache** — radar / NWP / satellite / alerts data are cached to disk with atomic writes, surviving restarts and container recreation without re-downloading from upstream. Configurable via `LIBREWXR_CACHE_DIR` (a per-host tempdir fallback is used, with a warning, when unset)
 - **Memory-efficient storage** — radar frames, NWP grids, satellite frames, and nowcast data are all backed by memory-mapped files, letting the OS page cache manage physical RAM instead of pinning data on the heap. Pages are reclaimed under memory pressure and re-faulted on access
 - **Smart fetch optimization** — radar sources skip re-downloading frames already in memory (only ~1 of 12 frames is new each cycle), NWP models skip redundant S3 fetches when the model run hasn't changed, and parallel NWP fetches are concurrency-capped via `LIBREWXR_NWP_FETCH_CONCURRENCY` so peak transient RAM stays bounded
-- **Health endpoint** — `/health` for monitoring uptime, per-component memory breakdown, frame count, NWP chain status, alerts status, MCP mount state, and cache state, plus a `cluster` aggregation of per-worker stats in multi-worker deployments
+- **Health endpoint** — `/health` for monitoring uptime, per-component memory breakdown, frame count, NWP chain status, alerts status, MCP mount state, websocket channel status (connections, per-topic subscribers), and cache state, plus a `cluster` aggregation of per-worker stats in multi-worker deployments
 - **MCP server** for AI agents — query precipitation nowcast, active weather alerts, storm cells, and recent lightning strikes via Model Context Protocol. HTTP transport mounted at `/mcp` for n8n-style automation; stdio transport for local agents like Claude Desktop. See [MCP server](#mcp-server-librewxr-extension) below.
 - **Storm-cell detection** — convective cells detected on radar frames each cycle via connected-component labeling at a configurable dBZ threshold. Overlay them on tiles with `?cells=light|dark` (parallel to `?arrows=`). See [Storm-Cell Detection](docs/storm-cells.md).
 - **Lightning overlay** — NOAA GOES GLM flash points (GOES-East + GOES-West) drawn on radar tiles with `?lightning=dots`/`bolts`, each frame showing the strikes from its own 10-minute window; also queryable via `/v2/lightning` and the MCP `get_recent_lightning` tool. See [Lightning](docs/lightning.md).
+- **WebSocket push channel** — additive /v2/ws endpoint that pushes the exact weather-maps, alerts, storm-cells, and lightning payloads the moment they change, so clients can stop polling; lightning arrives as a live delta stream. Configurable via LIBREWXR_WEBSOCKET_ENABLED / LIBREWXR_WEBSOCKET_PATH. See [Web Integration Guide](docs/web-integration-guide.md#websocket-endpoint).
 - **Fully configurable** — all tunable parameters exposed via environment variables
 
 ## Current Limitations
@@ -461,13 +462,22 @@ GET /v2/lightning?bbox=west,south,east,north
 
 Returns recent GOES GLM lightning strikes as a GeoJSON `FeatureCollection` of `Point` features, each carrying `utc`, `energy` (joules), and `satellite` (`goes18` / `goes19`) properties. With no parameters it returns every strike in the held 30-minute window. `lat` + `lon` (with optional `radius_km`, default 25) returns strikes within distance of the point; `bbox=west,south,east,north` returns strikes inside the rectangle. `minutes` sets the lookback window (clamped to the 30-minute retention) and `limit` caps the results newest-first (default: the full window). Returns `503` when lightning is disabled. Prefer `bbox` or point + `radius_km` during severe outbreaks — the no-args window can be large; `limit` caps a large window.
 
+#### WebSocket (LibreWXR extension)
+
+```
+WS /v2/ws
+WS /v2/ws?topics=weather-maps,lightning
+```
+
+Pushes the same JSON payloads as the HTTP endpoints — the weather-maps catalog, alerts, and storm cells as soon as their content changes, and lightning as a snapshot plus a live delta stream — so clients can replace polling. The HTTP API remains the canonical Rain Viewer-compatible surface; the default topic is `weather-maps`, and `LIBREWXR_WEBSOCKET_ENABLED=false` disables the channel outright (the route is simply absent). See [Web Integration Guide](docs/web-integration-guide.md#websocket-endpoint) for the full protocol.
+
 #### Health
 
 ```
 GET /health
 ```
 
-Returns server status, frame count, cache usage, NWP chain state, satellite cache state, alerts status, lightning status, MCP mount state, and per-component memory breakdown, plus a `cluster` aggregation of per-worker stats in multi-worker deployments.
+Returns server status, frame count, cache usage, NWP chain state, satellite cache state, alerts status, lightning status, MCP mount state, websocket channel status (connections, per-topic subscribers), and per-component memory breakdown, plus a `cluster` aggregation of per-worker stats in multi-worker deployments.
 
 #### MCP Server (LibreWXR extension)
 

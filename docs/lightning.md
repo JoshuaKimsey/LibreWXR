@@ -158,6 +158,12 @@ outbreak can be a large response -- prefer `bbox` or point + `radius_km`
 Large JSON responses are gzipped by the server whenever the client
 advertises gzip.
 
+The same payload is also pushed over the WebSocket channel
+(`/v2/ws`, topic `lightning`), where it arrives as a snapshot of the
+full window followed by a live delta stream in ascending time order
+(the REST endpoint returns newest first) -- see
+[docs/web-integration-guide.md](web-integration-guide.md#websocket-endpoint).
+
 ## MCP tool
 
 The same strikes are available to AI agents through the MCP

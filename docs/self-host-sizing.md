@@ -166,6 +166,9 @@ timestamps. A CDN (CloudFront or Cloudflare) absorbs that duplication at
 the edge; your origin then only renders each unique tile once per frame
 cycle. This is the biggest lever by far - a well-cached deployment
 serves orders of magnitude more requests than the table above suggests.
+WebSocket connections (`/v2/ws`) bypass the CDN entirely and pin to a
+single render worker for their lifetime, so size worker connection
+limits accordingly (256 concurrent sockets per worker by default).
 
 ### 2. Buy CPU, not RAM
 

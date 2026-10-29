@@ -69,6 +69,7 @@ Plus additional features Rain Viewer didn't offer:
 - Precipitation motion arrows (`?arrows=light` or `?arrows=dark`)
 - Storm-cell markers (`?cells=light` or `?cells=dark`)
 - Lightning strikes (`?lightning=dots|bolts` per-frame tile overlay, plus a `/v2/lightning` GeoJSON feed)
+- Push updates over WebSocket (`/v2/ws`) for the metadata catalog, alerts, storm cells, and lightning — the HTTP API stays canonical
 - Configurable noise filtering and speckle removal
 - ECMWF IFS 9km global model layer + NOAA RRQPE global observed precipitation (60S-70N) + regional NWP layers (HRRR, HRRR-Alaska, HRDPS, JMA MSM, AROME Antilles, AROME Guyane, AROME Indien, AROME Ncaled, AROME Polyn, DMI DINI, ICON-EU, WRF-SMN)
 - Optical flow interpolation for smooth global animation
@@ -213,7 +214,7 @@ These are things to be aware of but generally don't require code changes:
 
 - **Coverage area**: Rain Viewer sourced radar data globally from many countries. LibreWXR has high-resolution radar composites for the US, Canada, Europe, El Salvador (MARN/SNET), Japan (JMA HRPN), Taiwan (CWA QPESUMS), Peninsular Malaysia + Borneo + Brunei + Singapore + N. Sumatra (MET Malaysia), and the Philippines (PAGASA PANAHON), plus NOAA RRQPE — a global observed (satellite-derived) precipitation radar region covering the 60S-70N band — and a chain of regional NWP models (HRRR, HRRR-Alaska, HRDPS, JMA MSM, AROME Antilles, AROME Guyane, AROME Indien, AROME Ncaled, AROME Polyn, DMI DINI, ICON-EU, WRF-SMN) layered on top of ECMWF IFS. Outside the radar domains but inside the band, the precipitation layer is observed (RRQPE, satellite-derived); it is modelled only poleward of the band, in the fringe excluded by RRQPE's coverage polygon, and when RRQPE declines — at a few-km resolution where regional NWP applies, and at IFS 9 km elsewhere. If your users are primarily in any of these radar regions, the experience is equivalent or better.
 
-- **Data update cadence**: Both use 10-minute intervals. LibreWXR aligns to clock boundaries (:00, :10, :20, etc.) just like Rain Viewer.
+- **Data update cadence**: Both use 10-minute intervals. LibreWXR aligns to clock boundaries (:00, :10, :20, etc.) just like Rain Viewer; clients can also subscribe to `/v2/ws` pushes instead of re-fetching the catalog.
 
 - **Satellite imagery**: LibreWXR serves NOAA GMGSI where Rain Viewer's paid layer was 10-minute infrared-only (discontinued for everyone January 2026): a global (±72.7 deg) hourly LW+VIS composite — infrared at night, visible reflectance by day, with a natural day/night terminator — with up to 12 hourly frames of history. The `satellite.infrared` metadata array works the same way and tile URLs use fixed `0`/`0_0` color/options segments: `/v2/satellite/{timestamp}/{size}/{z}/{x}/{y}/0/0_0.{ext}` (png or webp). `LIBREWXR_SATELLITE_ENABLED=false` empties the catalog array and makes tile requests return 503.
 
@@ -227,7 +228,7 @@ These are things to be aware of but generally don't require code changes:
 
 - **Rain Viewer API key authentication** — LibreWXR has no authentication. If your code sends a Rain Viewer API key, it will be ignored harmlessly.
 
-- **Rain Viewer webhooks or push notifications** — LibreWXR is a pull-based API only.
+- **Rain Viewer webhooks or push notifications** — Rain Viewer's own webhooks are not implemented. LibreWXR instead offers an additive WebSocket push channel (`/v2/ws`) that pushes the metadata catalog, alerts, storm cells, and lightning when they change (see [docs/web-integration-guide.md](web-integration-guide.md#websocket-endpoint)); the HTTP API itself remains pull-based.
 
 ---
 

@@ -86,6 +86,10 @@ motion data) and `region` properties.
 Returns `503 Service Unavailable` when storm-cell detection is disabled
 (`LIBREWXR_STORM_CELLS_ENABLED=false`).
 
+The same payload is also pushed over the WebSocket channel
+(`/v2/ws`, topic `storm-cells`) -- see
+[docs/web-integration-guide.md](web-integration-guide.md#websocket-endpoint).
+
 ## Limitations
 
 - **Latest-detection only.** The overlay uses the latest detection result
