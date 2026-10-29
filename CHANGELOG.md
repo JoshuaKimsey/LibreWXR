@@ -7,6 +7,20 @@ and commit the result alongside the version bump.
 
 ---
 
+## [v0.7.1 - WebSocket lifecycle log noise fix](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.7.1)
+
+2026-10-29
+
+Silences the per-connection WebSocket log lines that v0.7.0's new push channel exposed: every /v2/ws connect and disconnect printed two or more INFO lines ('... - "WebSocket /v2/ws?topics=weather-maps" [accepted]', 'connection open') from uvicorn's WebSocket protocol handling, which access_log=False does not cover and which would fill the console on a busy public instance.
+
+- The fix drops those records with a logging filter on uvicorn.error, installed by the shared logging setup in every render worker. A filter rather than a level: uvicorn.run(log_level="info") re-forces uvicorn.error to INFO after import on the single-worker path, so a level set at import time would be silently undone - filters survive that.
+- Startup and shutdown INFO lines ("Started server process", "Application startup complete", "Uvicorn running on ...") and every WARNING/ERROR record (handshake failures, ASGI exceptions) still pass unchanged.
+- Verified end-to-end against a real uvicorn server process, plus a control run with the filter stripped confirming the chatter returns.
+
+Deployments pulling published images: set LIBREWXR_IMAGE_TAG=0.7.1 and restart; no configuration changes are needed.
+
+---
+
 ## [v0.7.0 - WebSocket push channel](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.7.0)
 
 2026-10-29
