@@ -21,13 +21,26 @@ import logging
 import logging.handlers
 
 from librewxr.config import settings
-from librewxr.logging_setup import setup_logging
+from librewxr.logging_setup import _WebSocketLifecycleFilter, setup_logging
 
 logger = logging.getLogger("librewxr.test_logging_setup")
 
 
 def _root_handlers() -> list[logging.Handler]:
     return logging.getLogger().handlers
+
+
+def _record(msg: str, *args: object, level: int = logging.INFO) -> logging.LogRecord:
+    """Build an ``uvicorn.error`` record, optionally with %-args like uvicorn."""
+    return logging.LogRecord(
+        name="uvicorn.error",
+        level=level,
+        pathname=__file__,
+        lineno=1,
+        msg=msg,
+        args=args,
+        exc_info=None,
+    )
 
 
 def _file_handlers() -> list[logging.Handler]:
@@ -137,5 +150,99 @@ def test_file_captures_warning_and_traceback_not_info(monkeypatch, tmp_path):
         assert "ValueError: boom" in text
         assert "Traceback (most recent call last)" in text
         assert "informational line" not in text
+    finally:
+        setup_logging(log_file="")
+
+
+# --- WebSocket lifecycle chatter -------------------------------------------
+#
+# uvicorn logs every WebSocket accept / reject / close at INFO on
+# ``uvicorn.error`` (HTTP connection lifecycle is TRACE, so WS is the
+# outlier), and the ``websockets`` library adds its own "connection open"
+# / "connection closed" INFO records - both are routine per-client
+# traffic and get filtered.  Everything else on that logger must survive.
+
+
+def test_websocket_lifecycle_filter_drops_per_connection_records():
+    ws_filter = _WebSocketLifecycleFilter()
+    dropped = [
+        # uvicorn's per-connection lines (plain and %-arg templated; the
+        # latter is what the sansio impl actually emits).
+        '176.225.29.246:0 - "WebSocket /v2/ws?topics=weather-maps" [accepted]',
+        '176.225.29.246:0 - "WebSocket /v2/ws" 403',
+        '176.225.29.246:0 - "WebSocket /v2/ws" 101',
+        _record('%s - "WebSocket %s" [accepted]', "176.225.29.246:0", "/v2/ws"),
+        # websockets library lifecycle records.
+        "connection open",
+        "connection closed",
+        # websockets library rejection paths.
+        "connection rejected (400 Bad Request)",
+        "HTTP response sent (403 Forbidden)",
+    ]
+    for item in dropped:
+        record = item if isinstance(item, logging.LogRecord) else _record(item)
+        assert ws_filter.filter(record) is False, f"should drop: {record.getMessage()!r}"
+
+
+def test_websocket_lifecycle_filter_passes_server_lifecycle_and_errors():
+    ws_filter = _WebSocketLifecycleFilter()
+    passed = [
+        # uvicorn startup / shutdown INFO - the reason this is a filter and
+        # not setLevel(WARNING) on uvicorn.error.
+        "Started server process [123]",
+        "Waiting for application startup.",
+        "Application startup complete.",
+        "Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)",
+        "Shutting down",
+        "Application shutdown complete.",
+        "Finished server process [123]",
+        # Errors / warnings / tracebacks from the handshake and ASGI layers.
+        "opening handshake failed",
+        "Exception in ASGI application",
+        "Invalid HTTP request received.",
+    ]
+    for message in passed:
+        for level in (logging.INFO, logging.WARNING, logging.ERROR):
+            record = _record(message, level=level)
+            assert ws_filter.filter(record) is True, (
+                f"should pass: {message!r} at {logging.getLevelName(level)}"
+            )
+
+
+def test_setup_logging_attaches_ws_filter_exactly_once():
+    # Repeated setup_logging() calls (main.py at module scope, then a
+    # worker subprocess import, then a test's teardown) must never stack
+    # duplicate filters.
+    setup_logging(log_file="")
+    try:
+        setup_logging(log_file="")
+        uvicorn_error = logging.getLogger("uvicorn.error")
+        ws_filters = [
+            f for f in uvicorn_error.filters if isinstance(f, _WebSocketLifecycleFilter)
+        ]
+        assert len(ws_filters) == 1
+    finally:
+        setup_logging(log_file="")
+
+
+def test_ws_chatter_silenced_but_startup_info_captured(caplog):
+    setup_logging(log_file="")
+    # logging.basicConfig(force=True) inside setup_logging wipes every root
+    # handler, including the one pytest installed to back caplog, so
+    # re-attach it before exercising the logger.
+    logging.getLogger().addHandler(caplog.handler)
+    try:
+        uvicorn_error = logging.getLogger("uvicorn.error")
+        with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+            caplog.clear()
+            uvicorn_error.info("connection open")
+            uvicorn_error.info("connection closed")
+            uvicorn_error.info('1.2.3.4:0 - "WebSocket /v2/ws" [accepted]')
+            uvicorn_error.info("Started server process [1]")
+        messages = [r.getMessage() for r in caplog.records]
+        # A logger-level filter blocks the record before it reaches any
+        # handler, so caplog only ever sees what passed the filter.
+        assert "Started server process [1]" in messages
+        assert messages == ["Started server process [1]"]
     finally:
         setup_logging(log_file="")

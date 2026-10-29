@@ -55,6 +55,51 @@ class _TagFormatter(logging.Formatter):
         return super().format(record)
 
 
+class _WebSocketLifecycleFilter(logging.Filter):
+    """Drop uvicorn's per-connection WebSocket lifecycle INFO chatter.
+
+    Why: a WebSocket connect/disconnect is routine per-client traffic, and
+    the no-routine-logs policy keeps those out of the console.  HTTP
+    connection lifecycle is the same traffic, but uvicorn logs it at
+    TRACE (invisible at the default INFO level); WebSockets are the
+    outlier and log every accept / reject / close at INFO.  Two loggers
+    are involved: uvicorn's own ``uvicorn.error`` lines (``<client> -
+    "WebSocket <path>" [accepted]``, the ``403`` / status variants) and
+    the ``websockets`` library's own records (``connection open``,
+    ``connection closed``), which land on ``uvicorn.error`` too because
+    uvicorn hands ``logging.getLogger("uvicorn.error")`` to its
+    ServerProtocol.
+
+    Why a filter and not ``setLevel``: on the single-worker path
+    ``main.py`` calls ``uvicorn.run(..., log_level="info")``, whose
+    ``configure_logging`` re-forces ``uvicorn.error`` back to INFO after
+    this module has been imported, so any level set here would be
+    undone.  Filters are not touched by that, so the filter survives.
+
+    Everything else on ``uvicorn.error`` is unaffected: the startup /
+    shutdown INFO lines ("Started server process", "Application startup
+    complete", "Uvicorn running on ...", "Shutting down"), every WARNING
+    and ERROR record, and exception tracebacks ("opening handshake
+    failed", "Exception in ASGI application", ...) all still pass.
+    """
+
+    _EXACT_DROPS = frozenset({"connection open", "connection closed"})
+    _PREFIX_DROPS = ("connection rejected", "HTTP response sent")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if '"WebSocket ' in message:
+            # uvicorn's per-connection lines: [accepted], 403, status code.
+            return False
+        if message in self._EXACT_DROPS:
+            # websockets library lifecycle records.
+            return False
+        if message.startswith(self._PREFIX_DROPS):
+            # websockets library rejection paths.
+            return False
+        return True
+
+
 VALID_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
@@ -143,3 +188,13 @@ def setup_logging(level: str | None = None, log_file: str | None = None) -> None
     # mcp.server.streamable_http_manager "StreamableHTTP session manager
     # started" INFO line).  Our own librewxr.mcp.* loggers are unaffected.
     logging.getLogger("mcp").setLevel(logging.WARNING)
+    # Drop uvicorn's per-connection WebSocket lifecycle INFO lines while
+    # keeping its startup/shutdown INFO and every WARNING/ERROR.  A filter,
+    # not a level, because uvicorn.run(log_level="info") re-forces
+    # uvicorn.error to INFO after import on the single-worker path.
+    # Guarded so repeated setup_logging() calls never stack duplicates.
+    uvicorn_error_logger = logging.getLogger("uvicorn.error")
+    if not any(
+        isinstance(f, _WebSocketLifecycleFilter) for f in uvicorn_error_logger.filters
+    ):
+        uvicorn_error_logger.addFilter(_WebSocketLifecycleFilter())
