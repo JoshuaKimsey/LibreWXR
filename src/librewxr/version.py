@@ -14,7 +14,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 # Kept in sync with ``pyproject.toml`` by ``scripts/check_versions.py``
 # (enforced in CI by ``.github/workflows/version-check.yml``).
-FALLBACK_VERSION = "0.7.0"
+FALLBACK_VERSION = "0.7.1"
 
 
 def package_version() -> str:
