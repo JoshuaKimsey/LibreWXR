@@ -7,6 +7,34 @@ and commit the result alongside the version bump.
 
 ---
 
+## [v0.7.0 - WebSocket push channel](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.7.0)
+
+2026-10-29
+
+Adds an additive WebSocket push channel so clients receive data the moment it changes instead of polling for it, and makes pyproject.toml the enforced single source of truth for the project version.
+
+The channel serves wss://<host>/v2/ws (ws:// over plain HTTP), on by default; LIBREWXR_WEBSOCKET_ENABLED=false removes the route entirely and LIBREWXR_WEBSOCKET_PATH moves it. Four topics ship in this release:
+
+- weather-maps: the exact /public/weather-maps.json payload, pushed only when the frame lists actually change - a content fingerprint, not a clock tick (the volatile generated timestamp is excluded from change detection)
+- alerts: the exact /v2/alerts GeoJSON FeatureCollection, on content change
+- storm-cells: the exact /v2/storm-cells GeoJSON FeatureCollection, on content change
+- lightning: a live stream - the full strike window as a snapshot on subscribe, then only the strikes that connection has not yet received (per-connection watermark deltas, ascending order)
+
+The HTTP JSON API remains the canonical Rain Viewer-compatible surface: every topic ships byte-identical payloads to its HTTP route, and the channel is strictly additive. The alerts, storm-cells, and lightning topics originally deferred to post-1.0 (#52) ship alongside the v1 weather-maps channel (#49).
+
+- Change detection rides the render workers' existing state.json polling - no second poller. Lightning rides the same tick via its artifact version, so deltas survive opportunistic reloads by /health and /v2/lightning.
+- Pushes are fingerprint-diffed per topic, so unchanged content never re-sends; serialized snapshots are cached per store content version, so N subscribers share one build.
+- Heavy payload builds (shapely unions, per-strike conversion) run off the render loop, and every client has a bounded delivery queue - a slow consumer is dropped (close 1013) instead of stalling tile serving. 256 connections per render worker.
+- LIBREWXR_CORS_ORIGINS applies to WebSocket origins too. /health gains a websocket section (enabled / path / connections / per-topic counts) and a top-level version field reporting the running build.
+- The bundled example viewers (leaflet, maplibre, hero, widget) now subscribe to /v2/ws with automatic fallback to their 5-minute poll on servers without the channel.
+- Full protocol, close codes, and a vanilla-JS client with reconnect/backoff: docs/web-integration-guide.md#websocket-endpoint
+
+Version governance: code derives the version at runtime via librewxr.version.package_version() (FastAPI app, MCP server card), scripts/check_versions.py plus a new version-check.yml workflow enforce every remaining literal and forbid numbered image-tag pins in docs, docker-publish.yml fails a release whose git tag disagrees with pyproject.toml, and published images now carry an org.opencontainers.image.version label. Housekeeping in the same pass: OPERA coverage counts corrected to 184 radars across 27 countries, doc image-tag examples genericized (the old pins had drifted three releases stale), and single-mode-migration.md's nonexistent v0.1.0/v0.0.1 references replaced with the single-mode-final tag.
+
+Deployments pulling published images: set LIBREWXR_IMAGE_TAG=0.7.0 and restart; the WebSocket channel is on by default, so no configuration changes are needed.
+
+---
+
 ## [v0.6.3 - Radar frame eviction race fix](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.6.3)
 
 2026-10-27
