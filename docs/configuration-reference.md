@@ -379,7 +379,7 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `US` | `USCOMP`, `AKCOMP`, `HICOMP`, `PRCOMP`, `GUCOMP` | All US regions |
 | `CANADA` | `CACOMP` | Canada |
 | `CENTRAL_AMERICA` | `SVCOMP` | El Salvador + W. Honduras + S. Guatemala + offshore Pacific |
-| `EUROPE` | `ITCOMP`, `OPERA` | DPC Italian national composite (24 radars) + OPERA pan-European composite (~155 radars, 24 countries). ITCOMP wins precedence over OPERA where it covers — Italy is not in the EUMETNET OPERA station list. |
+| `EUROPE` | `ITCOMP`, `OPERA` | DPC Italian national composite (24 radars) + OPERA pan-European composite (184 radars, 27 countries). ITCOMP wins precedence over OPERA where it covers — Italy is not in the EUMETNET OPERA station list. |
 | `SOUTHEAST_ASIA` | `MYPENINSULAR`, `MYEAST`, `PHCOMP` | Peninsular Malaysia + N. Sumatra + all of Borneo + Brunei + Singapore (MET Malaysia 12-radar composite) + the Philippines (PAGASA PANAHON 9-radar mosaic) |
 | `TAIWAN` | `TWCOMP` | Taiwan + W. Pacific buffer (CWA QPESUMS 7-radar composite) |
 | `JAPAN` | `JPCOMP` | Japan (JMA HRPN analysis-leg composite) |
@@ -590,7 +590,7 @@ Tag of the published image that Docker Compose pulls from `ghcr.io/joshuakimsey/
 | | |
 |---|---|
 | **Default** | `latest` (the compose fallback) |
-| **Type** | string (`0.6.0` to pin a release, `latest`, or a `sha-*` CI build tag) |
+| **Type** | string (an exact release tag to pin, `latest`, or a `sha-*` CI build tag) |
 
 Pinning a release keeps `docker compose pull` from advancing to a newer image until you choose to upgrade. When you build from a checkout, the same tag is applied to the locally built image.
 

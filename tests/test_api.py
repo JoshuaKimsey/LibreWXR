@@ -16,6 +16,7 @@ from librewxr.data.nowcast import NowcastFrame, NowcastStore
 from librewxr.data.store import FrameStore, RadarFrame
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
+from librewxr.version import package_version
 
 
 class _StubSatelliteSource:
@@ -538,6 +539,13 @@ class TestHealthEndpoint:
         # The "coord_caches" block serializes the new ``store`` sub-dict
         # automatically; it is None while the store is inactive.
         assert data["coord_caches"]["store"] is None
+
+    def test_health_reports_running_version(self, client):
+        """``/health`` advertises the running package version."""
+        c, _, _ = client
+        resp = c.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["version"] == package_version()
 
     def test_health_memory_breakdown_store_active(self, client, monkeypatch):
         """Store-backed: entries are shared read-only memmap pages, not

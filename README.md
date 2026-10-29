@@ -130,10 +130,11 @@ full architecture.
 ### Docker
 
 The image is on GitHub Container Registry - multi-arch (`linux/amd64` +
-`linux/arm64`), published for every release, anonymously pullable:
+`linux/arm64`) and anonymously pullable. Every release is published with
+its exact version tag, plus `latest` and per-commit `sha-*` tags:
 
 ```bash
-docker pull ghcr.io/joshuakimsey/librewxr:0.6.0
+docker pull ghcr.io/joshuakimsey/librewxr:latest
 ```
 
 That fetches the application image on its own - use it for a custom
@@ -153,9 +154,10 @@ docker compose up -d
 `docker-compose.yml` starts a `pipeline` service (fetches all data and
 writes a shared snapshot) and a `renderer` service (serves tiles); both
 run the published image, selected by `LIBREWXR_IMAGE_TAG` in `.env`
-(default `latest`; set e.g. `LIBREWXR_IMAGE_TAG=0.6.0` to stay on a
-release, or a `sha-*` tag to follow a specific build). Profile,
-worker-count, and cache defaults are identical to the build path - see
+(default `latest`). Set `LIBREWXR_IMAGE_TAG` to an exact release tag (see
+the GitHub releases page) to stay on a release, or a `sha-*` tag to
+follow a specific build. Profile, worker-count, and cache defaults are
+identical to the build path - see
 [Docker (build from source)](#docker-build-from-source) below.
 
 ### Customizing the deployment (.env)
@@ -290,7 +292,7 @@ place - the cache volume, bind mounts, logs, and gitignored
 
 ```bash
 git pull --ff-only   # brings the compose image: keys and scripts/update.sh
-# in .env: set LIBREWXR_IMAGE_TAG=0.6.0 (optional but recommended - a pinned
+# in .env: pin LIBREWXR_IMAGE_TAG to a release tag (recommended - a pinned
 # tag means docker compose pull never advances until you choose to upgrade)
 docker compose pull    # ~370 MB on first pull
 docker compose up -d   # no --build from here on
@@ -298,8 +300,8 @@ docker compose up -d   # no --build from here on
 
 Extra services declared in the override file (a tunnel, a proxy) are
 untouched - compose only recreates services whose image or config
-changed. Verify with `docker compose ps` (both services show the `0.6.0`
-image) and `/health`. If anything looks wrong, `docker compose up -d --build`
+changed. Verify with `docker compose ps` (both services show the image tag
+you pinned) and `/health`. If anything looks wrong, `docker compose up -d --build`
 drops you straight back onto a local build from the checkout. Finally
 point the cron entry at `scripts/update.sh` (same sentinel opt-in and
 flags) - from then on updates are pulls, not rebuilds.
@@ -477,7 +479,7 @@ Pushes the same JSON payloads as the HTTP endpoints — the weather-maps catalog
 GET /health
 ```
 
-Returns server status, frame count, cache usage, NWP chain state, satellite cache state, alerts status, lightning status, MCP mount state, websocket channel status (connections, per-topic subscribers), and per-component memory breakdown, plus a `cluster` aggregation of per-worker stats in multi-worker deployments.
+Returns server status, its running version, frame count, cache usage, NWP chain state, satellite cache state, alerts status, lightning status, MCP mount state, websocket channel status (connections, per-topic subscribers), and per-component memory breakdown, plus a `cluster` aggregation of per-worker stats in multi-worker deployments.
 
 #### MCP Server (LibreWXR extension)
 

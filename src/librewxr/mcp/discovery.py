@@ -27,13 +27,13 @@ public URLs.
 import hashlib
 import importlib
 import json
-from importlib.metadata import PackageNotFoundError, version as _distribution_version
 from urllib.parse import urlparse
 
 from starlette.requests import Request
 from starlette.responses import Response
 
 from librewxr.config import settings
+from librewxr.version import package_version
 
 # SEP-2127 (draft) MCP server-card JSON schema.
 _SERVER_CARD_SCHEMA = (
@@ -50,18 +50,6 @@ _REPOSITORY_URL = "https://github.com/JoshuaKimsey/LibreWRX"
 _SERVER_CARD_MEDIA_TYPE = "application/mcp-server-card+json"
 _AI_CATALOG_MEDIA_TYPE = "application/ai-catalog+json"
 _CACHE_CONTROL = "public, max-age=3600"
-
-
-def package_version() -> str:
-    """Return the installed ``librewxr`` distribution version.
-
-    Falls back to ``0.6.3`` (the pyproject version) when the package
-    metadata is unavailable, e.g. running from a bare source tree.
-    """
-    try:
-        return _distribution_version("librewxr")
-    except PackageNotFoundError:
-        return "0.6.3"
 
 
 def _supported_protocol_versions() -> list[str] | None:

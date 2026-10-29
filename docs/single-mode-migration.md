@@ -2,7 +2,8 @@
 
 LibreWXR used to ship two deployment shapes: `single` (one process doing
 fetch + render) and `multi` (a data pipeline plus render workers). Single
-mode was removed in v0.1.0; v0.0.1 is the last release that contains it.
+mode was removed at the `single-mode-final` git tag; that tag is the
+last one that contains it.
 LibreWXR now always runs as a pipeline + render worker pair; what used to
 be single mode is just that architecture with one render worker.
 
@@ -16,11 +17,11 @@ mode if you really want it.
   satellite / alerts / lightning data and writes a shared `state.json`
   snapshot. One or more render workers (`python -m librewxr.main`)
   memmap that snapshot and serve tiles.
-- **Single mode is gone as of v0.1.0.** The old single-container path is
-  deleted, and the `librewxr` compose service that ran it is removed. The
-  `pipeline` and `renderer` services are now both tagged
-  `profiles: ["multi", "single"]`, so a legacy `COMPOSE_PROFILES=single`
-  starts the same pair.
+- **Single mode is gone as of the `single-mode-final` tag.** The old
+  single-container path is deleted, and the `librewxr` compose service
+  that ran it is removed. The `pipeline` and `renderer` services are now
+  both tagged `profiles: ["multi", "single"]`, so a legacy
+  `COMPOSE_PROFILES=single` starts the same pair.
 - **Compatibility alias.** `LIBREWXR_MODE=single` or
   `COMPOSE_PROFILES=single` still works. `mode` always resolves to
   `"multi"`; a `single` token applies the "legacy-single" defaults
@@ -156,9 +157,8 @@ profile default.
 
 ## Want true single mode permanently?
 
-Pin to the git tag `single-mode-final` or the release tag `v0.0.1`, the
-last commit before single mode was removed in v0.1.0 and the last release
-that contains it. Both tags point at the same commit, so either name works
+Pin to the git tag `single-mode-final`, the last commit before single
+mode was removed and the last tag that contains it. Use that tag name
 for the checkout:
 
 ```bash

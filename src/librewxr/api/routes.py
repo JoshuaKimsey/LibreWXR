@@ -66,6 +66,7 @@ from librewxr.tiles.satellite_renderer import (
     render_gmgsi_composite_tile,
     render_gmgsi_tile,
 )
+from librewxr.version import package_version
 
 logger = logging.getLogger(__name__)
 
@@ -617,6 +618,7 @@ async def health():
     return {
         "status": "ok" if frame_count > 0 else "degraded",
         "uptime_seconds": uptime,
+        "version": package_version(),
         "cluster": cluster,
         "memory": {
             "resident_mb": round(rss_mb, 1),

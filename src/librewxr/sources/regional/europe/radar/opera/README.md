@@ -14,7 +14,7 @@ Native grid: 3800 × 4400 at 1 km on LAEA
 bbox is trimmed to the actual radar network extent, not the full LAEA
 grid.
 
-This is a genuinely multi-country source (~30 European countries) so
+This is a genuinely multi-country source (27 European countries) so
 the package lives directly under `sources/regional/europe/radar/` with
 no per-country directory.
 
@@ -46,7 +46,7 @@ block in the top-level `README.md` and `docs/coverage.md`.
 
 ## Stations
 
-~155 operational European radars from the EUMETNET OPERA database.  The
+184 operational European radars from the EUMETNET OPERA database.  The
 full list lives in `stations.py` together with the 300 km C-band range
 override; both feed `data/coverage.py` via the `RadarSourceContribution`.
 Regenerate by downloading `Data/OPERA_RADARS_DB_<date>.json` from the
