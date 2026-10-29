@@ -697,7 +697,7 @@ The `examples/` directory contains three self-contained HTML files showcasing th
 - **Background preloading** — pre-renders all frames with a progress indicator for smooth animation
 - **Keyboard shortcuts** — Space to play/pause, arrow keys to step through frames
 - **Locate Me** — geolocate and zoom to your position
-- **Auto-refresh** — metadata refreshes every 5 minutes to stay current
+- **Auto-refresh** — metadata stays current through the `/v2/ws` WebSocket push channel, with automatic fallback to the 5-minute poll
 
 The `widget.html` page is different by design: no map library, no tile grid (with an optional toggleable OpenStreetMap background). It fetches the same `weather-maps.json` catalog, then asks the server for a single image rendered *centered on a chosen location* via the point-tile endpoint (`.../{size}/{z}/{lat}/{lon}/{color}/{smooth}_{snow}.png`). It animates past and nowcast frames with play/pause, preloads ahead, and shows the exact image URL in a click-to-copy box — the drop-in snippet for a RainViewer-style weather card, email, or iframe. Everything configurable sits in one commented block at the top of the script.
 

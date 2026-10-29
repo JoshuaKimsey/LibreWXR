@@ -1426,7 +1426,7 @@ The two map examples include:
 - **Locate Me** — geolocate and zoom to your position
 - **Background preloading** — pre-renders all frames with a progress indicator for smooth playback
 - **Keyboard shortcuts** — Space to play/pause, arrow keys to step through frames
-- **Auto-refresh** — metadata refreshes every 5 minutes to stay current
+- **Auto-refresh** — metadata stays current through the `/v2/ws` WebSocket push channel, with automatic fallback to the 5-minute poll
 
 To use them:
 
@@ -1435,4 +1435,4 @@ To use them:
 
 These examples serve as reference implementations for production web integrations.
 
-The widget page (`examples/widget.html`) demonstrates the single-location image endpoint from [Widgets and Single-Location Images](#widgets-and-single-location-images) in its purest form: one `<img>` centered on a chosen point, no tile grid and no map library. It fetches the same `weather-maps.json` catalog, cycles past and nowcast frames with play/pause and a small preload pool, and always shows the exact point-tile URL of the image on screen in a click-to-copy box — the drop-in snippet for a weather card, email, or `iframe`. Its API-source selector defaults to the public instance (switch to `Local (localhost:8080)` to target your own server). All configuration lives in one commented block at the top of its script, and it degrades gracefully (auto-retry with backoff, geolocation failures, image load errors).
+The widget page (`examples/widget.html`) demonstrates the single-location image endpoint from [Widgets and Single-Location Images](#widgets-and-single-location-images) in its purest form: one `<img>` centered on a chosen point, no tile grid and no map library. It fetches the same `weather-maps.json` catalog and also receives pushes over the WebSocket channel (`/v2/ws`, polling fallback), cycles past and nowcast frames with play/pause and a small preload pool, and always shows the exact point-tile URL of the image on screen in a click-to-copy box — the drop-in snippet for a weather card, email, or `iframe`. Its API-source selector defaults to the public instance (switch to `Local (localhost:8080)` to target your own server). All configuration lives in one commented block at the top of its script, and it degrades gracefully (auto-retry with backoff, geolocation failures, image load errors).

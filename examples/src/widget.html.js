@@ -579,6 +579,9 @@ var FRAME_DWELL_MS = 500;           // dwell per frame (same as the map engine)
 var PRELOAD_AHEAD = 3;              // frames preloaded ahead of playback
 var CATALOG_POLL_MS = 300000;       // re-fetch the catalog every 5 minutes
 var RETRY_DELAYS = [5000, 15000, 30000];  // catalog auto-retry backoff
+var WS_BACKOFF_START_MS = 1000;     // first push-reconnect delay
+var WS_BACKOFF_MAX_MS = 30000;      // push-reconnect delay ceiling
+var WS_MAX_FAILED_ATTEMPTS = 3;     // dead handshakes before polling-only fallback
 
 // DOM references (the script sits at the end of <body>, so nodes exist).
 var errorBox = document.getElementById('lw-error');
@@ -686,6 +689,15 @@ function hideError() {
     errorBox.classList.remove('visible');
 }
 
+// Apply a catalog - the shared tail of the HTTP fetch and the WebSocket push,
+// so both feeds behave identically.
+function applyCatalog(data) {
+    catalogInFlight = false;
+    retryDelayIndex = 0;
+    hideError();
+    mergeCatalog(data);
+}
+
 // Fetch the catalog with the same auto-retry backoff the map demos use
 // (5s, then 15s, then 30s; after that the Retry button is manual).
 async function loadCatalog() {
@@ -696,10 +708,7 @@ async function loadCatalog() {
         var resp = await fetch(url);
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         var data = await resp.json();
-        catalogInFlight = false;
-        retryDelayIndex = 0;
-        hideError();
-        mergeCatalog(data);
+        applyCatalog(data);
     } catch (err) {
         catalogInFlight = false;
         if (retryDelayIndex < RETRY_DELAYS.length) {
@@ -712,6 +721,117 @@ async function loadCatalog() {
             showError('Could not load the radar catalog from ' + url + '. Is the server running?', true);
         }
     }
+}
+
+// ----------------------------------------------------------------------------
+// [2b] PUSH CHANNEL - /v2/ws pushes the same catalog the poll fetches, so an
+// open socket replaces the 5-minute poll. Strictly an optimization: the poll
+// runs until the first open and comes back on every close.
+// ----------------------------------------------------------------------------
+
+var wsSocket = null;        // live /v2/ws socket (null = polling only)
+var wsReconnectTimer = null;
+var wsAttempts = 0;         // consecutive handshakes that never reached OPEN
+var wsBackoffMs = WS_BACKOFF_START_MS;
+var catalogInterval = null; // the 5-minute catalog poll handle
+
+function startCatalogPoll() {
+    stopCatalogPoll();
+    catalogInterval = setInterval(loadCatalog, CATALOG_POLL_MS);
+}
+
+function stopCatalogPoll() {
+    if (catalogInterval) clearInterval(catalogInterval);
+    catalogInterval = null;
+}
+
+function pushUrl() {
+    // apiBase() is http(s)://..., so this yields ws:// or wss://.
+    return apiBase().replace(/^http/, 'ws') + '/v2/ws?topics=weather-maps';
+}
+
+function connectPush() {
+    if (wsAttempts >= WS_MAX_FAILED_ATTEMPTS) return; // permanent polling fallback
+    if (wsSocket) return;                             // connecting or connected
+    if (wsReconnectTimer) {
+        clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = null;
+    }
+
+    var socket;
+    try {
+        socket = new WebSocket(pushUrl());
+    } catch (err) {
+        // Constructor throws on a malformed URL: stay on polling.
+        console.warn('LibreWXR widget: cannot open ' + pushUrl() + ' - polling only');
+        return;
+    }
+    wsSocket = socket;
+    var opened = false;  // did THIS socket ever reach OPEN?
+
+    socket.onopen = function () {
+        opened = true;
+        wsAttempts = 0;
+        wsBackoffMs = WS_BACKOFF_START_MS;
+        stopCatalogPoll();          // pushes replace the 5-minute fetch
+    };
+
+    socket.onmessage = function (event) {
+        try {
+            var msg = JSON.parse(event.data);
+            // hello / subscribed / error frames are ignored silently: ?topics=
+            // already requested the subscription, and a bad frame must never
+            // stop the widget.
+            if (!msg || (msg.type !== 'snapshot' && msg.type !== 'update')) return;
+            if (msg.topic !== 'weather-maps') return;
+            applyCatalog(msg.data);  // data IS the weather-maps.json body
+        } catch (err) {
+            // Ignore: the poll loop still covers us.
+        }
+    };
+
+    socket.onerror = function () {
+        // Always followed by onclose, which owns the retry schedule.
+        console.log('LibreWXR widget: push socket error on ' + pushUrl());
+    };
+
+    socket.onclose = function () {
+        if (wsSocket !== socket) return;  // torn down by a source switch
+        wsSocket = null;
+        startCatalogPoll();               // polling is the refresh path again
+        if (!opened) {
+            wsAttempts++;
+            if (wsAttempts >= WS_MAX_FAILED_ATTEMPTS) {
+                // No channel on this server: plain polling, no retry churn.
+                console.warn('LibreWXR widget: /v2/ws unavailable after ' + WS_MAX_FAILED_ATTEMPTS
+                    + ' attempts - polling every ' + Math.round(CATALOG_POLL_MS / 1000) + 's');
+                return;
+            }
+        }
+        // A dropped live connection always retries with backoff.
+        var delay = wsBackoffMs;
+        wsBackoffMs = Math.min(wsBackoffMs * 2, WS_BACKOFF_MAX_MS);
+        wsReconnectTimer = setTimeout(function () {
+            wsReconnectTimer = null;
+            connectPush();
+        }, delay);
+    };
+}
+
+// Close the socket and reset the failure count (source switch). The handle is
+// detached first so the stale onclose does not reschedule against the old base.
+function teardownPush() {
+    if (wsReconnectTimer) {
+        clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = null;
+    }
+    var socket = wsSocket;
+    wsSocket = null;
+    if (socket) {
+        try { socket.close(); } catch (err) { /* already closed */ }
+    }
+    wsAttempts = 0;
+    wsBackoffMs = WS_BACKOFF_START_MS;
 }
 
 // ----------------------------------------------------------------------------
@@ -1113,6 +1233,10 @@ function boot() {
             invalidatePreloads();
             hideError();
             pause();
+            // Follow the new API base with the socket too; the teardown resets
+            // the failure count so a widget that fell back to polling retries.
+            teardownPush();
+            connectPush();
             loadCatalog();
         });
     }
@@ -1139,7 +1263,8 @@ function boot() {
     applyFrameSize();
     buildMapTiles();                            // draw the basemap once up front
     loadCatalog();                          // first fetch
-    setInterval(loadCatalog, CATALOG_POLL_MS);  // then poll for new frames
+    startCatalogPoll();                     // then poll until /v2/ws opens
+    connectPush();                          // live push, polling as fallback
 
     // Keep the age badge honest while a frame sits on screen.
     setInterval(function () {
