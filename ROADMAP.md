@@ -10,7 +10,7 @@ status, as this file and the issues are kept in sync. The lists are not exhausti
 
 ## The path to 1.0.0
 
-The current version is 0.7.1. Every section below is an unordered theme: each ships as its
+The current version is 0.8.0. Every section below is an unordered theme: each ships as its
 own 0.x release whenever it is next in line, with the version number assigned at release
 time.
 
@@ -57,7 +57,7 @@ alignment, so it can land alongside any release.
   record + `mcp-publisher login dns`); the GitHub namespace is treated as unusable for the
   `api.librewxr.net` remote under the domain-matching rule.
 - [ ] Create `server.json` at the repo root per the runbook template; `version` tracks
-  `pyproject.toml` at publish time (0.7.1 today - re-check when executing).
+  `pyproject.toml` at publish time (0.8.0 today - re-check when executing).
 - [ ] Publish the hosted instance; published `(name, version)` pairs are immutable, so the
   registry is only touched on real `pyproject.toml` version bumps.
 - [ ] Follow-up: align the SEP-2127 server card name with the chosen namespace - one
@@ -86,23 +86,25 @@ it is visually appealing and eye-catching rather than purely utilitarian, ready 
 
 Tracked in issue #47.
 
-- [ ] `LIBREWXR_COLOR_SCHEMES_FILE`: a local path or an http(s) URL (e.g. a GitHub Gist raw
+- [x] `LIBREWXR_COLOR_SCHEMES_FILE`: a local path or an http(s) URL (e.g. a GitHub Gist raw
   link) serving a `color_table.csv`-shaped file. The resolved file is the complete truth for the
   scheme set - names come from the CSV header, IDs follow column order - with the packaged table
   as both the built-in default and the fallback when the external source is unreachable or
   malformed (fresh fetch -> last-good artifact -> packaged built-ins).
-- [ ] Pipeline-owned resolution: the data pipeline fetches and validates the palette once per
+- [x] Pipeline-owned resolution: the data pipeline fetches and validates the palette once per
   fetch cycle and publishes it as a shared cache-dir artifact plus a `palette` section in
   `state.json`; render workers apply it through their existing state poll, so palette updates
   propagate to every worker with no backend restart (supersedes the earlier per-worker
   mtime-stat reload design).
-- [ ] Design constraints honored: LUT caches rebuild atomically on apply and stay cached
+- [x] Design constraints honored: LUT caches rebuild atomically on apply and stay cached
   process-wide; the applied palette version is fingerprinted into tile-cache and
   shared-tile-store keys; the geometry cache is unaffected thanks to the compute/present split.
   `/health` gains an additive `color_schemes` section (source, version, fetch status).
-- [ ] Keep `docs-check.yml` green: scheme docs/previews are regenerated via
+- [x] Keep `docs-check.yml` green: scheme docs/previews are regenerated via
   `scripts/generate_scheme_docs.py` + `scripts/generate_color_scheme_previews.py` whenever the
   format or defaults change.
+
+Note: shipped in 0.8.0.
 
 ### Health dashboard
 
