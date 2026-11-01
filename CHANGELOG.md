@@ -7,6 +7,25 @@ and commit the result alongside the version bump.
 
 ---
 
+## [v0.8.0 - External color palettes](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.8.0)
+
+2026-11-01
+
+LibreWXR now supports external color palettes: serve the entire color-scheme set from a file you control.
+
+LibreWXR ships fifteen built-in schemes plus the server-synthesized Raw grayscale (255). This release adds `LIBREWXR_COLOR_SCHEMES_FILE`: point it at a local path or any http(s) URL — a GitHub Gist raw link works — and the resolved file becomes the complete truth for the scheme set. Scheme names come from the CSV header and IDs follow column order, so a custom table can define from 1 to 255 schemes; ID 255 stays reserved for Raw. The data pipeline fetches and strictly validates the source once per fetch cycle and publishes it as a shared cache artifact plus a `palette` section in `state.json`, so render workers pick changes up through their existing state poll — palette edits hot-reload with no restart. A malformed or unreachable source is rejected whole and falls back fresh fetch → last-good artifact → packaged built-ins, so a bad palette never takes the renderer down.
+
+- New `LIBREWXR_COLOR_SCHEMES_FILE` setting: local path or http(s) URL; unset keeps the packaged default (byte-identical to 0.7.1 behavior).
+- Strict validation contract: 1 header row + 256 data rows, `#RRGGBBAA` cells, 1-255 uniquely named scheme columns, 2 MiB cap. Full reference in `docs/configuration-reference.md`.
+- The applied palette version (sha256 of the table bytes, first 12 hex chars) is fingerprinted into present-stage tile-cache and shared-tile-store keys, so a palette swap can never serve stale colors under a reachable key; the geometry cache is untouched thanks to the compute/present split.
+- The WebSocket `weather-maps` topic now pushes when the advertised scheme list changes, not only when frame lists change.
+- `/health` gains an additive `color_schemes` section (version, source, fetched_at, last fetch status).
+- Docker needs no new configuration: both compose services receive the variable via `env_file: .env`; the source resolves on the pipeline host, so a local palette file must be bind-mounted into the pipeline container (a gitignored `docker-compose.override.yml` works). An http(s) URL palette needs no mount.
+
+Deployments pulling published images: set `LIBREWXR_IMAGE_TAG=0.8.0` and restart. Behavior is unchanged when the new variable is left unset.
+
+---
+
 ## [v0.7.1 - WebSocket lifecycle log noise fix](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.7.1)
 
 2026-10-29
