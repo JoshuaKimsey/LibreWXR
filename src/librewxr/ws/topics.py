@@ -19,6 +19,7 @@ import asyncio
 import time
 
 from librewxr.api import routes
+from librewxr.colors import schemes
 from librewxr.config import settings
 from librewxr.mcp import tools as mcp_tools
 
@@ -84,7 +85,15 @@ async def topic_cache_key(topic: str):
         )
         if gmgsi_lw is not None and gmgsi_lw.timestamps:
             infrared_timestamps = tuple(gmgsi_lw.timestamps)
-        return (tuple(sorted(timestamps)), nowcast_timestamps, infrared_timestamps)
+        # The applied palette version is part of the key: a scheme-list
+        # change must push to connected clients even when no timestamp
+        # changed.
+        return (
+            tuple(sorted(timestamps)),
+            nowcast_timestamps,
+            infrared_timestamps,
+            schemes.current_version(),
+        )
     if topic == TOPIC_ALERTS:
         return routes.alerts_store.last_updated if routes.alerts_store is not None else None
     if topic == TOPIC_STORM_CELLS:

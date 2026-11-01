@@ -488,6 +488,32 @@ The lossless path uses libwebp's fast `method=1` preset: sizes stay within ~1% o
 
 PNG tiles are encoded adaptively and losslessly: when a tile's final pixels contain at most 256 unique RGBA colors (typical for unsmoothed radar tiles), the encoder builds an exact 8-bit palette from those colors and writes a palette (P-mode) PNG with a `tRNS` chunk carrying full 8-bit alpha; otherwise it writes a plain 32-bit RGBA PNG. No configuration knob is needed — the encoder selects the smaller representation automatically, and both paths reproduce the input pixels bit-for-bit.
 
+### `LIBREWXR_COLOR_SCHEMES_FILE`
+
+Override the built-in color table with an external `color_table.csv`-shaped file. The value is either a local filesystem path or an `http(s)` URL (a GitHub Gist raw link works well for sharing a palette). Empty (the default) serves the packaged built-in table. `file://` URLs are rejected - plain paths only - so what a value means never depends on URL parsing.
+
+The resolved file is the **complete truth** for the scheme set, not a merge over the built-ins: scheme names come from the CSV header and scheme IDs follow column order (`0..N-1`). ID 255 stays the reserved, synthesized "Raw" grayscale scheme and is never named in the header. Format contract:
+
+- one header row (the first cell is decorative; the remaining cells are the scheme names) plus exactly 256 data rows - rows 0-127 are the rain block, rows 128-255 the snow block;
+- cells are `#RRGGBBAA`;
+- 1-255 scheme columns with unique, non-empty names;
+- a 2 MiB size cap.
+
+Resolution is **pipeline-owned**. The data pipeline resolves and strictly validates the source once per fetch cycle, publishes the adopted bytes as a shared artifact under the cache dir, and advertises them in a `palette` section of `state.json`; render workers apply the palette through their existing state poll. Hot reload therefore needs no backend restart - it rides the fetch cadence (`LIBREWXR_FETCH_INTERVAL`). With `LIBREWXR_CACHE_DIR` unset the last-good artifact lives in the per-host tempdir and does not survive a wipe.
+
+Fallback ladder: fresh external fetch -> last-good artifact under the cache dir -> packaged built-ins. A malformed or unreachable source logs a warning and keeps whatever is currently being served - adoption is all-or-nothing, never partial.
+
+Cache behaviour: the applied palette version is fingerprinted into the present-stage tile-cache and shared-tile-store keys, so a palette change can never serve old colors under a reachable key; the geometry cache is unaffected thanks to the compute/present split. Clients may still hold previously fetched tiles until those expire per `Cache-Control` (up to 7200 s for historical frames), so a palette edit reaches a given client on its next refetch.
+
+In a split deployment the source resolves on the **pipeline** host; render hosts need only the same shared cache dir. Absolute paths are recommended - a relative path resolves against the pipeline's working directory.
+
+`/health` reports the active palette in an additive `color_schemes` section (`version`, `source`, `fetched_at`, `last_status`).
+
+| | |
+|---|---|
+| **Default** | empty (packaged built-in color table) |
+| **Type** | string (local path or `http(s)` URL) |
+
 ### `LIBREWXR_TILE_CACHE_MB`
 
 Maximum tile cache size in megabytes, **per worker**. The cache stores pre-presentation `TileGeometry` records — uint8 pixel values plus an optional snow mask — keyed on `(timestamp, z, x, y, tile_size, smooth, snow)`. Color scheme, output format, and arrow style are applied per request in the cheap `present_tile` step, so one cached entry serves every variant of a given viewport. Oldest entries are evicted when this byte limit is reached.

@@ -3,6 +3,7 @@
 import asyncio
 import atexit
 import gzip
+import hashlib
 import logging
 import os
 import random
@@ -22,6 +23,8 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from librewxr.api import routes
+from librewxr.colors import schemes
+from librewxr.colors.schemes import apply_external_table
 from librewxr.config import resolve_cache_dir, settings
 from librewxr.data.coverage import (
     build_coverage_masks,
@@ -37,6 +40,7 @@ from librewxr.data.master_state import (
 )
 from librewxr.data.nowcast import NowcastStore
 from librewxr.data.lightning_store import LightningStore
+from librewxr.data.palette_fetcher import palette_artifact_bytes
 from librewxr.data.storm_cells import StormCellStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.precip_mask import PrecipMaskStore
@@ -232,6 +236,85 @@ async def _wait_for_state(cache_dir, timeout: float) -> None:
                 "Still waiting for state.json (%.0fs elapsed) …", elapsed,
             )
             last_logged = elapsed
+
+
+def _apply_palette_from_payload(payload: dict | None, cache_dir: Path) -> bool:
+    """Apply the snapshot's external palette to this worker, if it changed.
+
+    Runs ON THE EVENT LOOP (never inside ``io_executor``): the mutation
+    rebinds the scheme LUT globals and mutates ``SCHEME_NAMES`` in place,
+    which ``/public/weather-maps.json`` and the WebSocket payload builder
+    iterate on the loop.
+
+    Returns ``True`` when a new palette was applied (the caller then
+    pushes a WS refresh).  No-op paths:
+
+    - no ``palette`` section (rolling upgrade / older pipeline),
+    - the advertised version already matches the applied one (this path
+      still refreshes ``routes.palette_info`` from the snapshot, so
+      ``/health`` reports the palette in builtin mode, where the pipeline
+      advertises the packaged table's hash and the worker never applies
+      anything),
+    - the artifact is missing (warns; retried on the next poll tick),
+    - the artifact's hash disagrees with the advertised version (warns;
+      retried on the next poll tick).
+
+    The advertised-version check alone is not sufficient.  The pipeline
+    writes the artifact and ``state.json`` as two separate files, so a
+    crash in that window leaves a *new* artifact next to the *old*
+    advertised version.  Without the hash guard that mismatch would
+    re-apply the bytes and re-purge the freshly minted current-version
+    cache entries on every ~1s poll tick for the rest of the fetch
+    interval.  Rejecting the mismatched artifact is always safe: the
+    pipeline's next cycle rewrites artifact and state in agreement, so
+    the worker self-heals within one fetch interval.
+
+    ORDER MATTERS: apply the LUTs first, then purge the old-version cache
+    entries.  Purging first would let a concurrent request mint fresh
+    old-version keys after the sweep, which would then serve stale colors
+    under a reachable key.
+    """
+    palette = (payload or {}).get("palette") or {}
+    advertised = palette.get("version")
+    if not advertised:
+        return False
+    if advertised == schemes.current_version():
+        routes.palette_info = palette
+        return False
+
+    raw = palette_artifact_bytes(cache_dir)
+    if raw is None:
+        logger.warning(
+            "Palette version %s advertised in state.json but no artifact "
+            "under %s; keeping the current palette",
+            advertised, cache_dir,
+        )
+        return False
+
+    artifact_version = hashlib.sha256(raw).hexdigest()[:12]
+    if artifact_version != advertised:
+        logger.warning(
+            "Palette artifact under %s hashes to %s but state.json "
+            "advertises %s (crash window between the two writes?); "
+            "keeping the current palette and waiting for the next fetch cycle",
+            cache_dir, artifact_version, advertised,
+        )
+        return False
+
+    try:
+        old = schemes.current_version()
+        new = apply_external_table(raw)
+        if routes.tile_cache is not None:
+            routes.tile_cache.purge_token(f"p{old}")
+        routes.palette_info = palette
+        logger.info("Applied color palette %s (was %s)", new, old)
+        return True
+    except Exception:
+        logger.warning(
+            "Failed to apply color palette %s; keeping the current palette",
+            advertised, exc_info=True,
+        )
+        return False
 
 
 def _compute_cache_invalidation(
@@ -682,6 +765,13 @@ async def _render_only_lifespan(app: FastAPI):
     ws_hub = WebSocketHub() if settings.websocket_enabled else None
     routes.ws_hub = ws_hub
 
+    # Boot palette: apply the snapshot's palette section before serving.
+    # The poller is mtime-gated, so it never fires for the snapshot that
+    # was already current at boot; without this a worker restarted after
+    # a palette change would keep serving the packaged colors.
+    if _apply_palette_from_payload(payload, cache_dir):
+        logger.info("Applied color palette from the boot snapshot")
+
     last_mtime = state_mtime(cache_dir)
     # Seed the diff from the boot payload so the first poll skips unchanged stores.
     last_payload: dict | None = payload
@@ -713,6 +803,18 @@ async def _render_only_lifespan(app: FastAPI):
                     await ws_hub.on_poll_tick()
                 except Exception:
                     logger.exception("WebSocket hub tick failed")
+            # Palette hot reload, also before the early-out: the helper is
+            # in-memory apart from one artifact read and must stay on the
+            # event loop (see its docstring).  Keyed off ``last_payload``,
+            # so the palette advertised by a snapshot read on the previous
+            # tick lands here.  The extra hub call is a no-op unless the
+            # topic key (which folds the palette version) changed.
+            if _apply_palette_from_payload(last_payload, cache_dir):
+                if ws_hub is not None:
+                    try:
+                        await ws_hub.on_state_refreshed()
+                    except Exception:
+                        logger.exception("WebSocket hub refresh failed")
             if mtime is None or mtime == last_mtime:
                 continue
             try:

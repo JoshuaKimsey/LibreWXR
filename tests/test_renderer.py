@@ -9,7 +9,12 @@ from PIL import Image
 
 pytestmark = pytest.mark.tiles
 
-from librewxr.colors.schemes import SCHEME_NAMES
+from librewxr.colors.schemes import (
+    SCHEME_NAMES,
+    apply_external_table,
+    capture_luts,
+    packaged_table_bytes,
+)
 from librewxr.data.regions import REGIONS
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import (
@@ -930,3 +935,81 @@ class TestNowcastFloorPin:
         assert (result[:128, :] == 102).all()
         assert (result[128:, :] == 121).all()
         assert (result >= 84).all()
+
+
+# ---------------------------------------------------------------------------
+# Captured LUTs / external palettes
+# ---------------------------------------------------------------------------
+
+def _custom_two_scheme_table() -> bytes:
+    names = ("Alpha", "Beta")
+    header = ",".join(["dBZ / RGBA", *names])
+    rain = ("#01020304", "#11121314")
+    snow = ("#05060708", "#15161718")
+    rows = []
+    for i in range(256):
+        colors = rain if i < 128 else snow
+        rows.append(",".join([str(i - 32), *colors]))
+    return "\n".join([header, *rows]).encode()
+
+
+@pytest.fixture
+def packaged_palette():
+    yield
+    apply_external_table(packaged_table_bytes())
+
+
+def _synthetic_geometry() -> TileGeometry:
+    values = np.zeros((256, 256), dtype=np.uint8)
+    values[64:192, 64:192] = 128
+    values[100:150, 100:150] = 200
+    snow_mask = np.zeros((256, 256), dtype=bool)
+    snow_mask[:, :128] = True
+    return TileGeometry(
+        values=values,
+        snow_mask=snow_mask,
+        tile_size=256,
+        pad=0,
+        blur_radius=0.0,
+    )
+
+
+class TestPresentTileCapturedLuts:
+    def test_luts_path_identical_to_default(self, sample_frame_data):
+        geom = compute_tile_geometry(
+            {"USCOMP": sample_frame_data}, z=5, x=7, y=12, tile_size=256,
+        )
+        assert not geom.is_transparent
+        rain, snow, _version = capture_luts(2)
+        for fmt in ("png", "webp"):
+            assert present_tile(
+                geom, color_scheme=2, fmt=fmt, luts=(rain, snow),
+            ) == present_tile(geom, color_scheme=2, fmt=fmt)
+
+    def test_snow_path_uses_the_snow_lut(self):
+        geom = _synthetic_geometry()
+        rain, snow, _version = capture_luts(7)
+        assert present_tile(
+            geom, color_scheme=7, fmt="png", luts=(rain, snow),
+        ) == present_tile(geom, color_scheme=7, fmt="png")
+
+    def test_luts_override_the_global_tables(self):
+        geom = _synthetic_geometry()
+        rain, snow, _version = capture_luts(7)
+        other = np.zeros((256, 4), dtype=np.uint8)
+        other[:, 0] = 255
+        other[:, 3] = 255
+        assert present_tile(
+            geom, color_scheme=7, fmt="png", luts=(other, other),
+        ) != present_tile(geom, color_scheme=7, fmt="png", luts=(rain, snow))
+
+    def test_transparent_tile_bytes_unchanged_by_palette_apply(
+        self, packaged_palette,
+    ):
+        geom = TileGeometry.transparent(256)
+        before = present_tile(geom, color_scheme=2, fmt="png")
+
+        apply_external_table(_custom_two_scheme_table())
+        after = present_tile(geom, color_scheme=2, fmt="png")
+
+        assert before == after

@@ -10,18 +10,25 @@ existing snapshot tests in ``tests/test_data_pipeline.py``.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 
 import numpy as np
 import pytest
 
+from librewxr.api import routes
+from librewxr.colors import schemes
 from librewxr.data.nowcast import NowcastFrame, NowcastStore
+from librewxr.data.palette_fetcher import palette_artifact_path
 from librewxr.main import (
+    _apply_palette_from_payload,
     _compute_cache_invalidation,
     _drop_absent_stores,
     _maybe_resurrect_nowcast_store,
     _maybe_resurrect_precip_mask,
 )
+from librewxr.tiles.cache import TileCache
 
 pytestmark = pytest.mark.store
 
@@ -290,3 +297,170 @@ def test_maybe_resurrect_nowcast_store_noop_when_snapshot_lacks_it(tmp_path):
     payload = {"stores": {}}
     assert _maybe_resurrect_nowcast_store(stores, payload, tmp_path) is False
     assert stores["nowcast_store"] is None
+
+
+# ---------------------------------------------------------------------------
+# Per-tick external-palette apply
+# ---------------------------------------------------------------------------
+
+def _table_bytes(names=("Tick", "Palette")) -> bytes:
+    header = ",".join(["dBZ / RGBA", *names])
+    colors = tuple("#01020304" for _ in names)
+    rows = [",".join([str(i - 32), *colors]) for i in range(256)]
+    return "\n".join([header, *rows]).encode()
+
+
+def _version(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()[:12]
+
+
+def _write_artifact(cache_dir, raw: bytes) -> None:
+    path = palette_artifact_path(cache_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+
+
+def _palette_section(raw: bytes) -> dict:
+    return {
+        "version": _version(raw),
+        "source": "path",
+        "fetched_at": "2026-11-01T00:00:00+00:00",
+        "last_status": "ok",
+    }
+
+
+@pytest.fixture
+def packaged_palette():
+    """Restore the packaged table after a test mutates the scheme globals."""
+    yield
+    schemes.apply_external_table(schemes.packaged_table_bytes())
+
+
+def test_apply_palette_from_payload_applies_and_purges(tmp_path, monkeypatch, packaged_palette):
+    raw = _table_bytes()
+    _write_artifact(tmp_path, raw)
+    old = schemes.current_version()
+
+    cache = TileCache(max_mb=10)
+    cache.put((100, f"p{old}"), b"stale-old-palette")
+    cache.put((100, "pdeadbeef0000"), b"unrelated")
+    calls: list[str] = []
+    real_purge = cache.purge_token
+
+    def spy(token: str) -> int:
+        calls.append(token)
+        return real_purge(token)
+
+    monkeypatch.setattr(cache, "purge_token", spy)
+    monkeypatch.setattr(routes, "tile_cache", cache)
+    monkeypatch.setattr(routes, "palette_info", None)
+
+    section = _palette_section(raw)
+    assert _apply_palette_from_payload({"palette": section}, tmp_path) is True
+
+    assert schemes.current_version() == _version(raw)
+    assert routes.palette_info is section
+    assert calls == [f"p{old}"]
+    # Old-version entries swept; unrelated entries kept; accounting intact.
+    assert cache.entries() == [((100, "pdeadbeef0000"), len(b"unrelated"))]
+    assert cache.total_bytes == len(b"unrelated")
+    # The timestamp index was kept consistent (no KeyError on sweep).
+    cache.invalidate_timestamp(100)
+    assert cache.size == 0
+
+
+def test_apply_palette_missing_artifact_warns_and_keeps_current(
+    tmp_path, monkeypatch, caplog, packaged_palette,
+):
+    before = schemes.current_version()
+    monkeypatch.setattr(routes, "tile_cache", TileCache(max_mb=10))
+    monkeypatch.setattr(routes, "palette_info", None)
+
+    with caplog.at_level(logging.WARNING, logger="librewxr.main"):
+        applied = _apply_palette_from_payload(
+            {"palette": {"version": "0123456789ab"}}, tmp_path,
+        )
+
+    assert applied is False
+    assert schemes.current_version() == before
+    assert routes.palette_info is None
+    assert any("no artifact" in record.message for record in caplog.records)
+
+
+def test_apply_palette_advertised_equals_applied_is_noop(tmp_path, monkeypatch, packaged_palette):
+    # Artifact exists with different bytes: if the helper applied it, the
+    # version would change.  Advertised == applied must short-circuit, but
+    # still publish the snapshot's palette section for /health (builtin).
+    _write_artifact(tmp_path, _table_bytes(names=("Ignored", "Table")))
+    before = schemes.current_version()
+    monkeypatch.setattr(routes, "tile_cache", TileCache(max_mb=10))
+    monkeypatch.setattr(routes, "palette_info", "sentinel")
+
+    section = {"version": before}
+    assert _apply_palette_from_payload({"palette": section}, tmp_path) is False
+    assert schemes.current_version() == before
+    assert routes.palette_info is section
+
+
+def test_apply_palette_artifact_hash_mismatch_is_rejected(
+    tmp_path, monkeypatch, caplog, packaged_palette,
+):
+    # Crash window: the pipeline wrote a new artifact but died before
+    # state.json.  Re-applying (and re-purging current-version keys) every
+    # poll tick would thrash the cache, so the helper rejects the artifact.
+    raw = _table_bytes()
+    _write_artifact(tmp_path, raw)
+    advertised = "0123456789ab"
+    assert _version(raw) != advertised
+    before = schemes.current_version()
+
+    cache = TileCache(max_mb=10)
+    calls: list[str] = []
+
+    def spy(token: str) -> int:
+        calls.append(token)
+        return 0
+
+    monkeypatch.setattr(cache, "purge_token", spy)
+    monkeypatch.setattr(routes, "tile_cache", cache)
+    monkeypatch.setattr(routes, "palette_info", "sentinel")
+
+    with caplog.at_level(logging.WARNING, logger="librewxr.main"):
+        applied = _apply_palette_from_payload(
+            {"palette": {"version": advertised}}, tmp_path,
+        )
+
+    assert applied is False
+    assert schemes.current_version() == before
+    assert calls == []
+    assert routes.palette_info == "sentinel"
+    assert any(
+        advertised in record.message and _version(raw) in record.message
+        for record in caplog.records
+    )
+
+
+def test_apply_palette_absent_section_is_noop(tmp_path, monkeypatch, packaged_palette):
+    _write_artifact(tmp_path, _table_bytes(names=("Unused", "Table")))
+    before = schemes.current_version()
+    monkeypatch.setattr(routes, "tile_cache", TileCache(max_mb=10))
+    monkeypatch.setattr(routes, "palette_info", None)
+
+    assert _apply_palette_from_payload({}, tmp_path) is False
+    assert _apply_palette_from_payload(None, tmp_path) is False
+    assert _apply_palette_from_payload({"palette": {}}, tmp_path) is False
+    assert schemes.current_version() == before
+    assert routes.palette_info is None
+
+
+def test_apply_palette_invalid_artifact_keeps_current(tmp_path, monkeypatch, packaged_palette):
+    _write_artifact(tmp_path, b"not a color table")
+    before = schemes.current_version()
+    monkeypatch.setattr(routes, "tile_cache", TileCache(max_mb=10))
+    monkeypatch.setattr(routes, "palette_info", None)
+
+    assert _apply_palette_from_payload(
+        {"palette": {"version": "0123456789ab"}}, tmp_path,
+    ) is False
+    assert schemes.current_version() == before
+    assert routes.palette_info is None

@@ -101,6 +101,25 @@ class TileCache:
                 self._total_bytes -= _size_of(self._cache[k])
                 del self._cache[k]
 
+    def purge_token(self, token: str) -> int:
+        """Drop every entry whose key contains ``token`` as an element.
+
+        Used when the applied color palette changes: entries keyed with
+        the old ``"p<version>"`` segment are unreachable by construction,
+        so they are swept eagerly instead of waiting for LRU eviction.
+        Returns the number of entries removed.  Byte accounting and the
+        timestamp index stay consistent with the other remove paths.
+        """
+        with self._lock:
+            stale = [
+                k for k in self._cache
+                if isinstance(k, tuple) and any(el == token for el in k)
+            ]
+            for k in stale:
+                self._total_bytes -= _size_of(self._cache.pop(k))
+                self._unindex_ts(k)
+            return len(stale)
+
     def clear(self) -> None:
         with self._lock:
             self._cache.clear()

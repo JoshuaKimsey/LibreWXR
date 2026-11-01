@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     # both to absolute paths to have uvicorn serve HTTPS itself.
     ssl_certfile: str | None = None
     ssl_keyfile: str | None = None
+    # External color-scheme table: local path or http(s) URL to a
+    # color_table.csv-shaped file.  Empty = packaged built-in table.
+    color_schemes_file: str = ""
     fetch_interval: int = 600  # seconds between fetches (10 min = radar frame cadence)
     max_frames: int = 12
     max_zoom: int = 12

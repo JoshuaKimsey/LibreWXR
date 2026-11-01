@@ -35,7 +35,7 @@ from librewxr.api.models import (
     WeatherMapsResponse,
 )
 from librewxr.api.conditional import compute_etag, conditional_response
-from librewxr.colors.schemes import SCHEME_NAMES
+from librewxr.colors.schemes import SCHEME_NAMES, capture_luts, current_version
 from librewxr.config import settings
 from librewxr.data.alerts_store import AlertEntry, ensure_valid_polygon
 from librewxr.data.lightning_store import LightningStore
@@ -104,6 +104,13 @@ enabled_regions: list[str] | None = None
 # Memory monitor — set by main.py in both lifespans.  Provides the cgroup
 # anon/file/shmem split for the /health ``cluster`` section.
 memory_monitor = None  # MemoryMonitor | None
+
+# Palette section advertised by the pipeline's state.json (version /
+# source / fetched_at / last_status), set by main.py when a palette is
+# applied.  ``None`` until then; /health omits its ``color_schemes``
+# section in that case.  The applied version is read from
+# ``schemes.current_version()`` (the LUTs actually serving requests).
+palette_info: dict | None = None
 
 # Tile present pool - set by main.py.  Multi-mode render workers get a
 # dedicated executor for the cheap ``present_tile`` tail (colorize/encode)
@@ -540,12 +547,13 @@ async def health():
     # Split the tile cache into its five entry kinds: satellite render
     # entries (``"sat"``-prefixed keys), geometry entries (int timestamp +
     # 6-element viewport key), present render entries (int timestamp +
-    # 9-element viewport/visual key), overlay present entries (int
-    # timestamp + 9-element viewport/visual key + 6-element style/version
-    # suffix -- arrows/cells/lightning styles and their content versions;
-    # any frame an overlay attaches to), and lat/lon-centered window
-    # present entries (int timestamp + "win" + 9-element window/visual
-    # key).  Each kind is reported with its own count and byte total.
+    # 10-element viewport/visual/palette key), overlay present entries
+    # (int timestamp + 10-element viewport/visual/palette key + 6-element
+    # style/version suffix -- arrows/cells/lightning styles and their
+    # content versions; any frame an overlay attaches to), and
+    # lat/lon-centered window present entries (int timestamp + "win" +
+    # 10-element window/visual/palette key).  Each kind is reported with
+    # its own count and byte total.
     cache_kind_geometry = 0
     cache_kind_geometry_bytes = 0
     cache_kind_present = 0
@@ -563,16 +571,16 @@ async def health():
         elif key and isinstance(key[0], int) and len(key) == 7:
             cache_kind_geometry += 1
             cache_kind_geometry_bytes += size
-        elif key and isinstance(key[0], int) and len(key) == 10:
+        elif key and isinstance(key[0], int) and len(key) == 11:
             cache_kind_present += 1
             cache_kind_present_bytes += size
-        elif key and isinstance(key[0], int) and len(key) >= 14:
-            # Overlay keys are the 10-element present key plus style/version
-            # params (14 since flow/cells versioning, 16 with lightning); window
-            # keys are length 11 with key[1] == "win", so they cannot land here.
+        elif key and isinstance(key[0], int) and len(key) >= 15:
+            # Overlay keys are the 11-element present key plus style/version
+            # params (15 since flow/cells versioning, 17 with lightning); window
+            # keys are length 12 with key[1] == "win", so they cannot land here.
             cache_kind_overlay += 1
             cache_kind_overlay_bytes += size
-        elif key and isinstance(key[0], int) and len(key) == 11 and key[1] == "win":
+        elif key and isinstance(key[0], int) and len(key) == 12 and key[1] == "win":
             cache_kind_window += 1
             cache_kind_window_bytes += size
 
@@ -619,6 +627,21 @@ async def health():
         "status": "ok" if frame_count > 0 else "degraded",
         "uptime_seconds": uptime,
         "version": package_version(),
+        # Additive: only present once a palette section has been applied
+        # (main.py sets ``routes.palette_info``).  The applied version is
+        # read from the live scheme LUTs, not from the advertised section.
+        **(
+            {
+                "color_schemes": {
+                    "version": current_version(),
+                    "source": palette_info.get("source"),
+                    "fetched_at": palette_info.get("fetched_at"),
+                    "last_status": palette_info.get("last_status"),
+                }
+            }
+            if palette_info is not None
+            else {}
+        ),
         "cluster": cluster,
         "memory": {
             "resident_mb": round(rss_mb, 1),
@@ -843,20 +866,22 @@ def _present_and_hash(geom, **kwargs) -> tuple[bytes, str]:
     return tile_bytes, compute_etag(tile_bytes)
 
 
-def _shared_tile_key(timestamp, version, z, x, y, tile_size, smooth, snow, color, ext) -> str:
+def _shared_tile_key(timestamp, version, z, x, y, tile_size, smooth, snow, color, ext, pal_ver: str = "") -> str:
     """Shared-store key for an encoded radar tile.
 
     Folds every input that determines the encoded bytes (including the
-    frame's content version) so a merge/eviction or config change re-keys
-    the tile instead of serving stale bytes.
+    frame's content version and the applied palette version) so a
+    merge/eviction, config change or palette change re-keys the tile
+    instead of serving stale bytes.
     """
     return (
         f"{timestamp}-v{version}-{z}-{x}-{y}-{tile_size}-"
-        f"{int(smooth)}{int(snow)}-{color}-{ext}-q{settings.webp_quality}"
+        f"{int(smooth)}{int(snow)}-{color}-{ext}-q{settings.webp_quality}-"
+        f"p{pal_ver}"
     )
 
 
-def _shared_overlay_key(timestamp, frame_version, flow_version, cells_version, z, x, y, tile_size, smooth, snow, color, ext, arrow_style, cell_style, lightning_fingerprint: str = "0", lightning_style: str = "") -> str:
+def _shared_overlay_key(timestamp, frame_version, flow_version, cells_version, z, x, y, tile_size, smooth, snow, color, ext, arrow_style, cell_style, lightning_fingerprint: str = "0", lightning_style: str = "", pal_ver: str = "") -> str:
     """Shared-store key for an encoded overlay tile.
 
     Same content-versioning principle as ``_shared_tile_key`` extended
@@ -871,12 +896,15 @@ def _shared_overlay_key(timestamp, frame_version, flow_version, cells_version, z
     later gains late-fetched strikes re-keys exactly once.  The live
     store version is deliberately NOT folded in - a reload with identical
     content must stay a cache hit.
+
+    The trailing ``-p{pal_ver}`` segment folds the applied color-palette
+    version so a new palette re-keys overlay tiles too.
     """
     return (
         f"{timestamp}-v{frame_version}-f{flow_version}-c{cells_version}-"
         f"{z}-{x}-{y}-{tile_size}-{int(smooth)}{int(snow)}-{color}-{ext}-"
         f"q{settings.webp_quality}-a{arrow_style}-k{cell_style}-"
-        f"g{lightning_fingerprint}-G{lightning_style or '-'}"
+        f"g{lightning_fingerprint}-G{lightning_style or '-'}-p{pal_ver}"
     )
 
 
@@ -979,9 +1007,13 @@ async def _radar_window(
     tile_size = 512 if size >= 512 else 256
     px0, py0 = window_origin(lat, lon, z, tile_size)
 
+    # One capture per request: both LUTs + the palette version actually
+    # applied, so the in-memory present key is keyed by the LUTs used.
+    rain_lut, snow_lut, pal_ver = capture_luts(color)
+
     present_key = (
         timestamp, "win", z, px0, py0, tile_size, smooth, snow,
-        color, ext, settings.webp_quality,
+        color, ext, settings.webp_quality, f"p{pal_ver}",
     )
     cached = tile_cache.get(present_key)
     if isinstance(cached, CachedRender):
@@ -1051,6 +1083,7 @@ async def _radar_window(
                 color_scheme=color,
                 fmt=ext,
                 arrow_style="",
+                luts=(rain_lut, snow_lut),
             )
             tile_cache.put(present_key, CachedRender(data=tile_bytes, etag=etag))
 
@@ -1158,9 +1191,15 @@ async def radar_tile(
     # cache hit skips both ``present_tile`` and the ETag hash.  Hoisted
     # here (before the shared-store lookup) so the early-serve fast path
     # below can use it without recomputing the tuple.
+    #
+    # One capture per request: the two LUTs for the requested scheme plus
+    # the palette version of the LUTs actually applied.  The version
+    # (never the state-advertised one) is folded into every cache key so
+    # a palette swap re-keys renders instead of serving stale colors.
+    rain_lut, snow_lut, pal_ver = capture_luts(color)
     present_key = (
         timestamp, z, xi, yi, tile_size, smooth, snow,
-        color, ext, settings.webp_quality,
+        color, ext, settings.webp_quality, f"p{pal_ver}",
     )
 
     # Geometry-stage cache outcome: this is the meaningful hit/miss for
@@ -1195,7 +1234,7 @@ async def radar_tile(
         if shared_tile_store is not None and is_plain and frame_store is not None:
             version = frame_store.frame_version(timestamp)
             if version is not None:  # past frames only; nowcast ts has no version
-                shared_key = _shared_tile_key(timestamp, version, z, xi, yi, tile_size, smooth, snow, color, ext)
+                shared_key = _shared_tile_key(timestamp, version, z, xi, yi, tile_size, smooth, snow, color, ext, pal_ver)
                 if io_executor is not None:
                     loop = asyncio.get_running_loop()
                     shared_hit = await loop.run_in_executor(
@@ -1389,6 +1428,7 @@ async def radar_tile(
                             cell_counts=cell_counts,
                             lightning_style=eff_lightning,
                             flash_points=flash_points,
+                            luts=(rain_lut, snow_lut),
                         )
                         present_ns = time.perf_counter_ns() - present_start
                         tile_cache.put(present_key, CachedRender(data=tile_bytes, etag=etag))
@@ -1406,7 +1446,7 @@ async def radar_tile(
                         if shared_tile_store is not None and frame_store is not None:
                             version = frame_store.frame_version(timestamp)
                             if version is not None:
-                                key = _shared_tile_key(timestamp, version, z, xi, yi, tile_size, smooth, snow, color, ext)
+                                key = _shared_tile_key(timestamp, version, z, xi, yi, tile_size, smooth, snow, color, ext, pal_ver)
                                 if io_executor is not None:
                                     loop = asyncio.get_running_loop()
                                     task = asyncio.ensure_future(
@@ -1448,6 +1488,7 @@ async def radar_tile(
                                 timestamp, version, flow_v, cells_v, z, xi, yi,
                                 tile_size, smooth, snow, color, ext,
                                 eff_arrow, eff_cells, lightning_fp, eff_lightning,
+                                pal_ver,
                             )
                             if io_executor is not None:
                                 loop = asyncio.get_running_loop()
@@ -1478,6 +1519,7 @@ async def radar_tile(
                             cell_counts=cell_counts,
                             lightning_style=eff_lightning,
                             flash_points=flash_points,
+                            luts=(rain_lut, snow_lut),
                         )
                         present_ns = time.perf_counter_ns() - present_start
                         tile_cache.put(overlay_key, CachedRender(data=tile_bytes, etag=etag))
@@ -1497,6 +1539,7 @@ async def radar_tile(
                                     timestamp, version, flow_v, cells_v, z, xi, yi,
                                     tile_size, smooth, snow, color, ext,
                                     eff_arrow, eff_cells, lightning_fp, eff_lightning,
+                                    pal_ver,
                                 )
                                 if io_executor is not None:
                                     loop = asyncio.get_running_loop()

@@ -86,18 +86,22 @@ it is visually appealing and eye-catching rather than purely utilitarian, ready 
 
 Tracked in issue #47.
 
-- [ ] Add `LIBREWXR_COLOR_SCHEMES_FILE`: load scheme definitions from an external CSV in the
-  existing `color_table.csv` format, merged over the built-in schemes (built-ins currently
-  load at runtime from package data in `src/librewxr/colors/schemes.py`, so this is an
-  extension, not a rewrite).
-- [ ] Optional hot reload (stat the file's mtime) so palette updates need no backend restart
-  or version bump.
-- [ ] Design constraints: LUT caches are built lazily and cached process-wide, and
-  colorization happens in the present-time tile tail - a palette change must invalidate LUT
-  caches and be fingerprinted into tile-cache and shared-tile-store keys; the geometry cache
-  is unaffected thanks to the compute/present split.
-- [ ] Keep `docs-check.yml` green: regenerate scheme docs/previews via
-  `scripts/generate_scheme_docs.py` + `scripts/generate_color_scheme_previews.py` when the
+- [ ] `LIBREWXR_COLOR_SCHEMES_FILE`: a local path or an http(s) URL (e.g. a GitHub Gist raw
+  link) serving a `color_table.csv`-shaped file. The resolved file is the complete truth for the
+  scheme set - names come from the CSV header, IDs follow column order - with the packaged table
+  as both the built-in default and the fallback when the external source is unreachable or
+  malformed (fresh fetch -> last-good artifact -> packaged built-ins).
+- [ ] Pipeline-owned resolution: the data pipeline fetches and validates the palette once per
+  fetch cycle and publishes it as a shared cache-dir artifact plus a `palette` section in
+  `state.json`; render workers apply it through their existing state poll, so palette updates
+  propagate to every worker with no backend restart (supersedes the earlier per-worker
+  mtime-stat reload design).
+- [ ] Design constraints honored: LUT caches rebuild atomically on apply and stay cached
+  process-wide; the applied palette version is fingerprinted into tile-cache and
+  shared-tile-store keys; the geometry cache is unaffected thanks to the compute/present split.
+  `/health` gains an additive `color_schemes` section (source, version, fetch status).
+- [ ] Keep `docs-check.yml` green: scheme docs/previews are regenerated via
+  `scripts/generate_scheme_docs.py` + `scripts/generate_color_scheme_previews.py` whenever the
   format or defaults change.
 
 ### Health dashboard

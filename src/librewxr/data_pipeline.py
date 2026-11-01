@@ -50,6 +50,7 @@ from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.storm_cells import StormCellGenerator, StormCellStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.pagecache import prime_fresh_memmaps
+from librewxr.data.palette_fetcher import resolve_palette
 from librewxr.data.precip_mask import PrecipMaskStore
 from librewxr.data.radar_cache import RadarFrameCache
 from librewxr.data.regions import REGIONS
@@ -283,6 +284,16 @@ async def run_pipeline() -> None:
         # atomic rename to a worker thread so the serialisation never
         # blocks the event loop.
         payload = snapshot_state(stores)
+        # External color palette: resolve + validate here (the pipeline
+        # never builds LUTs), then advertise the section in the same
+        # snapshot.  The artifact write inside resolve_palette completes
+        # before state.json is written, so a worker can never see the new
+        # version without its bytes on disk.  resolve_palette never
+        # raises, and the guard keeps a palette failure out of the cycle.
+        try:
+            payload["palette"] = await resolve_palette(settings, cache_dir)
+        except Exception:
+            logger.exception("Failed to resolve external color palette")
         try:
             await asyncio.to_thread(write_state_snapshot, payload, cache_dir)
         except Exception:

@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 pytestmark = pytest.mark.api
 
 from librewxr.api import routes
+from librewxr.colors import schemes
 from librewxr.config import settings
 from librewxr.data.nowcast import NowcastFrame, NowcastStore
 from librewxr.data.store import FrameStore, RadarFrame
@@ -836,7 +837,8 @@ class TestSharedTileStoreIntegration:
         assert store.size == 1, "past-frame overlay tile was not published"
 
         # Key shape: ts prefix + frame version + flow/cells version
-        # segments (arrow_style/cell_style tail included).
+        # segments (arrow_style/cell_style tail included) + the applied
+        # palette version segment.
         entries = list(store.root.rglob("*.tile"))
         assert len(entries) == 1
         key = entries[0].stem
@@ -844,6 +846,7 @@ class TestSharedTileStoreIntegration:
         assert "-f1-" in key
         assert "-c0-" in key
         assert "-alight-k" in key
+        assert key.endswith(f"-p{schemes.current_version()}")
 
         # "Second worker": in-memory caches cleared and present
         # hard-failing - success can only come from the shared store.
@@ -855,6 +858,81 @@ class TestSharedTileStoreIntegration:
         second = c.get(url)
         assert second.status_code == 200
         assert second.content == first.content
+
+
+class TestPaletteAwareKeys:
+    """Cache keys fold the applied palette version (``p<pal_ver>``)."""
+
+    def test_shared_tile_key_embeds_palette_version(self):
+        key = routes._shared_tile_key(
+            123, 1, 4, 3, 6, 256, 0, 0, 2, "png", "deadbeef0000",
+        )
+        assert key.startswith("123-v1-")
+        assert key.endswith("-pdeadbeef0000")
+
+    def test_shared_overlay_key_embeds_palette_version(self):
+        key = routes._shared_overlay_key(
+            123, 1, 2, 3, 4, 3, 6, 256, 0, 0, 2, "png",
+            "light", "light", "0", "", "deadbeef0000",
+        )
+        assert "-f2-" in key
+        assert "-c3-" in key
+        assert "-alight-k" in key
+        assert key.endswith("-pdeadbeef0000")
+
+    def test_present_cache_key_embeds_palette_version(self, client):
+        c, ts, _ = client
+        routes.tile_cache.clear()
+        resp = c.get(f"/v2/radar/{ts}/256/4/3/6/2/0_0.png")
+        assert resp.status_code == 200
+        keys = [
+            key for key, _size in routes.tile_cache.entries()
+            if isinstance(key[0], int) and len(key) == 11
+        ]
+        assert keys, "plain present key was not cached"
+        assert all(key[-1] == f"p{schemes.current_version()}" for key in keys)
+
+    def test_window_present_key_embeds_palette_version(self, client):
+        c, ts, _ = client
+        routes.tile_cache.clear()
+        resp = c.get(f"/v2/radar/{ts}/256/4/35.0/-97.0/2/0_0.png")
+        assert resp.status_code == 200
+        keys = [
+            key for key, _size in routes.tile_cache.entries()
+            if len(key) > 1 and key[1] == "win"
+        ]
+        assert keys, "window present key was not cached"
+        assert keys[0][-1] == f"p{schemes.current_version()}"
+        assert len(keys[0]) == 12
+
+
+class TestHealthColorSchemes:
+    """Additive /health ``color_schemes`` section, driven by routes.palette_info."""
+
+    def test_section_present_when_palette_info_set(self, client, monkeypatch):
+        c, _, _ = client
+        monkeypatch.setattr(routes, "palette_info", {
+            "version": "0123456789ab",
+            "source": "path",
+            "fetched_at": "2026-11-01T00:00:00+00:00",
+            "last_status": "ok",
+        })
+        resp = c.get("/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["color_schemes"] == {
+            "version": schemes.current_version(),
+            "source": "path",
+            "fetched_at": "2026-11-01T00:00:00+00:00",
+            "last_status": "ok",
+        }
+
+    def test_section_absent_without_palette_info(self, client, monkeypatch):
+        c, _, _ = client
+        monkeypatch.setattr(routes, "palette_info", None)
+        resp = c.get("/health")
+        assert resp.status_code == 200
+        assert "color_schemes" not in resp.json()
 
 
 def psutil_rss_mb() -> float:

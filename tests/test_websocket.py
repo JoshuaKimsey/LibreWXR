@@ -47,6 +47,7 @@ from librewxr.ws.topics import (
     TOPIC_LIGHTNING,
     TOPIC_STORM_CELLS,
     TOPIC_WEATHER_MAPS,
+    topic_cache_key,
 )
 
 pytestmark = pytest.mark.websocket
@@ -842,3 +843,33 @@ class TestBackpressureAndLifecycle:
         assert fake_a.close_codes == [1001]
         assert fake_b.close_codes == [1001]
         assert all(sender.done() for sender in senders)
+
+
+# ---------------------------------------------------------------------------
+# Topic cache keys: the applied palette version is part of the weather-maps key
+# ---------------------------------------------------------------------------
+
+async def test_weather_maps_topic_key_tracks_palette_version(wired, monkeypatch):
+    from librewxr.colors import schemes
+
+    monkeypatch.setattr(schemes, "current_version", lambda: "aaaaaaaaaaaa")
+    first = await topic_cache_key(TOPIC_WEATHER_MAPS)
+
+    monkeypatch.setattr(schemes, "current_version", lambda: "bbbbbbbbbbbb")
+    second = await topic_cache_key(TOPIC_WEATHER_MAPS)
+
+    assert first != second
+    assert first[-1] == "aaaaaaaaaaaa"
+    assert second[-1] == "bbbbbbbbbbbb"
+    # The pre-existing inputs are still part of the key.
+    assert first[:3] == second[:3]
+
+
+async def test_other_topic_keys_do_not_include_palette(wired, monkeypatch):
+    from librewxr.colors import schemes
+
+    monkeypatch.setattr(schemes, "current_version", lambda: "aaaaaaaaaaaa")
+    first = await topic_cache_key(TOPIC_STORM_CELLS)
+    monkeypatch.setattr(schemes, "current_version", lambda: "bbbbbbbbbbbb")
+    second = await topic_cache_key(TOPIC_STORM_CELLS)
+    assert first == second

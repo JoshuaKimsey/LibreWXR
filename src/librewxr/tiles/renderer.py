@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
-from librewxr.colors.schemes import colorize
+from librewxr.colors.schemes import colorize, colorize_with_lut
 from librewxr.config import settings
 from librewxr.data.coverage import sample_coverage, sample_feather
 from librewxr.data.regions import RegionDef
@@ -356,6 +356,7 @@ def present_tile(
     cell_counts: dict[str, int] | None = None,
     lightning_style: str = "",
     flash_points: np.ndarray | None = None,
+    luts: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> bytes:
     """Render a cached ``TileGeometry`` to encoded bytes.
 
@@ -372,14 +373,26 @@ def present_tile(
     ``NowcastGenerator._compute_nwp_flow_sync``); ``nwp_chain`` is the
     dispatch chain used to gate arrow presence on the chain's own
     precip at the point.
+
+    ``luts`` optionally supplies the ``(rain_lut, snow_lut)`` pair
+    captured by the caller for the request's scheme (see
+    ``schemes.capture_luts``).  When given it colorizes directly from the
+    captured tables; when ``None`` the lazy global ``get_lut`` path runs
+    as before.
     """
     if geom.is_transparent:
         return _transparent_tile(geom.tile_size, fmt)
 
     if geom.snow_mask is not None:
-        rgba_rain = colorize(geom.values, color_scheme, snow=False)
-        rgba_snow = colorize(geom.values, color_scheme, snow=True)
+        if luts is not None:
+            rgba_rain = colorize_with_lut(geom.values, luts[0])
+            rgba_snow = colorize_with_lut(geom.values, luts[1])
+        else:
+            rgba_rain = colorize(geom.values, color_scheme, snow=False)
+            rgba_snow = colorize(geom.values, color_scheme, snow=True)
         rgba = np.where(geom.snow_mask[..., np.newaxis], rgba_snow, rgba_rain)
+    elif luts is not None:
+        rgba = colorize_with_lut(geom.values, luts[0])
     else:
         rgba = colorize(geom.values, color_scheme, snow=False)
 
