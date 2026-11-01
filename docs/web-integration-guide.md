@@ -127,7 +127,7 @@ This is the starting point for any integration. It returns metadata about all av
 }
 ```
 
-(The real response lists all 15 color schemes in `colorSchemes` — the example above is abbreviated.)
+(The real response lists all 15 color schemes in `colorSchemes` with the default packaged table — the example above is abbreviated. A custom palette can define 1-255 schemes instead.)
 
 **Fields:**
 
@@ -158,7 +158,7 @@ This is where the actual tile images come from. Your map library will call this 
 | `z` | Zoom level | `0` to `12` (configurable max) |
 | `x` | Tile column | `0` to `2^z - 1` |
 | `y` | Tile row | `0` to `2^z - 1` |
-| `color` | Color scheme ID | `0` to `14`, or `255` (see [Color Schemes](#color-schemes)) |
+| `color` | Color scheme ID | `0` to `14`, or `255` with the default table (custom palettes redefine IDs — see [Color Schemes](#color-schemes)) |
 | `smooth_snow` | Smoothing and snow flags, joined with `_` | `{0 or 1}_{0 or 1}` |
 | `ext` | Image format | `png` or `webp` |
 
@@ -363,7 +363,7 @@ On connect the server sends a `hello` message, then one `error` message for any 
 
 | Topic | `data` payload | Pushed when | Cadence |
 |-------|----------------|-------------|---------|
-| `weather-maps` | Exactly the `GET /public/weather-maps.json` response | The frame lists actually change (the volatile `generated` timestamp is excluded from change detection - it just records when that payload version was built) | Pipeline snapshot cadence: the radar fetch cycle (`LIBREWXR_FETCH_INTERVAL`, default `600` s) as picked up by the render worker's `state.json` poll |
+| `weather-maps` | Exactly the `GET /public/weather-maps.json` response | The frame lists actually change (the volatile `generated` timestamp is excluded from change detection - it just records when that payload version was built); a scheme-list change (custom palette applied) pushes too — the palette version is part of the topic's cache key | Pipeline snapshot cadence: the radar fetch cycle (`LIBREWXR_FETCH_INTERVAL`, default `600` s) as picked up by the render worker's `state.json` poll |
 | `alerts` | Exactly the `GET /v2/alerts` GeoJSON `FeatureCollection` (unfiltered, default polygon simplification) | The feature collection content changes | Same snapshot cadence |
 | `storm-cells` | Exactly the `GET /v2/storm-cells` GeoJSON `FeatureCollection` | The cell list content changes | Same snapshot cadence |
 | `lightning` | GeoJSON `FeatureCollection` of GOES GLM strikes - full current window on subscribe, only not-yet-delivered strikes on `update` | New strikes land in the shared lightning artifact | The lightning fetch loop (`LIBREWXR_LIGHTNING_FETCH_INTERVAL`, default `300` s) |
@@ -1276,6 +1276,8 @@ LibreWXR supports the 9 original Rain Viewer color schemes, a contributed scheme
 
 Use the scheme ID as the `{color}` path parameter. If an invalid ID is provided, the server falls back to Rainbow @ Selex SI (7).
 
+Self-hosted instances can replace the entire scheme set via `LIBREWXR_COLOR_SCHEMES_FILE` — with a custom palette, scheme names come from that file's header and IDs follow column order, so the defaults above (0-14 plus the synthesized 255) no longer apply. Clients should always populate scheme pickers from `radar.colorSchemes` rather than hardcoding the default IDs. See the [configuration reference](configuration-reference.md) for the format contract and fallback behavior.
+
 #### Visual reference
 
 Rain palettes from 0..85 dBZ:
@@ -1417,7 +1419,7 @@ The two map examples include:
 - **Source selector** — switch between your local server and the public instance (`api.librewxr.net`) without editing code. Auto-detects the best default based on how the file is opened.
 - **Layer modes** — Radar, Satellite, or Radar + Satellite (satellite as a cloud background under animated radar)
 - **Light/dark theme** — toggles both the base map style and UI colors
-- **Color scheme selector** — 15 color schemes plus a raw grayscale (255) option
+- **Color scheme selector** — the instance's full scheme list (15 + raw grayscale by default), populated from `radar.colorSchemes`
 - **Motion arrows and nowcast** — with full animation support
 - **Draggable scrubber** — timeline with past/nowcast visual distinction and tick labels
 - **Weather-alerts overlay** — severity-styled WMO alert polygons (toggleable)

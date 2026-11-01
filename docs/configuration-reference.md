@@ -505,7 +505,7 @@ Fallback ladder: fresh external fetch -> last-good artifact under the cache dir 
 
 Cache behaviour: the applied palette version is fingerprinted into the present-stage tile-cache and shared-tile-store keys, so a palette change can never serve old colors under a reachable key; the geometry cache is unaffected thanks to the compute/present split. Clients may still hold previously fetched tiles until those expire per `Cache-Control` (up to 7200 s for historical frames), so a palette edit reaches a given client on its next refetch.
 
-In a split deployment the source resolves on the **pipeline** host; render hosts need only the same shared cache dir. Absolute paths are recommended - a relative path resolves against the pipeline's working directory.
+In a split deployment the source resolves on the **pipeline** host; render hosts need only the same shared cache dir. Absolute paths are recommended - a relative path resolves against the pipeline's working directory. In Docker, a local path must exist inside the pipeline container - bind-mount the file via a gitignored `docker-compose.override.yml` and point the variable at the in-container path; an http(s) URL needs nothing.
 
 `/health` reports the active palette in an additive `color_schemes` section (`version`, `source`, `fetched_at`, `last_status`).
 

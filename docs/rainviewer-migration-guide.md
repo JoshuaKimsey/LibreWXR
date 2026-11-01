@@ -36,7 +36,7 @@ Find where your code references the Rain Viewer API and change two things:
 1. **Metadata URL:** Change `https://api.rainviewer.com/public/weather-maps.json` to `http://your-librewxr-server:8080/public/weather-maps.json`
 2. **Tile host:** Use the `host` field from the metadata response instead of hardcoding `https://tilecache.rainviewer.com`
 
-That's it. The endpoint paths, URL format, query parameters, color scheme IDs, and response structure are all identical.
+That's it. The endpoint paths, URL format, query parameters, color scheme IDs, and response structure are all identical. (Color scheme IDs are identical with the default palette; a custom palette redefines them.)
 
 ---
 
@@ -148,7 +148,7 @@ Every parameter works the same way:
 | `timestamp` | Unix timestamp from metadata | Identical |
 | `size` | `256` or `512` | Identical |
 | `z`, `x`, `y` | Slippy map tile coordinates | Identical |
-| `color` | `0`-`8` | `0`-`14` + `255` (raw grayscale) |
+| `color` | `0`-`8` | `0`-`14` + `255` (raw grayscale, default table) |
 | `smooth` | `0` or `1` | Identical |
 | `snow` | `0` or `1` | Identical |
 | `ext` | `png` (free) / `webp` (paid) | `png` or `webp` (both always available) |
@@ -218,7 +218,7 @@ These are things to be aware of but generally don't require code changes:
 
 - **Satellite imagery**: LibreWXR serves NOAA GMGSI where Rain Viewer's paid layer was 10-minute infrared-only (discontinued for everyone January 2026): a global (±72.7 deg) hourly LW+VIS composite — infrared at night, visible reflectance by day, with a natural day/night terminator — with up to 12 hourly frames of history. The `satellite.infrared` metadata array works the same way and tile URLs use fixed `0`/`0_0` color/options segments: `/v2/satellite/{timestamp}/{size}/{z}/{x}/{y}/0/0_0.{ext}` (png or webp). `LIBREWXR_SATELLITE_ENABLED=false` empties the catalog array and makes tile requests return 503.
 
-- **Color scheme rendering**: LibreWXR reproduces all 9 original Rain Viewer color schemes from the same color lookup tables, plus six contributed schemes (15 named total) and a raw grayscale mode (255). The visual output should be identical for a given scheme ID.
+- **Color scheme rendering**: LibreWXR reproduces all 9 original Rain Viewer color schemes from the same color lookup tables, plus six contributed schemes (15 named total) and a raw grayscale mode (255). The visual output should be identical for a given scheme ID. (That parity holds for the packaged default table — an instance configured with `LIBREWXR_COLOR_SCHEMES_FILE` redefines the ID space, so clients should read `radar.colorSchemes` instead of assuming the default IDs.)
 
 - **Tile caching headers**: LibreWXR serves tiles with `Cache-Control: public` — `max-age=300` (5 minutes) for the latest and nowcast frames, and `max-age=7200` (2 hours) for historical frames, which are immutable once backfill is complete. This is compatible with any CDN or caching proxy.
 

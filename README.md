@@ -28,7 +28,7 @@ Rain Viewer recently (as of January 1st, 2026) restricted their free API tier. L
 | | Rain Viewer free tier | LibreWXR (self-hosted) |
 |---|---|---|
 | Max zoom level | 7 | 12 (configurable) |
-| Color schemes | Universal Blue only | 15 schemes + raw grayscale |
+| Color schemes | Universal Blue only | 15 schemes + raw grayscale, fully replaceable |
 | Satellite layer | None | Global (GOES / Meteosat / Himawari composite) |
 | Forecast layer | None | 60-minute nowcast (radar extrapolation + NWP blend) |
 | Image formats | PNG | PNG + WebP (configurable quality) |
@@ -44,7 +44,8 @@ Beyond compatibility, the goal is a far more customizable API backend for self-h
 ## Features
 
 - **Rain Viewer v2 API compatible** — drop-in replacement, no client changes needed
-- **All 15 color schemes** — Black & White, Rainviewer Original, Universal Blue, Titan, The Weather Channel (TWC), Meteored, NEXRAD Level III, Rainbow @ Selex SI, Dark Sky, Datameteo Valerio, Viper HD, MRMS CREF, 33/40 Max Storm, MetService NZ (Dark), Windy, plus raw grayscale
+- **All 15 color schemes** — Black & White, Rainviewer Original, Universal Blue, Titan, The Weather Channel (TWC), Meteored, NEXRAD Level III, Rainbow @ Selex SI, Dark Sky, Datameteo Valerio, Viper HD, MRMS CREF, 33/40 Max Storm, MetService NZ (Dark), Windy, plus raw grayscale — or serve your own complete scheme set with `LIBREWXR_COLOR_SCHEMES_FILE` (a local CSV or any http(s) URL)
+- **Custom color palettes** — point `LIBREWXR_COLOR_SCHEMES_FILE` at a local file or any http(s) URL (a GitHub Gist works) and the resolved table becomes the complete scheme set; palette changes hot-reload on the next fetch cycle with the packaged table as fallback
 - **Tile sizes** — 256px and 512px
 - **Image formats** — PNG and WebP (with configurable lossy/lossless quality)
 - **Smoothing** — zoom-adaptive Gaussian blur with seamless tile boundaries
@@ -60,10 +61,10 @@ Beyond compatibility, the goal is a far more customizable API backend for self-h
 - **Snow detection** — per-pixel snow/rain classification. Regional NWP sources classify natively from their own 2-metre temperature field (HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, ICON-EU, JMA MSM); ECMWF IFS snowfall ratio fills everywhere else
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
 - **Pipeline + render-worker architecture** — a data pipeline process fetches all radar / NWP / satellite / alerts / lightning data while one or more render workers serve tiles from a shared memmap snapshot. Split across processes so every core can render in parallel instead of being GIL-bound at one. `COMPOSE_PROFILES=multi` is the shipped default; a legacy `single` profile maps to one render worker with the legacy-single defaults
-- **Persistent disk cache** — radar / NWP / satellite / alerts data are cached to disk with atomic writes, surviving restarts and container recreation without re-downloading from upstream. Configurable via `LIBREWXR_CACHE_DIR` (a per-host tempdir fallback is used, with a warning, when unset)
+- **Persistent disk cache** — radar / NWP / satellite / alerts / lightning data and the resolved color palette are cached to disk with atomic writes, surviving restarts and container recreation without re-downloading from upstream. Configurable via `LIBREWXR_CACHE_DIR` (a per-host tempdir fallback is used, with a warning, when unset)
 - **Memory-efficient storage** — radar frames, NWP grids, satellite frames, and nowcast data are all backed by memory-mapped files, letting the OS page cache manage physical RAM instead of pinning data on the heap. Pages are reclaimed under memory pressure and re-faulted on access
 - **Smart fetch optimization** — radar sources skip re-downloading frames already in memory (only ~1 of 12 frames is new each cycle), NWP models skip redundant S3 fetches when the model run hasn't changed, and parallel NWP fetches are concurrency-capped via `LIBREWXR_NWP_FETCH_CONCURRENCY` so peak transient RAM stays bounded
-- **Health endpoint** — `/health` for monitoring uptime, per-component memory breakdown, frame count, NWP chain status, alerts status, MCP mount state, websocket channel status (connections, per-topic subscribers), and cache state, plus a `cluster` aggregation of per-worker stats in multi-worker deployments
+- **Health endpoint** — `/health` for monitoring uptime, per-component memory breakdown, frame count, NWP chain status, alerts status, MCP mount state, websocket channel status (connections, per-topic subscribers), color-scheme status (`color_schemes`), and cache state, plus a `cluster` aggregation of per-worker stats in multi-worker deployments
 - **MCP server** for AI agents — query precipitation nowcast, active weather alerts, storm cells, and recent lightning strikes via Model Context Protocol. HTTP transport mounted at `/mcp` for n8n-style automation; stdio transport for local agents like Claude Desktop. See [MCP server](#mcp-server-librewxr-extension) below.
 - **Storm-cell detection** — convective cells detected on radar frames each cycle via connected-component labeling at a configurable dBZ threshold. Overlay them on tiles with `?cells=light|dark` (parallel to `?arrows=`). See [Storm-Cell Detection](docs/storm-cells.md).
 - **Lightning overlay** — NOAA GOES GLM flash points (GOES-East + GOES-West) drawn on radar tiles with `?lightning=dots`/`bolts`, each frame showing the strikes from its own 10-minute window; also queryable via `/v2/lightning` and the MCP `get_recent_lightning` tool. See [Lightning](docs/lightning.md).
@@ -185,7 +186,10 @@ A few vars are managed by the compose file instead of `.env`:
 Knobs that need container-level changes - a volatile-cache tmpfs mount,
 TLS cert files, a custom cache path - go in a gitignored
 `docker-compose.override.yml`: compose merges it automatically and it
-survives `git pull`. Recipes and the full per-variable reference:
+survives `git pull`. A local palette file works the same way — bind-mount
+it into the pipeline service and point `LIBREWXR_COLOR_SCHEMES_FILE` at the
+in-container path; an http(s) URL palette needs no mount.
+Recipes and the full per-variable reference:
 [`docs/configuration-reference.md`](docs/configuration-reference.md).
 
 ### Docker (build from source)
@@ -358,7 +362,7 @@ GET /v2/radar/{timestamp}/{size}/{z}/{x}/{y}/{color}/{smooth}_{snow}.{ext}
 | `size` | `256`, `512` | Tile size in pixels |
 | `z` | integer | Zoom level |
 | `x`, `y` | integer-valued strings | Standard slippy map tile coordinates — segments containing a dot are interpreted as lat/lon (see the Radar Point Tiles section) |
-| `color` | `0`-`14`, `255` | Color scheme (see below) |
+| `color` | `0`-`14`, `255` by default | Color scheme (custom palettes redefine the ID space — see below) |
 | `smooth` | `0`, `1` | Enable smoothing |
 | `snow` | `0`, `1` | Enable snow precipitation colors |
 | `ext` | `png`, `webp` | Image format |
@@ -518,7 +522,7 @@ line is the bare-metal form; a custom container path needs a
 
 Per-source toggles — every radar source, regional NWP model, satellite channel, and the alerts feed — all default to `true`; sources enable by convention, so you only turn off what you don't need.
 
-The full surface (every `LIBREWXR_*` variable with type, default, and range — including per-source NWP publish delays, dBZ calibration offsets, and source base URLs) lives in [`docs/configuration-reference.md`](docs/configuration-reference.md), with inline comments in [`src/librewxr/config.py`](src/librewxr/config.py). See `.env.example` for detailed descriptions and tuning guidance for each setting.
+The full surface (every `LIBREWXR_*` variable with type, default, and range — including per-source NWP publish delays, dBZ calibration offsets, source base URLs, and the external color-palette table) lives in [`docs/configuration-reference.md`](docs/configuration-reference.md), with inline comments in [`src/librewxr/config.py`](src/librewxr/config.py). See `.env.example` for detailed descriptions and tuning guidance for each setting.
 
 ## Deployment
 
@@ -699,7 +703,7 @@ The `examples/` directory contains three self-contained HTML files showcasing th
 - **Source selector** — switch between local (`localhost:8080`) and the public instance (`api.librewxr.net`) with auto-detection
 - **Layer modes** — Radar, Satellite, or Radar + Satellite (satellite as background under radar)
 - **Light/dark theme** — toggles both the base map and UI styling
-- **Color scheme selector** — 15 color schemes plus a raw grayscale (255) option
+- **Color scheme selector** — the instance's full scheme list (15 + raw grayscale by default), populated from `radar.colorSchemes`
 - **Weather-alerts overlay** — severity-styled WMO alert polygons
 - **Options panel** — collapsible controls for smoothing, snow mask, PNG/WebP output format, and 256/512px tile size with HiDPI auto-detection
 - **Motion arrows** — off, light, or dark
