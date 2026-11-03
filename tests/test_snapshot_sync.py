@@ -16,6 +16,7 @@ import pytest
 from librewxr.data.master_state import load_state, snapshot_state, write_state_snapshot
 from librewxr.data.snapshot_sync import (
     LIGHTNING_ARTIFACT,
+    MANIFEST_VERSION,
     SnapshotPublisher,
     SnapshotPuller,
     rewrite_directories,
@@ -326,7 +327,7 @@ async def test_manifest_of_another_version_is_replaced_not_read(
     store = FrameStore(max_frames=2, cache_dir=pipeline_cache)
     await store.add_frame(_frame(T0, 1))
     manifest = await _publish(store, pipeline_cache, SnapshotPublisher(pipeline_cache, url))
-    assert manifest["version"] == 2 and manifest["sequence"] == 1
+    assert manifest["version"] == MANIFEST_VERSION and manifest["sequence"] == 1
     assert "Ignoring manifest of version 1" in caplog.text
     assert SnapshotPuller(tmp_path / "render", url).pull()
 

@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 MANIFEST_NAME = "manifest.json"
 # Bump when the manifest's layout changes; a publisher ignores (and
 # replaces) a manifest of another version, a puller refuses it
-MANIFEST_VERSION = 2
+MANIFEST_VERSION = 3
 # Remote prefix of the uploaded snapshots (one object per published state.json)
 SNAPSHOT_PREFIX = "snapshots"
 # Local record of the last manifest a puller applied
