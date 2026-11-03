@@ -67,6 +67,8 @@ VOLATILE_SUBDIR = "volatile"
 # memmap files the snapshot names (see snapshot_files)
 _WHOLE_DIRS = ("coverage_masks", "palettes")
 LIGHTNING_ARTIFACT = "lightning/current.npz"
+# Per-publish hard-link directories beside the files being uploaded
+STAGE_DIRNAME = ".publish"
 # Snapshot payload keys that hold a directory on the pipeline's host
 _DIRECTORY_KEYS = ("memmap_dir", "cache_root")
 
@@ -268,10 +270,11 @@ class SnapshotPublisher:
     def _put(self, local: Path, name: str) -> str | None:
         """Upload one file; ``None`` when it vanished before it could be read.
 
-        The pipeline keeps writing while a publish runs: a nowcast
-        regeneration or an eviction can remove a file the snapshot named.
-        Such a file is left out of the manifest and the next snapshot
-        (which no longer names it) replaces it.
+        ``local`` is normally the publish's own hard link to the file (see
+        ``_stage``), so the pipeline can delete or replace the original
+        meanwhile.  Where linking was not possible it is the original, and
+        a file removed before the upload is left out of the manifest; the
+        next snapshot (which no longer names it) carries the replacement.
         """
         remote = self._remote(name)
         self._ensure_parent(remote)
@@ -280,6 +283,41 @@ class SnapshotPublisher:
         except FileNotFoundError:
             return None
         return name
+
+    def _stage(self, files: dict[str, Path], sequence: int) -> dict[str, Path]:
+        """Hard-link the snapshot's files so the publish reads a fixed set.
+
+        The pipeline keeps writing while a publish runs: a nowcast
+        regeneration deletes the previous frames and an atomic replace
+        gives a name a new inode.  A link made now keeps the inode the
+        snapshot described until the publish is done, at no copy cost.
+        Links go in a ``.publish-<sequence>`` directory beside each file
+        (same filesystem, outside every store's glob).  A file that cannot
+        be linked (already gone, or a filesystem without hard links) keeps
+        its original path and is uploaded from there.
+        """
+        staged: dict[str, Path] = {}
+        for name, path in files.items():
+            link = path.parent / f"{STAGE_DIRNAME}-{sequence}" / path.name
+            try:
+                link.parent.mkdir(exist_ok=True)
+                os.link(path, link)
+                staged[name] = link
+            except FileNotFoundError:
+                continue
+            except OSError:
+                staged[name] = path
+        return staged
+
+    @staticmethod
+    def _unstage(staged: dict[str, Path], sequence: int) -> None:
+        for path in staged.values():
+            if path.parent.name == f"{STAGE_DIRNAME}-{sequence}":
+                path.unlink(missing_ok=True)
+                try:
+                    path.parent.rmdir()
+                except OSError:
+                    pass
 
     def _pipe(self, name: str, data: bytes) -> None:
         remote = self._remote(name)
@@ -312,36 +350,41 @@ class SnapshotPublisher:
         if self._previous is None:
             self._previous = self._read_manifest() or {"files": {}, "snapshot": None}
         previous = self._previous
-        files = snapshot_files(payload, self._cache_dir, self._volatile_dir)
-        stamps: dict[str, dict] = {}
-        for name, path in files.items():
-            try:
-                stamps[name] = _stamp(path)
-            except FileNotFoundError:
-                continue
-        changed = [
-            name for name, stamp in stamps.items()
-            if previous["files"].get(name) != stamp
-        ]
-        uploaded = 0
-        vanished = 0
-        with ThreadPoolExecutor(self._workers) as pool:
-            for name, done in zip(
-                changed, pool.map(lambda n: self._put(files[n], n), changed)
-            ):
-                if done is None:
-                    vanished += 1
-                    del stamps[name]
-                else:
-                    uploaded += stamps[name]["size"]
+        written_at = int(payload.get("written_at", time.time()))
+        sequence = int(previous.get("sequence", 0)) + 1
+        files = self._stage(
+            snapshot_files(payload, self._cache_dir, self._volatile_dir), sequence
+        )
+        try:
+            stamps: dict[str, dict] = {}
+            for name, path in files.items():
+                try:
+                    stamps[name] = _stamp(path)
+                except FileNotFoundError:
+                    continue
+            changed = [
+                name for name, stamp in stamps.items()
+                if previous["files"].get(name) != stamp
+            ]
+            uploaded = 0
+            vanished = 0
+            with ThreadPoolExecutor(self._workers) as pool:
+                for name, done in zip(
+                    changed, pool.map(lambda n: self._put(files[n], n), changed)
+                ):
+                    if done is None:
+                        vanished += 1
+                        del stamps[name]
+                    else:
+                        uploaded += stamps[name]["size"]
+        finally:
+            self._unstage(files, sequence)
         if vanished:
             logger.warning(
                 "%d file(s) vanished during the publish (the pipeline moved on); "
                 "left out of this manifest", vanished,
             )
 
-        written_at = int(payload.get("written_at", time.time()))
-        sequence = int(previous.get("sequence", 0)) + 1
         snapshot_name = f"{SNAPSHOT_PREFIX}/{written_at}-{sequence}.json.gz"
         self._pipe(
             snapshot_name,

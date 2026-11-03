@@ -29,7 +29,10 @@ data_pipeline  ──publish──▶  <prefix>/radar/..., nowcast/...  ◀─�
   changed), then the snapshot under a unique name, then one
   `manifest.json` listing the snapshot and its files with sizes and
   mtimes. The manifest is the single object readers key off, so a
-  reader never sees a snapshot whose files are still uploading. Files a
+  reader never sees a snapshot whose files are still uploading. The
+  publish reads its own hard links to the files (made beside them, no
+  copy), so the pipeline can regenerate the nowcast or evict a frame
+  meanwhile without the upload losing the content the snapshot named. Files a
   snapshot dropped are deleted after the next publish, the same
   one-cycle grace the pipeline's local eviction keeps, so a reader
   mid-pull can finish. The lightning artifact, which lives outside

@@ -205,11 +205,12 @@ async def test_stale_files_survive_quick_republishes_within_the_grace(
     assert len(manifest["stale_snapshots"]) == 3
 
 
-async def test_file_removed_during_publish_is_left_out_of_the_manifest(
+async def test_file_removed_during_publish_still_reaches_the_store(
     tmp_path: Path, pipeline_cache: Path, caplog
 ):
     """The pipeline keeps writing while a publish runs (a nowcast regeneration
-    deletes the previous frames); a vanished file must not fail the publish."""
+    deletes the previous frames); the publish must still upload the content
+    the snapshot described, from its own hard link."""
     url = f"file://{tmp_path / 'store'}"
     store = FrameStore(max_frames=2, cache_dir=pipeline_cache)
     await store.add_frame(_frame(T0, 1))
@@ -227,6 +228,33 @@ async def test_file_removed_during_publish_is_left_out_of_the_manifest(
     publisher._fs.put_file = put_file
     manifest = publisher.publish(payload)
     assert manifest is not None
-    assert doomed not in manifest["files"]
+    # The publish read its own hard link, so the deleted original still
+    # reached the store with the content the snapshot described
+    assert doomed in manifest["files"]
+    assert (tmp_path / "store" / doomed).read_bytes() == b"\x01" * 400
     assert f"radar/{T0 + 600}_GUCOMP.dat" in manifest["files"]
-    assert "vanished during the publish" in caplog.text
+    assert not list((pipeline_cache / "radar").glob(".publish-*"))
+
+
+async def test_file_gone_before_staging_is_left_out_of_the_manifest(
+    tmp_path: Path, pipeline_cache: Path, caplog
+):
+    """A file that is already gone when the publish starts (no link possible)
+    must not fail the publish; the next snapshot no longer names it."""
+    url = f"file://{tmp_path / 'store'}"
+    store = FrameStore(max_frames=2, cache_dir=pipeline_cache)
+    await store.add_frame(_frame(T0, 1))
+    await store.add_frame(_frame(T0 + 600, 2))
+    payload = snapshot_state({"frame_store": store})
+    publisher = SnapshotPublisher(pipeline_cache, url)
+    original_stage = publisher._stage
+
+    def stage(files, sequence):
+        (pipeline_cache / f"radar/{T0}_GUCOMP.dat").unlink()
+        return original_stage(files, sequence)
+
+    publisher._stage = stage
+    manifest = publisher.publish(payload)
+    assert manifest is not None
+    assert f"radar/{T0}_GUCOMP.dat" not in manifest["files"]
+    assert f"radar/{T0 + 600}_GUCOMP.dat" in manifest["files"]
