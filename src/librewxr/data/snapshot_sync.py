@@ -88,6 +88,12 @@ def open_store(url: str, endpoint_url: str = "") -> tuple[Any, str]:
     return fs, root.rstrip("/")
 
 
+def _is_local(fs) -> bool:
+    """Whether ``fs`` is a directory-based (local) filesystem."""
+    protocol = fs.protocol if isinstance(fs.protocol, (tuple, list)) else (fs.protocol,)
+    return "file" in protocol or "local" in protocol
+
+
 def relative_name(
     path: Path, cache_dir: Path, volatile_dir: Path | None
 ) -> str | None:
@@ -249,15 +255,24 @@ class SnapshotPublisher:
     def _remote(self, name: str) -> str:
         return f"{self._root}/{name}"
 
+    def _ensure_parent(self, remote: str) -> None:
+        """A directory-based store needs the parent directory to exist.
+
+        Object stores have no directories, and asking one to create the
+        bucket's "directory" turns into a HeadBucket / GetBucketLocation
+        call that a key limited to object access may be forbidden.
+        """
+        if _is_local(self._fs):
+            self._fs.makedirs(remote.rsplit("/", 1)[0], exist_ok=True)
+
     def _put(self, local: Path, name: str) -> None:
-        """Upload one file; a directory-based store needs the parent to exist."""
         remote = self._remote(name)
-        self._fs.makedirs(remote.rsplit("/", 1)[0], exist_ok=True)
+        self._ensure_parent(remote)
         self._fs.put_file(str(local), remote)
 
     def _pipe(self, name: str, data: bytes) -> None:
         remote = self._remote(name)
-        self._fs.makedirs(remote.rsplit("/", 1)[0], exist_ok=True)
+        self._ensure_parent(remote)
         self._fs.pipe_file(remote, data)
 
     def _read_manifest(self) -> dict | None:
