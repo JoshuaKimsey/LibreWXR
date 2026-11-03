@@ -30,6 +30,7 @@ This document is the **full** reference for every setting LibreWXR understands. 
 - [Weather Alerts (WMO CAP)](#weather-alerts-wmo-cap)
 - [Persistent Cache](#persistent-cache)
 - [Performance and Reliability](#performance-and-reliability)
+- [External Hooks](#external-hooks)
 - [Tile Request Tracking](#tile-request-tracking)
 - [MCP Server](#mcp-server)
 - [WebSocket Push Channel](#websocket-push-channel)
@@ -1666,6 +1667,65 @@ Number of retries on transient download errors (connection refused, timeout, DNS
 | **Type** | integer |
 
 `0` = fail immediately, `1` = one retry (2 total attempts).
+
+---
+
+## External Hooks
+
+The data pipeline hands its results to other processes through files: the `state.json` snapshot after every fetch cycle, the nowcast memmaps it names, and the lightning artifact. A hook runs an operator-supplied command (a script outside LibreWXR) the moment one of those files is complete, so post-processing or mirroring (exporting the nowcast to another format, syncing the cache to object storage for render nodes on other hosts, ...) needs no poller.
+
+Each hook is a shell-style command line, split with `shlex` and run directly (no shell), as a child of the pipeline process with the pipeline's own environment plus the event's context:
+
+| Variable | Set for | Value |
+|---|---|---|
+| `LIBREWXR_HOOK_EVENT` | all | `state`, `nowcast` or `lightning` |
+| `LIBREWXR_CACHE_DIR` | all | the cache directory (also inherited from the pipeline's environment) |
+| `LIBREWXR_HOOK_STATE_PATH` | `state`, `nowcast` | path of the `state.json` just written |
+| `LIBREWXR_HOOK_WRITTEN_AT` | `state`, `nowcast` | the snapshot's `written_at` (unix seconds) |
+| `LIBREWXR_HOOK_RADAR_TS` | `nowcast` | timestamp of the latest radar frame, the one the nowcast extrapolates |
+| `LIBREWXR_HOOK_NOWCAST_TS` | `nowcast` | comma-separated nowcast valid times, ascending |
+| `LIBREWXR_HOOK_NOWCAST_DIR` | `nowcast` | directory of the nowcast memmaps named in `state.json` |
+| `LIBREWXR_HOOK_LIGHTNING_PATH` | `lightning` | path of the lightning artifact just written |
+| `LIBREWXR_HOOK_LIGHTNING_VERSION` | `lightning` | the artifact's content version |
+
+A hook never affects the pipeline: a non-zero exit is logged with the last lines of its output, one that overruns `LIBREWXR_HOOK_TIMEOUT` is killed, and a trigger that arrives while the previous run of the same hook is still going is skipped (the next trigger carries newer data). On shutdown the pipeline waits for a running hook before removing its stores. Hooks run only in the pipeline process; render workers never fire them.
+
+### `LIBREWXR_HOOK_STATE_CMD`
+
+Command run after every `state.json` write. The pipeline writes the snapshot at the end of each fetch cycle and also mid-cycle (on radar frame merges and satellite fetches), so expect several runs per cycle; use it to mirror the cache.
+
+| | |
+|---|---|
+| **Default** | empty (off) |
+| **Type** | string (command line) |
+
+### `LIBREWXR_HOOK_NOWCAST_CMD`
+
+Command run once per nowcast: after the first `state.json` write whose nowcast belongs to the latest radar frame (a mid-cycle snapshot that already lists the new radar frame but still carries the previous frame's nowcast does not count). The snapshot names every nowcast memmap, so the command can read the complete nowcast from `state.json`.
+
+| | |
+|---|---|
+| **Default** | empty (off) |
+| **Type** | string (command line) |
+
+### `LIBREWXR_HOOK_LIGHTNING_CMD`
+
+Command run after every write of the lightning artifact (`<cache_dir>/lightning/current.npz`), i.e. once per lightning fetch interval while GLM data is enabled.
+
+| | |
+|---|---|
+| **Default** | empty (off) |
+| **Type** | string (command line) |
+
+### `LIBREWXR_HOOK_TIMEOUT`
+
+Seconds a hook may run before it is killed. Keep it below the fetch interval so a stuck hook cannot skip every later trigger.
+
+| | |
+|---|---|
+| **Default** | `540` |
+| **Type** | float |
+| **Unit** | seconds |
 
 ---
 

@@ -48,6 +48,12 @@ from librewxr.data.lightning_store import LightningStore
 from librewxr.data.master_state import snapshot_state, write_state_snapshot
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.storm_cells import StormCellGenerator, StormCellStore
+from librewxr.hooks import (
+    HookRunner,
+    lightning_event_env,
+    nowcast_event_env,
+    state_event_env,
+)
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.pagecache import prime_fresh_memmaps
 from librewxr.data.palette_fetcher import resolve_palette
@@ -248,6 +254,20 @@ async def run_pipeline() -> None:
         LightningStore(cache_dir=cache_dir) if settings.lightning_enabled else None
     )
 
+    # External hooks (operator commands, see hooks.py): fire() is a no-op for
+    # an unconfigured hook, so the call sites below cost nothing by default.
+    state_hook = HookRunner("state", settings.hook_state_cmd, settings.hook_timeout)
+    nowcast_hook = HookRunner("nowcast", settings.hook_nowcast_cmd, settings.hook_timeout)
+    lightning_hook = HookRunner(
+        "lightning", settings.hook_lightning_cmd, settings.hook_timeout
+    )
+    for hook in (state_hook, nowcast_hook, lightning_hook):
+        if hook.enabled:
+            logger.info("External %s hook enabled", hook.name)
+    # Radar frame the last nowcast hook was fired for: state.json is written
+    # several times per cycle, the nowcast hook must run once per nowcast.
+    last_nowcast_hook_ts: str | None = None
+
     # Per-timestamp global precip mask (the Tier 2 empty-tile gate's
     # replacement).  Built from every source's combined contribution
     # (radar + all NWP samples + nowcast) each cycle, then snapshotted
@@ -275,6 +295,7 @@ async def run_pipeline() -> None:
     }
 
     async def on_cycle_complete() -> None:
+        nonlocal last_nowcast_hook_ts
         try:
             await precip_mask_store.build(stores, nwp_chain, settings)
         except Exception:
@@ -294,10 +315,21 @@ async def run_pipeline() -> None:
             payload["palette"] = await resolve_palette(settings, cache_dir)
         except Exception:
             logger.exception("Failed to resolve external color palette")
+        snapshot_written = False
         try:
             await asyncio.to_thread(write_state_snapshot, payload, cache_dir)
+            snapshot_written = True
         except Exception:
             logger.exception("Failed to dump master state snapshot")
+        if snapshot_written:
+            state_hook.fire(state_event_env(payload, cache_dir))
+            nowcast_env = nowcast_event_env(payload, cache_dir)
+            if (
+                nowcast_env is not None
+                and nowcast_env["LIBREWXR_HOOK_RADAR_TS"] != last_nowcast_hook_ts
+            ):
+                last_nowcast_hook_ts = nowcast_env["LIBREWXR_HOOK_RADAR_TS"]
+                nowcast_hook.fire(nowcast_env)
         # Prime freshly written memmap frames into the host page cache so
         # render workers don't cold-fault on a slow backing disk (the host
         # page cache is shared between the pipeline and renderer
@@ -364,6 +396,11 @@ async def run_pipeline() -> None:
             interval_s=settings.lightning_fetch_interval,
             max_age_s=settings.lightning_max_age,
             satellites=_NOAA_SATS,
+            on_artifact_written=lambda: lightning_hook.fire(
+                lightning_event_env(
+                    lightning_store.artifact_path, lightning_store.version, cache_dir
+                )
+            ),
         )
         await lightning_fetcher.start()
         logger.info(
@@ -399,6 +436,10 @@ async def run_pipeline() -> None:
             await alerts_fetcher.close()
         if lightning_fetcher is not None:
             await lightning_fetcher.close()
+        # A hook started by the last cycle may still be running; let it finish
+        # (its own timeout bounds the wait) before the stores it reads go away.
+        for hook in (state_hook, nowcast_hook, lightning_hook):
+            await hook.wait()
         if nowcast_store is not None:
             nowcast_store.cleanup()
         if storm_cell_store is not None:

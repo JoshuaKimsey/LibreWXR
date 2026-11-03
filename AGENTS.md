@@ -181,6 +181,7 @@ All config via `LIBREWXR_*` env vars or `.env` file. Settings defined in `src/li
 - `LIBREWXR_MEMORY_PRESSURE_CHECK_INTERVAL`: seconds between memory pressure checks (default 30)
 - `LIBREWXR_WORKER_HEALTHCHECK_TIMEOUT`: uvicorn worker healthcheck timeout in seconds (default 30; 0 = uvicorn's built-in 5 s)
 - `LIBREWXR_PAGECACHE_PRIME_ENABLED`: pipeline-only `posix_fadvise(WILLNEED)` page-cache priming after fetch cycles (default true)
+- `LIBREWXR_HOOK_STATE_CMD` / `LIBREWXR_HOOK_NOWCAST_CMD` / `LIBREWXR_HOOK_LIGHTNING_CMD`: external hooks (`hooks.py`), operator commands the pipeline runs after every `state.json` write / once per new nowcast / after every lightning artifact write, with the event in `LIBREWXR_HOOK_*` env vars; `LIBREWXR_HOOK_TIMEOUT` (default 540 s) kills an overrunning one. Pipeline-only; empty = off
 
 **Radar:**
 - `LIBREWXR_ENABLED_REGIONS`: `ALL`, a region group (`CONUS`, `US`, `CANADA`, `CENTRAL_AMERICA`, `EUROPE`, `JAPAN`, `SOUTHEAST_ASIA`, `TAIWAN`), or comma-separated region names
