@@ -31,6 +31,7 @@ This document is the **full** reference for every setting LibreWXR understands. 
 - [Persistent Cache](#persistent-cache)
 - [Performance and Reliability](#performance-and-reliability)
 - [External Hooks](#external-hooks)
+- [Network Split (Snapshot Sync)](#network-split-snapshot-sync)
 - [Tile Request Tracking](#tile-request-tracking)
 - [MCP Server](#mcp-server)
 - [WebSocket Push Channel](#websocket-push-channel)
@@ -1726,6 +1727,49 @@ Seconds a hook may run before it is killed. Keep it below the fetch interval so 
 | | |
 |---|---|
 | **Default** | `540` |
+| **Type** | float |
+| **Unit** | seconds |
+
+---
+
+## Network Split (Snapshot Sync)
+
+Carries the pipeline/renderer handoff over an artifact store so the data pipeline and the render workers can run on different servers; see [docs/network-split.md](network-split.md). The pipeline publishes each `state.json` and the files it names; a puller (`python -m librewxr.snapshot_pull`) on each render host brings them into that host's cache, where render-only workers read them as usual. Off by default: the shared-filesystem handoff is unchanged.
+
+### `LIBREWXR_SNAPSHOT_SYNC_URL`
+
+Where snapshots are published (pipeline) or pulled from (puller): any `fsspec` URL, typically `s3://bucket/prefix`; `file:///path` works for a shared or local disk. Credentials come from the environment (`AWS_*` for S3). Empty disables snapshot sync.
+
+| | |
+|---|---|
+| **Default** | empty (off) |
+| **Type** | string (URL) |
+
+### `LIBREWXR_SNAPSHOT_SYNC_ENDPOINT_URL`
+
+Endpoint of an S3-compatible store (MinIO, OVH, ...) for an `s3://` sync URL. Empty uses AWS.
+
+| | |
+|---|---|
+| **Default** | empty |
+| **Type** | string (URL) |
+
+### `LIBREWXR_SNAPSHOT_SYNC_WORKERS`
+
+Parallel uploads (pipeline) or downloads (puller) per publish or pull.
+
+| | |
+|---|---|
+| **Default** | `8` |
+| **Type** | integer |
+
+### `LIBREWXR_SNAPSHOT_PULL_INTERVAL`
+
+Seconds between manifest polls by the puller. The manifest changes once per fetch cycle, so a few seconds only shortens the lag by that much.
+
+| | |
+|---|---|
+| **Default** | `10` |
 | **Type** | float |
 | **Unit** | seconds |
 
