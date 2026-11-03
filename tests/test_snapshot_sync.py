@@ -206,7 +206,7 @@ async def test_stale_files_survive_quick_republishes_within_the_grace(
 
 
 async def test_file_removed_during_publish_still_reaches_the_store(
-    tmp_path: Path, pipeline_cache: Path, caplog
+    tmp_path: Path, pipeline_cache: Path, monkeypatch
 ):
     """The pipeline keeps writing while a publish runs (a nowcast regeneration
     deletes the previous frames); the publish must still upload the content
@@ -225,7 +225,9 @@ async def test_file_removed_during_publish_still_reaches_the_store(
             (pipeline_cache / doomed).unlink()
         return real_put(lpath, rpath, **kwargs)
 
-    publisher._fs.put_file = put_file
+    # fsspec caches filesystem instances: patch through monkeypatch so the
+    # shared file:// instance is restored for the other tests
+    monkeypatch.setattr(publisher._fs, "put_file", put_file)
     manifest = publisher.publish(payload)
     assert manifest is not None
     # The publish read its own hard link, so the deleted original still
@@ -271,3 +273,34 @@ def test_publisher_removes_link_directories_a_crash_left_behind(
     SnapshotPublisher(pipeline_cache, f"file://{tmp_path / 'store'}")
     assert not stale.exists()
     assert (pipeline_cache / "radar").is_dir()
+
+
+async def test_failed_delete_is_retried_on_the_next_publish(
+    tmp_path: Path, pipeline_cache: Path, caplog, monkeypatch
+):
+    """A multi-object delete can time out on a slow store; the files must stay
+    listed as stale so a later publish deletes them, never leak."""
+    url = f"file://{tmp_path / 'store'}"
+    remote = tmp_path / "store"
+    store = FrameStore(max_frames=1, cache_dir=pipeline_cache)
+    await store.add_frame(_frame(T0, 1))
+    publisher = SnapshotPublisher(pipeline_cache, url, stale_grace_s=0)
+    await _publish(store, pipeline_cache, publisher)
+    await store.add_frame(_frame(T0 + 600, 2))
+    await _publish(store, pipeline_cache, publisher)
+
+    def failing_rm(paths):
+        raise TimeoutError("slow store")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(publisher._fs, "rm", failing_rm)
+        await store.add_frame(_frame(T0 + 1200, 3))
+        manifest = await _publish(store, pipeline_cache, publisher)
+    assert f"radar/{T0}_GUCOMP.dat" in manifest["stale"]
+    assert (remote / "radar" / f"{T0}_GUCOMP.dat").exists()
+    assert "retrying next publish" in caplog.text
+
+    await store.add_frame(_frame(T0 + 1800, 4))
+    manifest = await _publish(store, pipeline_cache, publisher)
+    assert f"radar/{T0}_GUCOMP.dat" not in manifest["stale"]
+    assert not (remote / "radar" / f"{T0}_GUCOMP.dat").exists()

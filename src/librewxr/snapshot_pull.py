@@ -66,9 +66,10 @@ async def run_puller() -> None:
     while not stop_event.is_set():
         try:
             applied = await asyncio.to_thread(puller.pull)
-        except (OSError, ValueError, KeyError):
-            # A store or transfer error leaves the local cache as it was;
-            # the next poll retries from the manifest.
+        except Exception:
+            # A store or transfer error (the client libraries raise their
+            # own types) leaves the local cache as it was; the next poll
+            # retries from the manifest.
             logger.exception("Snapshot pull failed")
             applied = False
         if applied:

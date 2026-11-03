@@ -67,6 +67,9 @@ VOLATILE_SUBDIR = "volatile"
 # memmap files the snapshot names (see snapshot_files)
 _WHOLE_DIRS = ("coverage_masks", "palettes")
 LIGHTNING_ARTIFACT = "lightning/current.npz"
+# Objects per delete request: a 1000-key multi-object delete timed out
+# against OVH, and a failed batch is simply retried on the next publish
+DELETE_BATCH = 100
 # Per-publish hard-link directories beside the files being uploaded
 STAGE_DIRNAME = ".publish"
 # Snapshot payload keys that hold a directory on the pipeline's host
@@ -426,10 +429,11 @@ class SnapshotPublisher:
             if name not in stamps
         }
         stale_snapshots: dict[str, int] = dict(previous.get("stale_snapshots", {}))
-        expired = {
+        expired = sorted(
             name for name, since in {**stale, **stale_snapshots}.items()
             if now - since >= self._stale_grace_s
-        }
+        )
+        deleted = self._delete(expired)
         for name in set(previous["files"]) - set(stamps):
             stale.setdefault(name, now)
         if previous.get("snapshot") and previous["snapshot"] != snapshot_name:
@@ -443,17 +447,14 @@ class SnapshotPublisher:
             "volatile_dir": str(self._volatile_dir) if self._volatile_dir else None,
             "snapshot": snapshot_name,
             "files": stamps,
-            "stale": {n: t for n, t in stale.items() if n not in expired},
+            # Still listed: what is waiting out the grace, and what a failed
+            # delete left behind (retried next publish)
+            "stale": {n: t for n, t in stale.items() if n not in deleted},
             "stale_snapshots": {
-                n: t for n, t in stale_snapshots.items() if n not in expired
+                n: t for n, t in stale_snapshots.items() if n not in deleted
             },
         }
         self._pipe(MANIFEST_NAME, json.dumps(manifest, sort_keys=True).encode())
-        if expired:
-            try:
-                self._fs.rm([self._remote(name) for name in sorted(expired)])
-            except FileNotFoundError:
-                pass
         self._previous = manifest
         logger.info(
             "Published snapshot %d: %d of %d files uploaded (%.0f MB) in %.1f s",
@@ -461,6 +462,24 @@ class SnapshotPublisher:
             time.monotonic() - started,
         )
         return manifest
+
+    def _delete(self, names: list[str]) -> set[str]:
+        """Delete ``names`` in small batches; returns the ones that are gone."""
+        deleted: set[str] = set()
+        for start in range(0, len(names), DELETE_BATCH):
+            batch = names[start : start + DELETE_BATCH]
+            try:
+                self._fs.rm([self._remote(name) for name in batch])
+            except FileNotFoundError:
+                pass
+            except Exception as exc:  # store/transport errors: retried next publish
+                logger.warning(
+                    "Deleting %d expired snapshot files failed (%s); retrying next publish",
+                    len(batch), exc,
+                )
+                continue
+            deleted.update(batch)
+        return deleted
 
     def publish_lightning(self) -> bool:
         """Upload the lightning artifact (written outside the snapshot cycle)."""

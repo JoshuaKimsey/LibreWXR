@@ -104,6 +104,13 @@ the worker after the puller has caught up in that case.
   nowcast frames dominate, since they are regenerated every cycle), so
   tens of seconds on a fast link. The manifest's `written_at` and the
   puller log show the lag.
+- **Measured against OVH object storage** (full-region pipeline, 32
+  parallel transfers): a whole snapshot of 1,433 files published in
+  121 s and pulled into an empty render cache in 89 s; a publish with
+  nothing new takes about 20 s (stat, link and manifest round trips).
+  Deletes go out in batches of 100 keys, since a 1,000-key
+  multi-object delete timed out there; a failed batch is retried on
+  the next publish.
 - **Bandwidth.** Roughly 1 GB per cycle per render host at full regions,
   about 150 GB a day. The memmaps are mostly zeros; compressing them in
   transit is a possible follow-up.

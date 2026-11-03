@@ -339,7 +339,7 @@ async def run_pipeline() -> None:
             # Uploads run off the loop; a store error must not break the cycle
             try:
                 await asyncio.to_thread(publisher.publish, payload)
-            except (OSError, ValueError):
+            except Exception:  # store client errors are not all OSError
                 logger.exception("Snapshot publish failed")
         if snapshot_written:
             state_hook.fire(state_event_env(payload, cache_dir))
