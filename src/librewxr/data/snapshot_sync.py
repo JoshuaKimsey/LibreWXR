@@ -383,7 +383,14 @@ class SnapshotPublisher:
     def _publish(self, payload: dict) -> dict:
         started = time.monotonic()
         if self._previous is None:
-            self._previous = self._read_manifest() or {"files": {}, "snapshot": None}
+            # A new series starts whenever there is no manifest to continue
+            # (first publish, or one of another version): its epoch tells a
+            # puller that the sequence numbers started over.
+            self._previous = self._read_manifest() or {
+                "files": {},
+                "snapshot": None,
+                "epoch": uuid.uuid4().hex,
+            }
         previous = self._previous
         written_at = int(payload.get("written_at", time.time()))
         sequence = int(previous.get("sequence", 0)) + 1
@@ -450,6 +457,7 @@ class SnapshotPublisher:
             stale_snapshots.setdefault(previous["snapshot"], now)
         manifest = {
             "version": MANIFEST_VERSION,
+            "epoch": previous["epoch"],
             "sequence": sequence,
             "written_at": written_at,
             "published_at": now,
@@ -557,7 +565,8 @@ class SnapshotPuller:
                 f"manifest version {manifest.get('version')!r} at {self._root}; "
                 f"this build reads version {MANIFEST_VERSION}"
             )
-        if int(manifest.get("sequence", 0)) <= self.applied_sequence:
+        same_series = manifest.get("epoch") == self._applied.get("epoch")
+        if same_series and int(manifest.get("sequence", 0)) <= self.applied_sequence:
             return False
 
         started = time.monotonic()
@@ -592,6 +601,7 @@ class SnapshotPuller:
             except FileNotFoundError:
                 pass
         self._applied = {
+            "epoch": manifest.get("epoch"),
             "sequence": int(manifest["sequence"]),
             "written_at": manifest.get("written_at"),
             "files": files,

@@ -7,6 +7,7 @@ path serves ``s3://`` through fsspec.
 """
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -328,3 +329,28 @@ async def test_manifest_of_another_version_is_replaced_not_read(
     assert manifest["version"] == 2 and manifest["sequence"] == 1
     assert "Ignoring manifest of version 1" in caplog.text
     assert SnapshotPuller(tmp_path / "render", url).pull()
+
+
+async def test_puller_follows_a_publisher_that_started_a_new_series(
+    tmp_path: Path, pipeline_cache: Path
+):
+    """A publisher that starts over (fresh store, or a manifest of another
+    version it ignored) numbers its snapshots from 1 again; a puller that had
+    applied a higher sequence must still take them."""
+    url = f"file://{tmp_path / 'store'}"
+    store = FrameStore(max_frames=2, cache_dir=pipeline_cache)
+    await store.add_frame(_frame(T0, 1))
+    publisher = SnapshotPublisher(pipeline_cache, url)
+    for k in (1, 2, 3):
+        await store.add_frame(_frame(T0 + 600 * k, k + 1))
+        await _publish(store, pipeline_cache, publisher)
+    puller = SnapshotPuller(tmp_path / "render", url)
+    assert puller.pull() and puller.applied_sequence == 3
+
+    # The store is wiped and a new publisher starts a new series at 1
+    shutil.rmtree(tmp_path / "store")
+    fresh = SnapshotPublisher(pipeline_cache, url)
+    manifest = await _publish(store, pipeline_cache, fresh)
+    assert manifest["sequence"] == 1
+    assert puller.pull() and puller.applied_sequence == 1
+    assert not puller.pull()
