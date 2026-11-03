@@ -157,3 +157,27 @@ def test_snapshot_files_skips_files_outside_the_cache(tmp_path: Path, caplog):
     payload = {"stores": {"s": {"memmap_dir": str(outside), "frames": [["x.dat", "|u1", [1]]]}}}
     assert snapshot_files(payload, tmp_path / "cache", None) == {}
     assert "outside the cache" in caplog.text
+
+
+def test_snapshot_files_cover_grid_directories_that_derive_their_file_names(tmp_path: Path):
+    """The regional NWP grids snapshot ``[run, lead]`` keys, not file triples,
+    so their files must come from the directory the store names."""
+    cache = tmp_path / "cache"
+    grid_dir = cache / "hrrr"
+    grid_dir.mkdir(parents=True)
+    (grid_dir / "1793650200_0.dat").write_bytes(b"0")
+    (grid_dir / "1793650200_1.dat").write_bytes(b"0")
+    (grid_dir / "1793650200_2.dat.123.tmp").write_bytes(b"0")
+    payload = {
+        "stores": {
+            "hrrr_grid": {
+                "memmap_dir": str(grid_dir),
+                "latest_run_ts": 1793650200,
+                "frame_keys": [[1793650200, 0], [1793650200, 1]],
+            }
+        }
+    }
+    assert set(snapshot_files(payload, cache, None)) == {
+        "hrrr/1793650200_0.dat",
+        "hrrr/1793650200_1.dat",
+    }

@@ -104,15 +104,33 @@ def relative_name(
     return None
 
 
+def _store_directories(node, found: set[Path]) -> None:
+    """Every ``memmap_dir`` a store payload names, at any depth."""
+    if isinstance(node, dict):
+        value = node.get("memmap_dir")
+        if isinstance(value, str) and value:
+            found.add(Path(value))
+        for child in node.values():
+            _store_directories(child, found)
+    elif isinstance(node, (list, tuple)):
+        for child in node:
+            _store_directories(child, found)
+
+
 def snapshot_files(
     payload: dict, cache_dir: Path, volatile_dir: Path | None
 ) -> dict[str, Path]:
     """Every file a snapshot depends on, keyed by its name in the store.
 
-    The memmap files the stores name (``pagecache`` already walks the
-    payload for them), the directories read whole (coverage masks, the
-    palette artifact), the storm-cell store's directory (its snapshot
-    names the directory and it rescans it), and the lightning artifact.
+    The content of every directory a store names as its ``memmap_dir``:
+    stores describe their files differently (radar and nowcast list
+    ``[basename, dtype, shape]`` triples, the regional NWP grids list
+    ``[run, lead]`` keys and derive the names, the storm-cell store
+    rescans its directory), and a store's directory holds exactly what
+    that store serves plus files kept one cycle for eviction grace.  The
+    satellite frames (resolved from ``cache_root`` by the page-cache
+    walker), the directories read whole (coverage masks, the palette
+    artifact) and the lightning artifact complete the set.
     """
     files: dict[str, Path] = {}
 
@@ -124,19 +142,17 @@ def snapshot_files(
         if path.is_file():
             files[name] = path
 
+    directories: set[Path] = set()
     for store_payload in payload.get("stores", {}).values():
         if isinstance(store_payload, dict):
+            _store_directories(store_payload, directories)
             for path in _collect_memmap_files(store_payload):
                 add(path)
-    storm_dir = (payload.get("stores", {}).get("storm_cell_store") or {}).get(
-        "memmap_dir"
-    )
-    directories = [Path(storm_dir)] if storm_dir else []
-    directories += [cache_dir / name for name in _WHOLE_DIRS]
+    directories.update(cache_dir / name for name in _WHOLE_DIRS)
     for directory in directories:
         if directory.is_dir():
             for path in directory.iterdir():
-                if path.is_file() and not path.name.endswith(".tmp"):
+                if path.is_file() and ".tmp" not in path.name:
                     add(path)
     add(cache_dir / LIGHTNING_ARTIFACT)
     return files
