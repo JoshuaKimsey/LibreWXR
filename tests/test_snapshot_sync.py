@@ -258,3 +258,16 @@ async def test_file_gone_before_staging_is_left_out_of_the_manifest(
     assert manifest is not None
     assert f"radar/{T0}_GUCOMP.dat" not in manifest["files"]
     assert f"radar/{T0 + 600}_GUCOMP.dat" in manifest["files"]
+
+
+def test_publisher_removes_link_directories_a_crash_left_behind(
+    tmp_path: Path, pipeline_cache: Path
+):
+    """A publish interrupted mid-upload leaves its hard links behind, pinning
+    deleted frames' disk space; the next publisher start must reclaim them."""
+    stale = pipeline_cache / "radar" / ".publish-7"
+    stale.mkdir(parents=True)
+    (stale / "old_frame.dat").write_bytes(b"x")
+    SnapshotPublisher(pipeline_cache, f"file://{tmp_path / 'store'}")
+    assert not stale.exists()
+    assert (pipeline_cache / "radar").is_dir()

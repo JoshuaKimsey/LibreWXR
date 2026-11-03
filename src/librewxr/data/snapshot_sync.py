@@ -246,6 +246,28 @@ class SnapshotPublisher:
         # away while a reader is still downloading the previous manifest's
         # files; a time-based grace matches the pipeline's own eviction.
         self._stale_grace_s = float(stale_grace_s)
+        self._sweep_stale_links()
+
+    def _sweep_stale_links(self) -> None:
+        """Remove link directories a publish interrupted by a crash left behind.
+
+        Each holds inodes of files the pipeline may have deleted since, so
+        they would otherwise keep that disk space for ever.
+        """
+        roots = [self._cache_dir] + ([self._volatile_dir] if self._volatile_dir else [])
+        removed = 0
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for stale_dir in root.rglob(f"{STAGE_DIRNAME}-*"):
+                if not stale_dir.is_dir():
+                    continue
+                for link in stale_dir.iterdir():
+                    link.unlink(missing_ok=True)
+                stale_dir.rmdir()
+                removed += 1
+        if removed:
+            logger.info("Removed %d leftover snapshot publish link directories", removed)
         self._url = url
         self._fs, self._root = open_store(url, endpoint_url)
         self._workers = max(1, int(workers))
