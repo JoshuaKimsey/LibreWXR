@@ -246,6 +246,13 @@ class SnapshotPublisher:
         # away while a reader is still downloading the previous manifest's
         # files; a time-based grace matches the pipeline's own eviction.
         self._stale_grace_s = float(stale_grace_s)
+        self._url = url
+        self._fs, self._root = open_store(url, endpoint_url)
+        self._workers = max(1, int(workers))
+        # One publish at a time; a trigger arriving mid-publish is skipped
+        # (the next snapshot carries newer data)
+        self._lock = threading.Lock()
+        self._previous: dict | None = None
         self._sweep_stale_links()
 
     def _sweep_stale_links(self) -> None:
@@ -268,13 +275,6 @@ class SnapshotPublisher:
                 removed += 1
         if removed:
             logger.info("Removed %d leftover snapshot publish link directories", removed)
-        self._url = url
-        self._fs, self._root = open_store(url, endpoint_url)
-        self._workers = max(1, int(workers))
-        # One publish at a time; a trigger arriving mid-publish is skipped
-        # (the next snapshot carries newer data)
-        self._lock = threading.Lock()
-        self._previous: dict | None = None
 
     def _remote(self, name: str) -> str:
         return f"{self._root}/{name}"
