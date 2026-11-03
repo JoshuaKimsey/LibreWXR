@@ -265,10 +265,21 @@ class SnapshotPublisher:
         if _is_local(self._fs):
             self._fs.makedirs(remote.rsplit("/", 1)[0], exist_ok=True)
 
-    def _put(self, local: Path, name: str) -> None:
+    def _put(self, local: Path, name: str) -> str | None:
+        """Upload one file; ``None`` when it vanished before it could be read.
+
+        The pipeline keeps writing while a publish runs: a nowcast
+        regeneration or an eviction can remove a file the snapshot named.
+        Such a file is left out of the manifest and the next snapshot
+        (which no longer names it) replaces it.
+        """
         remote = self._remote(name)
         self._ensure_parent(remote)
-        self._fs.put_file(str(local), remote)
+        try:
+            self._fs.put_file(str(local), remote)
+        except FileNotFoundError:
+            return None
+        return name
 
     def _pipe(self, name: str, data: bytes) -> None:
         remote = self._remote(name)
@@ -302,18 +313,32 @@ class SnapshotPublisher:
             self._previous = self._read_manifest() or {"files": {}, "snapshot": None}
         previous = self._previous
         files = snapshot_files(payload, self._cache_dir, self._volatile_dir)
-        stamps = {name: _stamp(path) for name, path in files.items()}
+        stamps: dict[str, dict] = {}
+        for name, path in files.items():
+            try:
+                stamps[name] = _stamp(path)
+            except FileNotFoundError:
+                continue
         changed = [
             name for name, stamp in stamps.items()
             if previous["files"].get(name) != stamp
         ]
         uploaded = 0
+        vanished = 0
         with ThreadPoolExecutor(self._workers) as pool:
-            for name in pool.map(
-                lambda n: self._put(files[n], n) or n,
-                changed,
+            for name, done in zip(
+                changed, pool.map(lambda n: self._put(files[n], n), changed)
             ):
-                uploaded += stamps[name]["size"]
+                if done is None:
+                    vanished += 1
+                    del stamps[name]
+                else:
+                    uploaded += stamps[name]["size"]
+        if vanished:
+            logger.warning(
+                "%d file(s) vanished during the publish (the pipeline moved on); "
+                "left out of this manifest", vanished,
+            )
 
         written_at = int(payload.get("written_at", time.time()))
         sequence = int(previous.get("sequence", 0)) + 1

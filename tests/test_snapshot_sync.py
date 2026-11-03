@@ -203,3 +203,30 @@ async def test_stale_files_survive_quick_republishes_within_the_grace(
         f"radar/{T0 + 600 * k}_GUCOMP.dat" for k in (0, 1, 2)
     }
     assert len(manifest["stale_snapshots"]) == 3
+
+
+async def test_file_removed_during_publish_is_left_out_of_the_manifest(
+    tmp_path: Path, pipeline_cache: Path, caplog
+):
+    """The pipeline keeps writing while a publish runs (a nowcast regeneration
+    deletes the previous frames); a vanished file must not fail the publish."""
+    url = f"file://{tmp_path / 'store'}"
+    store = FrameStore(max_frames=2, cache_dir=pipeline_cache)
+    await store.add_frame(_frame(T0, 1))
+    await store.add_frame(_frame(T0 + 600, 2))
+    publisher = SnapshotPublisher(pipeline_cache, url)
+    payload = snapshot_state({"frame_store": store})
+    doomed = f"radar/{T0}_GUCOMP.dat"
+    real_put = publisher._fs.put_file
+
+    def put_file(lpath, rpath, **kwargs):
+        if rpath.endswith(doomed):
+            (pipeline_cache / doomed).unlink()
+        return real_put(lpath, rpath, **kwargs)
+
+    publisher._fs.put_file = put_file
+    manifest = publisher.publish(payload)
+    assert manifest is not None
+    assert doomed not in manifest["files"]
+    assert f"radar/{T0 + 600}_GUCOMP.dat" in manifest["files"]
+    assert "vanished during the publish" in caplog.text
