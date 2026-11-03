@@ -54,7 +54,9 @@ from librewxr.data.pagecache import _collect_memmap_files
 logger = logging.getLogger(__name__)
 
 MANIFEST_NAME = "manifest.json"
-MANIFEST_VERSION = 1
+# Bump when the manifest's layout changes; a publisher ignores (and
+# replaces) a manifest of another version, a puller refuses it
+MANIFEST_VERSION = 2
 # Remote prefix of the uploaded snapshots (one object per published state.json)
 SNAPSHOT_PREFIX = "snapshots"
 # Local record of the last manifest a puller applied
@@ -351,9 +353,17 @@ class SnapshotPublisher:
 
     def _read_manifest(self) -> dict | None:
         try:
-            return json.loads(self._fs.cat_file(self._remote(MANIFEST_NAME)))
+            manifest = json.loads(self._fs.cat_file(self._remote(MANIFEST_NAME)))
         except FileNotFoundError:
             return None
+        if manifest.get("version") != MANIFEST_VERSION:
+            logger.warning(
+                "Ignoring manifest of version %r at %s (this build writes %d); "
+                "republishing every file",
+                manifest.get("version"), self._root, MANIFEST_VERSION,
+            )
+            return None
+        return manifest
 
     def publish(self, payload: dict) -> dict | None:
         """Upload the files ``payload`` names, the snapshot, then the manifest.
@@ -542,6 +552,11 @@ class SnapshotPuller:
             self._pull_lightning()
             return False
         self._pull_lightning()
+        if manifest.get("version") != MANIFEST_VERSION:
+            raise ValueError(
+                f"manifest version {manifest.get('version')!r} at {self._root}; "
+                f"this build reads version {MANIFEST_VERSION}"
+            )
         if int(manifest.get("sequence", 0)) <= self.applied_sequence:
             return False
 

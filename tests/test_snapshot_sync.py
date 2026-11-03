@@ -304,3 +304,27 @@ async def test_failed_delete_is_retried_on_the_next_publish(
     manifest = await _publish(store, pipeline_cache, publisher)
     assert f"radar/{T0}_GUCOMP.dat" not in manifest["stale"]
     assert not (remote / "radar" / f"{T0}_GUCOMP.dat").exists()
+
+
+async def test_manifest_of_another_version_is_replaced_not_read(
+    tmp_path: Path, pipeline_cache: Path, caplog
+):
+    """A manifest written by a build with a different layout must not be
+    interpreted: the publisher starts over and the puller refuses it."""
+    import json
+
+    store_dir = tmp_path / "store"
+    store_dir.mkdir()
+    (store_dir / "manifest.json").write_text(
+        json.dumps({"version": 1, "sequence": 9, "files": {}, "stale": ["x"]})
+    )
+    url = f"file://{store_dir}"
+    with pytest.raises(ValueError, match="manifest version"):
+        SnapshotPuller(tmp_path / "render", url).pull()
+
+    store = FrameStore(max_frames=2, cache_dir=pipeline_cache)
+    await store.add_frame(_frame(T0, 1))
+    manifest = await _publish(store, pipeline_cache, SnapshotPublisher(pipeline_cache, url))
+    assert manifest["version"] == 2 and manifest["sequence"] == 1
+    assert "Ignoring manifest of version 1" in caplog.text
+    assert SnapshotPuller(tmp_path / "render", url).pull()
