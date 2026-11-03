@@ -228,9 +228,16 @@ class SnapshotPublisher:
         volatile_dir: Path | None = None,
         endpoint_url: str = "",
         workers: int = 8,
+        stale_grace_s: float = 60.0,
     ) -> None:
         self._cache_dir = Path(cache_dir)
         self._volatile_dir = Path(volatile_dir) if volatile_dir else None
+        # How long a file stays in the store after a snapshot stops naming
+        # it.  The pipeline publishes several snapshots per cycle (frame
+        # merges, satellite fetches), so "the next publish" can be seconds
+        # away while a reader is still downloading the previous manifest's
+        # files; a time-based grace matches the pipeline's own eviction.
+        self._stale_grace_s = float(stale_grace_s)
         self._url = url
         self._fs, self._root = open_store(url, endpoint_url)
         self._workers = max(1, int(workers))
@@ -300,29 +307,46 @@ class SnapshotPublisher:
             snapshot_name,
             gzip.compress(json.dumps(payload, default=str).encode("utf-8")),
         )
-        # What this snapshot dropped relative to the previous one is deleted
-        # after the NEXT publish (recorded in the manifest so a restarted
-        # pipeline still deletes it): a reader mid-pull on the previous
-        # manifest can finish, the same one-cycle grace as local eviction.
+        # Files and snapshots this manifest no longer names stay in the store
+        # for stale_grace_s (recorded in the manifest with the time they
+        # became stale, so a restarted pipeline still deletes them): a
+        # reader mid-pull on an older manifest can finish, the same grace
+        # the pipeline's local eviction keeps.
+        now = int(time.time())
+        # Only what an earlier manifest already marked stale can expire: a
+        # file dropped by this very publish always survives it, whatever
+        # the grace, so a reader on the previous manifest can finish.
+        stale: dict[str, int] = {
+            name: since for name, since in previous.get("stale", {}).items()
+            if name not in stamps
+        }
+        stale_snapshots: dict[str, int] = dict(previous.get("stale_snapshots", {}))
+        expired = {
+            name for name, since in {**stale, **stale_snapshots}.items()
+            if now - since >= self._stale_grace_s
+        }
+        for name in set(previous["files"]) - set(stamps):
+            stale.setdefault(name, now)
+        if previous.get("snapshot") and previous["snapshot"] != snapshot_name:
+            stale_snapshots.setdefault(previous["snapshot"], now)
         manifest = {
             "version": MANIFEST_VERSION,
             "sequence": sequence,
             "written_at": written_at,
-            "published_at": int(time.time()),
+            "published_at": now,
             "cache_dir": str(self._cache_dir),
             "volatile_dir": str(self._volatile_dir) if self._volatile_dir else None,
             "snapshot": snapshot_name,
             "files": stamps,
-            "stale": sorted(set(previous["files"]) - set(stamps)),
-            "stale_snapshots": [previous["snapshot"]] if previous.get("snapshot") else [],
+            "stale": {n: t for n, t in stale.items() if n not in expired},
+            "stale_snapshots": {
+                n: t for n, t in stale_snapshots.items() if n not in expired
+            },
         }
         self._pipe(MANIFEST_NAME, json.dumps(manifest, sort_keys=True).encode())
-        to_delete = (set(previous.get("stale", [])) - set(stamps)) | set(
-            previous.get("stale_snapshots", [])
-        )
-        if to_delete:
+        if expired:
             try:
-                self._fs.rm([self._remote(name) for name in sorted(to_delete)])
+                self._fs.rm([self._remote(name) for name in sorted(expired)])
             except FileNotFoundError:
                 pass
         self._previous = manifest

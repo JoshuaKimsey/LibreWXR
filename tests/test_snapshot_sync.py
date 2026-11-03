@@ -89,16 +89,17 @@ async def test_only_changed_files_travel_and_evicted_files_go_after_one_cycle(
     store = FrameStore(max_frames=2, cache_dir=pipeline_cache)
     await store.add_frame(_frame(T0, 1))
     await store.add_frame(_frame(T0 + 600, 2))
-    publisher = SnapshotPublisher(pipeline_cache, url)
+    publisher = SnapshotPublisher(pipeline_cache, url, stale_grace_s=0)
     await _publish(store, pipeline_cache, publisher)
     render_cache = tmp_path / "render"
     puller = SnapshotPuller(render_cache, url)
     assert puller.pull()
 
-    # A new frame evicts the oldest: one upload, the evicted file kept one cycle
+    # A new frame evicts the oldest: one upload, the evicted file kept until
+    # the grace has passed (here: the next publish)
     await store.add_frame(_frame(T0 + 1200, 3))
     manifest = await _publish(store, pipeline_cache, publisher)
-    assert manifest["stale"] == [f"radar/{T0}_GUCOMP.dat"]
+    assert list(manifest["stale"]) == [f"radar/{T0}_GUCOMP.dat"]
     assert (remote / "radar" / f"{T0}_GUCOMP.dat").exists()
     assert puller.pull()
     assert (render_cache / "radar" / f"{T0 + 1200}_GUCOMP.dat").exists()
@@ -181,3 +182,24 @@ def test_snapshot_files_cover_grid_directories_that_derive_their_file_names(tmp_
         "hrrr/1793650200_0.dat",
         "hrrr/1793650200_1.dat",
     }
+
+
+async def test_stale_files_survive_quick_republishes_within_the_grace(
+    tmp_path: Path, pipeline_cache: Path
+):
+    """The pipeline publishes several snapshots per cycle, so a file a reader
+    is still downloading must not disappear on the very next publish."""
+    url = f"file://{tmp_path / 'store'}"
+    remote = tmp_path / "store"
+    store = FrameStore(max_frames=1, cache_dir=pipeline_cache)
+    await store.add_frame(_frame(T0, 1))
+    publisher = SnapshotPublisher(pipeline_cache, url, stale_grace_s=3600)
+    await _publish(store, pipeline_cache, publisher)
+    for k in (1, 2, 3):
+        await store.add_frame(_frame(T0 + 600 * k, k))
+        manifest = await _publish(store, pipeline_cache, publisher)
+    assert (remote / "radar" / f"{T0}_GUCOMP.dat").exists()
+    assert set(manifest["stale"]) == {
+        f"radar/{T0 + 600 * k}_GUCOMP.dat" for k in (0, 1, 2)
+    }
+    assert len(manifest["stale_snapshots"]) == 3

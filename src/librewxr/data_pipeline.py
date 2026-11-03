@@ -275,6 +275,7 @@ async def run_pipeline() -> None:
             volatile_dir=volatile_dir,
             endpoint_url=settings.snapshot_sync_endpoint_url,
             workers=settings.snapshot_sync_workers,
+            stale_grace_s=evict_grace_s,
         )
         logger.info("Snapshot sync enabled: publishing to %s", settings.snapshot_sync_url)
     # Radar frame the last nowcast hook was fired for: state.json is written

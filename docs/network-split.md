@@ -82,6 +82,17 @@ works as the URL too, for a shared or local disk and for tests.
 With Docker Compose, `COMPOSE_PROFILES=render-node` starts the `puller`
 and `renderer-node` services (no pipeline) from the same compose file.
 
+## Start order on a render host
+
+Start the puller before the render workers, as the `render-node` compose
+profile does. A render worker waits for `state.json` to exist and then
+applies whatever it names, and the puller only writes `state.json` after
+every file of that snapshot is in place, so a fresh host is always
+consistent. A worker that starts against a `state.json` left over from an
+earlier run (files since removed) drops the stores it cannot open and
+only recovers them when their part of a later snapshot changes; restart
+the worker after the puller has caught up in that case.
+
 ## What to expect
 
 - **Lag.** A render host serves a cycle once the pipeline has uploaded
