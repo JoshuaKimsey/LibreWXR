@@ -351,6 +351,21 @@ class SnapshotPublisher:
         self._ensure_parent(remote)
         self._fs.pipe_file(remote, data)
 
+    def _stored_names(self) -> list[str]:
+        """Names of every object in the store except the manifest."""
+        try:
+            paths = self._fs.find(self._root)
+        except FileNotFoundError:
+            return []
+        except Exception as exc:  # noqa: BLE001 - a listing is best effort
+            logger.warning("Listing %s failed (%s); not reclaiming old files", self._root, exc)
+            return []
+        prefix = f"{self._root}/"
+        return [
+            name for name in (p[len(prefix):] for p in paths if p.startswith(prefix))
+            if name != MANIFEST_NAME
+        ]
+
     def _read_manifest(self) -> dict | None:
         try:
             manifest = json.loads(self._fs.cat_file(self._remote(MANIFEST_NAME)))
@@ -387,7 +402,13 @@ class SnapshotPublisher:
             # (first publish, or one of another version): its epoch tells a
             # puller that the sequence numbers started over.
             self._previous = self._read_manifest() or {
-                "files": {},
+                # Nothing records what the store already holds (an earlier
+                # series, a manifest of another version), so list it as the
+                # previous manifest's files: the ones this series no longer
+                # names then go stale and expire like any dropped file
+                # instead of staying in the store for ever.  The empty stamp
+                # never matches, so every file is still uploaded afresh.
+                "files": {name: {} for name in self._stored_names()},
                 "snapshot": None,
                 "epoch": uuid.uuid4().hex,
             }

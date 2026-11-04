@@ -355,3 +355,33 @@ async def test_puller_follows_a_publisher_that_started_a_new_series(
     assert manifest["sequence"] == 1
     assert puller.pull() and puller.applied_sequence == 1
     assert not puller.pull()
+
+
+async def test_new_series_reclaims_files_an_earlier_series_left(
+    tmp_path: Path, pipeline_cache: Path
+):
+    """A new series (no manifest it can continue, e.g. after a manifest
+    version bump) must expire what the store already holds instead of
+    leaving it there for ever."""
+    store_dir = tmp_path / "store"
+    (store_dir / "radar").mkdir(parents=True)
+    orphan = store_dir / "radar" / f"{T0 - 6000}_GUCOMP.dat"
+    orphan.write_bytes(b"old frame")
+    old_snapshot = store_dir / "snapshots" / "1-1.json.gz"
+    old_snapshot.parent.mkdir()
+    old_snapshot.write_bytes(b"old snapshot")
+    url = f"file://{store_dir}"
+
+    store = FrameStore(max_frames=2, cache_dir=pipeline_cache)
+    await store.add_frame(_frame(T0, 1))
+    publisher = SnapshotPublisher(pipeline_cache, url, stale_grace_s=0)
+    manifest = await _publish(store, pipeline_cache, publisher)
+    # Kept through the first publish: a reader may still be on the old series
+    assert orphan.exists() and old_snapshot.exists()
+    assert f"radar/{T0 - 6000}_GUCOMP.dat" in manifest["stale"]
+    assert f"radar/{T0}_GUCOMP.dat" not in manifest["stale"]
+
+    await _publish(store, pipeline_cache, publisher)
+    assert not orphan.exists() and not old_snapshot.exists()
+    assert (store_dir / "radar" / f"{T0}_GUCOMP.dat").exists()
+    assert SnapshotPuller(tmp_path / "render", url).pull()
