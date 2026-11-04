@@ -90,6 +90,28 @@ logger = logging.getLogger(__name__)
 _mask_save_task: asyncio.Task | None = None
 
 
+async def _restore_cached_frames(
+    radar_cache: RadarFrameCache, store: FrameStore, regions_by_name: dict,
+) -> None:
+    """Re-populate ``store`` from the radar disk cache.
+
+    Kept in its own function on purpose: the restored ``RadarFrame`` list
+    (and the loop variable) must not outlive the restore.  Held in
+    ``run_pipeline``'s scope they pinned every boot-time frame's memmaps
+    for the whole process lifetime, so once the store evicted and unlinked
+    those files their disk blocks were never released.
+    """
+    restored = radar_cache.load_frames(regions_by_name)
+    if not restored:
+        return
+    for frame in restored:
+        await store.add_frame(frame)
+    logger.info(
+        "Restored %d radar frame(s) from disk cache (%d → %d)",
+        len(restored), restored[0].timestamp, restored[-1].timestamp,
+    )
+
+
 async def run_pipeline() -> None:
     """Construct the pipeline, run until signalled, then shut down cleanly."""
     # resolve_cache_dir falls back to a stable per-host tempdir (with a
@@ -232,14 +254,7 @@ async def run_pipeline() -> None:
     # directory and would otherwise reap what eviction deliberately kept).
     radar_cache = RadarFrameCache(cache_dir, grace_s=evict_grace_s)
     regions_by_name = {name: REGIONS[name] for name in enabled}
-    restored = radar_cache.load_frames(regions_by_name)
-    if restored:
-        for frame in restored:
-            await store.add_frame(frame)
-        logger.info(
-            "Restored %d radar frame(s) from disk cache (%d → %d)",
-            len(restored), restored[0].timestamp, restored[-1].timestamp,
-        )
+    await _restore_cached_frames(radar_cache, store, regions_by_name)
 
     # AlertsStore is constructed up-front (even before the fetcher starts)
     # so it can ride along in the master_state snapshot.  The render-only
