@@ -119,5 +119,14 @@ the worker after the puller has caught up in that case.
   local cache as it was and retries on the next poll. A render host that
   has pulled once serves from local disk whether or not the pipeline is
   reachable.
+- **Local damage.** On every poll the puller checks that the files of the
+  applied snapshot are present at their published size, and downloads any
+  that are missing or truncated (and `state.json`, if that is gone). A
+  same-size corruption is not detected. A render worker that already
+  dropped a store over a missing file still recovers as described under
+  [Start order](#start-order-on-a-render-host).
+- **One publisher per store.** Point exactly one pipeline at a store URL.
+  Two publishers would silently interleave their snapshots in one series
+  and expire each other's files.
 - **Same contract.** Nothing in the render path changes: workers still
   memory-map local files named by a local `state.json`.

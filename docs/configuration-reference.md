@@ -1612,7 +1612,7 @@ When empty the behavior is unchanged: every store lives under `LIBREWXR_CACHE_DI
 
 Durable stores — radar frames, NWP/satellite grids, the coordinate store, the shared tile store, and `state.json` itself — **always** stay under `LIBREWXR_CACHE_DIR` regardless of this setting.
 
-The mount must exist at the **same absolute path in the pipeline and every render worker**. `state.json` records absolute memmap paths, so each process that applies the snapshot (`__setstate__`) must resolve them at that path. A shared host tmpfs bind mount (`source == target`) works; `docker-compose.yml` carries a commented example on both services.
+The mount must exist at the **same absolute path in the pipeline and every render worker**. `state.json` records absolute memmap paths, so each process that applies the snapshot (`__setstate__`) must resolve them at that path. A shared host tmpfs bind mount (`source == target`) works; `docker-compose.yml` carries a commented example on both services. This applies when the processes share a filesystem: in [network split mode](network-split.md) the puller rewrites these paths to the render host's own cache.
 
 The update-safe route is a gitignored `docker-compose.override.yml`, which Compose auto-merges on top of the tracked file at runtime (no `-f` chain) and which survives `git pull` untouched:
 
