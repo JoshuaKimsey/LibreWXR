@@ -43,7 +43,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import fsspec
@@ -171,6 +171,26 @@ def snapshot_files(
     return files
 
 
+def _is_store_name(name: object) -> bool:
+    """Whether a name read from a manifest stays under the root it is joined to.
+
+    Manifests are read back from the store, so their names are untrusted.
+    The publisher only ever writes clean relative paths; anything else means
+    a hostile or misconfigured store.  The check is on the path text: a store
+    cannot plant symlinks in a local cache, and an operator's own symlinked
+    subdirectory stays valid.
+    """
+    if not isinstance(name, str):
+        return False
+    path = PurePosixPath(name)
+    return bool(path.parts) and not path.is_absolute() and ".." not in path.parts
+
+
+def _is_cache_name(name: object) -> bool:
+    """A store name a puller may write or remove: not its own control files."""
+    return _is_store_name(name) and name not in (STATE_FILENAME, LOCAL_MANIFEST_NAME)
+
+
 def _stamp(path: Path) -> dict[str, int]:
     st = path.stat()
     return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
@@ -184,12 +204,15 @@ def rewrite_directories(
     Every ``memmap_dir`` / ``cache_root`` value under the pipeline's cache
     directory maps to the same place under ``local``; one under its
     volatile directory maps under ``local/volatile`` (where the puller put
-    those files).  Anything else is left alone.
+    those files).  Anything else is left alone.  Raises ``ValueError`` for a
+    value that would climb out of those directories with ``..``.
     """
     remote_cache = remote_cache_dir.rstrip("/")
     remote_volatile = (remote_volatile_dir or "").rstrip("/")
 
     def map_dir(value: str) -> str:
+        if ".." in PurePosixPath(value).parts:
+            raise ValueError(f"unsafe directory in snapshot: {value!r}")
         if remote_volatile and (
             value == remote_volatile or value.startswith(remote_volatile + "/")
         ):
@@ -376,6 +399,22 @@ class SnapshotPublisher:
                 "Ignoring manifest of version %r at %s (this build writes %d); "
                 "republishing every file",
                 manifest.get("version"), self._root, MANIFEST_VERSION,
+            )
+            return None
+        # Every name here ends up in a delete, so one that leaves the store
+        # (a real path on a file:// store) must not be acted on
+        names = [
+            *manifest.get("files", {}),
+            *manifest.get("stale", {}),
+            *manifest.get("stale_snapshots", {}),
+        ]
+        if manifest.get("snapshot") is not None:
+            names.append(manifest["snapshot"])
+        unsafe = sorted(str(name) for name in names if not _is_store_name(name))
+        if unsafe:
+            logger.warning(
+                "Ignoring manifest at %s naming unsafe paths (%s); republishing every file",
+                self._root, ", ".join(unsafe[:5]),
             )
             return None
         return manifest
@@ -586,6 +625,12 @@ class SnapshotPuller:
                 f"manifest version {manifest.get('version')!r} at {self._root}; "
                 f"this build reads version {MANIFEST_VERSION}"
             )
+        # Refuse the whole manifest, before anything is applied from it
+        unsafe = sorted(str(name) for name in manifest["files"] if not _is_cache_name(name))
+        if not _is_store_name(manifest.get("snapshot")):
+            unsafe.append(str(manifest.get("snapshot")))
+        if unsafe:
+            raise ValueError(f"unsafe paths in manifest: {', '.join(unsafe[:5])}")
         same_series = manifest.get("epoch") == self._applied.get("epoch")
         if same_series and int(manifest.get("sequence", 0)) <= self.applied_sequence:
             return False
@@ -616,6 +661,9 @@ class SnapshotPuller:
         keep = set(files) | set(self._applied.get("files", {}))
         removed = 0
         for name in set(self._applied.get("previous_files", {})) - keep:
+            if not _is_cache_name(name):
+                logger.warning("Not removing unsafe tracked path %r", name)
+                continue
             try:
                 (self._cache_dir / name).unlink()
                 removed += 1

@@ -7,6 +7,7 @@ path serves ``s3://`` through fsspec.
 """
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -385,3 +386,84 @@ async def test_new_series_reclaims_files_an_earlier_series_left(
     assert not orphan.exists() and not old_snapshot.exists()
     assert (store_dir / "radar" / f"{T0}_GUCOMP.dat").exists()
     assert SnapshotPuller(tmp_path / "render", url).pull()
+
+
+def _poison_manifest(store_dir: Path, **changes) -> None:
+    path = store_dir / "manifest.json"
+    manifest = json.loads(path.read_text())
+    for key, value in changes.items():
+        if isinstance(value, dict):
+            manifest.setdefault(key, {}).update(value)
+        else:
+            manifest[key] = value
+    path.write_text(json.dumps(manifest))
+
+
+@pytest.mark.parametrize(
+    "name", ["../evil", "radar/../../evil", "ABSOLUTE", "state.json", "snapshot_manifest.json"]
+)
+async def test_puller_refuses_a_manifest_naming_a_file_outside_its_cache(
+    tmp_path: Path, pipeline_cache: Path, name: str
+):
+    store_dir = tmp_path / "store"
+    store = FrameStore(max_frames=2, cache_dir=pipeline_cache)
+    await store.add_frame(_frame(T0, 1))
+    await _publish(store, pipeline_cache, SnapshotPublisher(pipeline_cache, f"file://{store_dir}"))
+    if name == "ABSOLUTE":
+        name = str(tmp_path / "evil")
+    _poison_manifest(store_dir, files={name: {"size": 1, "mtime_ns": 1}})
+
+    render = tmp_path / "render"
+    with pytest.raises(ValueError, match="unsafe"):
+        SnapshotPuller(render, f"file://{store_dir}").pull()
+    assert not (tmp_path / "evil").exists()
+    # Refused before anything was applied
+    assert not (render / "state.json").exists()
+    assert not (render / "radar").exists()
+
+
+async def test_puller_never_unlinks_a_tracked_name_outside_its_cache(
+    tmp_path: Path, pipeline_cache: Path
+):
+    url = f"file://{tmp_path / 'store'}"
+    store = FrameStore(max_frames=2, cache_dir=pipeline_cache)
+    await store.add_frame(_frame(T0, 1))
+    publisher = SnapshotPublisher(pipeline_cache, url)
+    await _publish(store, pipeline_cache, publisher)
+    puller = SnapshotPuller(tmp_path / "render", url)
+    assert puller.pull()
+
+    victim = tmp_path / "victim"
+    victim.write_text("keep me")
+    puller._applied["previous_files"]["../victim"] = {}
+    await store.add_frame(_frame(T0 + 600, 2))
+    await _publish(store, pipeline_cache, publisher)
+    assert puller.pull()
+    assert victim.exists()
+
+
+async def test_publisher_ignores_a_manifest_naming_files_outside_the_store(
+    tmp_path: Path, pipeline_cache: Path, caplog
+):
+    store_dir = tmp_path / "store"
+    url = f"file://{store_dir}"
+    store = FrameStore(max_frames=2, cache_dir=pipeline_cache)
+    await store.add_frame(_frame(T0, 1))
+    first = await _publish(store, pipeline_cache, SnapshotPublisher(pipeline_cache, url))
+
+    victim = tmp_path / "victim"
+    victim.write_text("keep me")
+    _poison_manifest(store_dir, stale={"../victim": 0})
+    # A restarted publisher reads the manifest back to continue the series
+    manifest = await _publish(store, pipeline_cache, SnapshotPublisher(pipeline_cache, url))
+    assert victim.exists()
+    assert "unsafe" in caplog.text
+    # Handled like a manifest of another version: a new series starts
+    assert manifest["epoch"] != first["epoch"]
+    assert manifest["sequence"] == 1
+
+
+def test_rewrite_directories_refuses_a_directory_climbing_out_of_the_cache(tmp_path: Path):
+    payload = {"stores": {"frame_store": {"memmap_dir": "/srv/cache/../../etc"}}}
+    with pytest.raises(ValueError, match="unsafe"):
+        rewrite_directories(payload, "/srv/cache", None, tmp_path)
