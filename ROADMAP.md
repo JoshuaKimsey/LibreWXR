@@ -10,7 +10,7 @@ status, as this file and the issues are kept in sync. The lists are not exhausti
 
 ## The path to 1.0.0
 
-The current version is 0.8.0. Every section below is an unordered theme: each ships as its
+The current version is 0.9.0. Every section below is an unordered theme: each ships as its
 own 0.x release whenever it is next in line, with the version number assigned at release
 time.
 
@@ -57,7 +57,7 @@ alignment, so it can land alongside any release.
   record + `mcp-publisher login dns`); the GitHub namespace is treated as unusable for the
   `api.librewxr.net` remote under the domain-matching rule.
 - [ ] Create `server.json` at the repo root per the runbook template; `version` tracks
-  `pyproject.toml` at publish time (0.8.0 today - re-check when executing).
+  `pyproject.toml` at publish time (0.9.0 today - re-check when executing).
 - [ ] Publish the hosted instance; published `(name, version)` pairs are immutable, so the
   registry is only touched on real `pyproject.toml` version bumps.
 - [ ] Follow-up: align the SEP-2127 server card name with the chosen namespace - one
@@ -140,7 +140,9 @@ Tracked in issue #50.
   shared filesystem (NFS or object-store-backed volume), including memmap-over-network
   caveats; update `docs/self-host-sizing.md`. The full network-separated pipeline/renderer is
   a post-1.0 design project - today's multi-mode and this phase share the same
-  shared-filesystem assumption.
+  shared-filesystem assumption. (superseded in 0.9.0: network split mode (#51) shipped separate-host
+  render workers over an object store, and `docs/self-host-sizing.md` links to it; keep this item
+  only for an NFS/shared-filesystem profile if demand appears)
 - [ ] Declare the public surface stable at 1.0.0: Rain Viewer-compatible HTTP endpoints, tile
   query parameters, JSON response shapes, and MCP tools. Semver applies to this surface;
   internal paths may change.
@@ -159,13 +161,19 @@ Unordered candidates; nothing here is committed.
 
 Tracked in issue #51.
 
-- [ ] Design spike first: replace the shared-filesystem handoff with a network artifact
+- [x] Design spike first: replace the shared-filesystem handoff with a network artifact
   handoff so the pipeline and renderers can run on entirely separate servers (candidates:
   object storage or an HTTP snapshot service the renderers pull from).
 
 Note: this redesigns the memmap + shared-store coupling - state.json,
 `coord/`, `tiles_shared/`, `mask/`, `lightning/`, `radar/`, `workers/` all assume a shared
 `cache_dir` today.
+
+Note: shipped in 0.9.0 as network split mode (`LIBREWXR_SNAPSHOT_SYNC_URL` +
+`python -m librewxr.snapshot_pull`, see `docs/network-split.md`), pulled forward from the
+post-1.0 list. The fsspec artifact-store handoff covers the object-storage candidate, so no
+separate HTTP snapshot service was needed; `coord/`, `tiles_shared/` and `workers/` stay per
+host.
 
 ### WebSocket topic extensions
 
