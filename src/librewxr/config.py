@@ -536,6 +536,15 @@ class Settings(BaseSettings):
     lightning_fetch_interval: int = 300      # LIBREWXR_LIGHTNING_FETCH_INTERVAL (seconds)
     lightning_max_age: int = 1800           # LIBREWXR_LIGHTNING_MAX_AGE (seconds; 1800 = 30 min)
     lightning_max_draw_per_tile: int = 1000 # LIBREWXR_LIGHTNING_MAX_DRAW_PER_TILE
+    # External hooks (see hooks.py): operator commands the data pipeline runs
+    # when a handoff file is complete, so a post-processing or mirroring
+    # script outside LibreWXR needs no poller.  Shell-style command lines
+    # (split with shlex, no shell); empty = off.  The event's context arrives
+    # in LIBREWXR_HOOK_* environment variables.
+    hook_state_cmd: str = ""        # LIBREWXR_HOOK_STATE_CMD: after every state.json write
+    hook_nowcast_cmd: str = ""      # LIBREWXR_HOOK_NOWCAST_CMD: once per new nowcast
+    hook_lightning_cmd: str = ""    # LIBREWXR_HOOK_LIGHTNING_CMD: after every lightning artifact write
+    hook_timeout: float = 540.0     # LIBREWXR_HOOK_TIMEOUT (seconds; a hook running longer is killed)
     cache_dir: str = ""  # Persistent cache directory for fetched grids; empty = in-memory only
     # Optional directory for stores whose contents are fully regenerated
     # every fetch cycle (nowcast frames + optical-flow fields, per-timestamp

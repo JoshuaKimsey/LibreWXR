@@ -26,7 +26,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 from urllib.parse import quote
 
 import h5py
@@ -174,12 +174,15 @@ class GOESGLMLightningFetcher:
         interval_s: int = 300,
         max_age_s: int = 1800,
         satellites: Sequence[tuple[str, str, int]] = _NOAA_SATS,
+        on_artifact_written: Callable[[], None] | None = None,
         download_retries: int | None = None,
     ) -> None:
         self._store = store
         self._interval_s = int(interval_s)
         self._max_age_s = int(max_age_s)
         self._satellites = tuple(satellites)
+        # Called after each successful artifact write (the lightning hook)
+        self._on_artifact_written = on_artifact_written
         self._download_retries = download_retries
 
         self._cache_dir = Path(cache_dir) if cache_dir is not None else None
@@ -270,7 +273,8 @@ class GOESGLMLightningFetcher:
             max_age_s=self._max_age_s,
             meta={"units": "J", "satellites": satellites},
         )
-        await self._store.save_snapshot()
+        if await self._store.save_snapshot() and self._on_artifact_written is not None:
+            self._on_artifact_written()
 
     # -- seams ---------------------------------------------------------------
 

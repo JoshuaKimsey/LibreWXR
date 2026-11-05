@@ -280,6 +280,11 @@ class LightningStore:
     # -- read-only properties ------------------------------------------------
 
     @property
+    def artifact_path(self) -> Path | None:
+        """The on-disk artifact (``<cache_dir>/lightning/current.npz``), or None."""
+        return self._artifact_path
+
+    @property
     def version(self) -> int:
         """Content version, restored from the artifact on a reader reload."""
         return self._version
