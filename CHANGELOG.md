@@ -7,6 +7,24 @@ and commit the result alongside the version bump.
 
 ---
 
+## [v0.9.0 - Network split mode and external hooks](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.9.0)
+
+2026-11-05
+
+LibreWXR can now run its data pipeline and render workers on entirely separate servers, and the pipeline can hand its output to external tooling the moment files are complete.
+
+**Network split mode (#56, roadmap #51).** The pipeline publishes each `state.json` and the files it names to an fsspec artifact store (`LIBREWXR_SNAPSHOT_SYNC_URL`, typically `s3://bucket/prefix`); `python -m librewxr.snapshot_pull` on each render host pulls them into that host's cache, rewrites the snapshot's directories, and writes `state.json` last, so render-only workers serve from local memmaps exactly as with a local pipeline. The puller also takes over the per-host housekeeping the pipeline would own (coordinate and tile store pruning, page-cache priming). Off by default — the shared-filesystem deployment is unchanged. New compose profile `render-node` (puller + renderer-node). See `docs/network-split.md`. Measured against OVH object storage: a full-region cycle (~1 GB, ~1,500 files) publishes in ~2 minutes and pulls into an empty cache in ~1.5 minutes.
+
+**External hooks (#55).** `LIBREWXR_HOOK_STATE_CMD` / `LIBREWXR_HOOK_NOWCAST_CMD` / `LIBREWXR_HOOK_LIGHTNING_CMD` run operator commands when a handoff file is complete (after every `state.json` write, once per new nowcast, after every lightning artifact write), with the event's context in `LIBREWXR_HOOK_*` environment variables. Failing or overrunning hooks are logged and never affect the pipeline. Off by default; pipeline-only.
+
+**Fixes.** Boot-restored radar frames release their memmaps once the store evicts them (previously pinning ~1.6 GB of deleted files per pipeline); the BoM shapefile reader is closed before its temp directory is removed.
+
+**Credits.** Everything in this release — both features, the fixes, and the live object-storage validation — was contributed by Alexander Rey (@alexander0042). Thank you for an outstanding contribution!
+
+Deployments pulling published images: set `LIBREWXR_IMAGE_TAG=0.9.0` and restart.
+
+---
+
 ## [v0.8.0 - External color palettes](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.8.0)
 
 2026-11-01
