@@ -467,3 +467,83 @@ def test_rewrite_directories_refuses_a_directory_climbing_out_of_the_cache(tmp_p
     payload = {"stores": {"frame_store": {"memmap_dir": "/srv/cache/../../etc"}}}
     with pytest.raises(ValueError, match="unsafe"):
         rewrite_directories(payload, "/srv/cache", None, tmp_path)
+
+
+async def _pulled_node(tmp_path: Path, pipeline_cache: Path) -> tuple[SnapshotPuller, Path, str]:
+    url = f"file://{tmp_path / 'store'}"
+    store = FrameStore(max_frames=2, cache_dir=pipeline_cache)
+    await store.add_frame(_frame(T0, 1))
+    manifest = await _publish(store, pipeline_cache, SnapshotPublisher(pipeline_cache, url))
+    render = tmp_path / "render"
+    puller = SnapshotPuller(render, url)
+    assert puller.pull()
+    frame = next(name for name in manifest["files"] if name.startswith("radar/"))
+    return puller, render, frame
+
+
+async def test_puller_restores_a_deleted_file_on_an_unchanged_manifest(
+    tmp_path: Path, pipeline_cache: Path
+):
+    puller, render, frame = await _pulled_node(tmp_path, pipeline_cache)
+    content = (render / frame).read_bytes()
+    state_mtime = (render / "state.json").stat().st_mtime_ns
+    (render / frame).unlink()
+
+    assert not puller.pull()  # nothing new was applied
+    assert (render / frame).read_bytes() == content
+    assert (render / "state.json").stat().st_mtime_ns == state_mtime
+
+
+async def test_puller_restores_a_truncated_file_on_an_unchanged_manifest(
+    tmp_path: Path, pipeline_cache: Path
+):
+    puller, render, frame = await _pulled_node(tmp_path, pipeline_cache)
+    content = (render / frame).read_bytes()
+    (render / frame).write_bytes(content[:10])
+
+    assert not puller.pull()
+    assert (render / frame).read_bytes() == content
+
+
+async def test_puller_rewrites_a_deleted_state_file_on_an_unchanged_manifest(
+    tmp_path: Path, pipeline_cache: Path
+):
+    puller, render, _frame_name = await _pulled_node(tmp_path, pipeline_cache)
+    (render / "state.json").unlink()
+
+    assert puller.pull()
+    assert load_state(render) is not None
+    assert not puller.pull()
+
+
+async def test_new_snapshot_restores_a_file_whose_stamp_did_not_change(
+    tmp_path: Path, pipeline_cache: Path
+):
+    url = f"file://{tmp_path / 'store'}"
+    store = FrameStore(max_frames=3, cache_dir=pipeline_cache)
+    await store.add_frame(_frame(T0, 1))
+    publisher = SnapshotPublisher(pipeline_cache, url)
+    manifest = await _publish(store, pipeline_cache, publisher)
+    render = tmp_path / "render"
+    puller = SnapshotPuller(render, url)
+    assert puller.pull()
+    frame = next(name for name in manifest["files"] if name.startswith("radar/"))
+    (render / frame).unlink()
+
+    await store.add_frame(_frame(T0 + 600, 2))
+    await _publish(store, pipeline_cache, publisher)
+    assert puller.pull()
+    assert (render / frame).exists()
+
+
+async def test_repair_leaves_the_lightning_artifact_to_its_own_refresh(
+    tmp_path: Path, pipeline_cache: Path
+):
+    """The artifact changes between manifests, so its size there is no reference."""
+    puller, render, _frame_name = await _pulled_node(tmp_path, pipeline_cache)
+    (pipeline_cache / "lightning" / "current.npz").write_bytes(b"newer and longer strikes")
+    publisher = SnapshotPublisher(pipeline_cache, f"file://{tmp_path / 'store'}")
+    assert publisher.publish_lightning()
+    assert not puller.pull()
+    assert (render / LIGHTNING_ARTIFACT).read_bytes() == b"newer and longer strikes"
+    assert not puller.pull()

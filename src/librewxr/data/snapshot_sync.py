@@ -607,8 +607,10 @@ class SnapshotPuller:
         Downloads every listed file the local cache lacks (or has at a
         different size/mtime), writes the rewritten snapshot as
         ``state.json`` last, then deletes tracked files that neither this
-        nor the previously applied manifest names.  The lightning artifact
-        is refreshed on every call.  Raises on store errors; the local
+        nor the previously applied manifest names.  With the manifest
+        already applied it only restores what the local cache has since
+        lost (see ``_repair``).  The lightning artifact is refreshed on
+        every call.  Raises on store errors; the local
         cache is left as it was (a partial download never reaches
         ``state.json``).
         """
@@ -633,30 +635,26 @@ class SnapshotPuller:
             raise ValueError(f"unsafe paths in manifest: {', '.join(unsafe[:5])}")
         same_series = manifest.get("epoch") == self._applied.get("epoch")
         if same_series and int(manifest.get("sequence", 0)) <= self.applied_sequence:
+            if int(manifest.get("sequence", 0)) == self.applied_sequence:
+                return self._repair(manifest)
             return False
 
         started = time.monotonic()
         files: dict[str, dict] = manifest["files"]
         needed = [
             name for name, stamp in files.items()
-            if name != LIGHTNING_ARTIFACT and self._applied["files"].get(name) != stamp
+            if name != LIGHTNING_ARTIFACT
+            and (
+                self._applied["files"].get(name) != stamp
+                or not self._local_copy_intact(name, stamp)
+            )
         ]
         downloaded = 0
         with ThreadPoolExecutor(self._workers) as pool:
             for name in pool.map(self._download, needed):
                 downloaded += files[name]["size"]
 
-        raw = gzip.decompress(self._fs.cat_file(self._remote(manifest["snapshot"])))
-        payload = rewrite_directories(
-            json.loads(raw), manifest["cache_dir"], manifest.get("volatile_dir"),
-            self._cache_dir,
-        )
-        _replace_file(
-            self._cache_dir / STATE_FILENAME,
-            lambda tmp: tmp.write_bytes(
-                gzip.compress(json.dumps(payload, default=str).encode("utf-8"))
-            ),
-        )
+        self._write_state(manifest)
 
         keep = set(files) | set(self._applied.get("files", {}))
         removed = 0
@@ -686,6 +684,57 @@ class SnapshotPuller:
             manifest["sequence"], int(time.time()) - int(manifest.get("written_at", 0)),
             len(needed), downloaded / 1e6, removed, time.monotonic() - started,
         )
+        return True
+
+    def _write_state(self, manifest: dict) -> None:
+        raw = gzip.decompress(self._fs.cat_file(self._remote(manifest["snapshot"])))
+        payload = rewrite_directories(
+            json.loads(raw), manifest["cache_dir"], manifest.get("volatile_dir"),
+            self._cache_dir,
+        )
+        _replace_file(
+            self._cache_dir / STATE_FILENAME,
+            lambda tmp: tmp.write_bytes(
+                gzip.compress(json.dumps(payload, default=str).encode("utf-8"))
+            ),
+        )
+
+    def _local_copy_intact(self, name: str, stamp: dict) -> bool:
+        """Whether a listed file is here at its published size.
+
+        Size is all there is to compare: a download gets its own mtime, and
+        hashing the cache on every poll is not worth it, so a same-size
+        corruption goes unnoticed.
+        """
+        try:
+            return (self._cache_dir / name).stat().st_size == stamp["size"]
+        except OSError:
+            return False
+
+    def _repair(self, manifest: dict) -> bool:
+        """Restore what the cache lost since ``manifest`` was applied.
+
+        Only the lost files come back, with no cleanup and no change to the
+        record of applied manifests, so the files kept one cycle late keep
+        their grace.  ``True`` when ``state.json`` itself had to be rewritten.
+        The lightning artifact is left to ``_pull_lightning``: it changes
+        between manifests, so its listed size is no reference.
+        """
+        damaged = [
+            name for name, stamp in manifest["files"].items()
+            if name != LIGHTNING_ARTIFACT and not self._local_copy_intact(name, stamp)
+        ]
+        if damaged:
+            logger.warning(
+                "Restoring %d file(s) missing or truncated in the local cache (first: %s)",
+                len(damaged), damaged[0],
+            )
+            with ThreadPoolExecutor(self._workers) as pool:
+                list(pool.map(self._download, damaged))
+        if (self._cache_dir / STATE_FILENAME).exists():
+            return False
+        logger.warning("Restoring %s, missing from the local cache", STATE_FILENAME)
+        self._write_state(manifest)
         return True
 
     def _download(self, name: str) -> str:
