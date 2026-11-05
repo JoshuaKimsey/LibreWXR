@@ -174,6 +174,70 @@ services:
         soft: 65536
         hard: 65536
 
+  # ─── RENDER NODE (network split, see docs/network-split.md) ─────────
+  # A host with no pipeline: the puller brings each published snapshot
+  # from LIBREWXR_SNAPSHOT_SYNC_URL into the cache volume and the render
+  # workers serve it as usual.  COMPOSE_PROFILES=render-node starts both.
+  puller:
+    profiles: ["render-node"]
+    image: ghcr.io/joshuakimsey/librewxr:${LIBREWXR_IMAGE_TAG:-latest}
+    build: .
+    command: ["python", "-m", "librewxr.snapshot_pull"]
+    env_file:
+      - .env
+    environment:
+      LIBREWXR_CACHE_DIR: /data/cache
+      LIBREWXR_LOG_FILE: /logs/librewxr.log
+    volumes:
+      - librewxr-cache:/data/cache
+      - ./logs:/logs
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Same as the renderer service above, but waiting on the puller instead
+  # of a pipeline (a depends_on target is started even when its profile is
+  # not active, so the renderer service cannot be reused here).
+  renderer-node:
+    profiles: ["render-node"]
+    image: ghcr.io/joshuakimsey/librewxr:${LIBREWXR_IMAGE_TAG:-latest}
+    build: .
+    command: ["python", "-m", "librewxr.main"]
+    ports:
+      - "${LIBREWXR_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      LIBREWXR_CACHE_DIR: /data/cache
+      LIBREWXR_RENDER_ONLY: "1"
+      LIBREWXR_LOG_FILE: /logs/librewxr.log
+      LIBREWXR_PORT: "8080"
+    shm_size: "2g"
+    volumes:
+      - librewxr-cache:/data/cache
+      - ./logs:/logs
+    depends_on:
+      - puller
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: ${LIBREWXR_RENDER_MEMORY:-18G}
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
   # ─── MANUAL UTILITIES ───────────────────────────────────────────────
   # Wipe the shared cache volume.  Gated behind the "manual" profile so
   # it doesn't run on every `up` — explicit targeting via `run` still

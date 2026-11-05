@@ -507,3 +507,61 @@ async def test_render_only_requires_cache_dir(monkeypatch):
     message = str(excinfo.value)
     assert "Is the data pipeline running?" in message
     assert str(fallback) in message
+
+
+@pytest.mark.skipif(
+    not Path("/proc/self/fd").is_dir(), reason="needs /proc/self/fd"
+)
+async def test_restored_frames_release_files_after_eviction(tmp_path):
+    """Boot-restored frames must not pin their files once evicted.
+
+    The pipeline used to keep the restored ``RadarFrame`` list alive in
+    ``run_pipeline``'s scope, so every boot-time frame's memmap stayed
+    open after the store evicted and unlinked it -- the deleted files'
+    disk blocks were never released for the life of the process.
+    """
+    import gc
+
+    from librewxr.data.radar_cache import RadarFrameCache
+    from librewxr.data.regions import RegionDef
+    from librewxr.data.store import FrameStore, RadarFrame
+    from librewxr.data_pipeline import _restore_cached_frames
+
+    region = RegionDef(
+        name="TESTCOMP", west=0.0, east=1.0, south=0.0, north=1.0,
+        pixel_size=0.125, group="TEST",
+    )
+    assert (region.height, region.width) == (8, 8)
+    regions = {"TESTCOMP": region}
+    radar_dir = tmp_path / "radar"
+
+    def _frame(ts: int) -> RadarFrame:
+        return RadarFrame(
+            timestamp=ts,
+            regions={"TESTCOMP": np.full((8, 8), ts % 200, dtype=np.uint8)},
+        )
+
+    # A prior session leaves three frames on disk.
+    prior = FrameStore(max_frames=3, cache_dir=tmp_path)
+    for ts in (600, 1200, 1800):
+        await prior.add_frame(_frame(ts))
+    RadarFrameCache(tmp_path).save_metadata(regions, [600, 1200, 1800])
+    del prior
+    gc.collect()
+
+    store = FrameStore(max_frames=3, cache_dir=tmp_path)
+    await _restore_cached_frames(RadarFrameCache(tmp_path), store, regions)
+    # Newer frames evict (and unlink) every restored one.
+    for ts in (2400, 3000, 3600):
+        await store.add_frame(_frame(ts))
+    gc.collect()
+
+    pinned = []
+    for fd in os.listdir("/proc/self/fd"):
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            continue
+        if target.startswith(str(radar_dir)) and target.endswith("(deleted)"):
+            pinned.append(target)
+    assert pinned == []

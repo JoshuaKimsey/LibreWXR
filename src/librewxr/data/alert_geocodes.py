@@ -515,50 +515,53 @@ def _parse_bom_zip(path: Path, name: str) -> dict[str, Polygon]:
             for member in archive.namelist():
                 if Path(member).suffix.lower() in (".shp", ".shx", ".dbf"):
                     archive.extract(member, tmpdir)
-            reader = shapefile.Reader(
+            # Close the reader before the temp dir goes: an unclosed
+            # Reader keeps fds on the deleted shp/shx/dbf, pinning their
+            # disk blocks for the life of the process.
+            with shapefile.Reader(
                 str(Path(tmpdir) / shp_member),
                 encoding="latin-1",
                 encodingErrors="replace",
-            )
-            fields = [
-                str(f.name if hasattr(f, "name") else f[0])
-                for f in reader.fields
-            ]
-            # pyshp lists a synthetic DeletionFlag first; records skip it.
-            offset = 1 if fields and fields[0].lower() == "deletionflag" else 0
-            aac_index = next(
-                (
-                    index
-                    for index, field in enumerate(fields)
-                    if field.upper().startswith("AAC")
-                ),
-                None,
-            )
-            if aac_index is None:
-                logger.debug(
-                    "BoM %s: no AAC field (fields=%s)", name, fields[:8]
+            ) as reader:
+                fields = [
+                    str(f.name if hasattr(f, "name") else f[0])
+                    for f in reader.fields
+                ]
+                # pyshp lists a synthetic DeletionFlag first; records skip it.
+                offset = 1 if fields and fields[0].lower() == "deletionflag" else 0
+                aac_index = next(
+                    (
+                        index
+                        for index, field in enumerate(fields)
+                        if field.upper().startswith("AAC")
+                    ),
+                    None,
                 )
-                return {}
-            record_index = aac_index - offset
+                if aac_index is None:
+                    logger.debug(
+                        "BoM %s: no AAC field (fields=%s)", name, fields[:8]
+                    )
+                    return {}
+                record_index = aac_index - offset
 
-            cells: dict[str, Polygon] = {}
-            skipped = 0
-            for shape_record in reader.iterShapeRecords():
-                shp = shape_record.shape
-                if shp.shapeType not in (5, 15, 25):
-                    skipped += 1
-                    continue
-                code = str(shape_record.record[record_index]).strip().upper()
-                if not code:
-                    skipped += 1
-                    continue
-                poly = _polygon_from_parts(list(shp.parts), shp.points)
-                if poly is None:
-                    skipped += 1
-                    continue
-                cells[code] = poly
-            if skipped:
-                logger.debug("BoM %s: skipped %d unusable shapes", name, skipped)
+                cells: dict[str, Polygon] = {}
+                skipped = 0
+                for shape_record in reader.iterShapeRecords():
+                    shp = shape_record.shape
+                    if shp.shapeType not in (5, 15, 25):
+                        skipped += 1
+                        continue
+                    code = str(shape_record.record[record_index]).strip().upper()
+                    if not code:
+                        skipped += 1
+                        continue
+                    poly = _polygon_from_parts(list(shp.parts), shp.points)
+                    if poly is None:
+                        skipped += 1
+                        continue
+                    cells[code] = poly
+                if skipped:
+                    logger.debug("BoM %s: skipped %d unusable shapes", name, skipped)
     return cells
 
 

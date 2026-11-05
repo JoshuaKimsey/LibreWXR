@@ -60,6 +60,7 @@ from librewxr.data.palette_fetcher import resolve_palette
 from librewxr.data.precip_mask import PrecipMaskStore
 from librewxr.data.radar_cache import RadarFrameCache
 from librewxr.data.regions import REGIONS
+from librewxr.data.snapshot_sync import SnapshotPublisher
 from librewxr.data.store import FrameStore
 from librewxr.logging_setup import setup_logging
 from librewxr.sources import (
@@ -87,6 +88,28 @@ logger = logging.getLogger(__name__)
 # process lifetime so it can't be garbage-collected mid-write (the write
 # is tens of MB); ``run_pipeline`` assigns it once at startup.
 _mask_save_task: asyncio.Task | None = None
+
+
+async def _restore_cached_frames(
+    radar_cache: RadarFrameCache, store: FrameStore, regions_by_name: dict,
+) -> None:
+    """Re-populate ``store`` from the radar disk cache.
+
+    Kept in its own function on purpose: the restored ``RadarFrame`` list
+    (and the loop variable) must not outlive the restore.  Held in
+    ``run_pipeline``'s scope they pinned every boot-time frame's memmaps
+    for the whole process lifetime, so once the store evicted and unlinked
+    those files their disk blocks were never released.
+    """
+    restored = radar_cache.load_frames(regions_by_name)
+    if not restored:
+        return
+    for frame in restored:
+        await store.add_frame(frame)
+    logger.info(
+        "Restored %d radar frame(s) from disk cache (%d → %d)",
+        len(restored), restored[0].timestamp, restored[-1].timestamp,
+    )
 
 
 async def run_pipeline() -> None:
@@ -231,14 +254,7 @@ async def run_pipeline() -> None:
     # directory and would otherwise reap what eviction deliberately kept).
     radar_cache = RadarFrameCache(cache_dir, grace_s=evict_grace_s)
     regions_by_name = {name: REGIONS[name] for name in enabled}
-    restored = radar_cache.load_frames(regions_by_name)
-    if restored:
-        for frame in restored:
-            await store.add_frame(frame)
-        logger.info(
-            "Restored %d radar frame(s) from disk cache (%d → %d)",
-            len(restored), restored[0].timestamp, restored[-1].timestamp,
-        )
+    await _restore_cached_frames(radar_cache, store, regions_by_name)
 
     # AlertsStore is constructed up-front (even before the fetcher starts)
     # so it can ride along in the master_state snapshot.  The render-only
@@ -264,6 +280,19 @@ async def run_pipeline() -> None:
     for hook in (state_hook, nowcast_hook, lightning_hook):
         if hook.enabled:
             logger.info("External %s hook enabled", hook.name)
+    # Snapshot publisher (network split mode): uploads each snapshot and the
+    # files it names so render nodes elsewhere can pull them.
+    publisher = None
+    if settings.snapshot_sync_url:
+        publisher = SnapshotPublisher(
+            cache_dir,
+            settings.snapshot_sync_url,
+            volatile_dir=volatile_dir,
+            endpoint_url=settings.snapshot_sync_endpoint_url,
+            workers=settings.snapshot_sync_workers,
+            stale_grace_s=evict_grace_s,
+        )
+        logger.info("Snapshot sync enabled: publishing to %s", settings.snapshot_sync_url)
     # Radar frame the last nowcast hook was fired for: state.json is written
     # several times per cycle, the nowcast hook must run once per nowcast.
     last_nowcast_hook_ts: str | None = None
@@ -321,6 +350,12 @@ async def run_pipeline() -> None:
             snapshot_written = True
         except Exception:
             logger.exception("Failed to dump master state snapshot")
+        if snapshot_written and publisher is not None:
+            # Uploads run off the loop; a store error must not break the cycle
+            try:
+                await asyncio.to_thread(publisher.publish, payload)
+            except Exception:  # store client errors are not all OSError
+                logger.exception("Snapshot publish failed")
         if snapshot_written:
             state_hook.fire(state_event_env(payload, cache_dir))
             nowcast_env = nowcast_event_env(payload, cache_dir)
@@ -386,6 +421,22 @@ async def run_pipeline() -> None:
             settings.alerts_fetch_interval,
         )
 
+    def _lightning_written() -> None:
+        """After each lightning artifact write: publish it and fire the hook."""
+        if publisher is not None:
+            task = asyncio.get_running_loop().run_in_executor(
+                None, publisher.publish_lightning
+            )
+            task.add_done_callback(
+                lambda t: t.exception()
+                and logger.error("Lightning artifact publish failed: %s", t.exception())
+            )
+        lightning_hook.fire(
+            lightning_event_env(
+                lightning_store.artifact_path, lightning_store.version, cache_dir
+            )
+        )
+
     # Lightning rides its own clock-aligned task (never coupled to the radar
     # fetch cycle or the alerts loop).  The artifact is the only handoff.
     lightning_fetcher = None
@@ -396,11 +447,7 @@ async def run_pipeline() -> None:
             interval_s=settings.lightning_fetch_interval,
             max_age_s=settings.lightning_max_age,
             satellites=_NOAA_SATS,
-            on_artifact_written=lambda: lightning_hook.fire(
-                lightning_event_env(
-                    lightning_store.artifact_path, lightning_store.version, cache_dir
-                )
-            ),
+            on_artifact_written=lambda: _lightning_written(),
         )
         await lightning_fetcher.start()
         logger.info(

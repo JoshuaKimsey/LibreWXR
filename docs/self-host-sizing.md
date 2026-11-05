@@ -57,7 +57,8 @@ idle capacity is the headroom that absorbs storms, flash crowds, and the
 cold tile long tail. The **heavy** tier is for deployments that must absorb
 tile traffic without a CDN in front. Scale vertically: the designed
 shape is one pipeline writer plus N render workers per host - not
-multi-node.
+multi-node. That describes the shared-filesystem deployment; to run render
+workers on other servers, see [Network Split Mode](network-split.md).
 
 ## Weather Alerts Footprint
 

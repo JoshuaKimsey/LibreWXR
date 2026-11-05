@@ -545,6 +545,15 @@ class Settings(BaseSettings):
     hook_nowcast_cmd: str = ""      # LIBREWXR_HOOK_NOWCAST_CMD: once per new nowcast
     hook_lightning_cmd: str = ""    # LIBREWXR_HOOK_LIGHTNING_CMD: after every lightning artifact write
     hook_timeout: float = 540.0     # LIBREWXR_HOOK_TIMEOUT (seconds; a hook running longer is killed)
+    # Snapshot sync (see data/snapshot_sync.py): the pipeline publishes each
+    # state.json and the files it names to an artifact store (any fsspec URL:
+    # s3://bucket/prefix, file:///path), and render nodes without a pipeline
+    # run ``python -m librewxr.snapshot_pull`` to bring them into their own
+    # cache.  Empty = off (the shared-filesystem handoff, unchanged).
+    snapshot_sync_url: str = ""           # LIBREWXR_SNAPSHOT_SYNC_URL
+    snapshot_sync_endpoint_url: str = ""  # LIBREWXR_SNAPSHOT_SYNC_ENDPOINT_URL (S3-compatible stores)
+    snapshot_sync_workers: int = 8        # LIBREWXR_SNAPSHOT_SYNC_WORKERS (parallel transfers)
+    snapshot_pull_interval: float = 10.0  # LIBREWXR_SNAPSHOT_PULL_INTERVAL (seconds between manifest polls)
     cache_dir: str = ""  # Persistent cache directory for fetched grids; empty = in-memory only
     # Optional directory for stores whose contents are fully regenerated
     # every fetch cycle (nowcast frames + optical-flow fields, per-timestamp
