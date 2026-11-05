@@ -45,7 +45,11 @@ class HookRunner:
 
     def __init__(self, name: str, command: str, timeout_s: float) -> None:
         self.name = name
-        self._argv = shlex.split(command) if command and command.strip() else []
+        try:
+            self._argv = shlex.split(command) if command and command.strip() else []
+        except ValueError as exc:
+            logger.error("%s hook disabled: cannot parse command: %s", self.name, exc)
+            self._argv = []
         self._timeout_s = float(timeout_s)
         self._task: asyncio.Task | None = None
 
