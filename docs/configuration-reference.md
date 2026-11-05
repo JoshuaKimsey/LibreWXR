@@ -1688,6 +1688,8 @@ Each hook is a shell-style command line, split with `shlex` and run directly (no
 | `LIBREWXR_HOOK_LIGHTNING_PATH` | `lightning` | path of the lightning artifact just written |
 | `LIBREWXR_HOOK_LIGHTNING_VERSION` | `lightning` | the artifact's content version |
 
+The `state.json` named by `LIBREWXR_HOOK_STATE_PATH` is gzip-compressed on disk (the name is historical; `load_state` sniffs the magic bytes). A hook that reads it must decompress first — `gzip.open(path)` in Python, `zcat` in a shell; a plain `json.load(open(path))` fails.
+
 A hook never affects the pipeline: a non-zero exit is logged with the last lines of its output, one that overruns `LIBREWXR_HOOK_TIMEOUT` is killed, and a trigger that arrives while the previous run of the same hook is still going is skipped (the next trigger carries newer data). On shutdown the pipeline waits for a running hook before removing its stores. Hooks run only in the pipeline process; render workers never fire them.
 
 ### `LIBREWXR_HOOK_STATE_CMD`
