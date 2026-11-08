@@ -489,6 +489,8 @@ GET /health
 
 Returns server status, its running version, frame count, cache usage, NWP chain state, satellite cache state, alerts status, lightning status, MCP mount state, websocket channel status (connections, per-topic subscribers), and per-component memory breakdown, plus a `cluster` aggregation of per-worker stats in multi-worker deployments.
 
+`GET /dashboard` serves a self-contained operational dashboard page (packaged HTML, no external requests) that polls `/health` client-side; `GET /metrics` exposes the same payload in Prometheus text-exposition format. Both are toggleable (`LIBREWXR_DASHBOARD_ENABLED`, `LIBREWXR_METRICS_ENABLED`) and ship no built-in auth. See [Health Dashboard and Prometheus Metrics](docs/dashboard.md).
+
 #### MCP Server (LibreWXR extension)
 
 LibreWXR exposes an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) endpoint for AI agents and automation pipelines. Four tools are available:

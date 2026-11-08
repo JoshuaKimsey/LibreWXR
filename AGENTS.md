@@ -51,6 +51,9 @@ src/librewxr/
     routes.py        # API endpoints (Rain Viewer-compatible)
     models.py        # Pydantic response models
     conditional.py   # ETag / If-None-Match conditional-request helpers
+    dashboard.py     # GET /dashboard - serves the packaged health dashboard page
+    dashboard.html   # Self-contained (offline, no external URLs) dashboard asset
+    metrics.py       # GET /metrics - Prometheus text-exposition over the /health payload
   sources/                                # Per-source packages (auto-discovered)
     _base.py                              # Protocols + contribution dataclasses
     _helpers.py                           # Shared dBZ encoder + GRIB stderr muzzle
@@ -223,6 +226,10 @@ All config via `LIBREWXR_*` env vars or `.env` file. Settings defined in `src/li
 - `LIBREWXR_WEBSOCKET_ENABLED`: mount the WebSocket push channel at `LIBREWXR_WEBSOCKET_PATH` (default true; false leaves no route at all)
 - `LIBREWXR_WEBSOCKET_PATH`: WebSocket push endpoint path (default `/v2/ws`)
 
+**Monitoring:**
+- `LIBREWXR_DASHBOARD_ENABLED` / `LIBREWXR_DASHBOARD_PATH`: serve the self-contained dashboard page at `/dashboard` (default true; false leaves no route at all)
+- `LIBREWXR_METRICS_ENABLED` / `LIBREWXR_METRICS_PATH`: serve Prometheus text-exposition of the `/health` payload at `/metrics` (default true; false leaves no route at all)
+
 **Storm cells:**
 - `LIBREWXR_STORM_CELLS_ENABLED`: storm-cell detection feeding the `?cells=` tile overlay (default true)
 - `LIBREWXR_STORM_CELLS_MIN_DBZ`: minimum dBZ for a pixel to be part of a cell (default 40)
@@ -274,4 +281,4 @@ The discovery walker picks up the new package automatically — no per-source pl
 - **Docker:** `docker compose up --build` with `COMPOSE_PROFILES=multi` (default). Deployments pull the prebuilt images (`docker compose pull` + `docker compose up -d`, tag selected by `LIBREWXR_IMAGE_TAG`), and `up --build` is for building from a checkout. A legacy `COMPOSE_PROFILES=single` works through a compatibility alias (same pipeline + renderer pair, 1 render worker). Exposes port 8080 (configurable via `LIBREWXR_PORT`). Use `docker compose run --rm clear-cache` to wipe caches.
 - **Scripts:** `scripts/generate_coverage_map.py` regenerates the `docs/coverage-map-*.png` files (needs the `maps` extra); `generate_scheme_docs.py` + `generate_color_scheme_previews.py` regenerate the color-scheme docs and preview PNGs (a CI workflow checks the previews aren't stale); `refresh_dpc_coverage.py` / `refresh_jma_coverage.py` refresh per-source coverage data; `update.sh` is the image-based self-update helper for published GHCR deployments (`docker compose pull` + `up -d`, carrying the `.env` / `.env.example` reconciliation); `generate_changelog.py` regenerates `CHANGELOG.md` from published GitHub releases (run after `gh release create`; commit the result with the version bump); `check_versions.py` is the version-consistency check (pyproject version vs hardcoded literals in version.py, tests, and docs, enforced by `version-check.yml`)
 - **Versioning:** `pyproject.toml` is the single source of truth; code derives the version at runtime via `librewxr.version.package_version()`; docs must not pin numbered image tags (use the tag scheme words instead); `scripts/check_versions.py` + `.github/workflows/version-check.yml` enforce consistency, and `docker-publish.yml` fails a release whose git tag disagrees with `pyproject.toml`.
-- **Docs:** `docs/adding-a-source.md`, `docs/configuration-reference.md`, `docs/satellite-implementation-plan.md`, `docs/coverage.md`, `docs/rainviewer-migration-guide.md`, `docs/web-integration-guide.md`, `docs/source-survey.md`, `docs/self-host-sizing.md`, `docs/single-mode-migration.md`, `docs/mcp-server.md`, `docs/storm-cells.md`, `docs/lightning.md`, `docs/lightning-implementation-plan.md`, `docs/alerts.md`, `docs/network-split.md`
+- **Docs:** `docs/adding-a-source.md`, `docs/configuration-reference.md`, `docs/satellite-implementation-plan.md`, `docs/coverage.md`, `docs/rainviewer-migration-guide.md`, `docs/web-integration-guide.md`, `docs/source-survey.md`, `docs/self-host-sizing.md`, `docs/single-mode-migration.md`, `docs/mcp-server.md`, `docs/storm-cells.md`, `docs/lightning.md`, `docs/lightning-implementation-plan.md`, `docs/alerts.md`, `docs/network-split.md`, `docs/dashboard.md`

@@ -471,9 +471,14 @@ async def ai_catalog() -> Response:
     )
 
 
-@router.get("/health")
-async def health():
-    """Health and status endpoint."""
+async def build_health_payload() -> dict:
+    """Build the ``/health`` payload.
+
+    Extracted from the route handler so the Prometheus exporter
+    (``api/metrics.py``) can render the exact same snapshot without an
+    internal HTTP round-trip.  Reads the ``routes`` module globals at
+    call time, like the route handlers do.
+    """
     now = int(time.time())
     uptime = now - int(start_time)
     mem_limit_mb = detect_memory_limit_mb(settings.memory_limit_mb)
@@ -746,6 +751,12 @@ async def health():
         "lightning": lightning_health,
         "websocket": websocket_health,
     }
+
+
+@router.get("/health")
+async def health() -> dict:
+    """Health and status endpoint."""
+    return await build_health_payload()
 
 
 def _content_type(ext: str) -> str:

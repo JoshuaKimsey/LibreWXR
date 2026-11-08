@@ -23,6 +23,8 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from librewxr.api import routes
+from librewxr.api.dashboard import router as dashboard_router
+from librewxr.api.metrics import router as metrics_router
 from librewxr.colors import schemes
 from librewxr.colors.schemes import apply_external_table
 from librewxr.config import resolve_cache_dir, settings
@@ -1150,6 +1152,12 @@ app.add_middleware(
 )
 
 app.include_router(routes.router)
+
+if settings.dashboard_enabled:
+    app.include_router(dashboard_router)
+
+if settings.metrics_enabled:
+    app.include_router(metrics_router)
 
 if settings.websocket_enabled:
     app.include_router(ws_router)

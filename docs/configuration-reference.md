@@ -35,6 +35,7 @@ This document is the **full** reference for every setting LibreWXR understands. 
 - [Tile Request Tracking](#tile-request-tracking)
 - [MCP Server](#mcp-server)
 - [WebSocket Push Channel](#websocket-push-channel)
+- [Monitoring (Dashboard + Prometheus)](#monitoring-dashboard--prometheus)
 - [RAM Sizing Guide](#ram-sizing-guide)
 - [Example Configurations](#example-configurations)
 
@@ -1858,6 +1859,50 @@ Four topics are available: `weather-maps` (the `/public/weather-maps.json` paylo
 |---|---|
 | **Default** | `true` / `/v2/ws` |
 | **Type** | boolean / string |
+
+---
+
+## Monitoring (Dashboard + Prometheus)
+
+LibreWXR serves two read-only diagnostic surfaces on top of `/health`: a self-contained dashboard page that polls the endpoint from the browser, and a Prometheus text-exposition exporter over the same payload. Both are additive, both are served by every render worker, and neither is authenticated by the server itself - access control belongs to the reverse proxy. See [`dashboard.md`](dashboard.md) for the endpoint overview, the full metric-name table, scrape guidance, and nginx / Caddy / Traefik basic-auth snippets.
+
+### `LIBREWXR_DASHBOARD_ENABLED`
+
+Master switch for the health dashboard page. When `true` (the default), `GET /dashboard` serves a single packaged HTML asset (no CDN, no external URLs) that polls `/health` client-side, by default every 10 seconds. When `false`, no route is mounted at all: a request is a plain `404`, the same semantics as the WebSocket channel. `/health` itself is unaffected.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+### `LIBREWXR_DASHBOARD_PATH`
+
+URL path the dashboard page is served on. Read at import time, so a change takes effect on the next restart. Change it if your reverse proxy already owns `/dashboard`, or to put the page under an internal prefix.
+
+| | |
+|---|---|
+| **Default** | `/dashboard` |
+| **Type** | string |
+
+### `LIBREWXR_METRICS_ENABLED`
+
+Master switch for the Prometheus exporter. When `true` (the default), `GET /metrics` renders the exact `/health` payload in Prometheus text-exposition 0.0.4 (`text/plain; version=0.0.4; charset=utf-8`). Every metric is a gauge; per-worker counters reset when the serving worker restarts. When `false`, no route is mounted at all (a plain `404`). No `prometheus_client` dependency is involved - the exposition is rendered from the health dict with stdlib code only.
+
+Building the health payload is moderately expensive (frame-store lock, tile-cache walk, pulse-file scan), so scrape at 15-60 second intervals and never below one second. See [`dashboard.md`](dashboard.md#prometheus-metrics) for the complete metric table and [`dashboard.md`](dashboard.md#per-worker-semantics) for which series are per-worker versus cluster-wide.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+### `LIBREWXR_METRICS_PATH`
+
+URL path the Prometheus exporter is served on. Read at import time, so a change takes effect on the next restart. Set it to something like `/internal/metrics` when `/metrics` is already claimed by another exporter on the same vhost.
+
+| | |
+|---|---|
+| **Default** | `/metrics` |
+| **Type** | string |
 
 ---
 

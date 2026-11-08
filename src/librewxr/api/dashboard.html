@@ -1,0 +1,1455 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (C) 2026 Joshua Kimsey -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Live operational health, rendering, and data-pipeline telemetry for LibreWXR.">
+  <link rel="icon" href="data:,">
+  <title>LibreWXR Dashboard</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080d13;
+      --bg-raised: #0d141d;
+      --bg-subtle: #111b26;
+      --bg-hover: #152230;
+      --bg-inset: #091119;
+      --bg-status: #0b171a;
+      --text: #edf4f8;
+      --text-soft: #c1ced8;
+      --muted: #8b9ba9;
+      --faint: #748795;
+      --border: #20303e;
+      --border-soft: #182633;
+      --border-strong: #334b5e;
+      --accent: #55d6be;
+      --accent-bright: #7ce7d3;
+      --accent-dim: #2a8f81;
+      --accent-wash: rgba(85, 214, 190, 0.09);
+      --accent-glow: rgba(85, 214, 190, 0.18);
+      --info: #69b7f6;
+      --info-wash: rgba(105, 183, 246, 0.1);
+      --ok: #58d68d;
+      --ok-wash: rgba(88, 214, 141, 0.1);
+      --warning: #f1bd66;
+      --warning-wash: rgba(241, 189, 102, 0.11);
+      --danger: #f37d82;
+      --danger-wash: rgba(243, 125, 130, 0.11);
+      --purple: #b8a1f4;
+      --cyan: #65cbe3;
+      --pink: #df91c0;
+      --track: #1b2a36;
+      --overlay: rgba(8, 13, 19, 0.88);
+      --shadow-card: 0 12px 34px rgba(0, 0, 0, 0.17);
+      --shadow-tooltip: 0 12px 32px rgba(0, 0, 0, 0.42);
+      --focus-ring: 0 0 0 3px rgba(85, 214, 190, 0.24);
+      --gradient-page: radial-gradient(ellipse 70% 40% at 15% 0%, rgba(51, 117, 113, 0.1), transparent 72%), radial-gradient(ellipse 50% 35% at 95% 4%, rgba(64, 102, 143, 0.08), transparent 76%);
+      --gradient-status: linear-gradient(120deg, rgba(85, 214, 190, 0.075), transparent 58%);
+      --gradient-degraded: linear-gradient(120deg, rgba(241, 189, 102, 0.09), transparent 58%);
+      --gradient-panel: linear-gradient(145deg, rgba(255, 255, 255, 0.012), transparent 45%);
+      --font-ui: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      --text-2xs: 0.65625rem;
+      --text-xs: 0.71875rem;
+      --text-sm: 0.8125rem;
+      --text-md: 0.875rem;
+      --text-lg: 1rem;
+      --text-xl: 1.25rem;
+      --text-2xl: 1.625rem;
+      --text-3xl: clamp(1.75rem, 3vw, 2.25rem);
+      --weight-regular: 400;
+      --weight-medium: 550;
+      --weight-semibold: 650;
+      --weight-bold: 750;
+      --tracking-tight: -0.025em;
+      --tracking-wide: 0.09em;
+      --space-1: 0.25rem;
+      --space-2: 0.5rem;
+      --space-3: 0.75rem;
+      --space-4: 1rem;
+      --space-5: 1.25rem;
+      --space-6: 1.5rem;
+      --space-7: 1.75rem;
+      --space-8: 2rem;
+      --space-10: 2.5rem;
+      --space-12: 3rem;
+      --radius-sm: 0.375rem;
+      --radius-md: 0.625rem;
+      --radius-lg: 0.875rem;
+      --radius-xl: 1.125rem;
+      --radius-round: 999px;
+      --content-max: 100rem;
+      --control-height: 2.5rem;
+      --map-height: 22rem;
+      --transition-fast: 120ms ease;
+      --transition-base: 200ms ease;
+      --chart-1: var(--accent);
+      --chart-2: var(--info);
+      --chart-3: var(--purple);
+      --chart-4: var(--cyan);
+      --chart-5: var(--pink);
+      --chart-6: var(--warning);
+      --map-bg: #09131c;
+      --map-land: #142631;
+      --map-line: #2b424f;
+      --map-grid: #1a303d;
+      --map-label: #6f8793;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    html { min-width: 20rem; scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-width: 20rem;
+      min-height: 100vh;
+      background-color: var(--bg);
+      background-image: var(--gradient-page);
+      background-attachment: fixed;
+      color: var(--text);
+      font-family: var(--font-ui);
+      font-size: var(--text-md);
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, select { font: inherit; }
+    button, a, select { -webkit-tap-highlight-color: transparent; }
+    a { color: var(--accent-bright); text-decoration: none; }
+    a:hover { color: var(--text); }
+    button { color: inherit; }
+    h1, h2, h3, h4, p, dl, dd, dt, ul, ol { margin: 0; }
+    ul, ol { padding: 0; }
+    code, .numeric, .metric-value, .kpi-value, .status-version, .data-age {
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums lining-nums;
+    }
+    code { color: var(--text-soft); font-size: 0.92em; }
+    [hidden] { display: none !important; }
+    ::selection { background: var(--accent-dim); color: var(--text); }
+    :focus-visible { outline: 2px solid var(--accent-bright); outline-offset: 3px; }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    .skip-link {
+      position: fixed;
+      top: var(--space-3);
+      left: var(--space-3);
+      z-index: 100;
+      padding: var(--space-3) var(--space-4);
+      border-radius: var(--radius-md);
+      background: var(--accent);
+      color: var(--bg);
+      transform: translateY(-180%);
+    }
+    .skip-link:focus { transform: translateY(0); }
+    .icon {
+      width: 1.125rem;
+      height: 1.125rem;
+      flex: 0 0 auto;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .icon-sm { width: 0.9375rem; height: 0.9375rem; }
+    .icon-lg { width: 1.375rem; height: 1.375rem; }
+
+    .masthead {
+      border-bottom: 1px solid var(--border-soft);
+      background: var(--overlay);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+    }
+    .masthead-inner, .page-head, main, .footer-inner {
+      width: min(100%, var(--content-max));
+      margin-inline: auto;
+      padding-inline: var(--space-7);
+    }
+    .masthead-inner {
+      min-height: 4.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-5);
+    }
+    .brand { display: inline-flex; align-items: center; gap: var(--space-3); color: var(--text); }
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 2.25rem;
+      height: 2.25rem;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-md);
+      background: var(--accent-wash);
+      color: var(--accent);
+      box-shadow: inset 0 0 18px var(--accent-wash);
+    }
+    .brand-mark .icon { width: 1.45rem; height: 1.45rem; }
+    .brand-name { font-size: var(--text-lg); font-weight: var(--weight-bold); letter-spacing: var(--tracking-tight); }
+    .brand-tag {
+      margin-left: var(--space-2);
+      padding-left: var(--space-3);
+      border-left: 1px solid var(--border);
+      color: var(--muted);
+      font-size: var(--text-2xs);
+      font-weight: var(--weight-semibold);
+      letter-spacing: var(--tracking-wide);
+      text-transform: uppercase;
+    }
+    .header-nav { display: flex; align-items: center; gap: var(--space-2); }
+    .nav-link {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-2);
+      min-height: 2.25rem;
+      padding: var(--space-2) var(--space-3);
+      border-radius: var(--radius-md);
+      color: var(--muted);
+      font-size: var(--text-sm);
+      font-weight: var(--weight-medium);
+      transition: color var(--transition-fast), background var(--transition-fast);
+    }
+    .nav-link:hover { color: var(--text); background: var(--bg-hover); }
+
+    .page-head {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: var(--space-6);
+      padding-top: var(--space-8);
+      padding-bottom: var(--space-6);
+    }
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      margin-bottom: var(--space-2);
+      color: var(--accent);
+      font-size: var(--text-2xs);
+      font-weight: var(--weight-bold);
+      letter-spacing: var(--tracking-wide);
+      text-transform: uppercase;
+    }
+    .eyebrow::before { content: ""; width: 1rem; height: 1px; background: currentColor; }
+    h1 { font-size: var(--text-3xl); line-height: 1.15; letter-spacing: var(--tracking-tight); font-weight: var(--weight-semibold); }
+    .page-subtitle { margin-top: var(--space-2); color: var(--muted); font-size: var(--text-sm); }
+    .refresh-controls { display: flex; align-items: flex-end; gap: var(--space-3); flex-wrap: wrap; }
+    .control-group { display: grid; gap: var(--space-1); }
+    .control-label { color: var(--muted); font-size: var(--text-2xs); font-weight: var(--weight-semibold); text-transform: uppercase; letter-spacing: 0.06em; }
+    select, .refresh-button {
+      min-height: var(--control-height);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      background: var(--bg-raised);
+      color: var(--text-soft);
+      transition: border-color var(--transition-fast), background var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast);
+    }
+    select { padding: 0 var(--space-8) 0 var(--space-3); cursor: pointer; }
+    select:hover, .refresh-button:hover { border-color: var(--border-strong); background: var(--bg-hover); color: var(--text); }
+    select:focus-visible, .refresh-button:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
+    .refresh-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: var(--space-2);
+      padding: 0 var(--space-4);
+      cursor: pointer;
+      font-weight: var(--weight-semibold);
+    }
+    .refresh-button:active { transform: translateY(1px); }
+    .refresh-button[disabled] { cursor: wait; opacity: 0.72; }
+    .refresh-button.is-loading .icon { animation: spin 0.9s linear infinite; }
+    .data-age-wrap { min-width: 7.5rem; padding-bottom: var(--space-2); text-align: right; }
+    .data-age { display: block; color: var(--text-soft); font-size: var(--text-xs); }
+    .sample-state { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-1); color: var(--faint); font-size: var(--text-2xs); }
+    .live-dot { width: 0.375rem; height: 0.375rem; border-radius: var(--radius-round); background: var(--ok); box-shadow: 0 0 0 3px var(--ok-wash); }
+    .is-stale .live-dot { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-wash); }
+    .is-stale .data-age { color: var(--warning); }
+
+    .error-banner {
+      width: min(calc(100% - var(--space-8)), calc(var(--content-max) - var(--space-8)));
+      margin: 0 auto var(--space-5);
+      display: flex;
+      align-items: flex-start;
+      gap: var(--space-3);
+      padding: var(--space-3) var(--space-4);
+      border: 1px solid var(--danger);
+      border-radius: var(--radius-md);
+      background: var(--danger-wash);
+      color: var(--text-soft);
+      font-size: var(--text-sm);
+    }
+    .error-banner .icon { color: var(--danger); margin-top: 0.125rem; }
+    .error-banner strong { color: var(--danger); }
+    main { padding-bottom: var(--space-10); }
+    .dashboard-section { margin-top: var(--space-8); }
+    .overview-section { margin-top: 0; }
+    .section-heading {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: var(--space-4);
+      margin-bottom: var(--space-4);
+    }
+    .section-title { font-size: var(--text-xl); line-height: 1.25; letter-spacing: var(--tracking-tight); font-weight: var(--weight-semibold); }
+    .section-description { margin-top: var(--space-1); color: var(--muted); font-size: var(--text-sm); }
+    .section-kicker { color: var(--faint); font-family: var(--font-mono); font-size: var(--text-xs); white-space: nowrap; }
+    .panel {
+      position: relative;
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      background-color: var(--bg-raised);
+      background-image: var(--gradient-panel);
+      box-shadow: var(--shadow-card);
+    }
+    .panel-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: var(--space-4);
+      padding: var(--space-5) var(--space-5) 0;
+    }
+    .panel-title-wrap { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+    .panel-icon {
+      display: grid;
+      place-items: center;
+      width: 2rem;
+      height: 2rem;
+      flex: 0 0 auto;
+      border: 1px solid var(--border-soft);
+      border-radius: var(--radius-md);
+      background: var(--bg-subtle);
+      color: var(--accent);
+    }
+    .panel-title { font-size: var(--text-lg); font-weight: var(--weight-semibold); letter-spacing: -0.015em; }
+    .panel-subtitle { margin-top: 0.125rem; color: var(--muted); font-size: var(--text-xs); }
+    .panel-body { padding: var(--space-5); }
+    .subpanel { min-width: 0; padding: var(--space-4); border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--bg-inset); }
+    .subpanel-title { margin-bottom: var(--space-3); color: var(--text-soft); font-size: var(--text-xs); font-weight: var(--weight-semibold); letter-spacing: 0.055em; text-transform: uppercase; }
+    .divider { height: 1px; margin: var(--space-4) 0; background: var(--border-soft); }
+
+    .hero-layout { display: grid; grid-template-columns: minmax(19rem, 1.35fr) minmax(0, 3.65fr); gap: var(--space-4); }
+    .status-card { overflow: hidden; padding: var(--space-6); background-image: var(--gradient-status); }
+    .status-card.is-degraded { background-image: var(--gradient-degraded); }
+    .status-card::after {
+      content: "";
+      position: absolute;
+      width: 11rem;
+      height: 11rem;
+      right: -4rem;
+      top: -5rem;
+      border: 1px solid var(--accent-glow);
+      border-radius: 50%;
+      box-shadow: 0 0 0 2rem var(--accent-wash), 0 0 0 4rem rgba(85, 214, 190, 0.025);
+      pointer-events: none;
+    }
+    .status-card.is-degraded::after { border-color: var(--warning-wash); box-shadow: 0 0 0 2rem var(--warning-wash); }
+    .status-top { position: relative; z-index: 1; display: flex; align-items: center; gap: var(--space-3); }
+    .status-orb {
+      position: relative;
+      display: grid;
+      place-items: center;
+      width: 2.75rem;
+      height: 2.75rem;
+      flex: 0 0 auto;
+      border: 1px solid var(--accent-dim);
+      border-radius: 50%;
+      background: var(--ok-wash);
+      color: var(--ok);
+    }
+    .status-orb::before { content: ""; position: absolute; inset: -0.3rem; border: 1px solid var(--accent-glow); border-radius: 50%; animation: breathe 2.8s ease-in-out infinite; }
+    .is-degraded .status-orb { border-color: var(--warning); background: var(--warning-wash); color: var(--warning); }
+    .is-degraded .status-orb::before { border-color: var(--warning-wash); }
+    .status-label { color: var(--muted); font-size: var(--text-2xs); font-weight: var(--weight-semibold); letter-spacing: var(--tracking-wide); text-transform: uppercase; }
+    .status-headline { margin-top: 0.125rem; font-size: var(--text-xl); font-weight: var(--weight-semibold); letter-spacing: var(--tracking-tight); }
+    .status-meta { position: relative; z-index: 1; display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-5); }
+    .meta-chip { display: inline-flex; align-items: center; gap: var(--space-2); min-height: 1.875rem; padding: var(--space-1) var(--space-3); border: 1px solid var(--border-soft); border-radius: var(--radius-round); background: var(--overlay); color: var(--muted); font-size: var(--text-xs); }
+    .meta-chip strong { color: var(--text-soft); font-weight: var(--weight-medium); }
+    .meta-chip code { color: var(--accent-bright); }
+    .kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-4); }
+    .kpi-card { display: flex; flex-direction: column; justify-content: space-between; min-height: 10.5rem; padding: var(--space-5); transition: border-color var(--transition-base), transform var(--transition-base); }
+    .kpi-card:hover, .feature-card:hover { border-color: var(--border-strong); }
+    .kpi-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); color: var(--muted); }
+    .kpi-label { font-size: var(--text-xs); font-weight: var(--weight-medium); }
+    .kpi-top .icon { color: var(--faint); }
+    .kpi-value { margin-top: var(--space-4); color: var(--text); font-size: clamp(1.45rem, 2.2vw, 2rem); line-height: 1; letter-spacing: -0.045em; }
+    .kpi-value small { margin-left: var(--space-1); color: var(--muted); font-family: var(--font-ui); font-size: var(--text-xs); letter-spacing: 0; }
+    .kpi-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-4); color: var(--muted); font-size: var(--text-xs); }
+    .mini-track { height: 0.1875rem; margin-top: var(--space-3); overflow: hidden; border-radius: var(--radius-round); background: var(--track); }
+    .mini-fill { height: 100%; border-radius: inherit; background: var(--accent); transition: width var(--transition-base); }
+
+    .badge { display: inline-flex; align-items: center; gap: 0.375rem; width: fit-content; min-height: 1.5rem; padding: 0.125rem var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-round); color: var(--muted); background: var(--bg-subtle); font-size: var(--text-2xs); font-weight: var(--weight-semibold); line-height: 1.2; white-space: nowrap; }
+    .badge::before { content: ""; width: 0.375rem; height: 0.375rem; border-radius: 50%; background: currentColor; }
+    .badge-ok { border-color: rgba(88, 214, 141, 0.25); background: var(--ok-wash); color: var(--ok); }
+    .badge-info { border-color: rgba(105, 183, 246, 0.24); background: var(--info-wash); color: var(--info); }
+    .badge-warning { border-color: rgba(241, 189, 102, 0.26); background: var(--warning-wash); color: var(--warning); }
+    .badge-danger { border-color: rgba(243, 125, 130, 0.28); background: var(--danger-wash); color: var(--danger); }
+    .badge-neutral::before { display: none; }
+    .scope-badge { display: inline-flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-round); color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap; }
+
+    .cluster-panel { overflow: hidden; }
+    .cluster-ribbon { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin: var(--space-5) var(--space-5) 0; padding: var(--space-4); border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--accent-wash); }
+    .cluster-ribbon-main { display: flex; align-items: center; gap: var(--space-3); }
+    .cluster-ribbon-main > .icon { color: var(--accent); }
+    .cluster-ribbon strong { display: block; font-size: var(--text-lg); font-weight: var(--weight-semibold); }
+    .cluster-ribbon p { color: var(--muted); font-size: var(--text-xs); }
+    .rss-stats { display: flex; gap: var(--space-5); }
+    .rss-stat span { display: block; color: var(--muted); font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.05em; }
+    .rss-stat strong { font-family: var(--font-mono); font-size: var(--text-md); font-weight: var(--weight-medium); }
+    .cluster-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); padding: var(--space-4) var(--space-5) var(--space-5); }
+    .stat-list { display: grid; gap: var(--space-3); }
+    .stat-row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); min-width: 0; }
+    .stat-row dt { color: var(--muted); font-size: var(--text-xs); }
+    .stat-row dd { color: var(--text-soft); font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }
+    .stat-row dd strong { color: var(--text); font-size: var(--text-md); font-weight: var(--weight-medium); }
+    .stat-row-emphasis { padding-bottom: var(--space-3); border-bottom: 1px solid var(--border-soft); }
+    .latency-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-2); margin-top: var(--space-4); }
+    .latency-item { padding: var(--space-3); border-radius: var(--radius-sm); background: var(--bg-subtle); }
+    .latency-item span { display: block; color: var(--muted); font-size: var(--text-2xs); }
+    .latency-item strong { display: block; margin-top: var(--space-1); font-family: var(--font-mono); font-size: var(--text-md); font-weight: var(--weight-medium); }
+    .memory-split { display: flex; height: 0.625rem; margin: var(--space-4) 0 var(--space-3); overflow: hidden; border-radius: var(--radius-round); background: var(--track); }
+    .memory-split > span { min-width: 0; transition: width var(--transition-base); }
+    .memory-anon { background: var(--accent); }
+    .memory-file { background: var(--info); }
+    .memory-shmem { background: var(--purple); }
+    .legend { display: flex; flex-wrap: wrap; gap: var(--space-3); list-style: none; }
+    .legend li { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--muted); font-size: var(--text-2xs); }
+    .legend-swatch { width: 0.4375rem; height: 0.4375rem; border-radius: 0.125rem; background: var(--swatch); }
+    .legend strong { color: var(--text-soft); font-family: var(--font-mono); font-weight: var(--weight-regular); }
+    .compact-table-wrap { overflow-x: auto; }
+    .compact-table { width: 100%; border-collapse: collapse; font-size: var(--text-xs); }
+    .compact-table th { padding: var(--space-2); border-bottom: 1px solid var(--border); color: var(--muted); font-size: var(--text-2xs); font-weight: var(--weight-semibold); letter-spacing: 0.04em; text-align: left; text-transform: uppercase; white-space: nowrap; }
+    .compact-table td { padding: var(--space-2); border-bottom: 1px solid var(--border-soft); color: var(--text-soft); vertical-align: middle; }
+    .compact-table tbody tr:last-child td { border-bottom: 0; }
+    .compact-table tbody tr { transition: background var(--transition-fast); }
+    .compact-table tbody tr:hover { background: var(--accent-wash); }
+    .compact-table .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+    .compact-table code { overflow-wrap: anywhere; }
+    .coordinate-panel { margin-top: var(--space-4); }
+    .coordinate-layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(15rem, 1fr); gap: var(--space-4); }
+    .store-card { display: flex; flex-direction: column; justify-content: center; }
+    .store-big { font-family: var(--font-mono); font-size: var(--text-2xl); line-height: 1.1; }
+    .store-caption { margin-top: var(--space-1); color: var(--muted); font-size: var(--text-xs); }
+
+    .two-column { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
+    .resource-layout { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(19rem, 1fr); gap: var(--space-4); }
+    .gauge-layout { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: var(--space-5); }
+    .gauge {
+      --gauge-value: 0%;
+      --gauge-color: var(--accent);
+      position: relative;
+      display: grid;
+      place-items: center;
+      width: 7.25rem;
+      height: 7.25rem;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: conic-gradient(var(--gauge-color) var(--gauge-value), var(--track) 0);
+    }
+    .gauge::before { content: ""; position: absolute; inset: 0.5rem; border: 1px solid var(--border-soft); border-radius: 50%; background: var(--bg-raised); }
+    .gauge-content { position: relative; z-index: 1; text-align: center; }
+    .gauge-value { display: block; font-family: var(--font-mono); font-size: var(--text-xl); font-weight: var(--weight-semibold); line-height: 1.1; }
+    .gauge-label { color: var(--muted); font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.05em; }
+    .gauge-stats { display: grid; gap: var(--space-3); }
+    .big-stat-label { color: var(--muted); font-size: var(--text-xs); }
+    .big-stat-value { display: block; font-family: var(--font-mono); font-size: var(--text-lg); font-weight: var(--weight-medium); }
+    .big-stat-note { color: var(--faint); font-size: var(--text-2xs); }
+    .breakdown-title { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin: var(--space-5) 0 var(--space-3); color: var(--text-soft); font-size: var(--text-xs); font-weight: var(--weight-semibold); }
+    .breakdown-title span { color: var(--faint); font-size: var(--text-2xs); font-weight: var(--weight-regular); }
+    .bar-list { display: grid; gap: var(--space-3); list-style: none; }
+    .bar-row-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-1); }
+    .bar-label { min-width: 0; color: var(--muted); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bar-value { color: var(--text-soft); font-family: var(--font-mono); font-size: var(--text-xs); white-space: nowrap; }
+    .bar-track { height: 0.3125rem; overflow: hidden; border-radius: var(--radius-round); background: var(--track); }
+    .bar-fill { width: var(--bar-size, 0%); height: 100%; border-radius: inherit; background: var(--bar-color, var(--accent)); transition: width var(--transition-base); }
+    .frame-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); margin-bottom: var(--space-5); }
+    .frame-stat { padding: var(--space-3); border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--bg-inset); }
+    .frame-stat span { display: block; color: var(--muted); font-size: var(--text-2xs); }
+    .frame-stat strong { display: block; margin-top: var(--space-1); font-family: var(--font-mono); font-size: var(--text-lg); font-weight: var(--weight-medium); }
+    .frame-times { display: grid; gap: var(--space-2); margin-bottom: var(--space-4); }
+    .frame-time { display: flex; justify-content: space-between; gap: var(--space-4); color: var(--muted); font-size: var(--text-xs); }
+    .frame-time time { color: var(--text-soft); font-family: var(--font-mono); text-align: right; }
+    .progress-track { height: 0.5rem; overflow: hidden; border-radius: var(--radius-round); background: var(--track); }
+    .progress-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent-dim), var(--accent)); transition: width var(--transition-base); }
+    .cache-kinds { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--space-2); margin-top: var(--space-5); }
+    .cache-kind { padding: var(--space-3); border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--bg-inset); }
+    .cache-kind-label { color: var(--muted); font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.04em; }
+    .cache-kind-value { display: block; margin-top: var(--space-2); font-family: var(--font-mono); font-size: var(--text-md); font-weight: var(--weight-medium); }
+    .cache-kind-note { display: block; margin-top: 0.125rem; color: var(--faint); font-family: var(--font-mono); font-size: var(--text-2xs); }
+    .chip-list { display: flex; flex-wrap: wrap; gap: var(--space-2); list-style: none; }
+    .chip { display: inline-flex; align-items: center; gap: var(--space-1); max-width: 100%; padding: var(--space-1) var(--space-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--bg-subtle); color: var(--text-soft); font-family: var(--font-mono); font-size: var(--text-2xs); overflow-wrap: anywhere; }
+    .chip-accent { border-color: rgba(85, 214, 190, 0.2); background: var(--accent-wash); color: var(--accent-bright); }
+    .source-group + .source-group { margin-top: var(--space-5); padding-top: var(--space-4); border-top: 1px solid var(--border-soft); }
+    .source-group h4 { margin-bottom: var(--space-3); color: var(--muted); font-size: var(--text-2xs); font-weight: var(--weight-semibold); letter-spacing: 0.06em; text-transform: uppercase; }
+
+    .models-layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(18rem, 1fr); gap: var(--space-4); align-items: start; }
+    .model-side { display: grid; gap: var(--space-4); }
+    .nwp-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+    .nwp-card { padding: var(--space-4); border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--bg-inset); }
+    .nwp-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-2); }
+    .nwp-name { min-width: 0; font-family: var(--font-mono); font-size: var(--text-sm); font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
+    .nwp-type { margin-top: 0.125rem; color: var(--faint); font-size: var(--text-2xs); }
+    .nwp-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); margin-top: var(--space-4); }
+    .nwp-stat span { display: block; color: var(--muted); font-size: var(--text-2xs); }
+    .nwp-stat strong { display: block; margin-top: 0.125rem; color: var(--text-soft); font-family: var(--font-mono); font-size: var(--text-xs); font-weight: var(--weight-regular); overflow-wrap: anywhere; }
+    .chain-block { margin-top: var(--space-5); padding-top: var(--space-4); border-top: 1px solid var(--border-soft); }
+    .chain-title { margin-bottom: var(--space-3); color: var(--muted); font-size: var(--text-2xs); font-weight: var(--weight-semibold); letter-spacing: 0.05em; text-transform: uppercase; }
+    .chain-list { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); list-style: none; counter-reset: chain; }
+    .chain-list li { display: inline-flex; align-items: center; gap: var(--space-2); counter-increment: chain; }
+    .chain-list li::before { content: counter(chain, decimal-leading-zero); color: var(--faint); font-family: var(--font-mono); font-size: var(--text-2xs); }
+    .chain-list li:not(:last-child)::after { content: "›"; margin-left: var(--space-1); color: var(--border-strong); font-size: var(--text-lg); }
+    .chain-list code { padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); background: var(--bg-subtle); color: var(--text-soft); font-size: var(--text-2xs); }
+    .nowcast-hero { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-4); }
+    .nowcast-count { font-family: var(--font-mono); font-size: var(--text-2xl); line-height: 1; }
+    .nowcast-caption { color: var(--muted); font-size: var(--text-xs); }
+    .timeline { display: flex; gap: var(--space-1); margin: var(--space-4) 0; }
+    .timeline-slot { position: relative; flex: 1; min-width: 0; height: 1.75rem; border-radius: var(--radius-sm); background: var(--info-wash); border: 1px solid rgba(105, 183, 246, 0.18); }
+    .timeline-slot::after { content: ""; position: absolute; left: 50%; bottom: 0.3rem; width: 0.25rem; height: 0.25rem; border-radius: 50%; background: var(--info); transform: translateX(-50%); }
+    .channel-list { display: grid; gap: var(--space-3); list-style: none; }
+    .channel { padding: var(--space-3); border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--bg-inset); }
+    .channel-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+    .channel-name { font-family: var(--font-mono); font-size: var(--text-xs); overflow-wrap: anywhere; }
+    .channel-meta { display: flex; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-2); color: var(--muted); font-size: var(--text-2xs); }
+
+    .traffic-panel { overflow: hidden; }
+    .traffic-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--space-3); margin-bottom: var(--space-4); }
+    .traffic-stat { padding: var(--space-3) var(--space-4); border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--bg-inset); }
+    .traffic-stat span { display: block; color: var(--muted); font-size: var(--text-2xs); }
+    .traffic-stat strong { display: block; margin-top: var(--space-1); font-family: var(--font-mono); font-size: var(--text-lg); font-weight: var(--weight-medium); }
+    .traffic-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(22rem, 1fr); gap: var(--space-4); }
+    .map-wrap { position: relative; min-width: 0; height: var(--map-height); overflow: hidden; border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--map-bg); }
+    #traffic-map { display: block; width: 100%; height: 100%; cursor: crosshair; }
+    #traffic-map:focus-visible { outline-offset: -3px; }
+    .map-caption { position: absolute; top: var(--space-3); left: var(--space-3); display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--overlay); color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); pointer-events: none; }
+    .map-legend { position: absolute; right: var(--space-3); bottom: var(--space-3); display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); background: var(--overlay); color: var(--muted); font-size: var(--text-2xs); pointer-events: none; }
+    .map-legend::before { content: ""; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); }
+    .map-tooltip { position: absolute; z-index: 2; min-width: 9rem; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--overlay); box-shadow: var(--shadow-tooltip); color: var(--text-soft); font-family: var(--font-mono); font-size: var(--text-2xs); pointer-events: none; transform: translate(var(--space-2), calc(-100% - var(--space-2))); }
+    .map-tooltip strong { display: block; margin-bottom: var(--space-1); color: var(--accent-bright); }
+    .map-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: var(--text-sm); pointer-events: none; }
+    .traffic-side { min-width: 0; }
+    .traffic-table { max-height: var(--map-height); overflow: auto; border: 1px solid var(--border-soft); border-radius: var(--radius-md); }
+    .traffic-table .compact-table th { position: sticky; top: 0; z-index: 1; background: var(--bg-subtle); }
+    .rank { display: inline-grid; place-items: center; width: 1.375rem; height: 1.375rem; border-radius: var(--radius-sm); background: var(--bg-subtle); color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); }
+    tr:first-child .rank { background: var(--accent-wash); color: var(--accent-bright); }
+    .traffic-bottom { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(22rem, 1fr); gap: var(--space-4); margin-top: var(--space-4); }
+    .zoom-chart { display: grid; gap: var(--space-3); }
+    .zoom-row { display: grid; grid-template-columns: 2.5rem minmax(4rem, 1fr) auto; align-items: center; gap: var(--space-3); }
+    .zoom-label { color: var(--text-soft); font-family: var(--font-mono); font-size: var(--text-xs); }
+    .zoom-value { color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); text-align: right; }
+    .fast-path-list { display: flex; flex-wrap: wrap; gap: var(--space-2); list-style: none; }
+    .fast-path-list li { display: flex; justify-content: space-between; gap: var(--space-3); flex: 1 1 10rem; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); background: var(--bg-subtle); color: var(--muted); font-size: var(--text-xs); }
+    .fast-path-list strong { color: var(--text-soft); font-family: var(--font-mono); font-weight: var(--weight-regular); }
+    .scope-note { display: flex; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-4); color: var(--faint); font-size: var(--text-xs); }
+    .scope-note .icon { margin-top: 0.125rem; }
+
+    .feature-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--space-4); }
+    .feature-card { grid-column: span 2; display: flex; flex-direction: column; min-height: 16rem; padding: var(--space-5); transition: border-color var(--transition-base); }
+    .feature-card.is-disabled { background-image: none; }
+    .feature-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
+    .feature-title-wrap { display: flex; align-items: center; gap: var(--space-3); }
+    .feature-title { font-size: var(--text-lg); font-weight: var(--weight-semibold); }
+    .feature-value { margin-top: var(--space-5); font-family: var(--font-mono); font-size: var(--text-2xl); line-height: 1; letter-spacing: -0.035em; }
+    .feature-unit { margin-left: var(--space-2); color: var(--muted); font-family: var(--font-ui); font-size: var(--text-xs); letter-spacing: 0; }
+    .feature-caption { margin-top: var(--space-2); color: var(--muted); font-size: var(--text-xs); }
+    .feature-details { margin-top: auto; padding-top: var(--space-5); }
+    .feature-details .stat-list { gap: var(--space-2); }
+    .feature-card .chip-list { margin-top: var(--space-3); }
+    .feature-disabled-copy { margin-top: auto; padding-top: var(--space-5); color: var(--muted); font-size: var(--text-sm); }
+    .satellite-feeds { display: grid; gap: var(--space-2); margin-top: var(--space-3); }
+    .satellite-feed { padding: var(--space-2) var(--space-3); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--bg-inset); }
+    .satellite-feed-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+    .satellite-feed-name { font-family: var(--font-mono); font-size: var(--text-xs); text-transform: uppercase; }
+    .satellite-feed-meta { margin-top: var(--space-1); color: var(--muted); font-size: var(--text-2xs); overflow-wrap: anywhere; }
+    .inline-flags { display: inline-flex; gap: var(--space-1); }
+    .details-disclosure { margin-top: var(--space-3); color: var(--muted); font-size: var(--text-xs); }
+    .details-disclosure summary { cursor: pointer; color: var(--text-soft); }
+    .details-disclosure pre { max-height: 10rem; margin: var(--space-2) 0 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); }
+
+    .empty-state, .loading-state, .section-error { display: flex; align-items: flex-start; gap: var(--space-3); min-height: 5rem; padding: var(--space-4); border: 1px dashed var(--border); border-radius: var(--radius-md); background: var(--bg-inset); color: var(--muted); }
+    .empty-state .icon, .loading-state .icon, .section-error .icon { margin-top: 0.125rem; color: var(--faint); }
+    .empty-state strong, .loading-state strong, .section-error strong { display: block; color: var(--text-soft); font-size: var(--text-sm); font-weight: var(--weight-medium); }
+    .empty-state p, .loading-state p, .section-error p { margin-top: var(--space-1); font-size: var(--text-xs); }
+    .loading-state .icon { color: var(--accent); animation: spin 1.8s linear infinite; }
+    .section-error { border-color: rgba(243, 125, 130, 0.3); background: var(--danger-wash); }
+    .section-error .icon { color: var(--danger); }
+    .muted-note { color: var(--faint); font-size: var(--text-xs); }
+    .text-ok { color: var(--ok) !important; }
+    .text-warning { color: var(--warning) !important; }
+    .text-danger { color: var(--danger) !important; }
+    .text-accent { color: var(--accent-bright) !important; }
+
+    footer { border-top: 1px solid var(--border-soft); }
+    .footer-inner { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); min-height: 5rem; color: var(--faint); font-size: var(--text-xs); }
+    .footer-brand { display: flex; align-items: center; gap: var(--space-2); }
+    .footer-brand .icon { color: var(--accent-dim); }
+    .footer-links { display: flex; gap: var(--space-4); }
+    .footer-links a { color: var(--muted); }
+    .footer-links a:hover { color: var(--accent-bright); }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes breathe { 0%, 100% { opacity: 0.45; transform: scale(0.96); } 50% { opacity: 1; transform: scale(1.05); } }
+
+    @media (max-width: 80rem) {
+      .hero-layout { grid-template-columns: 1fr; }
+      .status-card { min-height: auto; }
+      .kpi-card { min-height: 9rem; }
+      .cluster-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .cluster-grid > :last-child { grid-column: 1 / -1; }
+      .cache-kinds { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .feature-card { grid-column: span 3; }
+    }
+    @media (max-width: 68rem) {
+      .masthead-inner, .page-head, main, .footer-inner { padding-inline: var(--space-5); }
+      .page-head { align-items: flex-start; }
+      .refresh-controls { justify-content: flex-end; }
+      .data-age-wrap { order: -1; width: 100%; padding: 0; text-align: right; }
+      .sample-state { justify-content: flex-end; }
+      .two-column, .resource-layout, .models-layout { grid-template-columns: 1fr; }
+      .model-side { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .traffic-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .traffic-layout, .traffic-bottom { grid-template-columns: 1fr; }
+      .traffic-table { max-height: 24rem; }
+      .traffic-bottom > * { min-width: 0; }
+    }
+    @media (max-width: 48rem) {
+      :root { --map-height: 18rem; }
+      .masthead-inner { min-height: 3.75rem; }
+      .brand-tag { display: none; }
+      .nav-link span { display: none; }
+      .nav-link { padding-inline: var(--space-2); }
+      .page-head { flex-direction: column; padding-top: var(--space-6); gap: var(--space-5); }
+      .refresh-controls { width: 100%; align-items: flex-end; justify-content: flex-start; }
+      .data-age-wrap { width: auto; margin-right: auto; text-align: left; }
+      .sample-state { justify-content: flex-start; }
+      .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .cluster-ribbon { align-items: flex-start; flex-direction: column; }
+      .rss-stats { width: 100%; justify-content: space-between; }
+      .cluster-grid, .coordinate-layout { grid-template-columns: 1fr; }
+      .cluster-grid > :last-child { grid-column: auto; }
+      .model-side { grid-template-columns: 1fr; }
+      .traffic-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .section-heading { align-items: flex-start; }
+      .section-kicker { display: none; }
+      .feature-card { grid-column: span 6; min-height: 14rem; }
+      .footer-inner { align-items: flex-start; flex-direction: column; justify-content: center; padding-block: var(--space-5); }
+    }
+    @media (max-width: 30rem) {
+      .masthead-inner, .page-head, main, .footer-inner { padding-inline: var(--space-4); }
+      .error-banner { width: calc(100% - var(--space-8)); }
+      .brand-name { font-size: var(--text-md); }
+      .page-subtitle { max-width: 20rem; }
+      .control-label { font-size: var(--text-2xs); }
+      .refresh-button { padding-inline: var(--space-3); }
+      .refresh-button span { display: none; }
+      .status-card, .kpi-card, .feature-card { padding: var(--space-4); }
+      .status-headline { font-size: var(--text-lg); }
+      .status-meta { margin-top: var(--space-4); }
+      .kpi-card { min-height: 8.5rem; }
+      .kpi-value { font-size: 1.5rem; }
+      .kpi-foot { align-items: flex-start; flex-direction: column; gap: 0.125rem; }
+      .panel-header { padding: var(--space-4) var(--space-4) 0; }
+      .panel-body { padding: var(--space-4); }
+      .panel-header .scope-badge { display: none; }
+      .cluster-ribbon { margin: var(--space-4) var(--space-4) 0; }
+      .cluster-grid { padding: var(--space-3) var(--space-4) var(--space-4); }
+      .gauge-layout { grid-template-columns: 1fr; }
+      .gauge { margin-inline: auto; }
+      .gauge-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .frame-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .frame-summary > :last-child { grid-column: 1 / -1; }
+      .frame-time { align-items: flex-start; flex-direction: column; gap: 0.125rem; }
+      .frame-time time { text-align: left; }
+      .cache-kinds { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .nwp-grid { grid-template-columns: 1fr; }
+      .traffic-summary { gap: var(--space-2); }
+      .traffic-stat { padding: var(--space-3); }
+      .traffic-stat strong { font-size: var(--text-md); }
+      .zoom-row { grid-template-columns: 2rem minmax(3rem, 1fr) auto; gap: var(--space-2); }
+      .feature-value { font-size: var(--text-xl); }
+      .footer-links { flex-wrap: wrap; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <svg class="sr-only" aria-hidden="true" focusable="false">
+    <symbol id="i-radar" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><path d="M12 12 18.5 5.5M12 3.5v2M3.5 12h2M12 18.5v2M18.5 12h2"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l2.5-7 5 14 2.5-7h4"/></symbol>
+    <symbol id="i-workers" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"/></symbol>
+    <symbol id="i-memory" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3M10 10h4v4h-4z"/></symbol>
+    <symbol id="i-requests" viewBox="0 0 24 24"><path d="M4 19V9M10 19V4M16 19v-7M22 19H2"/></symbol>
+    <symbol id="i-cache" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 3.6 2.5 18a2 2 0 0 0 1.8 3h15.4a2 2 0 0 0 1.8-3L13.7 3.6a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 6v5h-5M4 18v-5h5"/><path d="M18.2 9A7 7 0 0 0 6 6.2L4 11M5.8 15A7 7 0 0 0 18 17.8l2-4.8"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></symbol>
+    <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M17.5 19H6a4 4 0 0 1-.6-8A6.5 6.5 0 0 1 18 9.5 4.8 4.8 0 0 1 17.5 19Z"/></symbol>
+    <symbol id="i-satellite" viewBox="0 0 24 24"><path d="m9 15-5 5M14 4l6 6M4 10l6-6 4 4-6 6-4-4ZM10 20l4-4 6 4-4 4-6-4Z" transform="translate(0 -2)"/><path d="m8 8 8 8M16 2l6 6-4 4-6-6 4-4Z"/></symbol>
+    <symbol id="i-map" viewBox="0 0 24 24"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Z"/><path d="M9 3v15M15 6v15"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="m13 2-9 12h7l-1 8 9-12h-7l1-8Z"/></symbol>
+    <symbol id="i-socket" viewBox="0 0 24 24"><path d="M8 12h8M12 8v8"/><circle cx="12" cy="12" r="9"/><path d="M5 5l3 3M19 5l-3 3M5 19l3-3M19 19l-3-3"/></symbol>
+    <symbol id="i-archive" viewBox="0 0 24 24"><path d="M4 7v13h16V7M3 3h18v4H3zM9 11h6"/></symbol>
+    <symbol id="i-cells" viewBox="0 0 24 24"><circle cx="8" cy="9" r="4"/><circle cx="16" cy="15" r="5"/><path d="M12 4h.01M4 17h.01M20 6h.01"/></symbol>
+  </svg>
+
+  <a class="skip-link" href="#dashboard">Skip to dashboard</a>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <a class="brand" href="/dashboard" aria-label="LibreWXR dashboard home">
+        <span class="brand-mark"><svg class="icon" aria-hidden="true"><use href="#i-radar"/></svg></span>
+        <span class="brand-name">LibreWXR<span class="brand-tag">Operations</span></span>
+      </a>
+      <nav class="header-nav" aria-label="Server resources">
+        <a class="nav-link" href="/health"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-activity"/></svg><span>Health JSON</span></a>
+        <a class="nav-link" href="/docs"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-external"/></svg><span>API reference</span></a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="page-head">
+    <div>
+      <p class="eyebrow">Live infrastructure</p>
+      <h1>Operations overview</h1>
+      <p class="page-subtitle">Radar pipeline, render fleet, and delivery telemetry in one view.</p>
+    </div>
+    <div class="refresh-controls" aria-label="Health refresh controls">
+      <div class="data-age-wrap">
+        <span id="data-age" class="data-age">Waiting for data</span>
+        <span class="sample-state"><span class="live-dot" aria-hidden="true"></span><span id="sample-state">Connecting</span></span>
+      </div>
+      <div class="control-group">
+        <label class="control-label" for="refresh-interval">Refresh every</label>
+        <select id="refresh-interval" aria-label="Health polling interval">
+          <option value="5">5 seconds</option>
+          <option value="10" selected>10 seconds</option>
+          <option value="30">30 seconds</option>
+          <option value="60">60 seconds</option>
+          <option value="0">Manual only</option>
+        </select>
+      </div>
+      <button id="refresh-button" class="refresh-button" type="button" aria-label="Refresh health data now">
+        <svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><span>Refresh</span>
+      </button>
+    </div>
+  </div>
+  <span id="refresh-announcement" class="sr-only" role="status" aria-live="polite"></span>
+
+  <div id="error-banner" class="error-banner" role="alert" hidden>
+    <svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>
+    <p><strong>Health refresh failed.</strong> <span id="error-message">The last good data remains visible.</span></p>
+  </div>
+
+  <main id="dashboard" tabindex="-1">
+    <section class="dashboard-section overview-section" aria-label="Current system summary">
+      <div class="hero-layout">
+        <article id="status-card" class="panel status-card" aria-label="Server health status">
+          <div class="loading-state"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><div><strong>Reading server health</strong><p>The first telemetry sample is on its way.</p></div></div>
+        </article>
+        <div id="summary-kpis" class="kpi-grid" aria-label="Key performance indicators"></div>
+      </div>
+    </section>
+
+    <section class="dashboard-section" aria-labelledby="cluster-heading">
+      <div class="section-heading">
+        <div><h2 id="cluster-heading" class="section-title">Cluster &amp; coordinates</h2><p class="section-description">Aggregated worker pulses and shared spatial-index efficiency.</p></div>
+        <span class="section-kicker">RENDER PLANE / 01</span>
+      </div>
+      <article class="panel cluster-panel" aria-label="Cluster-wide telemetry">
+        <div id="cluster-content"><div class="panel-body"><div class="loading-state"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><div><strong>Loading cluster telemetry</strong></div></div></div></div>
+      </article>
+      <article class="panel coordinate-panel" aria-labelledby="coordinate-title">
+        <div class="panel-header"><div class="panel-title-wrap"><span class="panel-icon"><svg class="icon" aria-hidden="true"><use href="#i-map"/></svg></span><div><h3 id="coordinate-title" class="panel-title">Worker coordinate caches</h3><p class="panel-subtitle">Process-local projections plus the shared on-disk coordinate store.</p></div></div><span class="scope-badge">This worker</span></div>
+        <div id="coordinate-content" class="panel-body"><div class="loading-state"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><div><strong>Loading coordinate statistics</strong></div></div></div>
+      </article>
+    </section>
+
+    <section class="dashboard-section" aria-labelledby="resources-heading">
+      <div class="section-heading">
+        <div><h2 id="resources-heading" class="section-title">Memory &amp; radar frames</h2><p class="section-description">Resident process footprint and the current radar observation window.</p></div>
+        <span class="section-kicker">DATA PLANE / 02</span>
+      </div>
+      <div class="two-column">
+        <article class="panel" aria-labelledby="memory-title">
+          <div class="panel-header"><div class="panel-title-wrap"><span class="panel-icon"><svg class="icon" aria-hidden="true"><use href="#i-memory"/></svg></span><div><h3 id="memory-title" class="panel-title">Process memory</h3><p class="panel-subtitle">RSS allocation by component, in mebibytes.</p></div></div><span class="scope-badge">This worker</span></div>
+          <div id="memory-content" class="panel-body"><div class="loading-state"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><div><strong>Loading memory breakdown</strong></div></div></div>
+        </article>
+        <article class="panel" aria-labelledby="frames-title">
+          <div class="panel-header"><div class="panel-title-wrap"><span class="panel-icon"><svg class="icon" aria-hidden="true"><use href="#i-radar"/></svg></span><div><h3 id="frames-title" class="panel-title">Radar observations</h3><p class="panel-subtitle">Held frame history and per-region freshness.</p></div></div><span id="frames-badge" class="badge badge-neutral">Waiting</span></div>
+          <div id="frames-content" class="panel-body"><div class="loading-state"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><div><strong>Loading radar frames</strong></div></div></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="dashboard-section" aria-labelledby="cache-heading">
+      <div class="section-heading">
+        <div><h2 id="cache-heading" class="section-title">Cache &amp; coverage</h2><p class="section-description">Encoded render artifacts, active radar sources, and enabled regions.</p></div>
+        <span class="section-kicker">DELIVERY PLANE / 03</span>
+      </div>
+      <div class="resource-layout">
+        <article class="panel" aria-labelledby="tile-cache-title">
+          <div class="panel-header"><div class="panel-title-wrap"><span class="panel-icon"><svg class="icon" aria-hidden="true"><use href="#i-cache"/></svg></span><div><h3 id="tile-cache-title" class="panel-title">Tile cache</h3><p class="panel-subtitle">Geometry and presentation entries for this render worker.</p></div></div><span class="scope-badge">LRU / in memory</span></div>
+          <div id="tile-cache-content" class="panel-body"><div class="loading-state"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><div><strong>Loading tile cache</strong></div></div></div>
+        </article>
+        <article class="panel" aria-labelledby="sources-title">
+          <div class="panel-header"><div class="panel-title-wrap"><span class="panel-icon"><svg class="icon" aria-hidden="true"><use href="#i-layers"/></svg></span><div><h3 id="sources-title" class="panel-title">Sources &amp; regions</h3><p class="panel-subtitle">Configured ingestion and palette provenance.</p></div></div></div>
+          <div id="sources-content" class="panel-body"><div class="loading-state"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><div><strong>Loading sources</strong></div></div></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="dashboard-section" aria-labelledby="models-heading">
+      <div class="section-heading">
+        <div><h2 id="models-heading" class="section-title">Models &amp; nowcasting</h2><p class="section-description">Dynamic NWP grid inventory, model fallback order, and forecast layers.</p></div>
+        <span class="section-kicker">FORECAST PLANE / 04</span>
+      </div>
+      <div class="models-layout">
+        <article class="panel" aria-labelledby="nwp-title">
+          <div class="panel-header"><div class="panel-title-wrap"><span class="panel-icon"><svg class="icon" aria-hidden="true"><use href="#i-cloud"/></svg></span><div><h3 id="nwp-title" class="panel-title">NWP grids</h3><p class="panel-subtitle">Discovered directly from top-level grid health keys.</p></div></div><span id="nwp-count" class="badge badge-neutral">Waiting</span></div>
+          <div id="nwp-content" class="panel-body"><div class="loading-state"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><div><strong>Discovering model grids</strong></div></div></div>
+        </article>
+        <div class="model-side">
+          <article class="panel" aria-labelledby="nowcast-title">
+            <div class="panel-header"><div class="panel-title-wrap"><span class="panel-icon"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg></span><div><h3 id="nowcast-title" class="panel-title">Nowcast</h3><p class="panel-subtitle">Radar extrapolation and model flow.</p></div></div></div>
+            <div id="nowcast-content" class="panel-body"><div class="loading-state"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><div><strong>Loading nowcast</strong></div></div></div>
+          </article>
+          <article class="panel" aria-labelledby="satellite-title">
+            <div class="panel-header"><div class="panel-title-wrap"><span class="panel-icon"><svg class="icon" aria-hidden="true"><use href="#i-satellite"/></svg></span><div><h3 id="satellite-title" class="panel-title">Satellite</h3><p class="panel-subtitle">GMGSI longwave and visible mosaics.</p></div></div></div>
+            <div id="satellite-content" class="panel-body"><div class="loading-state"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><div><strong>Loading satellite channels</strong></div></div></div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="dashboard-section" aria-labelledby="traffic-heading">
+      <div class="section-heading">
+        <div><h2 id="traffic-heading" class="section-title">Most loaded areas</h2><p class="section-description">Radar-tile traffic for the serving worker; cluster-wide top tiles are not exposed by health telemetry.</p></div>
+        <span class="section-kicker">REQUEST PLANE / 05</span>
+      </div>
+      <article class="panel traffic-panel" aria-label="Worker radar tile traffic">
+        <div id="traffic-content" class="panel-body"><div class="loading-state"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><div><strong>Loading tile request telemetry</strong></div></div></div>
+      </article>
+    </section>
+
+    <section class="dashboard-section" aria-labelledby="features-heading">
+      <div class="section-heading">
+        <div><h2 id="features-heading" class="section-title">Services &amp; overlays</h2><p class="section-description">Optional product surfaces, live data feeds, and persistent radar history.</p></div>
+        <span class="section-kicker">FEATURE PLANE / 06</span>
+      </div>
+      <div id="feature-grid" class="feature-grid">
+        <div class="panel feature-card"><div class="loading-state"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><div><strong>Loading services</strong></div></div></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="footer-inner">
+      <p class="footer-brand"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-radar"/></svg><span>LibreWXR self-hosted weather infrastructure</span></p>
+      <nav class="footer-links" aria-label="Footer resources"><a href="/health">Raw health JSON</a><a href="/docs">API reference</a><span>Times shown in UTC</span></nav>
+    </div>
+  </footer>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const $ = (id) => document.getElementById(id);
+      const numberFormatter = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+      const decimalFormatter = new Intl.NumberFormat("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+      const state = { data: null, lastSuccess: 0, timer: 0, inFlight: false, stale: false, mapCleanup: null };
+      const chartColors = ["--chart-1", "--chart-2", "--chart-3", "--chart-4", "--chart-5", "--chart-6"];
+
+      function isObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
+      function object(value) { return isObject(value) ? value : {}; }
+      function array(value) { return Array.isArray(value) ? value : []; }
+      function finite(value, fallback = null) {
+        if (value === null || value === undefined || value === "" || typeof value === "boolean") return fallback;
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
+      }
+      function clamp(value, min = 0, max = 100) { return Math.min(max, Math.max(min, finite(value, 0))); }
+      function esc(value) {
+        return String(value ?? "—").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character]));
+      }
+      function text(value, fallback = "—") {
+        if (value === null || value === undefined || value === "") return fallback;
+        if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+        return fallback;
+      }
+      function fmtInt(value) { const n = finite(value); return n === null ? "—" : numberFormatter.format(n); }
+      function fmtMB(value) {
+        const n = finite(value);
+        if (n === null) return "—";
+        if (Math.abs(n) >= 1024) return `${decimalFormatter.format(n / 1024)} GB`;
+        return `${decimalFormatter.format(n)} MB`;
+      }
+      function fmtBytes(value) {
+        const n = finite(value);
+        return n === null ? "—" : fmtMB(n / 1048576);
+      }
+      function fmtPctRatio(value) { const n = finite(value); return n === null ? "—" : `${decimalFormatter.format(n * 100)}%`; }
+      function ratioFromHits(hitsValue, missesValue) {
+        const hits = finite(hitsValue, 0);
+        const misses = finite(missesValue, 0);
+        return hits + misses > 0 ? hits / (hits + misses) : null;
+      }
+      function fmtPct(value) { const n = finite(value); return n === null ? "—" : `${decimalFormatter.format(n)}%`; }
+      function fmtMs(value) {
+        const n = finite(value);
+        if (n === null) return "—";
+        const digits = Math.abs(n) < 1 ? 2 : Math.abs(n) < 100 ? 1 : 0;
+        return `${n.toFixed(digits)} ms`;
+      }
+      function fmtDuration(seconds) {
+        const total = Math.max(0, Math.floor(finite(seconds, 0)));
+        const days = Math.floor(total / 86400);
+        const hours = Math.floor((total % 86400) / 3600);
+        const minutes = Math.floor((total % 3600) / 60);
+        if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+        if (hours > 0) return `${hours}h ${minutes}m`;
+        if (minutes > 0) return `${minutes}m ${total % 60}s`;
+        return `${total}s`;
+      }
+      function fmtAge(seconds) {
+        const n = finite(seconds);
+        if (n === null) return "—";
+        if (n < 60) return `${Math.max(0, Math.round(n))}s`;
+        if (n < 3600) return `${Math.floor(n / 60)}m ${Math.round(n % 60)}s`;
+        return fmtDuration(n);
+      }
+      function validEpoch(value) { const n = finite(value); return n !== null && n > 0 ? n : null; }
+      function fmtEpoch(value) {
+        if (value === null || value === undefined || value === "" || value === 0) return "Not reported";
+        const epoch = validEpoch(value);
+        const date = epoch !== null ? new Date(epoch * 1000) : new Date(String(value));
+        if (Number.isNaN(date.getTime())) return text(value, "Not reported");
+        return date.toISOString().replace("T", " ").replace(".000Z", " UTC");
+      }
+      function relativeEpoch(value) {
+        const epoch = validEpoch(value);
+        if (epoch === null) return "—";
+        return `${fmtAge(Date.now() / 1000 - epoch)} ago`;
+      }
+      function humanize(value) {
+        return text(value, "unknown").replace(/_mb$|_grid$/g, "").replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+      }
+      function icon(name, extra = "") { return `<svg class="icon ${extra}" aria-hidden="true"><use href="#i-${esc(name)}"/></svg>`; }
+      function badge(label, tone = "neutral") { return `<span class="badge badge-${esc(tone)}">${esc(label)}</span>`; }
+      function enabledBadge(enabled) { return badge(enabled ? "Enabled" : "Disabled", enabled ? "ok" : "neutral"); }
+      function emptyState(title, copy, name = "info") {
+        return `<div class="empty-state">${icon(name)}<div><strong>${esc(title)}</strong><p>${esc(copy)}</p></div></div>`;
+      }
+      function statRow(label, value, emphasis = false) {
+        return `<div class="stat-row${emphasis ? " stat-row-emphasis" : ""}"><dt>${esc(label)}</dt><dd>${value}</dd></div>`;
+      }
+      function barRow(label, valueDisplay, percent, colorIndex = 0) {
+        const safePercent = clamp(percent);
+        const color = chartColors[colorIndex % chartColors.length];
+        return `<li><div class="bar-row-head"><span class="bar-label" title="${esc(label)}">${esc(label)}</span><span class="bar-value">${esc(valueDisplay)}</span></div><div class="bar-track" aria-hidden="true"><div class="bar-fill" style="--bar-size:${safePercent}%;--bar-color:var(${color})"></div></div></li>`;
+      }
+      function disabledFeature(iconName, title, description) {
+        return `<article class="panel feature-card is-disabled" data-feature="${esc(title.toLowerCase().replace(/\s+/g, "-"))}"><div class="feature-head"><div class="feature-title-wrap"><span class="panel-icon">${icon(iconName)}</span><h3 class="feature-title">${esc(title)}</h3></div>${badge("Disabled", "neutral")}</div><p class="feature-disabled-copy">${esc(description)}</p></article>`;
+      }
+      function unavailableFeature(iconName, title) {
+        return `<article class="panel feature-card is-disabled"><div class="feature-head"><div class="feature-title-wrap"><span class="panel-icon">${icon(iconName)}</span><h3 class="feature-title">${esc(title)}</h3></div>${badge("Not reported", "neutral")}</div><p class="feature-disabled-copy">This server did not include a ${esc(title.toLowerCase())} health section.</p></article>`;
+      }
+      function featureShell(iconName, title, headline, unit, caption, details, tone = "ok") {
+        return `<article class="panel feature-card" data-feature="${esc(title.toLowerCase().replace(/\s+/g, "-"))}"><div class="feature-head"><div class="feature-title-wrap"><span class="panel-icon">${icon(iconName)}</span><h3 class="feature-title">${esc(title)}</h3></div>${badge("Enabled", tone)}</div><div class="feature-value">${headline}<span class="feature-unit">${esc(unit)}</span></div><p class="feature-caption">${caption}</p><div class="feature-details">${details}</div></article>`;
+      }
+
+      function renderSummary(data) {
+        const degraded = data.status === "degraded";
+        const palette = isObject(data.color_schemes) ? data.color_schemes : null;
+        const statusCard = $("status-card");
+        statusCard.classList.toggle("is-degraded", degraded);
+        statusCard.innerHTML = `
+          <div class="status-top">
+            <span class="status-orb">${icon(degraded ? "alert" : "check", "icon-lg")}</span>
+            <div><p class="status-label">Server status</p><h2 class="status-headline">${degraded ? "Attention required" : "All systems operational"}</h2></div>
+          </div>
+          <div class="status-meta">
+            <span class="meta-chip">Version <strong class="status-version">v${esc(text(data.version, "unknown"))}</strong></span>
+            <span class="meta-chip">${icon("clock", "icon-sm")} Uptime <strong>${esc(fmtDuration(data.uptime_seconds))}</strong></span>
+            ${palette ? `<span class="meta-chip">Palette <code>${esc(text(palette.version, "unversioned"))}</code></span>` : ""}
+          </div>`;
+
+        const cluster = isObject(data.cluster) ? data.cluster : null;
+        const clusterRequests = object(cluster?.requests);
+        const localRequests = object(data.tile_requests);
+        const localCache = object(localRequests.cache);
+        const clusterLatency = object(cluster?.tile_latency);
+        const localLatency = object(localRequests.latency);
+        const memory = object(data.memory);
+        const workers = finite(cluster?.workers_reporting);
+        const totalRequests = cluster ? clusterRequests.total_requests : localRequests.total_requests;
+        const hitRate = cluster ? clusterRequests.hit_rate : localCache.hit_rate;
+        const requestLatency = cluster ? clusterLatency.avg_request_ms : localLatency.avg_request_ms;
+        const memoryPct = finite(memory.usage_pct, 0);
+        const memoryTone = memoryPct >= 90 ? "var(--danger)" : memoryPct >= 75 ? "var(--warning)" : "var(--accent)";
+        const scope = cluster ? "Cluster total" : "This worker";
+        const kpis = [
+          { label: "Render workers", icon: "workers", value: workers === null ? "—" : fmtInt(workers), unit: workers === 1 ? "worker" : "workers", foot: cluster ? "Reporting live pulses" : "Cluster not reported", sub: cluster ? "Healthy pulse inventory" : "Local metrics remain live", progress: null },
+          { label: "Memory pressure", icon: "memory", value: fmtPct(memoryPct).replace("%", ""), unit: "% RSS", foot: `${fmtMB(memory.resident_mb)} resident`, sub: `of ${fmtMB(memory.limit_mb)} limit`, progress: clamp(memoryPct), color: memoryTone },
+          { label: "Tile requests", icon: "requests", value: fmtInt(totalRequests), unit: "", foot: scope, sub: `${fmtInt(cluster ? clusterRequests.hot_tiles : localRequests.hot_tiles)} hot tiles`, progress: null },
+          { label: "Geometry hit rate", icon: "cache", value: finite(hitRate) === null ? "—" : fmtPctRatio(hitRate).replace("%", ""), unit: "%", foot: `${fmtMs(requestLatency)} mean request`, sub: cluster ? "Across the fleet" : "This worker", progress: clamp(finite(hitRate, 0) * 100), color: "var(--info)" }
+        ];
+        $("summary-kpis").innerHTML = kpis.map((kpi) => `<article class="panel kpi-card"><div><div class="kpi-top"><span class="kpi-label">${esc(kpi.label)}</span>${icon(kpi.icon)}</div><div class="kpi-value">${esc(kpi.value)}${kpi.unit ? `<small>${esc(kpi.unit)}</small>` : ""}</div></div><div><div class="kpi-foot"><span>${esc(kpi.foot)}</span><span>${esc(kpi.sub)}</span></div>${kpi.progress === null ? "" : `<div class="mini-track" aria-hidden="true"><div class="mini-fill" style="width:${kpi.progress}%;background:${kpi.color || "var(--accent)"}"></div></div>`}</div></article>`).join("");
+      }
+
+      function coordRows(caches) {
+        const entries = Object.entries(object(caches));
+        if (!entries.length) return emptyState("No coordinate caches reported", "Projection caches will appear after the first tile computation.", "map");
+        return `<div class="compact-table-wrap"><table class="compact-table"><caption class="sr-only">Coordinate cache efficiency</caption><thead><tr><th scope="col">Cache</th><th scope="col" class="num">Entries</th><th scope="col" class="num">Hits</th><th scope="col" class="num">Misses</th><th scope="col" class="num">Hit ratio</th></tr></thead><tbody>${entries.map(([name, raw]) => {
+          const cache = object(raw);
+          return `<tr><td><code>${esc(name)}</code></td><td class="num">${esc(fmtInt(cache.entries))}</td><td class="num">${esc(fmtInt(cache.hits))}</td><td class="num">${esc(fmtInt(cache.misses))}</td><td class="num ${finite(cache.hit_ratio) !== null && cache.hit_ratio >= 0.8 ? "text-ok" : ""}">${esc(fmtPctRatio(cache.hit_ratio))}</td></tr>`;
+        }).join("")}</tbody></table></div>`;
+      }
+      function storeStats(store) {
+        if (!isObject(store)) return emptyState("Shared store not active", "This worker is using process-local coordinate caches.", "archive");
+        const ratio = ratioFromHits(store.hits, store.misses);
+        return `<div><div class="store-big">${esc(fmtPctRatio(ratio))}</div><p class="store-caption">Shared-store hit ratio</p><dl class="stat-list" style="margin-top:var(--space-4)">${statRow("Entries", `<strong>${esc(fmtInt(store.entries))}</strong>`)}${statRow("Disk footprint", esc(fmtBytes(store.bytes)))}${statRow("Publishes", esc(fmtInt(store.publishes)))}${statRow("Hits / misses", `${esc(fmtInt(store.hits))} / ${esc(fmtInt(store.misses))}`)}</dl></div>`;
+      }
+
+      function renderCluster(data) {
+        const cluster = data.cluster;
+        if (!isObject(cluster)) {
+          $("cluster-content").innerHTML = `<div class="panel-body">${emptyState("Cluster telemetry unavailable", "The server returned no worker aggregate. Worker-local health below remains available and current.", "workers")}</div>`;
+          return;
+        }
+        const memory = object(cluster.memory);
+        const rss = object(memory.workers_rss_mb);
+        const container = isObject(memory.container) ? memory.container : null;
+        const requests = object(cluster.requests);
+        const latency = object(cluster.tile_latency);
+        const tileCache = object(cluster.tile_cache);
+        const coord = object(cluster.coord);
+        const workers = finite(cluster.workers_reporting, 0);
+        let containerContent;
+        if (container) {
+          const parts = ["anon", "file", "shmem"].map((key) => finite(container[`${key}_mb`], 0));
+          const total = parts.reduce((sum, value) => sum + value, 0);
+          const widths = parts.map((value) => total > 0 ? value / total * 100 : 0);
+          containerContent = `<div class="memory-split" role="img" aria-label="Container memory: ${esc(fmtMB(parts[0]))} anonymous, ${esc(fmtMB(parts[1]))} file, ${esc(fmtMB(parts[2]))} shared"><span class="memory-anon" style="width:${widths[0]}%"></span><span class="memory-file" style="width:${widths[1]}%"></span><span class="memory-shmem" style="width:${widths[2]}%"></span></div><ul class="legend"><li><span class="legend-swatch" style="--swatch:var(--accent)"></span>Anon <strong>${esc(fmtMB(parts[0]))}</strong></li><li><span class="legend-swatch" style="--swatch:var(--info)"></span>File <strong>${esc(fmtMB(parts[1]))}</strong></li><li><span class="legend-swatch" style="--swatch:var(--purple)"></span>Shmem <strong>${esc(fmtMB(parts[2]))}</strong></li></ul><dl class="stat-list" style="margin-top:var(--space-4)">${statRow("Cgroup total", `<strong>${esc(fmtMB(total))}</strong>`)}${statRow("Container limit", esc(fmtMB(container.limit_mb)))}</dl>`;
+        } else {
+          containerContent = emptyState("No cgroup split", "Container memory accounting is not reported on this host.", "memory");
+        }
+        $("cluster-content").innerHTML = `
+          <div class="cluster-ribbon">
+            <div class="cluster-ribbon-main">${icon("workers", "icon-lg")}<div><strong>${esc(fmtInt(workers))} render ${workers === 1 ? "worker" : "workers"} reporting</strong><p>Fresh process pulses aggregated into one fleet view.</p></div></div>
+            <div class="rss-stats" aria-label="Worker resident memory"><div class="rss-stat"><span>RSS sum</span><strong>${esc(fmtMB(rss.sum))}</strong></div><div class="rss-stat"><span>Minimum</span><strong>${esc(fmtMB(rss.min))}</strong></div><div class="rss-stat"><span>Maximum</span><strong>${esc(fmtMB(rss.max))}</strong></div></div>
+          </div>
+          <div class="cluster-grid">
+            <section class="subpanel" aria-label="Container memory"><h3 class="subpanel-title">Container memory split</h3>${containerContent}</section>
+            <section class="subpanel" aria-label="Cluster requests"><h3 class="subpanel-title">Request plane</h3><dl class="stat-list">${statRow("Total requests", `<strong>${esc(fmtInt(requests.total_requests))}</strong>`, true)}${statRow("Geometry hit rate", `<span class="text-accent">${esc(fmtPctRatio(requests.hit_rate))}</span>`)}${statRow("Cache hits / misses", `${esc(fmtInt(requests.cache_hits))} / ${esc(fmtInt(requests.cache_misses))}`)}${statRow("Fast-path responses", esc(fmtInt(requests.fast_path_total)))}${statRow("Hot-tile activity", esc(fmtInt(requests.hot_tiles)))}</dl><div class="latency-grid"><div class="latency-item"><span>Request</span><strong>${esc(fmtMs(latency.avg_request_ms))}</strong></div><div class="latency-item"><span>Compute</span><strong>${esc(fmtMs(latency.avg_compute_ms))}</strong></div><div class="latency-item"><span>Present</span><strong>${esc(fmtMs(latency.avg_present_ms))}</strong></div></div></section>
+            <section class="subpanel" aria-label="Cluster cache and coordinate aggregates"><h3 class="subpanel-title">Fleet cache &amp; coordinates</h3><dl class="stat-list" style="margin-bottom:var(--space-4)">${statRow("Cluster tile entries", `<strong>${esc(fmtInt(tileCache.entries))}</strong>`)}${statRow("Cluster tile memory", esc(fmtMB(tileCache.used_mb)))}</dl>${coordRows(coord.caches)}<div class="divider"></div><h4 class="subpanel-title">Shared coordinate store</h4>${isObject(coord.store) ? `<dl class="stat-list">${statRow("Hit ratio", `<span class="text-accent">${esc(fmtPctRatio(ratioFromHits(coord.store.hits, coord.store.misses)))}</span>`)}${statRow("Entries / bytes", `${esc(fmtInt(coord.store.entries))} / ${esc(fmtBytes(coord.store.bytes))}`)}${statRow("Hits / misses", `${esc(fmtInt(coord.store.hits))} / ${esc(fmtInt(coord.store.misses))}`)}${statRow("Publishes", esc(fmtInt(coord.store.publishes)))}</dl>` : `<p class="muted-note">No shared-store aggregate reported.</p>`}</section>
+          </div>`;
+      }
+
+      function renderCoordinates(data) {
+        const coord = object(data.coord_caches);
+        const entries = Object.entries(object(coord.caches));
+        const maxSize = finite(coord.max_size);
+        $("coordinate-content").innerHTML = `<div class="coordinate-layout"><section class="subpanel" aria-label="Worker coordinate cache table"><h3 class="subpanel-title">Projection functions <span class="muted-note">${maxSize === null ? "" : `· ${esc(fmtInt(maxSize))} entries max each`}</span></h3>${coordRows(coord.caches)}${entries.length ? `<p class="muted-note" style="margin-top:var(--space-3)">Hit ratios are calculated from process-local hits and misses.</p>` : ""}</section><aside class="subpanel store-card" aria-label="Worker shared coordinate store"><h3 class="subpanel-title">Shared on-disk store</h3>${storeStats(coord.store)}</aside></div>`;
+      }
+
+      function renderMemory(data) {
+        const memory = object(data.memory);
+        const breakdown = object(memory.breakdown);
+        const resident = finite(memory.resident_mb, 0);
+        const pct = finite(memory.usage_pct, resident > 0 && finite(memory.limit_mb, 0) > 0 ? resident / memory.limit_mb * 100 : 0);
+        const gaugeColor = pct >= 90 ? "var(--danger)" : pct >= 75 ? "var(--warning)" : "var(--accent)";
+        const excluded = new Set(["coord_store_entries", "coord_store_mb"]);
+        const entries = Object.entries(breakdown).filter(([key, value]) => key.endsWith("_mb") && !excluded.has(key) && finite(value) !== null).sort((a, b) => finite(b[1], 0) - finite(a[1], 0));
+        const bars = entries.length ? `<ul class="bar-list">${entries.map(([key, value], index) => barRow(humanize(key), fmtMB(value), resident > 0 ? finite(value, 0) / resident * 100 : 0, index)).join("")}</ul>` : emptyState("No memory breakdown", "Component allocation details were not included in this sample.", "memory");
+        const sharedStore = finite(breakdown.coord_store_mb, 0) > 0 || finite(breakdown.coord_store_entries, 0) > 0 ? `<p class="muted-note" style="margin-top:var(--space-4)">Shared coordinate store: ${esc(fmtMB(breakdown.coord_store_mb))} across ${esc(fmtInt(breakdown.coord_store_entries))} entries; disk-backed pages are excluded from RSS component shares.</p>` : "";
+        $("memory-content").innerHTML = `<div class="gauge-layout"><div class="gauge" style="--gauge-value:${clamp(pct)}%;--gauge-color:${gaugeColor}" role="img" aria-label="Memory usage ${esc(fmtPct(pct))}"><div class="gauge-content"><strong class="gauge-value">${esc(fmtPct(pct))}</strong><span class="gauge-label">of limit</span></div></div><dl class="gauge-stats"><div><dt class="big-stat-label">Resident set size</dt><dd class="big-stat-value">${esc(fmtMB(memory.resident_mb))}</dd><dd class="big-stat-note">Private process memory</dd></div><div><dt class="big-stat-label">Detected memory limit</dt><dd class="big-stat-value">${esc(fmtMB(memory.limit_mb))}</dd><dd class="big-stat-note">Host or cgroup ceiling</dd></div></dl></div><div class="breakdown-title">Component allocation <span>Share of process RSS</span></div>${bars}${sharedStore}`;
+      }
+
+      function renderFrames(data) {
+        const frames = object(data.frames);
+        const count = finite(frames.count, 0);
+        const max = Math.max(0, finite(frames.max, 0));
+        const age = finite(frames.latest_age_seconds);
+        const ageTone = age !== null && age > 1200 ? "text-danger" : age !== null && age > 720 ? "text-warning" : "text-ok";
+        $("frames-badge").outerHTML = badge(count > 0 ? "Receiving" : "No frames", count > 0 ? "ok" : "warning").replace('class="badge ', 'id="frames-badge" class="badge ');
+        const regions = Object.entries(object(frames.per_region)).sort((a, b) => finite(b[1], 0) - finite(a[1], 0) || a[0].localeCompare(b[0]));
+        const regionMax = Math.max(1, ...regions.map(([, value]) => finite(value, 0)));
+        const regionBars = regions.length ? `<ul class="bar-list">${regions.map(([name, value], index) => barRow(name, `${fmtInt(value)} frames`, finite(value, 0) / regionMax * 100, index)).join("")}</ul>` : emptyState("No regional inventory", "Enabled radar regions will appear after pipeline initialization.", "radar");
+        $("frames-content").innerHTML = `<div class="frame-summary"><div class="frame-stat"><span>Frames held</span><strong>${esc(fmtInt(count))} <span class="muted-note">/ ${esc(fmtInt(max))}</span></strong></div><div class="frame-stat"><span>Latest age</span><strong class="${ageTone}">${esc(fmtAge(age))}</strong></div><div class="frame-stat"><span>Regions reporting</span><strong>${esc(fmtInt(regions.filter(([, value]) => finite(value, 0) > 0).length))} <span class="muted-note">/ ${esc(fmtInt(regions.length))}</span></strong></div></div><div class="progress-track" role="img" aria-label="${esc(fmtInt(count))} of ${esc(fmtInt(max))} frame slots used"><div class="progress-fill" style="width:${max > 0 ? clamp(count / max * 100) : 0}%"></div></div><div class="frame-times" style="margin-top:var(--space-4)"><div class="frame-time"><span>Newest observation</span><time>${esc(fmtEpoch(frames.latest))}</time></div><div class="frame-time"><span>Oldest observation</span><time>${esc(fmtEpoch(frames.oldest))}</time></div></div><div class="breakdown-title">Frames by region <span>Current ring-buffer inventory</span></div>${regionBars}`;
+      }
+
+      function renderTileCache(data) {
+        const cache = object(data.tile_cache);
+        const used = finite(cache.used_mb, 0);
+        const max = finite(cache.max_mb, 0);
+        const pct = max > 0 ? used / max * 100 : 0;
+        const kinds = [
+          ["Geometry", "geometry"], ["Present", "present"], ["Overlay", "overlay"], ["Window", "window"], ["Satellite", "satellite"]
+        ];
+        $("tile-cache-content").innerHTML = `<dl class="stat-list">${statRow("Cache utilization", `<strong>${esc(fmtMB(used))}</strong> <span class="muted-note">of ${esc(fmtMB(max))}</span>`, true)}${statRow("Total entries", `<strong>${esc(fmtInt(cache.entries))}</strong>`)}${statRow("Capacity used", esc(fmtPct(pct)))}</dl><div class="progress-track" style="margin-top:var(--space-4)" role="img" aria-label="Tile cache ${esc(fmtPct(pct))} full"><div class="progress-fill" style="width:${clamp(pct)}%"></div></div><div class="cache-kinds">${kinds.map(([label, key]) => `<div class="cache-kind"><span class="cache-kind-label">${esc(label)}</span><strong class="cache-kind-value">${esc(fmtInt(cache[`${key}_entries`]))}</strong><span class="cache-kind-note">${esc(fmtBytes(cache[`${key}_bytes`]))}</span></div>`).join("")}</div><p class="muted-note" style="margin-top:var(--space-4)">Geometry is shared by visual variants; present, overlay, window, and satellite entries hold request-specific renders.</p>`;
+      }
+
+      function renderSources(data) {
+        const sources = object(data.sources);
+        const regions = array(data.enabled_regions).filter((region) => typeof region === "string");
+        const palette = isObject(data.color_schemes) ? data.color_schemes : null;
+        const blending = sources.cacomp_msc_blending;
+        $("sources-content").innerHTML = `<div class="source-group"><h4>Radar ingestion</h4><dl class="stat-list">${statRow("North America", `<code>${esc(text(sources.na_source, "not reported"))}</code>`)}${statRow("Canada", `<code>${esc(text(sources.ca_source, "not reported"))}</code>`)}${statRow("CACOMP MSC blending", blending === null || blending === undefined ? badge("Not applicable", "neutral") : badge(blending ? "Active" : "Inactive", blending ? "ok" : "warning"))}</dl></div><div class="source-group"><h4>Enabled regions · ${esc(fmtInt(regions.length))}</h4>${regions.length ? `<ul class="chip-list">${regions.map((region) => `<li class="chip chip-accent">${esc(region)}</li>`).join("")}</ul>` : `<p class="muted-note">No enabled regions reported.</p>`}</div><div class="source-group"><h4>Applied color palette</h4>${palette ? `<dl class="stat-list">${statRow("Version", `<code class="text-accent">${esc(text(palette.version))}</code>`)}${statRow("Last status", esc(text(palette.last_status)))}${statRow("Fetched", esc(fmtEpoch(palette.fetched_at)))}</dl><p class="muted-note" style="margin-top:var(--space-2);overflow-wrap:anywhere">${esc(text(palette.source, "Source not reported"))}</p>` : `<p class="muted-note">No external palette section reported. The packaged scheme set remains available.</p>`}</div>`;
+      }
+
+      function renderNwp(data) {
+        const grids = Object.entries(data).filter(([key, value]) => key.endsWith("_grid") && isObject(value)).sort(([a], [b]) => a.localeCompare(b));
+        $("nwp-count").outerHTML = badge(`${grids.length} ${grids.length === 1 ? "grid" : "grids"}`, grids.length ? "info" : "neutral").replace('class="badge ', 'id="nwp-count" class="badge ');
+        const cards = grids.length ? `<div class="nwp-grid">${grids.map(([slug, grid]) => {
+          const loaded = grid.loaded === true;
+          const enabled = grid.enabled !== false;
+          const ifsStyle = Object.prototype.hasOwnProperty.call(grid, "timesteps") || Object.prototype.hasOwnProperty.call(grid, "reference_time");
+          const title = humanize(slug);
+          return `<section class="nwp-card" data-grid="${esc(slug)}"><div class="nwp-card-head"><div><h4 class="nwp-name">${esc(title)}</h4><p class="nwp-type">${esc(slug)} · ${ifsStyle ? "global grid" : "regional chain grid"}</p></div>${badge(loaded ? "Loaded" : enabled ? "Not loaded" : "Disabled", loaded ? "ok" : enabled ? "warning" : "neutral")}</div><div class="nwp-stats"><div class="nwp-stat"><span>Enabled</span><strong>${grid.enabled === undefined ? "Not reported" : grid.enabled ? "Yes" : "No"}</strong></div><div class="nwp-stat"><span>${ifsStyle ? "Timesteps" : "Frames"}</span><strong>${esc(fmtInt(ifsStyle ? grid.timesteps : grid.frames))}</strong></div><div class="nwp-stat" style="grid-column:1/-1"><span>${ifsStyle ? "Reference time" : "Latest run"}</span><strong>${esc(ifsStyle ? fmtEpoch(grid.reference_time) : text(grid.latest_run, "Not reported"))}</strong></div></div></section>`;
+        }).join("")}</div>` : emptyState("No NWP grids advertised", "No top-level keys ending in _grid were found in this health sample.", "cloud");
+        const sources = array(object(data.nwp_chain).sources).filter((source) => typeof source === "string");
+        const chain = sources.length ? `<ol class="chain-list">${sources.map((source) => `<li><code>${esc(source)}</code></li>`).join("")}</ol>` : `<p class="muted-note">No model fallback sources reported.</p>`;
+        $("nwp-content").innerHTML = `${cards}<div class="chain-block"><h4 class="chain-title">NWP chain · narrowest domain first</h4>${chain}</div>`;
+      }
+
+      function renderNowcast(data) {
+        const nowcast = object(data.nowcast);
+        if (nowcast.enabled === false) {
+          $("nowcast-content").innerHTML = `${enabledBadge(false)}<div style="margin-top:var(--space-4)">${emptyState("Nowcasting disabled", "Radar extrapolation and forecast-frame generation are turned off.", "activity")}</div>`;
+          return;
+        }
+        const frames = array(nowcast.frames).map(validEpoch).filter((value) => value !== null);
+        $("nowcast-content").innerHTML = `<div class="nowcast-hero"><div><div class="nowcast-count">${esc(fmtInt(nowcast.count ?? frames.length))}</div><p class="nowcast-caption">forecast frames in memory</p></div>${enabledBadge(true)}</div>${frames.length ? `<div class="timeline" role="img" aria-label="${frames.length} nowcast frames from ${esc(fmtEpoch(frames[0]))}">${frames.map(() => `<span class="timeline-slot"></span>`).join("")}</div><div class="frame-time"><span>Forecast horizon</span><time>${esc(fmtEpoch(frames[frames.length - 1]))}</time></div>` : `<div style="margin-bottom:var(--space-4)">${emptyState("No forecast frames", "The nowcast store is enabled but has no generated timestamps.", "clock")}</div>`}<dl class="stat-list" style="margin-top:var(--space-4)">${statRow("Optical-flow fields", esc(fmtInt(nowcast.flows)))}${statRow("NWP flow available", nowcast.nwp_flow ? badge("Available", "ok") : badge("Unavailable", "neutral"))}${statRow("Motion arrows", nowcast.arrow_flow_enabled ? badge("Enabled", "ok") : badge("Disabled", "neutral"))}</dl>`;
+      }
+
+      function renderSatellite(data) {
+        const satellite = object(data.satellite);
+        if (satellite.enabled === false) {
+          $("satellite-content").innerHTML = `${enabledBadge(false)}<div style="margin-top:var(--space-4)">${emptyState("Satellite layer disabled", "GMGSI ingestion and satellite compositing are turned off.", "satellite")}</div>`;
+          return;
+        }
+        const channels = Object.entries(object(satellite.channels));
+        $("satellite-content").innerHTML = `<div style="margin-bottom:var(--space-4)">${enabledBadge(true)}</div>${channels.length ? `<ul class="channel-list">${channels.map(([name, raw]) => {
+          const channel = object(raw);
+          return `<li class="channel"><div class="channel-head"><strong class="channel-name">${esc(name)}</strong>${badge(channel.loaded ? "Loaded" : "Empty", channel.loaded ? "ok" : "warning")}</div><div class="channel-meta"><span>${esc(fmtInt(channel.frames))} frames</span><span>${channel.latest ? esc(relativeEpoch(channel.latest)) : "No latest frame"}</span></div><div class="muted-note" style="margin-top:var(--space-1)">${esc(fmtEpoch(channel.latest))}</div></li>`;
+        }).join("")}</ul>` : emptyState("No satellite channels", "The satellite layer is enabled but no channel grids are reported.", "satellite")}`;
+      }
+
+      function tileCenter(tile) {
+        const z = finite(tile.z, 0);
+        const x = finite(tile.x, 0);
+        const y = finite(tile.y, 0);
+        const n = Math.pow(2, z);
+        const lon = x / n * 360 - 180;
+        const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180 / Math.PI;
+        return { lat, lon };
+      }
+      function fmtCoordinate(value, positive, negative) { return `${Math.abs(value).toFixed(2)}° ${value >= 0 ? positive : negative}`; }
+
+      function renderTraffic(data) {
+        const traffic = object(data.tile_requests);
+        if (state.mapCleanup) { state.mapCleanup(); state.mapCleanup = null; }
+        if (traffic.enabled === false) {
+          $("traffic-content").innerHTML = emptyState("Tile request tracking disabled", "Enable tile tracking to collect worker-local hotspots, zoom distribution, cache outcomes, and latency.", "map");
+          return;
+        }
+        const top = array(traffic.top).filter(isObject).map((tile) => ({ ...tile, center: tileCenter(tile) })).sort((a, b) => finite(b.count, 0) - finite(a.count, 0));
+        const byZoom = Object.entries(object(traffic.by_zoom)).map(([zoom, raw]) => ({ zoom, ...object(raw) })).sort((a, b) => finite(a.zoom, 0) - finite(b.zoom, 0));
+        const cache = object(traffic.cache);
+        const latency = object(traffic.latency);
+        const fastPath = object(traffic.fast_path);
+        const maxZoomRequests = Math.max(1, ...byZoom.map((row) => finite(row.requests, 0)));
+        const reasons = Object.entries(object(fastPath.by_reason)).sort((a, b) => finite(b[1], 0) - finite(a[1], 0));
+        $("traffic-content").innerHTML = `
+          <div class="traffic-summary"><div class="traffic-stat"><span>Tracked requests</span><strong>${esc(fmtInt(traffic.total_requests))}</strong></div><div class="traffic-stat"><span>Tracked tiles</span><strong>${esc(fmtInt(traffic.tracked_tiles))}</strong></div><div class="traffic-stat"><span>Hot tiles · ≥${esc(fmtInt(traffic.hot_threshold))}</span><strong class="text-accent">${esc(fmtInt(traffic.hot_tiles))}</strong></div><div class="traffic-stat"><span>Geometry hit rate</span><strong>${esc(fmtPctRatio(cache.hit_rate))}</strong></div><div class="traffic-stat"><span>Fast-path total</span><strong>${esc(fmtInt(fastPath.total))}</strong></div></div>
+          <div class="traffic-layout">
+            <div class="map-wrap"><canvas id="traffic-map" tabindex="0" role="img" aria-label="Equirectangular world map showing ${top.length} most requested radar tile locations for this worker. Equivalent coordinates are listed in the adjacent table.">Your browser cannot display the hotspot map. Use the adjacent top-tile table.</canvas><span class="map-caption">TOP TILE CENTERS · EQUIRECTANGULAR</span><span class="map-legend">Larger dots = more requests</span><div id="map-tooltip" class="map-tooltip" hidden></div>${top.length ? "" : `<div class="map-empty">No hotspot tiles recorded yet</div>`}</div>
+            <div class="traffic-side"><div class="traffic-table"><table class="compact-table"><caption class="sr-only">Most requested radar tiles for this worker</caption><thead><tr><th scope="col">#</th><th scope="col">Tile z/x/y</th><th scope="col">Center lat / lon</th><th scope="col" class="num">Requests</th></tr></thead><tbody>${top.length ? top.map((tile, index) => `<tr><td><span class="rank">${index + 1}</span></td><td><code>${esc(fmtInt(tile.z))}/${esc(fmtInt(tile.x))}/${esc(fmtInt(tile.y))}</code></td><td class="num">${esc(fmtCoordinate(tile.center.lat, "N", "S"))}<br><span class="muted-note">${esc(fmtCoordinate(tile.center.lon, "E", "W"))}</span></td><td class="num"><strong>${esc(fmtInt(tile.count))}</strong></td></tr>`).join("") : `<tr><td colspan="4"><p class="muted-note" style="padding:var(--space-4)">No top tiles yet. Requests at zoom ${esc(fmtInt(traffic.min_zoom))} and above will populate this view.</p></td></tr>`}</tbody></table></div></div>
+          </div>
+          <div class="traffic-bottom">
+            <section class="subpanel" aria-label="Tile requests by zoom"><h3 class="subpanel-title">Zoom distribution <span class="muted-note">· requests / unique tiles</span></h3>${byZoom.length ? `<div class="zoom-chart">${byZoom.map((row, index) => `<div class="zoom-row"><span class="zoom-label">Z${esc(row.zoom)}</span><div class="bar-track" aria-hidden="true"><div class="bar-fill" style="--bar-size:${clamp(finite(row.requests, 0) / maxZoomRequests * 100)}%;--bar-color:var(${chartColors[index % chartColors.length]})"></div></div><span class="zoom-value">${esc(fmtInt(row.requests))} / ${esc(fmtInt(row.tiles))}</span></div>`).join("")}</div>` : emptyState("No zoom distribution", "Tracked request buckets will appear with tile traffic.", "requests")}</section>
+            <section class="subpanel" aria-label="Worker tile serving performance"><h3 class="subpanel-title">Serving performance</h3><div class="latency-grid" style="margin-top:0"><div class="latency-item"><span>Request avg</span><strong>${esc(fmtMs(latency.avg_request_ms))}</strong></div><div class="latency-item"><span>Compute avg</span><strong>${esc(fmtMs(latency.avg_compute_ms))}</strong></div><div class="latency-item"><span>Present avg</span><strong>${esc(fmtMs(latency.avg_present_ms))}</strong></div></div><dl class="stat-list" style="margin-top:var(--space-4)">${statRow("Request samples", esc(fmtInt(latency.requests)))}${statRow("Compute / present samples", `${esc(fmtInt(latency.computes))} / ${esc(fmtInt(latency.presents))}`)}${statRow("Cache hits / misses", `${esc(fmtInt(cache.hits))} / ${esc(fmtInt(cache.misses))}`)}${statRow("Tracking range", `Z${esc(fmtInt(traffic.min_zoom))}+ · ${esc(fmtInt(traffic.max_entries))} tile cap`)}</dl>${reasons.length ? `<h4 class="subpanel-title" style="margin-top:var(--space-4)">Fast-path reasons</h4><ul class="fast-path-list">${reasons.map(([reason, count]) => `<li><span>${esc(humanize(reason))}</span><strong>${esc(fmtInt(count))}</strong></li>`).join("")}</ul>` : ""}</section>
+          </div>
+          <p class="scope-note">${icon("info", "icon-sm")}<span>Scope: radar-tile requests observed by this serving worker only. Hotspots reset on restart; cluster-wide top-tile rankings are not present in <code>/health</code>.</span></p>`;
+        setupTrafficMap(top);
+      }
+
+      // Compact, hand-simplified land silhouettes keep the map useful without any tile service.
+      const land = [
+        [[-168,72],[-153,70],[-143,61],[-132,56],[-127,50],[-124,42],[-118,33],[-110,29],[-105,22],[-97,17],[-91,18],[-87,21],[-83,23],[-80,26],[-81,31],[-76,35],[-73,41],[-66,45],[-59,51],[-62,57],[-72,61],[-79,67],[-94,72],[-112,74],[-132,71],[-151,73]],
+        [[-98,19],[-91,17],[-88,16],[-86,12],[-83,9],[-79,8],[-77,9],[-82,13],[-86,16],[-90,21]],
+        [[-73,60],[-52,59],[-38,65],[-20,74],[-29,82],[-48,84],[-62,79]],
+        [[-81,12],[-72,11],[-62,8],[-51,3],[-44,-2],[-35,-6],[-39,-18],[-48,-28],[-53,-34],[-58,-39],[-64,-51],[-70,-55],[-74,-46],[-73,-36],[-70,-25],[-76,-14],[-80,-4],[-78,4]],
+        [[-11,36],[-10,44],[-5,48],[-9,54],[-2,58],[6,55],[10,58],[18,56],[24,60],[31,70],[45,69],[60,73],[89,76],[112,73],[139,71],[164,66],[178,65],[170,58],[158,52],[142,49],[132,43],[126,39],[122,31],[121,23],[112,20],[108,12],[104,2],[98,8],[94,18],[88,22],[82,8],[76,9],[72,20],[65,25],[57,26],[51,16],[43,12],[39,20],[34,28],[29,36],[23,37],[18,40],[12,45],[7,44],[2,42],[-5,36]],
+        [[-17,15],[-7,21],[3,27],[13,32],[25,32],[34,28],[43,12],[51,11],[48,3],[41,-5],[40,-15],[35,-25],[28,-33],[18,-35],[12,-25],[8,-16],[1,-5],[-6,4],[-13,9]],
+        [[47,-13],[50,-16],[49,-25],[45,-26],[43,-20]],
+        [[112,-11],[122,-14],[130,-12],[137,-15],[142,-11],[146,-18],[153,-27],[150,-37],[140,-39],[132,-33],[122,-34],[114,-26]],
+        [[-8,50],[-4,58],[0,57],[1,52]], [[129,31],[135,34],[141,41],[145,44],[142,37],[136,33]],
+        [[95,5],[103,0],[106,-6],[102,-5]], [[108,6],[118,4],[119,-3],[112,-4]], [[109,-6],[119,-8],[127,-8],[122,-10],[113,-9]], [[131,-1],[141,-3],[151,-6],[145,-10],[136,-7]],
+        [[166,-35],[174,-37],[178,-42],[173,-43],[169,-40]], [[166,-41],[172,-41],[169,-47],[165,-47]],
+        [[-180,-72],[-150,-73],[-120,-74],[-90,-72],[-60,-75],[-30,-72],[0,-70],[30,-69],[60,-67],[90,-66],[120,-67],[150,-71],[180,-72],[180,-90],[-180,-90]]
+      ];
+
+      function setupTrafficMap(top) {
+        const canvas = $("traffic-map");
+        if (!canvas) return;
+        const wrap = canvas.parentElement;
+        const tooltip = $("map-tooltip");
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        let width = 0;
+        let height = 0;
+        let plotted = [];
+        const css = getComputedStyle(document.documentElement);
+        const color = (token) => css.getPropertyValue(token).trim();
+        const point = (lon, lat) => [(lon + 180) / 360 * width, (90 - lat) / 180 * height];
+        function draw() {
+          const rect = wrap.getBoundingClientRect();
+          width = Math.max(1, rect.width);
+          height = Math.max(1, rect.height);
+          const ratio = Math.min(window.devicePixelRatio || 1, 2);
+          canvas.width = Math.round(width * ratio);
+          canvas.height = Math.round(height * ratio);
+          ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+          ctx.clearRect(0, 0, width, height);
+          ctx.fillStyle = color("--map-bg");
+          ctx.fillRect(0, 0, width, height);
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = color("--map-grid");
+          ctx.globalAlpha = 0.7;
+          for (let lon = -150; lon <= 150; lon += 30) {
+            const [x] = point(lon, 0); ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+          }
+          for (let lat = -60; lat <= 60; lat += 30) {
+            const [, y] = point(0, lat); ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+          }
+          ctx.globalAlpha = 1;
+          land.forEach((polygon) => {
+            ctx.beginPath();
+            polygon.forEach(([lon, lat], index) => { const [x, y] = point(lon, lat); if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); });
+            ctx.closePath(); ctx.fillStyle = color("--map-land"); ctx.fill(); ctx.strokeStyle = color("--map-line"); ctx.stroke();
+          });
+          ctx.fillStyle = color("--map-label");
+          ctx.font = `10px ${color("--font-mono")}`;
+          ctx.textBaseline = "bottom";
+          [-120, -60, 0, 60, 120].forEach((lon) => { const [x] = point(lon, -88); ctx.fillText(`${Math.abs(lon)}°${lon === 0 ? "" : lon > 0 ? "E" : "W"}`, x + 4, height - 4); });
+          const maxCount = Math.max(1, ...top.map((tile) => finite(tile.count, 0)));
+          plotted = [...top].sort((a, b) => finite(b.count, 0) - finite(a.count, 0)).map((tile) => {
+            const [x, y] = point(tile.center.lon, tile.center.lat);
+            const count = finite(tile.count, 0);
+            const radius = 3.5 + Math.sqrt(count / maxCount) * Math.min(10, width / 55);
+            const alpha = 0.42 + 0.58 * Math.sqrt(count / maxCount);
+            ctx.save(); ctx.globalAlpha = alpha; ctx.fillStyle = color("--accent"); ctx.shadowColor = color("--accent"); ctx.shadowBlur = radius * 1.25; ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fill(); ctx.shadowBlur = 0; ctx.globalAlpha = Math.min(1, alpha + 0.2); ctx.strokeStyle = color("--accent-bright"); ctx.lineWidth = 1; ctx.stroke(); ctx.restore();
+            return { tile, x, y, radius };
+          });
+        }
+        function pointerMove(event) {
+          if (!plotted.length) return;
+          const rect = canvas.getBoundingClientRect();
+          const x = event.clientX - rect.left;
+          const y = event.clientY - rect.top;
+          const match = [...plotted].reverse().find((dot) => Math.hypot(dot.x - x, dot.y - y) <= dot.radius + 7);
+          if (!match) { tooltip.hidden = true; return; }
+          tooltip.innerHTML = `<strong>${esc(fmtInt(match.tile.count))} requests</strong>Z${esc(fmtInt(match.tile.z))} · X${esc(fmtInt(match.tile.x))} · Y${esc(fmtInt(match.tile.y))}<br>${esc(fmtCoordinate(match.tile.center.lat, "N", "S"))} · ${esc(fmtCoordinate(match.tile.center.lon, "E", "W"))}`;
+          tooltip.style.left = `${Math.min(width - 150, Math.max(0, match.x))}px`;
+          tooltip.style.top = `${Math.max(55, match.y)}px`;
+          tooltip.hidden = false;
+        }
+        function pointerLeave() { tooltip.hidden = true; }
+        canvas.addEventListener("pointermove", pointerMove);
+        canvas.addEventListener("pointerleave", pointerLeave);
+        draw();
+        let observer = null;
+        if (typeof ResizeObserver === "function") { observer = new ResizeObserver(draw); observer.observe(wrap); }
+        else window.addEventListener("resize", draw);
+        state.mapCleanup = () => { if (observer) observer.disconnect(); else window.removeEventListener("resize", draw); canvas.removeEventListener("pointermove", pointerMove); canvas.removeEventListener("pointerleave", pointerLeave); };
+      }
+
+      function renderFeatures(data) {
+        const cards = [];
+        const alerts = data.alerts;
+        if (!isObject(alerts)) cards.push(unavailableFeature("bell", "Weather alerts"));
+        else if (alerts.enabled === false) cards.push(disabledFeature("bell", "Weather alerts", "WMO CAP alert ingestion and alert overlays are disabled by server configuration."));
+        else cards.push(featureShell("bell", "Weather alerts", esc(fmtInt(alerts.count)), "active alerts", alerts.ingest_ok ? "CAP ingestion is healthy." : "The latest CAP ingest did not complete successfully.", `<dl class="stat-list">${statRow("Ingest status", alerts.ingest_ok ? badge("Healthy", "ok") : badge("Failing", "danger"))}${statRow("Last updated", esc(fmtEpoch(alerts.last_updated)))}${statRow("Observed", esc(relativeEpoch(alerts.last_updated)))}</dl>`, alerts.ingest_ok ? "ok" : "warning"));
+
+        const cells = data.storm_cells;
+        if (!isObject(cells)) cards.push(unavailableFeature("cells", "Storm cells"));
+        else if (cells.enabled === false) cards.push(disabledFeature("cells", "Storm cells", "Convective-cell detection and tile overlays are disabled by server configuration."));
+        else {
+          const regions = Object.entries(object(cells.per_region)).sort((a, b) => finite(b[1], 0) - finite(a[1], 0));
+          cards.push(featureShell("cells", "Storm cells", esc(fmtInt(cells.count)), "detected cells", regions.length ? `Across ${regions.length} radar ${regions.length === 1 ? "region" : "regions"}.` : "No regional detections reported.", `<dl class="stat-list">${statRow("Last updated", esc(fmtEpoch(cells.last_updated)))}${statRow("Observed", esc(relativeEpoch(cells.last_updated)))}</dl>${regions.length ? `<ul class="chip-list">${regions.map(([name, count]) => `<li class="chip">${esc(name)} <strong>${esc(fmtInt(count))}</strong></li>`).join("")}</ul>` : ""}`));
+        }
+
+        const lightning = data.lightning;
+        if (!isObject(lightning)) cards.push(unavailableFeature("bolt", "Lightning"));
+        else if (lightning.enabled === false) cards.push(disabledFeature("bolt", "Lightning", "GOES GLM flash ingestion and lightning tile overlays are disabled by server configuration."));
+        else {
+          const satellites = Object.entries(object(lightning.satellites));
+          const stale = satellites.some(([, raw]) => object(raw).stale === true || object(raw).last_fetch_ok === false);
+          const feedHtml = satellites.length ? `<div class="satellite-feeds">${satellites.map(([name, raw]) => {
+            const feed = object(raw);
+            const staleFeed = feed.stale === true || feed.last_fetch_ok === false;
+            return `<div class="satellite-feed"><div class="satellite-feed-head"><strong class="satellite-feed-name">${esc(name)}</strong><span class="inline-flags">${badge(feed.stale ? "Stale" : "Fresh", feed.stale ? "warning" : "ok")}${feed.last_fetch_ok === false ? badge("Fetch failed", "danger") : ""}</span></div><div class="satellite-feed-meta">${esc(text(feed.bucket, "Bucket not reported"))} · last event ${esc(fmtEpoch(feed.last_e))}</div>${feed.last_key ? `<details class="details-disclosure"><summary>Last object key</summary><pre>${esc(feed.last_key)}</pre></details>` : ""}</div>`;
+          }).join("")}</div>` : "";
+          cards.push(featureShell("bolt", "Lightning", esc(fmtInt(lightning.points)), "held flashes", stale ? "At least one GLM feed needs attention." : "GOES-East and GOES-West flash window.", `<dl class="stat-list">${statRow("Window start", esc(fmtEpoch(lightning.window_start_s)))}${statRow("Window end", esc(fmtEpoch(lightning.window_end_s)))}${statRow("Ceiling trims", esc(fmtInt(lightning.ceiling_trimmed_total)))}${statRow("Last updated", esc(fmtEpoch(lightning.last_updated)))}${statRow("Artifact version", `<code>${esc(text(lightning.version))}</code>`)}</dl>${feedHtml}`, stale ? "warning" : "ok"));
+        }
+
+        const websocket = data.websocket;
+        if (!isObject(websocket)) cards.push(unavailableFeature("socket", "WebSocket"));
+        else if (websocket.enabled === false) cards.push(disabledFeature("socket", "WebSocket", "The real-time health and weather push channel is not mounted."));
+        else {
+          const topics = Object.entries(object(websocket.topics));
+          cards.push(featureShell("socket", "WebSocket", esc(fmtInt(websocket.connections)), "live connections", `Push endpoint ${esc(text(websocket.path, "not reported"))}`, `<ul class="chip-list">${topics.length ? topics.map(([name, count]) => `<li class="chip">${esc(name)} <strong>${esc(fmtInt(count))}</strong></li>`).join("") : `<li class="muted-note">No topic subscriptions reported.</li>`}</ul>`));
+        }
+
+        const mcp = data.mcp;
+        if (!isObject(mcp)) cards.push(unavailableFeature("terminal", "MCP server"));
+        else if (mcp.enabled === false) cards.push(disabledFeature("terminal", "MCP server", "The Model Context Protocol HTTP transport is disabled by server configuration."));
+        else {
+          const tools = array(mcp.tools).filter((tool) => typeof tool === "string");
+          cards.push(featureShell("terminal", "MCP server", esc(fmtInt(tools.length)), "tools advertised", `Mount ${esc(text(mcp.path, "not reported"))}`, `<dl class="stat-list">${statRow("HTTP transport", mcp.mounted ? badge("Mounted", "ok") : badge("Not mounted", "danger"))}</dl>${tools.length ? `<ul class="chip-list">${tools.map((tool) => `<li class="chip">${esc(tool)}</li>`).join("")}</ul>` : `<p class="muted-note" style="margin-top:var(--space-3)">No MCP tools advertised.</p>`}`, mcp.mounted ? "ok" : "warning"));
+        }
+
+        const radarCache = data.radar_cache;
+        if (!isObject(radarCache)) cards.push(unavailableFeature("archive", "Radar disk cache"));
+        else if (radarCache.enabled === false) cards.push(disabledFeature("archive", "Radar disk cache", "Persistent radar-frame history is disabled; restart recovery uses newly fetched frames."));
+        else cards.push(featureShell("archive", "Radar disk cache", esc(fmtInt(radarCache.files)), "cached files", `${esc(fmtMB(radarCache.used_mb))} of persistent frame history.`, `<dl class="stat-list">${statRow("Newest cached frame", esc(fmtEpoch(radarCache.newest_ts)))}${statRow("Oldest cached frame", esc(fmtEpoch(radarCache.oldest_ts)))}${statRow("Disk used", esc(fmtMB(radarCache.used_mb)))}</dl>`));
+
+        $("feature-grid").innerHTML = cards.join("");
+      }
+
+      function renderDashboard(data) {
+        const errors = [];
+        const renderers = [
+          ["summary", () => renderSummary(data)],
+          ["cluster", () => renderCluster(data)],
+          ["coordinate caches", () => renderCoordinates(data)],
+          ["memory", () => renderMemory(data)],
+          ["frames", () => renderFrames(data)],
+          ["tile cache", () => renderTileCache(data)],
+          ["sources", () => renderSources(data)],
+          ["NWP grids", () => renderNwp(data)],
+          ["nowcast", () => renderNowcast(data)],
+          ["satellite", () => renderSatellite(data)],
+          ["tile traffic", () => renderTraffic(data)],
+          ["features", () => renderFeatures(data)]
+        ];
+        renderers.forEach(([name, renderer]) => {
+          try { renderer(); }
+          catch (error) {
+            console.error(`LibreWXR dashboard: failed to render ${name}`, error);
+            errors.push(name);
+          }
+        });
+        state.data = data;
+        return errors;
+      }
+
+      function updateAge() {
+        if (!state.lastSuccess) {
+          $("data-age").textContent = state.inFlight ? "Fetching health data" : "Waiting for data";
+          return;
+        }
+        const seconds = Math.max(0, Math.floor((Date.now() - state.lastSuccess) / 1000));
+        const age = seconds < 2 ? "just now" : seconds < 60 ? `${seconds}s ago` : `${Math.floor(seconds / 60)}m ${seconds % 60}s ago`;
+        $("data-age").textContent = state.stale ? `Stale · ${age}` : `Updated ${age}`;
+        $("data-age").title = `Last successful sample: ${new Date(state.lastSuccess).toISOString()}`;
+        $("sample-state").textContent = state.stale ? "Last good data" : Number($("refresh-interval").value) === 0 ? "Manual polling" : "Live telemetry";
+      }
+
+      function showError(message) {
+        state.stale = true;
+        document.body.classList.add("is-stale");
+        if (!state.data) {
+          $("status-card").classList.add("is-degraded");
+          $("status-card").innerHTML = `<div class="status-top"><span class="status-orb">${icon("alert", "icon-lg")}</span><div><p class="status-label">Server status</p><h2 class="status-headline">Health unavailable</h2></div></div><div class="status-meta"><span class="meta-chip">No successful sample received</span></div>`;
+        }
+        $("error-message").textContent = `${message} ${state.data ? "Showing the last successful sample; no data has been cleared." : "The dashboard will retry without clearing this page."}`;
+        $("error-banner").hidden = false;
+        updateAge();
+      }
+      function clearError() {
+        state.stale = false;
+        document.body.classList.remove("is-stale");
+        $("error-banner").hidden = true;
+      }
+      function scheduleRefresh() {
+        window.clearTimeout(state.timer);
+        const seconds = Number($("refresh-interval").value);
+        if (seconds > 0) state.timer = window.setTimeout(() => refreshHealth(false), seconds * 1000);
+        updateAge();
+      }
+      async function refreshHealth(manual = false) {
+        if (state.inFlight) return;
+        state.inFlight = true;
+        const button = $("refresh-button");
+        button.disabled = true;
+        button.classList.add("is-loading");
+        button.setAttribute("aria-busy", "true");
+        updateAge();
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 15000);
+        try {
+          const response = await fetch("/health", { method: "GET", headers: { "Accept": "application/json" }, cache: "no-store", signal: controller.signal });
+          if (!response.ok) throw new Error(`Server returned HTTP ${response.status}.`);
+          let payload;
+          try { payload = await response.json(); }
+          catch (_) { throw new Error("The health response was not valid JSON."); }
+          if (!isObject(payload) || (payload.status !== "ok" && payload.status !== "degraded")) throw new Error("The health response was malformed; a valid status and object payload are required.");
+          const sectionErrors = renderDashboard(payload);
+          state.lastSuccess = Date.now();
+          clearError();
+          if (sectionErrors.length) showError(`Some ${sectionErrors.join(", ")} values could not be rendered.`);
+          $("refresh-announcement").textContent = manual ? `Health data refreshed. ${Object.keys(payload).length} top-level fields received.` : "";
+        } catch (error) {
+          const message = error.name === "AbortError" ? "The request timed out after 15 seconds." : text(error.message, "The server could not be reached.");
+          showError(message);
+          if (manual) $("refresh-announcement").textContent = `Health refresh failed. ${message}`;
+        } finally {
+          window.clearTimeout(timeout);
+          state.inFlight = false;
+          button.disabled = false;
+          button.classList.remove("is-loading");
+          button.removeAttribute("aria-busy");
+          scheduleRefresh();
+        }
+      }
+
+      $("refresh-button").addEventListener("click", () => refreshHealth(true));
+      $("refresh-interval").addEventListener("change", () => {
+        window.clearTimeout(state.timer);
+        if (!state.inFlight && Number($("refresh-interval").value) > 0) refreshHealth(false);
+        else scheduleRefresh();
+      });
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden && state.lastSuccess) {
+          const interval = Number($("refresh-interval").value);
+          if (interval > 0 && Date.now() - state.lastSuccess > interval * 1000) refreshHealth(false);
+        }
+      });
+      window.addEventListener("pagehide", () => { window.clearTimeout(state.timer); if (state.mapCleanup) state.mapCleanup(); });
+      window.setInterval(updateAge, 1000);
+      refreshHealth(false);
+    })();
+  </script>
+</body>
+</html>

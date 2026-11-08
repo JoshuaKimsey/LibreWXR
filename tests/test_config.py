@@ -182,3 +182,33 @@ def test_websocket_env_overrides(monkeypatch):
     s = _fresh_settings(monkeypatch, mode="multi")
     assert s.websocket_enabled is False
     assert s.websocket_path == "/custom/ws"
+
+
+# ---------------------------------------------------------------------------
+# Monitoring endpoint settings (dashboard + Prometheus metrics)
+# ---------------------------------------------------------------------------
+
+def test_dashboard_metrics_defaults(monkeypatch):
+    """The dashboard and metrics endpoints are on by default."""
+    monkeypatch.delenv("LIBREWXR_DASHBOARD_ENABLED", raising=False)
+    monkeypatch.delenv("LIBREWXR_DASHBOARD_PATH", raising=False)
+    monkeypatch.delenv("LIBREWXR_METRICS_ENABLED", raising=False)
+    monkeypatch.delenv("LIBREWXR_METRICS_PATH", raising=False)
+    s = _fresh_settings(monkeypatch, mode="multi")
+    assert s.dashboard_enabled is True
+    assert s.dashboard_path == "/dashboard"
+    assert s.metrics_enabled is True
+    assert s.metrics_path == "/metrics"
+
+
+def test_dashboard_metrics_env_overrides(monkeypatch):
+    """LIBREWXR_DASHBOARD_* / LIBREWXR_METRICS_* drive enable + mount path."""
+    monkeypatch.setenv("LIBREWXR_DASHBOARD_ENABLED", "false")
+    monkeypatch.setenv("LIBREWXR_DASHBOARD_PATH", "/x")
+    monkeypatch.setenv("LIBREWXR_METRICS_ENABLED", "false")
+    monkeypatch.setenv("LIBREWXR_METRICS_PATH", "/y")
+    s = _fresh_settings(monkeypatch, mode="multi")
+    assert s.dashboard_enabled is False
+    assert s.dashboard_path == "/x"
+    assert s.metrics_enabled is False
+    assert s.metrics_path == "/y"

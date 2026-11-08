@@ -66,6 +66,18 @@ class Settings(BaseSettings):
     websocket_enabled: bool = True
     websocket_path: str = "/v2/ws"
 
+    # Operational monitoring endpoints.  ``dashboard_path`` serves the
+    # self-contained health dashboard page (a single offline HTML asset
+    # that polls /health client-side); ``metrics_path`` serves the same
+    # health snapshot in Prometheus text-exposition format.  Both are
+    # read-only and additive.  Disabling one means its route is not
+    # mounted at all (a request is a plain 404), same as the WebSocket
+    # channel above.
+    dashboard_enabled: bool = True
+    dashboard_path: str = "/dashboard"
+    metrics_enabled: bool = True
+    metrics_path: str = "/metrics"
+
     # Optional direct TLS termination.  Leave both unset (the default) to
     # serve plain HTTP and let a reverse proxy / tunnel handle TLS.  Set
     # both to absolute paths to have uvicorn serve HTTPS itself.
