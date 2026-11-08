@@ -287,14 +287,13 @@ A typical cron entry for hourly updates:
 
 Use `scripts/update.sh --dry-run` to see what the script would do without making any changes; dry-run is always allowed regardless of the sentinel. `--help` prints the full mode list. `--env` reconciles `.env` with `.env.example` on its own (no pull, no restart).
 
-Deployments that build the image locally instead of pulling a published one are still supported: `scripts/update.sh --build` performs a source rebuild (`docker compose up -d --build`) rather than pulling an image, and the legacy `scripts/auto-update.sh` (git pull + rebuild) remains available for now. To move such a deployment onto the published images, see [Transitioning a source-built deployment to the published images](#transitioning-a-source-built-deployment-to-the-published-images) below.
+Deployments that build the image locally instead of pulling a published one are still supported: `scripts/update.sh --build` performs a source rebuild (`docker compose up -d --build`) rather than pulling an image. To move such a deployment onto the published images, see [Transitioning a source-built deployment to the published images](#transitioning-a-source-built-deployment-to-the-published-images) below.
 
 ### Transitioning a source-built deployment to the published images
 
-Deployments that built from source (`docker compose up -d --build`, or
-the legacy `scripts/auto-update.sh` cron) switch to pulled images in
-place - the cache volume, bind mounts, logs, and gitignored
-`docker-compose.override.yml` all survive. One-time steps:
+Deployments that built from source (`docker compose up -d --build`) switch
+to pulled images in place - the cache volume, bind mounts, logs, and
+gitignored `docker-compose.override.yml` all survive. One-time steps:
 
 ```bash
 git pull --ff-only   # brings the compose image: keys and scripts/update.sh
@@ -310,7 +309,10 @@ changed. Verify with `docker compose ps` (both services show the image tag
 you pinned) and `/health`. If anything looks wrong, `docker compose up -d --build`
 drops you straight back onto a local build from the checkout. Finally
 point the cron entry at `scripts/update.sh` (same sentinel opt-in and
-flags) - from then on updates are pulls, not rebuilds.
+flags) - from then on updates are pulls, not rebuilds. Cron entries
+created for the previous source-based updater should be repointed the
+same way; source checkouts that keep building locally can schedule
+`scripts/update.sh --build` instead.
 
 ## Usage
 

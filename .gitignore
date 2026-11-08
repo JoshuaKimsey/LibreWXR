@@ -33,7 +33,7 @@ cache/
 .claude/
 .claude-context/
 
-# Per-host opt-in sentinel for scripts/auto-update.sh
+# Per-host opt-in sentinel for scripts/update.sh
 .auto-update-enabled
 
 # Site (managed separately, not part of the API repo)

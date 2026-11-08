@@ -4,23 +4,20 @@
 #
 # LibreWXR image-based update helper.
 #
-# Image-mode successor to scripts/auto-update.sh. Instead of rebuilding the
-# compose stack from source, this pulls the published container images from
-# ghcr.io/joshuakimsey/librewxr and restarts the stack. The git checkout is
-# still used for docker-compose.yml, .env.example and the scripts, so the
-# git rails below are unchanged: fast-forward-only pulls, dirty-tree
-# refusal, and the .env reconciliation step.
+# Instead of rebuilding the compose stack from source, this pulls the
+# published container images from ghcr.io/joshuakimsey/librewxr and restarts
+# the stack. The git checkout is still used for docker-compose.yml,
+# .env.example and the scripts, so the git rails below apply:
+# fast-forward-only pulls, dirty-tree refusal, and the .env reconciliation
+# step.
 #
 # Safe to run from cron or a systemd timer -- exits quietly when there is
 # nothing to do, uses an flock to prevent concurrent runs, and refuses to
 # touch a dirty working tree.
 #
-# Safety: like auto-update.sh, the default mode is a no-op unless the host
-# explicitly opts in by creating a sentinel file at
-# ${REPO_DIR}/.auto-update-enabled (or by setting LIBREWXR_AUTO_UPDATE=1 in
-# the environment). The sentinel name, the environment variable and the
-# flock path are shared with auto-update.sh, so existing cron entries and
-# the .gitignore entry keep working unchanged. The sentinel is in
+# Safety: the default mode is a no-op unless the host explicitly opts in by
+# creating a sentinel file at ${REPO_DIR}/.auto-update-enabled (or by
+# setting LIBREWXR_AUTO_UPDATE=1 in the environment). The sentinel is in
 # .gitignore so cloning the repo on your development machine will *not*
 # enable auto-updates -- you have to `touch .auto-update-enabled` on the
 # production host you actually want to run this on.
@@ -179,7 +176,7 @@ sync_env_with_example() {
 
     {
         echo
-        echo "# === Added by auto-update on $(date -u +'%Y-%m-%d') ==="
+        echo "# === Added by update.sh on $(date -u +'%Y-%m-%d') ==="
         echo "# Previous .env preserved at .env.bak. Edit values as needed."
         for var in "${missing[@]}"; do
             echo
