@@ -10,6 +10,7 @@ from librewxr.memory import (
     _jittered_thresholds,
     _read_cgroup_memory_limit_bytes,
     _read_cgroup_memory_usage,
+    _read_int,
     _read_stat_fields,
     _read_stat_sum,
     cgroup_memory_snapshot,
@@ -127,6 +128,8 @@ class TestCgroupStatParsing:
         assert usage.anon_bytes == 1_000
         assert usage.file_bytes == 4_000
         assert usage.shmem_bytes == 2_000
+        # memory.current is the kernel's own usage figure, not the stat sum.
+        assert usage.current_bytes == 9_000
 
     def test_cgroup_v1_uses_rss_plus_shmem_as_decision(self, monkeypatch):
         _fake_cgroup_files(
@@ -145,6 +148,8 @@ class TestCgroupStatParsing:
         assert usage.anon_bytes == 3_000
         assert usage.file_bytes == 4_000
         assert usage.shmem_bytes == 2_000
+        # v1's usage file is the equivalent kernel-usage figure.
+        assert usage.current_bytes == 8_000
 
     def test_cgroup_v2_split_fields_default_to_zero_on_raw_fallback(self, monkeypatch):
         """Raw-usage fallback carries no stat split — the new fields stay 0."""
@@ -158,6 +163,21 @@ class TestCgroupStatParsing:
         assert usage.anon_bytes == 0
         assert usage.file_bytes == 0
         assert usage.shmem_bytes == 0
+        # The raw usage file is still the kernel's own usage figure.
+        assert usage.current_bytes == 9_000
+
+    def test_cgroup_v2_current_falls_back_to_decision_when_missing(self, monkeypatch):
+        """A readable stat file with an unreadable memory.current still
+        yields a non-null current figure (the stat sum) so the container
+        block never reports a usable split with a null current."""
+        _fake_cgroup_files(
+            monkeypatch,
+            v2_stat={"anon": 1_000, "shmem": 2_000, "file": 4_000},
+            v2_current=None, v1_stat=None, v1_usage=None,
+        )
+        usage = _read_cgroup_memory_usage()
+        assert usage is not None
+        assert usage.current_bytes == 3_000
 
     def test_cgroup_usage_missing_file_counter_is_not_required(self, monkeypatch):
         """The decision metric only needs anon+shmem; a missing file
@@ -177,6 +197,28 @@ class TestCgroupStatParsing:
         stat = tmp_path / "memory.stat"
         stat.write_text("anon 1000\nfile 999999999\nshmem 2000\nslab 300\n")
         assert _read_stat_fields(stat, ("anon", "shmem")) == {"anon": 1000, "shmem": 2000}
+
+
+class TestMemoryCurrentParsing:
+    """``memory.current`` is a single integer read through ``_read_int``."""
+
+    def test_reads_value(self, tmp_path):
+        current = tmp_path / "memory.current"
+        current.write_text("9000\n")
+        assert _read_int(current) == 9000
+
+    def test_missing_file_yields_none(self, tmp_path):
+        assert _read_int(tmp_path / "nope.current") is None
+
+    def test_garbage_yields_none(self, tmp_path):
+        current = tmp_path / "memory.current"
+        current.write_text("not-a-number\n")
+        assert _read_int(current) is None
+
+    def test_unlimited_sentinel_yields_none(self, tmp_path):
+        current = tmp_path / "memory.current"
+        current.write_text("max\n")
+        assert _read_int(current) is None
 
 
 class TestCgroupFallback:
@@ -203,6 +245,7 @@ class TestCgroupFallback:
         assert usage.total_bytes == 8_000
         assert usage.label == "cgroup"
         assert usage.stat_based is False
+        assert usage.current_bytes == 8_000
 
     def test_returns_none_outside_any_container(self, monkeypatch):
         _fake_cgroup_files(
@@ -259,6 +302,7 @@ class TestCgroupFallback:
                 anon_bytes=1 * 1024 * 1024,
                 file_bytes=5 * 1024 * 1024,
                 shmem_bytes=2 * 1024 * 1024,
+                current_bytes=9 * 1024 * 1024,
             ),
         )
         monitor._check()
@@ -266,8 +310,28 @@ class TestCgroupFallback:
             "anon_mb": 1,
             "file_mb": 5,
             "shmem_mb": 2,
+            "current_mb": 9.0,
             "limit_mb": 1000,
         }
+
+    def test_monitor_current_mb_falls_back_to_total_bytes(self, monkeypatch):
+        """A CgroupUsage built without current_bytes still yields a
+        non-null current_mb (its total_bytes) for the cluster block."""
+        monitor, _, _ = _make_monitor(monkeypatch, limit_mb=1000)
+        monkeypatch.setattr(
+            "librewxr.memory._read_cgroup_memory_usage",
+            lambda: CgroupUsage(
+                3 * 1024 * 1024,
+                9 * 1024 * 1024,
+                "anon+shmem",
+                True,
+                anon_bytes=1 * 1024 * 1024,
+                file_bytes=5 * 1024 * 1024,
+                shmem_bytes=2 * 1024 * 1024,
+            ),
+        )
+        monitor._check()
+        assert monitor.cgroup_memory_mb["current_mb"] == 9.0
 
 
 # ---------------------------------------------------------------------------

@@ -392,6 +392,12 @@
     .kpi-hint { margin-top: var(--space-2); color: var(--faint); font-size: var(--text-2xs); line-height: 1.4; }
     .mini-track { height: 0.1875rem; margin-top: var(--space-3); overflow: hidden; border-radius: var(--radius-round); background: var(--track); }
     .mini-fill { height: 100%; border-radius: inherit; background: var(--accent); transition: width var(--transition-base); }
+    .mini-track.has-markers { position: relative; height: 0.375rem; overflow: visible; }
+    .mini-hard-marker { position: absolute; top: -0.1875rem; bottom: -0.1875rem; width: 2px; background: var(--text); transform: translateX(-1px); }
+    .mini-overflow-marker { position: absolute; top: -0.25rem; right: -0.125rem; width: 0.25rem; height: 0.875rem; border-radius: var(--radius-round); background: var(--danger); box-shadow: 0 0 0 2px var(--bg-raised); }
+    .mini-track.is-overflow { background: var(--danger-wash); }
+    .kpi-context { margin-top: var(--space-2); color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); overflow-wrap: anywhere; }
+    .kpi-overflow-note { margin-top: var(--space-2); color: var(--danger); font-size: var(--text-2xs); font-weight: var(--weight-medium); }
 
     .badge { display: inline-flex; align-items: center; gap: 0.375rem; width: fit-content; min-height: 1.5rem; padding: 0.125rem var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-round); color: var(--muted); background: var(--bg-subtle); font-size: var(--text-2xs); font-weight: var(--weight-semibold); line-height: 1.2; white-space: nowrap; }
     .badge::before { content: ""; width: 0.375rem; height: 0.375rem; border-radius: 50%; background: currentColor; }
@@ -448,8 +454,9 @@
     .memory-split { display: flex; height: 0.625rem; margin: var(--space-4) 0 var(--space-3); overflow: hidden; border-radius: var(--radius-round); background: var(--track); }
     .memory-split > span { min-width: 0; transition: width var(--transition-base); }
     .memory-anon { background: var(--accent); }
-    .memory-file { background: var(--info); }
-    .memory-shmem { background: var(--purple); }
+    .memory-file { position: relative; overflow: hidden; background: var(--info); }
+    .memory-shmem { position: absolute; inset: 0 auto 0 0; background: repeating-linear-gradient(45deg, var(--purple) 0 2px, transparent 2px 4px); pointer-events: none; }
+    .legend-swatch.is-nested { background: repeating-linear-gradient(45deg, var(--purple) 0 2px, var(--bg-inset) 2px 4px); }
     .legend { display: flex; flex-wrap: wrap; gap: var(--space-3); list-style: none; }
     .legend li { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--muted); font-size: var(--text-2xs); }
     .legend-swatch { width: 0.4375rem; height: 0.4375rem; border-radius: 0.125rem; background: var(--swatch); }
@@ -1118,11 +1125,27 @@
           const clusterMemory = object(cluster.memory);
           const container = isObject(clusterMemory.container) ? clusterMemory.container : null;
           if (container) {
-            const parts = ["anon", "file", "shmem"].map((key) => finite(container[`${key}_mb`], 0));
-            const used = parts.reduce((sum, value) => sum + value, 0);
-            const limit = finite(container.limit_mb);
-            const pct = limit !== null && limit > 0 ? used / limit * 100 : null;
-            return result(used, limit, pct, "container (cgroup)", "Whole-container cgroup truth: anonymous, file and shared memory combined.", `${fmtMB(used)} used`, "% cgroup", `Anon ${fmtMB(parts[0])} · File ${fmtMB(parts[1])} · Shmem ${fmtMB(parts[2])}`);
+            const anon = finite(container.anon_mb, 0);
+            const file = finite(container.file_mb, 0);
+            const shmem = finite(container.shmem_mb, 0);
+            const zeroSplit = Math.abs(anon) <= 0.01 && Math.abs(file) <= 0.01 && Math.abs(shmem) <= 0.01;
+            if (!zeroSplit) {
+              const current = finite(container.current_mb);
+              const used = current !== null ? current : anon + file;
+              const limit = finite(container.limit_mb);
+              const pct = limit !== null && limit > 0 ? used / limit * 100 : null;
+              const hardPct = limit !== null && limit > 0 ? anon / limit * 100 : null;
+              const hardReadout = hardPct === null ? fmtMB(anon) : fmtPct(hardPct);
+              const totalReadout = pct === null ? fmtMB(used) : fmtPct(pct);
+              const hint = current !== null ? "Kernel memory.current total; page cache is kernel-reclaimable. Hard usage is anonymous memory only." : "Approximate anonymous + file total; tmpfs/shared is already inside file and is not added again.";
+              const kpi = result(used, limit, pct, "container (cgroup)", hint, `${fmtMB(used)} used`, "% cgroup", `${hardReadout} hard (anon) · ${totalReadout} incl. page cache (reclaimable)`);
+              kpi.color = pct !== null && pct > 100 ? "var(--danger)" : pct !== null && pct >= 100 ? "var(--warning)" : "var(--accent)";
+              kpi.hardPct = hardPct;
+              kpi.overflow = pct !== null && pct > 100;
+              kpi.overflowNote = kpi.overflow ? `Exceeds limit by ${fmtMB(used - limit)}; visual bar capped at 100%.` : "";
+              kpi.context = `Anon ${fmtMB(anon)} · File ${fmtMB(file)} (of which ${fmtMB(shmem)} tmpfs/shared)`;
+              return kpi;
+            }
           }
           const pss = isObject(cluster.workers_pss_mb) ? cluster.workers_pss_mb : null;
           const limit = finite(memory.limit_mb);
@@ -1178,7 +1201,7 @@
           { label: "Tile requests", icon: "requests", value: fmtInt(totalRequests), unit: "", foot: scope, sub: `${fmtInt(cluster ? clusterRequests.hot_tiles : localRequests.hot_tiles)} hot tiles`, progress: null },
           { label: "Geometry hit rate", icon: "cache", value: finite(hitRate) === null ? "—" : fmtPctRatio(hitRate).replace("%", ""), unit: "%", foot: `${fmtMs(requestLatency)} mean request`, sub: cluster ? "Across the fleet" : "This worker", progress: clamp(finite(hitRate, 0) * 100), color: "var(--info)" }
         ];
-        $("summary-kpis").innerHTML = kpis.map((kpi) => `<article class="panel kpi-card"><div><div class="kpi-top"><span class="kpi-label">${esc(kpi.label)}</span>${icon(kpi.icon)}</div><div class="kpi-value">${esc(kpi.value)}${kpi.unit ? `<small>${esc(kpi.unit)}</small>` : ""}</div>${kpi.basis ? `<div class="kpi-basis">${esc(kpi.basis)}</div>` : ""}</div><div><div class="kpi-foot"><span>${esc(kpi.foot)}</span><span>${esc(kpi.sub)}</span></div>${kpi.progress === null ? "" : `<div class="mini-track" aria-hidden="true"><div class="mini-fill" style="width:${kpi.progress}%;background:${kpi.color || "var(--accent)"}"></div></div>`}${kpi.detail ? `<p class="kpi-detail">${esc(kpi.detail)}</p>` : ""}${kpi.hint ? `<p class="kpi-hint">${esc(kpi.hint)}</p>` : ""}</div></article>`).join("");
+        $("summary-kpis").innerHTML = kpis.map((kpi) => `<article class="panel kpi-card"><div><div class="kpi-top"><span class="kpi-label">${esc(kpi.label)}</span>${icon(kpi.icon)}</div><div class="kpi-value">${esc(kpi.value)}${kpi.unit ? `<small>${esc(kpi.unit)}</small>` : ""}</div>${kpi.basis ? `<div class="kpi-basis">${esc(kpi.basis)}</div>` : ""}</div><div><div class="kpi-foot"><span>${esc(kpi.foot)}</span><span>${esc(kpi.sub)}</span></div>${kpi.progress === null ? "" : `<div class="mini-track${kpi.hardPct !== null && kpi.hardPct !== undefined ? " has-markers" : ""}${kpi.overflow ? " is-overflow" : ""}" aria-hidden="true"><div class="mini-fill" style="width:${kpi.progress}%;background:${kpi.color || "var(--accent)"}"></div>${kpi.hardPct !== null && kpi.hardPct !== undefined ? `<span class="mini-hard-marker" style="left:${clamp(kpi.hardPct)}%"></span>` : ""}${kpi.overflow ? `<span class="mini-overflow-marker"></span>` : ""}</div>`}${kpi.detail ? `<p class="kpi-detail">${esc(kpi.detail)}</p>` : ""}${kpi.context ? `<p class="kpi-context">${esc(kpi.context)}</p>` : ""}${kpi.overflowNote ? `<p class="kpi-overflow-note">${esc(kpi.overflowNote)}</p>` : ""}${kpi.hint ? `<p class="kpi-hint">${esc(kpi.hint)}</p>` : ""}</div></article>`).join("");
       }
 
       function coordRows(caches) {
@@ -1230,10 +1253,17 @@
         const workers = finite(cluster.workers_reporting, 0);
         let containerContent;
         if (container) {
-          const parts = ["anon", "file", "shmem"].map((key) => finite(container[`${key}_mb`], 0));
-          const total = parts.reduce((sum, value) => sum + value, 0);
-          const widths = parts.map((value) => total > 0 ? value / total * 100 : 0);
-          containerContent = `<div class="memory-split" role="img" aria-label="Container memory: ${esc(fmtMB(parts[0]))} anonymous, ${esc(fmtMB(parts[1]))} file, ${esc(fmtMB(parts[2]))} shared"><span class="memory-anon" style="width:${widths[0]}%"></span><span class="memory-file" style="width:${widths[1]}%"></span><span class="memory-shmem" style="width:${widths[2]}%"></span></div><ul class="legend"><li><span class="legend-swatch" style="--swatch:var(--accent)"></span>Anon <strong>${esc(fmtMB(parts[0]))}</strong></li><li><span class="legend-swatch" style="--swatch:var(--info)"></span>File <strong>${esc(fmtMB(parts[1]))}</strong></li><li><span class="legend-swatch" style="--swatch:var(--purple)"></span>Shmem <strong>${esc(fmtMB(parts[2]))}</strong></li></ul><dl class="stat-list" style="margin-top:var(--space-4)">${statRow("Cgroup total", `<strong>${esc(fmtMB(total))}</strong>`)}${statRow("Container limit", esc(fmtMB(container.limit_mb)))}</dl>`;
+          const anon = finite(container.anon_mb, 0);
+          const file = finite(container.file_mb, 0);
+          const shmem = finite(container.shmem_mb, 0);
+          const splitTotal = anon + file;
+          const anonWidth = splitTotal > 0 ? anon / splitTotal * 100 : 0;
+          const fileWidth = splitTotal > 0 ? file / splitTotal * 100 : 0;
+          const shmemWidth = file > 0 ? clamp(shmem / file * 100) : 0;
+          const current = finite(container.current_mb);
+          const total = current !== null ? current : splitTotal;
+          const totalLabel = current !== null ? "Cgroup current" : "Anon + file (approx.)";
+          containerContent = `<div class="memory-split" role="img" aria-label="Container split: ${esc(fmtMB(anon))} anonymous; ${esc(fmtMB(file))} file, of which ${esc(fmtMB(shmem))} tmpfs/shared nested inside file"><span class="memory-anon" style="width:${anonWidth}%"></span><span class="memory-file" style="width:${fileWidth}%"><span class="memory-shmem" style="width:${shmemWidth}%"></span></span></div><ul class="legend"><li><span class="legend-swatch" style="--swatch:var(--accent)"></span>Anon <strong>${esc(fmtMB(anon))}</strong></li><li><span class="legend-swatch" style="--swatch:var(--info)"></span>File <strong>${esc(fmtMB(file))}</strong></li><li><span class="legend-swatch is-nested"></span>of which tmpfs/shared <strong>${esc(fmtMB(shmem))}</strong></li></ul><dl class="stat-list" style="margin-top:var(--space-4)">${statRow(totalLabel, `<strong>${esc(fmtMB(total))}</strong>`)}${statRow("Hard (anon)", esc(fmtMB(anon)))}${statRow("Container limit", esc(fmtMB(container.limit_mb)))}</dl>`;
         } else {
           containerContent = emptyState("No cgroup split", "Container memory accounting is not reported on this host.", "memory");
         }

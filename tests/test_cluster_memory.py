@@ -11,6 +11,7 @@ import json
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -236,3 +237,31 @@ class TestClusterPerWorkerMemory:
         resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json()["cluster"] is None
+
+
+class TestClusterContainerMemory:
+    """cluster.memory.container forwards the monitor's MB split verbatim,
+    including the additive kernel-usage ``current_mb``."""
+
+    def test_container_current_mb_flows_to_health(self, cluster_client, monkeypatch):
+        client, _ = cluster_client
+        container = {
+            "anon_mb": 400,
+            "file_mb": 900,
+            "shmem_mb": 120,
+            "current_mb": 1200.5,
+            "limit_mb": 1318,
+        }
+        monkeypatch.setattr(
+            routes,
+            "memory_monitor",
+            SimpleNamespace(cgroup_memory_mb=container),
+        )
+        cluster = client.get("/health").json()["cluster"]
+        assert cluster["memory"]["container"] == container
+
+    def test_container_absent_stays_null(self, cluster_client, monkeypatch):
+        client, _ = cluster_client
+        monkeypatch.setattr(routes, "memory_monitor", None)
+        cluster = client.get("/health").json()["cluster"]
+        assert cluster["memory"]["container"] is None

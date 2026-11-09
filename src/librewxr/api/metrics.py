@@ -515,11 +515,13 @@ def _collect(out: _Families, payload: dict) -> None:
             )
         container = cluster_memory.get("container")
         if isinstance(container, dict):
-            for kind in ("anon", "file", "shmem"):
+            for kind in ("anon", "file", "shmem", "current"):
                 out.add(
                     "librewxr_cluster_container_mb",
                     container.get(f"{kind}_mb"),
-                    "Container cgroup memory split (MB)",
+                    "Container cgroup memory (MB); kind=current is the "
+                    "kernel's own usage figure including page cache and "
+                    "kernel memory",
                     {"kind": kind},
                 )
             out.add(

@@ -147,7 +147,7 @@ NWP source is exported with no change to the exporter.
 | `librewxr_cluster_pipeline_reporting` | | `cluster.pipeline.reporting` (`1` = a fresh pipeline pulse is present) |
 | `librewxr_cluster_pipeline_rss_mb` | | `cluster.pipeline.rss_mb` (only when reporting) |
 | `librewxr_cluster_pipeline_pss_mb` | | `cluster.pipeline.pss_mb` (only when reporting; omitted when `null`) |
-| `librewxr_cluster_container_mb` | `kind` (`anon`, `file`, `shmem`) | `cluster.memory.container.<kind>_mb` |
+| `librewxr_cluster_container_mb` | `kind` (`anon`, `file`, `shmem`, `current`) | `cluster.memory.container.<kind>_mb` (`current` is the kernel's own `memory.current`, page cache and kernel memory included) |
 | `librewxr_cluster_container_limit_mb` | | `cluster.memory.container.limit_mb` |
 | `librewxr_cluster_tile_cache_entries` | | `cluster.tile_cache.entries` |
 | `librewxr_cluster_tile_cache_used_mb` | | `cluster.tile_cache.used_mb` |
@@ -383,10 +383,19 @@ Three figures answer different questions:
   host (network-split deployments), render hosts see
   `reporting: false` -- this is expected, not a failure, and the
   pipeline's memory is simply not observable from the render host.
-- The cgroup container split (`cluster.memory.container`), when present,
+- The cgroup container block (`cluster.memory.container`), when present,
   remains the whole-container truth: it includes every process in the
   container (render workers, sidecars, and their shared page cache) and
-  is not derived from the pulses.
+  is not derived from the pulses. Compute container usage from
+  `current_mb` against `limit_mb`: `current_mb` is the kernel's own
+  `memory.current` reading, so the kernel does the accounting. It
+  includes page cache and kernel memory and therefore runs higher than
+  an anon-only "hard" usage figure; the dashboard distinguishes the two.
+  Do **not** derive usage by summing `anon_mb + file_mb + shmem_mb`: on
+  cgroup v2 `shmem` is a breakdown *within* `file` (tmpfs pages are
+  file-backed), so that sum double-counts shared/tmpfs pages and can
+  exceed 100% of the limit (observed 117% against a real ~91%). The stat
+  counters are exposed for breakdown and diagnostics only.
 
 ## Authentication
 

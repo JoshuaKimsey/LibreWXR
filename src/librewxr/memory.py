@@ -142,6 +142,14 @@ class CgroupUsage:
     ``cache`` / ``shmem``) exposed for the cluster /health aggregation.
     They are 0 on the raw-usage fallback paths where no stat file was
     parsed.
+
+    ``current_bytes`` is the kernel's own usage figure (v2:
+    ``memory.current``; v1: ``memory.usage_in_bytes``) exposed verbatim
+    for the cluster /health container block.  It includes clean page
+    cache and kernel memory, so it runs higher than the anon-only
+    "hard" decision metric.  It falls back to ``total_bytes`` when the
+    usage file itself was unreadable, so a built snapshot always carries
+    a value.
     """
 
     decision_bytes: int
@@ -151,6 +159,7 @@ class CgroupUsage:
     anon_bytes: int = 0
     file_bytes: int = 0
     shmem_bytes: int = 0
+    current_bytes: int | None = None
 
 
 def _read_int(path: Path) -> int | None:
@@ -231,6 +240,7 @@ def _read_cgroup_memory_usage() -> CgroupUsage | None:
             shmem_bytes=v2_stat["shmem"],
             label="anon+shmem",
             stat_based=True,
+            current_bytes=total if total is not None else decision,
         )
     if total is not None:
         return CgroupUsage(
@@ -238,6 +248,7 @@ def _read_cgroup_memory_usage() -> CgroupUsage | None:
             total_bytes=total,
             label="cgroup",
             stat_based=False,
+            current_bytes=total,
         )
 
     # cgroup v1 — decision metric is rss + shmem from memory.stat, with
@@ -256,6 +267,7 @@ def _read_cgroup_memory_usage() -> CgroupUsage | None:
             shmem_bytes=v1_stat["shmem"],
             label="rss+shmem",
             stat_based=True,
+            current_bytes=total if total is not None else decision,
         )
     if total is not None:
         return CgroupUsage(
@@ -263,6 +275,7 @@ def _read_cgroup_memory_usage() -> CgroupUsage | None:
             total_bytes=total,
             label="cgroup",
             stat_based=False,
+            current_bytes=total,
         )
 
     return None
@@ -345,20 +358,29 @@ class MemoryMonitor:
 
     @property
     def cgroup_memory_mb(self) -> dict | None:
-        """Most recent cgroup anon/file/shmem split + limit in MB.
+        """Most recent cgroup anon/file/shmem/current split + limit in MB.
 
         Returns ``None`` outside containers (the per-process psutil
-        fallback carries no cgroup split).  ``limit_mb`` is the monitor's
-        detected container limit, matching the value the /health top-level
-        ``memory.limit_mb`` reports.
+        fallback carries no cgroup split).  ``current_mb`` is the
+        kernel's own ``memory.current`` usage (page cache and kernel
+        memory included) so health consumers can compute usage against
+        the limit without summing stat categories -- ``shmem`` is a
+        breakdown *within* ``file`` on cgroup v2, so ``anon + file +
+        shmem`` double-counts tmpfs/shared pages.  ``limit_mb`` is the
+        monitor's detected container limit, matching the value the
+        /health top-level ``memory.limit_mb`` reports.
         """
         if self._last_cgroup_usage is None:
             return None
         usage = self._last_cgroup_usage
+        current_bytes = usage.current_bytes
+        if current_bytes is None:
+            current_bytes = usage.total_bytes
         return {
             "anon_mb": usage.anon_bytes // (1024 * 1024),
             "file_mb": usage.file_bytes // (1024 * 1024),
             "shmem_mb": usage.shmem_bytes // (1024 * 1024),
+            "current_mb": round(current_bytes / (1024 * 1024), 1),
             "limit_mb": self._limit_mb,
         }
 

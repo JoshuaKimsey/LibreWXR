@@ -593,7 +593,9 @@ class TestHealthCluster:
         # it must carry the full key set.
         container = memory["container"]
         if container is not None:
-            assert set(container) == {"anon_mb", "file_mb", "shmem_mb", "limit_mb"}
+            assert set(container) == {
+                "anon_mb", "file_mb", "shmem_mb", "current_mb", "limit_mb",
+            }
         workers_rss = memory["workers_rss_mb"]
         assert set(workers_rss) == {"sum", "min", "max"}
         assert workers_rss["min"] <= workers_rss["max"]

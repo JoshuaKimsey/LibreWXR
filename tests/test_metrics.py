@@ -38,6 +38,7 @@ def _payload() -> dict:
                     "anon_mb": 100.0,
                     "file_mb": 50.0,
                     "shmem_mb": 5.0,
+                    "current_mb": 160.0,
                     "limit_mb": 4096.0,
                 },
                 "workers_rss_mb": {"sum": 900.0, "min": 400.0, "max": 500.0},
@@ -228,6 +229,7 @@ class TestRenderPrometheus:
         assert "librewxr_cluster_workers_reporting 2" in text
         assert 'librewxr_cluster_workers_rss_mb{stat="sum"} 900.0' in text
         assert 'librewxr_cluster_container_mb{kind="anon"} 100.0' in text
+        assert 'librewxr_cluster_container_mb{kind="current"} 160.0' in text
         assert "librewxr_cluster_container_limit_mb 4096.0" in text
         assert "librewxr_cluster_cache_hits 900" in text
 
@@ -303,6 +305,17 @@ class TestRenderPrometheus:
         # The per-worker list is deliberately not exported (pid churn).
         assert "librewxr_cluster_workers{" not in text
         assert 'pid="' not in text
+
+    def test_cluster_container_current_omitted_when_absent(self):
+        payload = _payload()
+        del payload["cluster"]["memory"]["container"]["current_mb"]
+        text = render_prometheus(payload)
+        assert 'librewxr_cluster_container_mb{kind="current"}' not in text
+        # The existing kinds and limit are unchanged.
+        assert 'librewxr_cluster_container_mb{kind="anon"} 100.0' in text
+        assert 'librewxr_cluster_container_mb{kind="file"} 50.0' in text
+        assert 'librewxr_cluster_container_mb{kind="shmem"} 5.0' in text
+        assert "librewxr_cluster_container_limit_mb 4096.0" in text
 
     def test_cluster_pss_absent_when_null(self):
         payload = _payload()
