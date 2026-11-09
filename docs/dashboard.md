@@ -12,6 +12,7 @@ never disagree.
 - [Configuration](#configuration)
 - [Disabled endpoints](#disabled-endpoints)
 - [Prometheus metrics](#prometheus-metrics)
+- [Tile request history](#tile-request-history)
 - [Scrape guidance](#scrape-guidance)
 - [Per-worker semantics](#per-worker-semantics)
 - [Authentication](#authentication)
@@ -200,6 +201,87 @@ NWP source is exported with no change to the exporter.
 `nwp_chain` is deliberately not exported (it is a static ordered list of
 source names; the dashboard renders it, and a scrape gains nothing from
 an info metric that only changes on redeploy).
+
+## Tile request history
+
+`GET /health/tile-history` serves a bounded in-memory ring of cumulative
+tile-request counter snapshots. The render lifespan's sampling loop
+captures one snapshot every `LIBREWXR_TILE_HISTORY_INTERVAL_S` seconds
+(300 by default) whether or not anyone is viewing the dashboard, and
+keeps the most recent `LIBREWXR_TILE_HISTORY_MAX_ENTRIES` (288 by
+default) - a 24-hour window at the defaults. Nothing is written to disk.
+
+The response is JSON:
+
+```json
+{
+  "enabled": true,
+  "tracking_enabled": true,
+  "interval_s": 300,
+  "max_entries": 288,
+  "snapshots": [
+    {
+      "t": 1762600800,
+      "total_requests": 1234,
+      "cache_hits": 900,
+      "cache_misses": 100,
+      "hit_rate": 0.9,
+      "fast_path_total": 500,
+      "tracked_tiles": 30,
+      "hot_tiles": 3,
+      "avg_request_ms": 12.5,
+      "avg_compute_ms": 8.0,
+      "avg_present_ms": 4.5,
+      "by_zoom": {"7": {"tiles": 20, "requests": 800}},
+      "top": [{"z": 7, "x": 12, "y": 34, "count": 99}]
+    }
+  ]
+}
+```
+
+Snapshots are ordered oldest first. `tracking_enabled` is `false` when
+`LIBREWXR_TILE_TRACKING_ENABLED=false` (the tracker itself is absent),
+in which case `snapshots` is empty.
+
+| Field | Meaning |
+|---|---|
+| `t` | Epoch seconds at capture |
+| `total_requests` | Tracked tile requests (cumulative) |
+| `cache_hits` / `cache_misses` / `hit_rate` | Geometry-cache outcome tallies and their ratio (cumulative) |
+| `fast_path_total` | Fast-path (empty / transparent) responses (cumulative) |
+| `tracked_tiles` / `hot_tiles` | Distinct tracked tiles and how many clear the hot threshold (cumulative) |
+| `avg_request_ms` / `avg_compute_ms` / `avg_present_ms` | Mean latencies over all requests so far (cumulative) |
+| `by_zoom` | Per-zoom tile and request counts, string zoom keys (cumulative) |
+| `top` | Most-requested tiles, same shape as `/health` `tile_requests.top` (cumulative) |
+
+**Every value is cumulative at capture time.** To get an interval (for
+example, requests over the last five minutes), subtract consecutive
+snapshots client-side. Do not treat the values as per-interval deltas.
+
+The endpoint is **per worker**, exactly like `/health`
+`tile_requests.top` / `by_zoom`: each render worker samples and serves its
+own counters. Ask each worker (or use the `cluster` aggregate in
+`/health`/`/metrics`, which is computed from the shared worker pulses).
+
+The ring is **in memory only**: a worker restart resets its window to a
+single fresh snapshot. Long-term history belongs to Prometheus - scrape
+`/metrics` and retain the `librewxr_tile_requests_*` series there.
+
+**Cold-tile eviction caveat.** The underlying per-tile counter table is
+capped at `LIBREWXR_TILE_TRACKING_MAX_ENTRIES` (10,000 by default). When
+it overflows the cache drops cold entries, so a `by_zoom` delta computed
+from two consecutive snapshots can occasionally dip negative (the
+eviction removed more requests from that zoom's bucket than arrived
+between captures). Consumers should clamp interval values at zero.
+
+Four knobs control the endpoint:
+
+| Variable | Default | Description |
+|---|---|---|
+| `LIBREWXR_TILE_HISTORY_ENABLED` | `true` | Mount the endpoint and start the sampling task. When `false`, no route is mounted at all. |
+| `LIBREWXR_TILE_HISTORY_INTERVAL_S` | `300` | Seconds between snapshots. |
+| `LIBREWXR_TILE_HISTORY_MAX_ENTRIES` | `288` | Ring size; window = interval x entries (24h at the defaults). |
+| `LIBREWXR_TILE_HISTORY_PATH` | `/health/tile-history` | URL path the endpoint is served on. Read at import time, so a change needs a restart. |
 
 ## Scrape guidance
 

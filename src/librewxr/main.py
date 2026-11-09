@@ -25,6 +25,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from librewxr.api import routes
 from librewxr.api.dashboard import router as dashboard_router
 from librewxr.api.metrics import router as metrics_router
+from librewxr.api.tile_history import router as tile_history_router
 from librewxr.colors import schemes
 from librewxr.colors.schemes import apply_external_table
 from librewxr.config import resolve_cache_dir, settings
@@ -715,10 +716,47 @@ async def _render_only_lifespan(app: FastAPI):
         TileRequestTracker(
             min_zoom=settings.tile_tracking_min_zoom,
             max_entries=settings.tile_tracking_max_entries,
+            history_max_entries=settings.tile_history_max_entries,
         )
         if settings.tile_tracking_enabled
         else None
     )
+
+    # Tile-request history sampling: snapshot the cumulative counters into
+    # the tracker's bounded ring on a fixed cadence, whether or not anyone
+    # is reading the history endpoint.  Mirrors the worker-pulse loop's
+    # lifecycle (stop event + prompt cancellation); each capture is
+    # individually guarded so one failure never kills the sampler.
+    tile_history_stop = asyncio.Event()
+    tile_history_task = None
+    if tile_request_tracker is not None and settings.tile_history_enabled:
+        async def _tile_history_loop() -> None:
+            try:
+                tile_request_tracker.capture_snapshot()
+            except Exception:
+                logger.exception("Tile-history initial snapshot failed")
+            while not tile_history_stop.is_set():
+                try:
+                    await asyncio.wait_for(
+                        tile_history_stop.wait(),
+                        timeout=settings.tile_history_interval_s,
+                    )
+                    return
+                except asyncio.TimeoutError:
+                    pass
+                try:
+                    tile_request_tracker.capture_snapshot()
+                except Exception:
+                    logger.warning(
+                        "Tile-history snapshot failed", exc_info=True,
+                    )
+
+        tile_history_task = asyncio.create_task(_tile_history_loop())
+        logger.info(
+            "Tile-request history sampling every %d s (ring %d entries)",
+            settings.tile_history_interval_s,
+            settings.tile_history_max_entries,
+        )
 
     routes.frame_store = store
     routes.tile_cache = cache
@@ -929,6 +967,7 @@ async def _render_only_lifespan(app: FastAPI):
     finally:
         poller_stop.set()
         pulse_stop.set()
+        tile_history_stop.set()
         try:
             await poller_task
         except Exception:
@@ -940,6 +979,11 @@ async def _render_only_lifespan(app: FastAPI):
             await pulse_task
         except Exception:
             logger.exception("Pulse loop shutdown error")
+        if tile_history_task is not None:
+            try:
+                await tile_history_task
+            except Exception:
+                logger.exception("Tile-history loop shutdown error")
         await _cancel_coord_warm_task(warm_task)
         await monitor.stop()
         request_executor.shutdown(wait=False)
@@ -1158,6 +1202,9 @@ if settings.dashboard_enabled:
 
 if settings.metrics_enabled:
     app.include_router(metrics_router)
+
+if settings.tile_history_enabled:
+    app.include_router(tile_history_router)
 
 if settings.websocket_enabled:
     app.include_router(ws_router)

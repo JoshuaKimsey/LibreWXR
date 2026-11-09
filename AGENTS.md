@@ -54,6 +54,7 @@ src/librewxr/
     dashboard.py     # GET /dashboard - serves the packaged health dashboard page
     dashboard.html   # Self-contained asset (hot-tile map loads MapLibre GL + OpenFreeMap; offline canvas fallback)
     metrics.py       # GET /metrics - Prometheus text-exposition over the /health payload
+    tile_history.py  # GET /health/tile-history - bounded in-memory tile-request snapshot ring
   sources/                                # Per-source packages (auto-discovered)
     _base.py                              # Protocols + contribution dataclasses
     _helpers.py                           # Shared dBZ encoder + GRIB stderr muzzle
@@ -110,7 +111,7 @@ src/librewxr/
     shared_tile_store.py  # Shared on-disk encoded-tile store (multi-mode only)
     png_palette.py   # Adaptive lossless PNG8 palette encoding for tile output
     coordinates.py   # Tile/region coordinate transforms
-    request_tracker.py  # Hot-tile counters for /health diagnostics
+    request_tracker.py  # Hot-tile counters for /health diagnostics + bounded snapshot history ring
   mcp/
     server.py        # FastMCP server (HTTP app mounted at /mcp + stdio main)
     __main__.py       # stdio entry point (python -m librewxr.mcp)
@@ -229,6 +230,8 @@ All config via `LIBREWXR_*` env vars or `.env` file. Settings defined in `src/li
 **Monitoring:**
 - `LIBREWXR_DASHBOARD_ENABLED` / `LIBREWXR_DASHBOARD_PATH`: serve the self-contained dashboard page at `/dashboard` (default true; false leaves no route at all)
 - `LIBREWXR_METRICS_ENABLED` / `LIBREWXR_METRICS_PATH`: serve Prometheus text-exposition of the `/health` payload at `/metrics` (default true; false leaves no route at all)
+- `LIBREWXR_TILE_HISTORY_ENABLED` / `LIBREWXR_TILE_HISTORY_PATH`: serve the per-worker tile-request snapshot ring at `/health/tile-history` (default true; false leaves no route at all and starts no sampler)
+- `LIBREWXR_TILE_HISTORY_INTERVAL_S` / `LIBREWXR_TILE_HISTORY_MAX_ENTRIES`: snapshot cadence and ring size (defaults 300 s / 288, a 24h window)
 
 **Storm cells:**
 - `LIBREWXR_STORM_CELLS_ENABLED`: storm-cell detection feeding the `?cells=` tile overlay (default true)

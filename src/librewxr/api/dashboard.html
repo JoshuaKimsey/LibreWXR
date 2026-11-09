@@ -581,6 +581,49 @@
     .fast-path-list strong { color: var(--text-soft); font-family: var(--font-mono); font-weight: var(--weight-regular); }
     .scope-note { display: flex; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-4); color: var(--faint); font-size: var(--text-xs); }
     .scope-note .icon { margin-top: 0.125rem; }
+    .section-heading-meta { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); flex-wrap: wrap; }
+    .window-summary { display: inline-flex; align-items: center; min-height: 1.75rem; padding: var(--space-1) var(--space-3); border: 1px solid var(--border-soft); border-radius: var(--radius-round); background: var(--bg-raised); color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); white-space: nowrap; }
+    .traffic-history { padding: var(--space-5); border-bottom: 1px solid var(--border-soft); background: var(--gradient-panel); }
+    .history-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-4); }
+    .history-title { color: var(--text-soft); font-size: var(--text-sm); font-weight: var(--weight-semibold); }
+    .history-subtitle { margin-top: var(--space-1); color: var(--faint); font-size: var(--text-xs); }
+    .history-actions { display: flex; align-items: center; gap: var(--space-2); flex: 0 0 auto; }
+    .history-button { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-height: 2.25rem; padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); color: var(--text-soft); font-size: var(--text-xs); cursor: pointer; transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast); }
+    .history-button:hover:not(:disabled) { border-color: var(--border-strong); background: var(--bg-hover); color: var(--text); }
+    .history-button:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
+    .history-button:disabled { opacity: 0.45; cursor: default; }
+    .history-button.is-playing { border-color: var(--accent-dim); background: var(--accent-wash); color: var(--accent-bright); }
+    .history-chart { position: relative; display: flex; align-items: flex-end; gap: 2px; height: 4.5rem; padding: var(--space-2); overflow: hidden; border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--bg-inset); }
+    .history-chart::before { content: "REQUESTS / INTERVAL"; position: absolute; top: var(--space-1); left: var(--space-2); color: var(--faint); font-family: var(--font-mono); font-size: 0.5625rem; letter-spacing: 0.05em; pointer-events: none; }
+    .history-chart.is-live { box-shadow: inset -2px 0 0 var(--accent-bright); }
+    .history-chart.is-dense { gap: 0; }
+    .history-bar { position: relative; flex: 1 1 0; min-width: 0; height: 100%; padding-top: var(--space-3); }
+    .history-bar::before { content: ""; position: absolute; right: 0; bottom: 0; left: 0; height: var(--history-height); min-height: 2px; border-radius: 2px 2px 0 0; background: var(--accent-dim); opacity: 0.72; transition: background var(--transition-fast), opacity var(--transition-fast); }
+    .history-bar.is-selected::before { background: var(--accent-bright); opacity: 1; box-shadow: 0 0 8px var(--accent-glow); }
+    .history-slider { display: block; width: 100%; height: 1.5rem; margin: var(--space-3) 0 0; accent-color: var(--accent); cursor: pointer; }
+    .history-range-labels { display: flex; justify-content: space-between; gap: var(--space-3); color: var(--faint); font-family: var(--font-mono); font-size: var(--text-2xs); }
+    .history-range-labels span:last-child { color: var(--accent); font-weight: var(--weight-semibold); letter-spacing: 0.06em; }
+    .history-control-footer { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin-top: var(--space-4); }
+    .history-selection { min-width: 0; }
+    .history-selection strong { display: block; color: var(--text-soft); font-size: var(--text-xs); font-weight: var(--weight-medium); }
+    .history-selection time, .history-selection span { display: block; margin-top: var(--space-1); color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); overflow-wrap: anywhere; }
+    .history-switch { display: inline-flex; align-items: center; gap: var(--space-2); flex: 0 0 auto; cursor: pointer; }
+    .history-switch input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+    .history-switch > span { pointer-events: none; }
+    .switch-track { position: relative; width: 2.25rem; height: 1.25rem; flex: 0 0 auto; border: 1px solid var(--border-strong); border-radius: var(--radius-round); background: var(--track); transition: background var(--transition-fast), border-color var(--transition-fast), box-shadow var(--transition-fast); }
+    .switch-track::after { content: ""; position: absolute; top: 0.1875rem; left: 0.1875rem; width: 0.75rem; height: 0.75rem; border-radius: 50%; background: var(--muted); transition: transform var(--transition-fast), background var(--transition-fast); }
+    .history-switch input:checked + .switch-track { border-color: var(--accent-dim); background: var(--accent-wash); }
+    .history-switch input:checked + .switch-track::after { background: var(--accent-bright); transform: translateX(1rem); }
+    .history-switch input:focus-visible + .switch-track { box-shadow: var(--focus-ring); }
+    .history-switch input:disabled ~ * { opacity: 0.45; cursor: default; }
+    .history-switch-copy strong { display: block; color: var(--text-soft); font-size: var(--text-xs); font-weight: var(--weight-medium); }
+    .history-switch-copy small { display: block; margin-top: 0.125rem; color: var(--faint); font-size: var(--text-2xs); }
+    .history-hint { margin-top: var(--space-3); color: var(--faint); font-size: var(--text-2xs); }
+    .history-note { display: flex; align-items: flex-start; gap: var(--space-3); color: var(--muted); }
+    .history-note .icon { margin-top: 0.125rem; color: var(--accent-dim); }
+    .history-note strong { display: block; color: var(--text-soft); font-size: var(--text-sm); font-weight: var(--weight-medium); }
+    .history-note p { margin-top: var(--space-1); font-size: var(--text-xs); }
+    .history-note code { overflow-wrap: anywhere; }
 
     .feature-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--space-4); }
     .feature-card { grid-column: span 2; display: flex; flex-direction: column; min-height: 16rem; padding: var(--space-5); transition: border-color var(--transition-base); }
@@ -669,6 +712,12 @@
       .model-side { grid-template-columns: 1fr; }
       .traffic-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .section-heading { align-items: flex-start; }
+      .traffic-section-heading { flex-direction: column; }
+      .section-heading-meta { justify-content: flex-start; }
+      .history-head, .history-control-footer { align-items: flex-start; flex-direction: column; }
+      .history-actions { width: 100%; }
+      .history-button { flex: 1 1 0; }
+      .history-switch { align-self: stretch; }
       .section-kicker { display: none; }
       .feature-card { grid-column: span 6; min-height: 14rem; }
       .footer-inner { align-items: flex-start; flex-direction: column; justify-content: center; padding-block: var(--space-5); }
@@ -702,6 +751,9 @@
       .cache-kinds { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .nwp-grid { grid-template-columns: 1fr; }
       .traffic-summary { gap: var(--space-2); }
+      .traffic-history { padding: var(--space-4); }
+      .window-summary { white-space: normal; }
+      .history-range-labels span:first-child { max-width: 75%; }
       .traffic-stat { padding: var(--space-3); }
       .traffic-stat strong { font-size: var(--text-md); }
       .zoom-row { grid-template-columns: 2rem minmax(3rem, 1fr) auto; gap: var(--space-2); }
@@ -732,6 +784,8 @@
     <symbol id="i-satellite" viewBox="0 0 24 24"><path d="m9 15-5 5M14 4l6 6M4 10l6-6 4 4-6 6-4-4ZM10 20l4-4 6 4-4 4-6-4Z" transform="translate(0 -2)"/><path d="m8 8 8 8M16 2l6 6-4 4-6-6 4-4Z"/></symbol>
     <symbol id="i-map" viewBox="0 0 24 24"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Z"/><path d="M9 3v15M15 6v15"/></symbol>
     <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></symbol>
     <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></symbol>
     <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></symbol>
     <symbol id="i-bolt" viewBox="0 0 24 24"><path d="m13 2-9 12h7l-1 8 9-12h-7l1-8Z"/></symbol>
@@ -869,11 +923,12 @@
     </section>
 
     <section class="dashboard-section" aria-labelledby="traffic-heading">
-      <div class="section-heading">
+      <div class="section-heading traffic-section-heading">
         <div><h2 id="traffic-heading" class="section-title">Most loaded areas</h2><p class="section-description">Radar-tile traffic for the serving worker; cluster-wide top tiles are not exposed by health telemetry.</p></div>
-        <span class="section-kicker">REQUEST PLANE / 05</span>
+        <div class="section-heading-meta"><span id="traffic-window" class="window-summary" hidden></span><span class="section-kicker">REQUEST PLANE / 05</span></div>
       </div>
       <article class="panel traffic-panel" aria-label="Worker radar tile traffic">
+        <div id="traffic-history" class="traffic-history" hidden></div>
         <div id="traffic-content" class="panel-body"><div class="loading-state"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><div><strong>Loading tile request telemetry</strong></div></div></div>
       </article>
     </section>
@@ -904,6 +959,7 @@
       const numberFormatter = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
       const decimalFormatter = new Intl.NumberFormat("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
       const state = { data: null, lastSuccess: 0, timer: 0, inFlight: false, stale: false, mapCleanup: null, trafficMap: null, mapLoadPromise: null, mapStylePromise: null, mapFailed: false, mapGeneration: 0 };
+      const history = { data: null, available: true, timer: 0, inFlight: false, lastAttempt: 0, lastSuccess: 0, selected: null, delta: false, playing: false, playTimer: 0 };
       const chartColors = ["--chart-1", "--chart-2", "--chart-3", "--chart-4", "--chart-5", "--chart-6"];
       const MAPLIBRE_SCRIPT_URL = "https://unpkg.com/maplibre-gl@^6.0.0/dist/maplibre-gl.mjs";
       const MAPLIBRE_WORKER_URL = "https://unpkg.com/maplibre-gl@^6.0.0/dist/maplibre-gl-worker.mjs";
@@ -1479,8 +1535,201 @@
         });
       }
 
+      function historySnapshots() { return array(history.data?.snapshots); }
+      function historyInterval() { return Math.max(1, finite(history.data?.interval_s, 300)); }
+      function historyIntervalLabel() {
+        const seconds = historyInterval();
+        if (seconds % 3600 === 0) return `${seconds / 3600} h`;
+        if (seconds % 60 === 0) return `${seconds / 60} min`;
+        return `${seconds} s`;
+      }
+      function historyWindowSummary() {
+        if (!history.data) return "";
+        const maxEntries = finite(history.data.max_entries);
+        if (maxEntries === null || maxEntries <= 0) return "";
+        const seconds = historyInterval() * maxEntries;
+        let windowLabel = fmtDuration(seconds);
+        if (seconds % 3600 === 0 && seconds <= 172800) windowLabel = `${seconds / 3600} h`;
+        else if (seconds % 86400 === 0) windowLabel = `${seconds / 86400} d`;
+        return `${windowLabel} window · ${historyIntervalLabel()} snapshots`;
+      }
+      function historyCounter(snapshots, index, key) {
+        const current = finite(snapshots[index]?.[key], 0);
+        return index > 0 ? Math.max(0, current - finite(snapshots[index - 1]?.[key], 0)) : 0;
+      }
+      function trafficForCurrentView(liveTraffic) {
+        const snapshots = historySnapshots();
+        if (history.selected === null || !snapshots.length) return liveTraffic;
+        if (history.selected < 0 || history.selected >= snapshots.length) { history.selected = null; return liveTraffic; }
+        const index = history.selected;
+        const snapshot = snapshots[index];
+        const previous = index > 0 ? snapshots[index - 1] : null;
+        const delta = history.delta;
+        const counter = (key) => delta ? historyCounter(snapshots, index, key) : finite(snapshot[key], 0);
+        const hits = counter("cache_hits");
+        const misses = counter("cache_misses");
+        const previousTop = new Map(array(previous?.top).filter(isObject).map((tile) => [`${tile.z}/${tile.x}/${tile.y}`, finite(tile.count, 0)]));
+        const top = array(snapshot.top).filter(isObject).map((tile) => {
+          const count = finite(tile.count, 0);
+          const previousCount = previousTop.get(`${tile.z}/${tile.x}/${tile.y}`) || 0;
+          return { ...tile, count: delta ? (previous ? Math.max(0, count - previousCount) : 0) : count };
+        });
+        const currentZoom = object(snapshot.by_zoom);
+        const previousZoom = object(previous?.by_zoom);
+        const zoomKeys = [...new Set([...Object.keys(currentZoom), ...(delta ? Object.keys(previousZoom) : [])])];
+        const byZoom = {};
+        zoomKeys.forEach((zoom) => {
+          const current = object(currentZoom[zoom]);
+          const prior = object(previousZoom[zoom]);
+          byZoom[zoom] = delta ? {
+            tiles: previous ? Math.max(0, finite(current.tiles, 0) - finite(prior.tiles, 0)) : 0,
+            requests: previous ? Math.max(0, finite(current.requests, 0) - finite(prior.requests, 0)) : 0
+          } : { tiles: finite(current.tiles, 0), requests: finite(current.requests, 0) };
+        });
+        return {
+          ...liveTraffic,
+          total_requests: counter("total_requests"),
+          tracked_tiles: finite(snapshot.tracked_tiles, 0),
+          hot_tiles: finite(snapshot.hot_tiles, 0),
+          cache: { hits, misses, hit_rate: delta ? ratioFromHits(hits, misses) : finite(snapshot.hit_rate, ratioFromHits(hits, misses)) },
+          fast_path: { total: counter("fast_path_total"), by_reason: {} },
+          by_zoom: byZoom,
+          top,
+          latency: {
+            avg_request_ms: finite(snapshot.avg_request_ms),
+            avg_compute_ms: finite(snapshot.avg_compute_ms),
+            avg_present_ms: finite(snapshot.avg_present_ms),
+            requests: counter("total_requests"),
+            computes: null,
+            presents: null
+          }
+        };
+      }
+      function renderTrafficView() { if (state.data) renderTraffic(state.data); }
+      function pauseHistoryPlayback(update = true) {
+        history.playing = false;
+        window.clearTimeout(history.playTimer);
+        if (update) updateHistoryUI();
+      }
+      function stepHistoryPlayback() {
+        if (!history.playing) return;
+        const snapshots = historySnapshots();
+        if (!snapshots.length) { pauseHistoryPlayback(); return; }
+        history.selected = history.selected === null ? 0 : Math.min(snapshots.length - 1, history.selected + 1);
+        if (history.selected >= snapshots.length - 1) history.playing = false;
+        else history.playTimer = window.setTimeout(stepHistoryPlayback, 1000);
+        renderTrafficView();
+        updateHistoryUI();
+      }
+      function updateHistoryUI() {
+        const snapshots = historySnapshots();
+        const live = history.selected === null;
+        const selected = live ? null : snapshots[history.selected];
+        const slider = $("history-slider");
+        if (slider) {
+          slider.value = String(live ? snapshots.length : history.selected);
+          slider.setAttribute("aria-valuetext", live ? "Live, current health data" : `${fmtEpoch(selected?.t)}, ${history.delta ? `activity since the previous snapshot, per ${historyIntervalLabel()}` : "cumulative counts"}`);
+        }
+        const play = $("history-play");
+        if (play) {
+          play.innerHTML = `${icon(history.playing ? "pause" : "play", "icon-sm")}<span>${history.playing ? "Pause" : "Play"}</span>`;
+          play.classList.toggle("is-playing", history.playing);
+          play.setAttribute("aria-label", history.playing ? "Pause snapshot replay" : "Play snapshot replay");
+        }
+        const liveButton = $("history-live");
+        if (liveButton) liveButton.disabled = live;
+        const delta = $("history-delta");
+        if (delta) { delta.checked = history.delta; delta.disabled = live; }
+        const mode = $("history-mode-label");
+        if (mode) mode.textContent = live ? "Live cumulative" : history.delta ? `Since previous snapshot · per ${historyIntervalLabel()}` : "Cumulative at snapshot";
+        const time = $("history-time");
+        if (time) {
+          if (live) { time.textContent = "Current /health response"; time.removeAttribute("datetime"); }
+          else { time.textContent = fmtEpoch(selected?.t); time.dateTime = new Date(finite(selected?.t, 0) * 1000).toISOString(); }
+        }
+        const hint = $("history-delta-hint");
+        if (hint) hint.textContent = live ? "Scrub to a snapshot to compare per-interval activity." : history.delta ? "Negative counter differences are clamped to zero." : "Values are cumulative at the selected capture time.";
+        const chart = $("history-chart");
+        if (chart) {
+          chart.classList.toggle("is-live", live);
+          chart.setAttribute("aria-label", `Per-interval total tile requests across ${snapshots.length} snapshots. ${live ? "Live selected" : `Selected ${fmtEpoch(selected?.t)}`}.`);
+          chart.querySelectorAll(".history-bar").forEach((bar, index) => bar.classList.toggle("is-selected", index === history.selected));
+        }
+      }
+      function renderHistoryControls() {
+        const container = $("traffic-history");
+        const windowBadge = $("traffic-window");
+        const summary = historyWindowSummary();
+        windowBadge.textContent = summary;
+        windowBadge.hidden = !history.available || !summary;
+        if (!history.available || !history.data || history.data.enabled === false) {
+          pauseHistoryPlayback(false);
+          history.selected = null;
+          container.hidden = true;
+          container.innerHTML = "";
+          return;
+        }
+        const snapshots = historySnapshots();
+        if (history.data.tracking_enabled === false) {
+          pauseHistoryPlayback(false);
+          history.selected = null;
+          container.hidden = false;
+          container.innerHTML = `<div class="history-note" role="status">${icon("info")}<div><strong>History collection is paused</strong><p>Enable <code>LIBREWXR_TILE_TRACKING_ENABLED</code> to record tile-request snapshots. The live traffic view remains available.</p></div></div>`;
+          return;
+        }
+        if (!snapshots.length) {
+          pauseHistoryPlayback(false);
+          history.selected = null;
+          container.hidden = false;
+          container.innerHTML = `<div class="history-note" role="status">${icon("clock")}<div><strong>Collecting history...</strong><p>Timeline replay will appear after the first tile-request snapshots are captured. The live traffic view remains available.</p></div></div>`;
+          return;
+        }
+        const interval = historyIntervalLabel();
+        const maxRequests = Math.max(1, ...snapshots.map((_, index) => historyCounter(snapshots, index, "total_requests")));
+        const bars = snapshots.map((snapshot, index) => {
+          const requests = historyCounter(snapshots, index, "total_requests");
+          return `<span class="history-bar" style="--history-height:${Math.max(2, requests / maxRequests * 100)}%" title="${esc(fmtEpoch(snapshot.t))}: ${esc(fmtInt(requests))} requests" aria-hidden="true"></span>`;
+        }).join("");
+        container.hidden = false;
+        container.innerHTML = `
+          <div class="history-head"><div><h3 class="history-title">Request history</h3><p class="history-subtitle">${esc(fmtInt(snapshots.length))} snapshots · ${esc(interval)} cadence · bars show requests per interval</p></div><div class="history-actions"><button id="history-play" class="history-button" type="button"></button><button id="history-live" class="history-button" type="button">${icon("refresh", "icon-sm")}<span>Back to live</span></button></div></div>
+          <div id="history-chart" class="history-chart${snapshots.length > 60 ? " is-dense" : ""}" role="img">${bars}</div>
+          <label class="sr-only" for="history-slider">Tile-request history snapshot; rightmost position is live</label>
+          <input id="history-slider" class="history-slider" type="range" min="0" max="${snapshots.length}" step="1" value="${history.selected === null ? snapshots.length : history.selected}">
+          <div class="history-range-labels"><span>${esc(fmtEpoch(snapshots[0].t))}</span><span>LIVE</span></div>
+          <div class="history-control-footer"><div class="history-selection"><strong id="history-mode-label"></strong><time id="history-time"></time></div><label class="history-switch" for="history-delta"><input id="history-delta" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span><span class="history-switch-copy"><strong>Since previous snapshot</strong><small>per ${esc(interval)}</small></span></label></div>
+          <p id="history-delta-hint" class="history-hint"></p>`;
+        $("history-play").addEventListener("click", () => {
+          if (history.playing) { pauseHistoryPlayback(); return; }
+          if (history.selected === null || history.selected >= snapshots.length - 1) history.selected = 0;
+          history.playing = snapshots.length > 1;
+          if (history.playing) history.playTimer = window.setTimeout(stepHistoryPlayback, 1000);
+          renderTrafficView();
+          updateHistoryUI();
+        });
+        $("history-live").addEventListener("click", () => {
+          pauseHistoryPlayback(false);
+          history.selected = null;
+          renderTrafficView();
+          updateHistoryUI();
+        });
+        $("history-slider").addEventListener("input", (event) => {
+          pauseHistoryPlayback(false);
+          const position = Number(event.currentTarget.value);
+          history.selected = position >= snapshots.length ? null : Math.max(0, Math.min(snapshots.length - 1, position));
+          renderTrafficView();
+          updateHistoryUI();
+        });
+        $("history-delta").addEventListener("change", (event) => {
+          history.delta = event.currentTarget.checked;
+          renderTrafficView();
+          updateHistoryUI();
+        });
+        updateHistoryUI();
+      }
+
       function renderTraffic(data) {
-        const traffic = object(data.tile_requests);
+        const traffic = trafficForCurrentView(object(data.tile_requests));
         state.mapGeneration += 1;
         const generation = state.mapGeneration;
         const existingMap = state.trafficMap;
@@ -1711,6 +1960,62 @@
         document.body.classList.remove("is-stale");
         $("error-banner").hidden = true;
       }
+      function scheduleHistoryRefresh() {
+        window.clearTimeout(history.timer);
+        if (Number($("refresh-interval").value) > 0) history.timer = window.setTimeout(() => refreshTileHistory(), 60000);
+      }
+      async function refreshTileHistory() {
+        if (history.inFlight) return;
+        history.inFlight = true;
+        history.lastAttempt = Date.now();
+        window.clearTimeout(history.timer);
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 15000);
+        try {
+          const response = await fetch("/health/tile-history", { method: "GET", headers: { "Accept": "application/json" }, cache: "no-store", signal: controller.signal });
+          if (response.status === 404) {
+            history.available = false;
+            history.data = null;
+            history.selected = null;
+            pauseHistoryPlayback(false);
+            renderHistoryControls();
+            renderTrafficView();
+            return;
+          }
+          if (!response.ok) throw new Error("History unavailable");
+          const payload = await response.json();
+          if (!isObject(payload)) throw new Error("History malformed");
+          if (payload.enabled === false) {
+            history.available = false;
+            history.data = null;
+            history.selected = null;
+            pauseHistoryPlayback(false);
+            renderHistoryControls();
+            renderTrafficView();
+            return;
+          }
+          if (payload.enabled !== true || typeof payload.tracking_enabled !== "boolean" || !Array.isArray(payload.snapshots)) throw new Error("History malformed");
+          const selectedTime = history.selected === null ? null : validEpoch(historySnapshots()[history.selected]?.t);
+          const snapshots = payload.snapshots.filter((snapshot) => isObject(snapshot) && validEpoch(snapshot.t) !== null).sort((a, b) => finite(a.t, 0) - finite(b.t, 0));
+          history.available = true;
+          history.data = { ...payload, snapshots };
+          history.lastSuccess = Date.now();
+          if (selectedTime !== null) {
+            const selectedIndex = snapshots.findIndex((snapshot) => validEpoch(snapshot.t) === selectedTime);
+            if (selectedIndex >= 0) history.selected = selectedIndex;
+            else { history.selected = null; pauseHistoryPlayback(false); }
+          }
+          if (!snapshots.length || payload.tracking_enabled === false) { history.selected = null; pauseHistoryPlayback(false); }
+          renderHistoryControls();
+          renderTrafficView();
+        } catch (_) {
+          // History is supplemental: preserve the last good timeline without raising a health error.
+        } finally {
+          window.clearTimeout(timeout);
+          history.inFlight = false;
+          scheduleHistoryRefresh();
+        }
+      }
       function scheduleRefresh() {
         window.clearTimeout(state.timer);
         const seconds = Number($("refresh-interval").value);
@@ -1718,6 +2023,7 @@
         updateAge();
       }
       async function refreshHealth(manual = false) {
+        if (manual) refreshTileHistory();
         if (state.inFlight) return;
         state.inFlight = true;
         const button = $("refresh-button");
@@ -1756,18 +2062,27 @@
       $("refresh-button").addEventListener("click", () => refreshHealth(true));
       $("refresh-interval").addEventListener("change", () => {
         window.clearTimeout(state.timer);
-        if (!state.inFlight && Number($("refresh-interval").value) > 0) refreshHealth(false);
-        else scheduleRefresh();
-      });
-      document.addEventListener("visibilitychange", () => {
-        if (!document.hidden && state.lastSuccess) {
-          const interval = Number($("refresh-interval").value);
-          if (interval > 0 && Date.now() - state.lastSuccess > interval * 1000) refreshHealth(false);
+        window.clearTimeout(history.timer);
+        const interval = Number($("refresh-interval").value);
+        if (interval > 0) {
+          if (!state.inFlight) refreshHealth(false); else scheduleRefresh();
+          if (!history.inFlight) refreshTileHistory(); else scheduleHistoryRefresh();
+        } else {
+          scheduleRefresh();
+          scheduleHistoryRefresh();
         }
       });
-      window.addEventListener("pagehide", () => { window.clearTimeout(state.timer); destroyTrafficMap(); });
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) {
+          const interval = Number($("refresh-interval").value);
+          if (interval > 0 && state.lastSuccess && Date.now() - state.lastSuccess > interval * 1000) refreshHealth(false);
+          if (interval > 0 && Date.now() - history.lastAttempt > 60000) refreshTileHistory();
+        }
+      });
+      window.addEventListener("pagehide", () => { window.clearTimeout(state.timer); window.clearTimeout(history.timer); pauseHistoryPlayback(false); destroyTrafficMap(); });
       window.setInterval(updateAge, 1000);
       refreshHealth(false);
+      refreshTileHistory();
     })();
   </script>
 </body>

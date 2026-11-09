@@ -79,6 +79,7 @@ def test_disabled_endpoints_mount_no_route():
         **os.environ,
         "LIBREWXR_DASHBOARD_ENABLED": "false",
         "LIBREWXR_METRICS_ENABLED": "false",
+        "LIBREWXR_TILE_HISTORY_ENABLED": "false",
     }
     code = (
         "from fastapi.testclient import TestClient\n"
@@ -86,6 +87,7 @@ def test_disabled_endpoints_mount_no_route():
         "c = TestClient(app)\n"
         "assert c.get('/dashboard').status_code == 404, 'dashboard route mounted while disabled'\n"
         "assert c.get('/metrics').status_code == 404, 'metrics route mounted while disabled'\n"
+        "assert c.get('/health/tile-history').status_code == 404, 'tile-history route mounted while disabled'\n"
         "assert c.get('/docs').status_code == 200, 'app built but docs missing?'\n"
         "print('mount-ok')\n"
     )

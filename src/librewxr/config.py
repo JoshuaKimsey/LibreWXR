@@ -619,6 +619,16 @@ class Settings(BaseSettings):
     tile_tracking_enabled: bool = True
     tile_tracking_min_zoom: int = 7  # Track only z >= this (overview zooms are pre-warmed anyway)
     tile_tracking_max_entries: int = 10_000  # Cap per-tile counters; halves when full
+    # Tile-request history: periodically snapshot the cumulative tile
+    # counters above into a bounded in-memory ring served at
+    # ``tile_history_path`` (GET /health/tile-history by default).  The
+    # window is interval x entries - 300 s x 288 = 24 h at the defaults.
+    # Capture runs in every render worker whether or not anyone views the
+    # dashboard, and the ring resets when the worker restarts.
+    tile_history_enabled: bool = True
+    tile_history_interval_s: int = 300  # Seconds between snapshots
+    tile_history_max_entries: int = 288  # Ring size; window = interval x entries (288 x 300s = 24h)
+    tile_history_path: str = "/health/tile-history"
     download_retries: int = 1  # Retries on transient download errors (0 = no retry, 1 = one retry)
     # Maximum number of NWP auxiliary-grid fetches running in parallel
     # inside one fetch cycle.  Each grid loads tens-to-hundreds of MB

@@ -11,7 +11,8 @@ State is in-memory only; restarts wipe the counters. That's fine for
 the diagnostic phase: we just want a few days of distribution to see
 whether traffic is power-law (a few hot tiles) or diffuse.
 """
-from collections import Counter
+import time
+from collections import Counter, deque
 from threading import Lock
 
 
@@ -25,9 +26,16 @@ def _avg_ms(total_ns: int, count: int) -> float:
 class TileRequestTracker:
     """Bounded per-tile request counter, tracking only z >= ``min_zoom``."""
 
-    def __init__(self, min_zoom: int = 7, max_entries: int = 10_000):
+    def __init__(
+        self,
+        min_zoom: int = 7,
+        max_entries: int = 10_000,
+        history_max_entries: int = 288,
+    ):
         self._min_zoom = min_zoom
         self._max_entries = max_entries
+        self._history_max_entries = history_max_entries
+        self._history: deque[dict] = deque(maxlen=history_max_entries)
         self._counts: Counter[tuple[int, int, int]] = Counter()
         self._fast_path_counts: dict[str, int] = {}  # reason -> count
         self._cache_hits: int = 0
@@ -200,3 +208,69 @@ class TileRequestTracker:
             },
             "latency": latency,
         }
+
+    def capture_snapshot(self, top_n: int = 10, hot_threshold: int = 5) -> dict:
+        """Capture the cumulative counters into the bounded history ring.
+
+        Reads the same internal state as :meth:`stats` under the same lock,
+        so a capture taken on the event loop while render threads are
+        recording sees a consistent point-in-time view.  Every counter in
+        the record is cumulative (not a delta); consumers derive intervals
+        from consecutive snapshots.  The returned record is the same object
+        appended to the ring - treat it as read-only; mutating it would
+        corrupt the stored history.
+
+        Args:
+            top_n: How many of the most-requested tiles to include (same
+                default as :meth:`stats`).
+            hot_threshold: Count threshold for ``hot_tiles`` (same default
+                as :meth:`stats`).
+        """
+        with self._lock:
+            tracked = len(self._counts)
+            top_items = self._counts.most_common(top_n)
+            total_requests = sum(self._counts.values())
+            hot_tiles = sum(1 for c in self._counts.values() if c >= hot_threshold)
+            by_zoom: dict[str, dict[str, int]] = {}
+            for (z, _x, _y), count in self._counts.items():
+                bucket = by_zoom.setdefault(str(z), {"tiles": 0, "requests": 0})
+                bucket["tiles"] += 1
+                bucket["requests"] += count
+            fast_path_total = sum(self._fast_path_counts.values())
+            cache_hits = self._cache_hits
+            cache_misses = self._cache_misses
+            record = {
+                "t": int(time.time()),
+                "total_requests": total_requests,
+                "cache_hits": cache_hits,
+                "cache_misses": cache_misses,
+                "hit_rate": (
+                    cache_hits / (cache_hits + cache_misses)
+                    if (cache_hits + cache_misses) > 0
+                    else 0.0
+                ),
+                "fast_path_total": fast_path_total,
+                "tracked_tiles": tracked,
+                "hot_tiles": hot_tiles,
+                "avg_request_ms": _avg_ms(
+                    self._lat_request_ns_total, self._lat_request_count,
+                ),
+                "avg_compute_ms": _avg_ms(
+                    self._lat_compute_ns_total, self._lat_compute_count,
+                ),
+                "avg_present_ms": _avg_ms(
+                    self._lat_present_ns_total, self._lat_present_count,
+                ),
+                "by_zoom": {z: by_zoom[z] for z in sorted(by_zoom, key=int)},
+                "top": [
+                    {"z": z, "x": x, "y": y, "count": count}
+                    for (z, x, y), count in top_items
+                ],
+            }
+            self._history.append(record)
+        return record
+
+    def history(self) -> list[dict]:
+        """Return the captured snapshots, oldest first (a shallow copy)."""
+        with self._lock:
+            return list(self._history)

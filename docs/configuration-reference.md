@@ -1904,6 +1904,43 @@ URL path the Prometheus exporter is served on. Read at import time, so a change 
 | **Default** | `/metrics` |
 | **Type** | string |
 
+### `LIBREWXR_TILE_HISTORY_ENABLED`
+
+Master switch for the tile-request history endpoint. When `true` (the default), every render worker snapshots its cumulative tile-request counters into a bounded in-memory ring and `GET /health/tile-history` serves that ring as JSON. Capture runs on its own cadence whether or not anyone views the dashboard or reads the endpoint. When `false`, no sampling task is started and no route is mounted at all (a plain `404`). `/health` and `/metrics` are unaffected.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+### `LIBREWXR_TILE_HISTORY_INTERVAL_S`
+
+Seconds between history snapshots. The retained window is `interval_s x max_entries`: the defaults (300 x 288) cover 24 hours per worker. The ring is per-worker and in-memory, so a worker restart resets its window; long-term history belongs to Prometheus via `/metrics`.
+
+| | |
+|---|---|
+| **Default** | `300` |
+| **Type** | integer |
+| **Unit** | seconds |
+
+### `LIBREWXR_TILE_HISTORY_MAX_ENTRIES`
+
+Maximum number of snapshots held in the per-worker ring. When full, the oldest snapshot is dropped. Together with `LIBREWXR_TILE_HISTORY_INTERVAL_S` this sets the window: `288` entries at `300` seconds is 24 hours.
+
+| | |
+|---|---|
+| **Default** | `288` |
+| **Type** | integer |
+
+### `LIBREWXR_TILE_HISTORY_PATH`
+
+URL path the tile-request history endpoint is served on. Read at import time, so a change takes effect on the next restart. Change it if your reverse proxy already owns `/health/tile-history`.
+
+| | |
+|---|---|
+| **Default** | `/health/tile-history` |
+| **Type** | string |
+
 ---
 
 ## RAM Sizing Guide
