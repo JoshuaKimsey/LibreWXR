@@ -529,15 +529,43 @@
     .traffic-stat span { display: block; color: var(--muted); font-size: var(--text-2xs); }
     .traffic-stat strong { display: block; margin-top: var(--space-1); font-family: var(--font-mono); font-size: var(--text-lg); font-weight: var(--weight-medium); }
     .traffic-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(22rem, 1fr); gap: var(--space-4); }
-    .map-wrap { position: relative; min-width: 0; height: var(--map-height); overflow: hidden; border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--map-bg); }
+    .map-wrap { position: relative; min-width: 0; max-width: 100%; height: var(--map-height); overflow: hidden; border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--map-bg); }
     #traffic-map { display: block; width: 100%; height: 100%; cursor: crosshair; }
     #traffic-map:focus-visible { outline-offset: -3px; }
-    .map-caption { position: absolute; top: var(--space-3); left: var(--space-3); display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--overlay); color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); pointer-events: none; }
-    .map-legend { position: absolute; right: var(--space-3); bottom: var(--space-3); display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); background: var(--overlay); color: var(--muted); font-size: var(--text-2xs); pointer-events: none; }
+    #traffic-map-gl { position: absolute; inset: 0; background: var(--map-bg); }
+    #traffic-map-gl .maplibregl-canvas:focus-visible { outline: 2px solid var(--accent-bright); outline-offset: -3px; }
+    .map-caption { position: absolute; z-index: 3; top: var(--space-3); left: var(--space-3); display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--overlay); color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); pointer-events: none; }
+    .map-legend { position: absolute; z-index: 3; right: var(--space-3); bottom: var(--space-3); display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); background: var(--overlay); color: var(--muted); font-size: var(--text-2xs); pointer-events: none; }
     .map-legend::before { content: ""; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); }
+    .is-maplibre .map-legend { right: auto; left: var(--space-3); }
+    .map-offline-note { position: absolute; z-index: 3; top: var(--space-3); right: var(--space-3); padding: var(--space-1) var(--space-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--overlay); color: var(--muted); font-size: var(--text-2xs); pointer-events: none; }
+    .map-loading { position: absolute; z-index: 4; top: 50%; left: 50%; display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--overlay); box-shadow: var(--shadow-tooltip); color: var(--text-soft); font-size: var(--text-xs); white-space: nowrap; pointer-events: none; transform: translate(-50%, -50%); }
+    .map-loading .icon { color: var(--accent); animation: spin 1.8s linear infinite; }
+    .map-wrap.is-loading .map-empty { transform: translateY(var(--space-8)); }
     .map-tooltip { position: absolute; z-index: 2; min-width: 9rem; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--overlay); box-shadow: var(--shadow-tooltip); color: var(--text-soft); font-family: var(--font-mono); font-size: var(--text-2xs); pointer-events: none; transform: translate(var(--space-2), calc(-100% - var(--space-2))); }
     .map-tooltip strong { display: block; margin-bottom: var(--space-1); color: var(--accent-bright); }
-    .map-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: var(--text-sm); pointer-events: none; }
+    .map-empty { position: absolute; z-index: 2; inset: 0; display: grid; place-items: center; padding: var(--space-8); color: var(--muted); font-size: var(--text-sm); text-align: center; pointer-events: none; }
+    .map-wrap .maplibregl-ctrl-group { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); box-shadow: var(--shadow-tooltip); }
+    .map-wrap .maplibregl-ctrl-group button { width: 2rem; height: 2rem; background-color: transparent; }
+    .map-wrap .maplibregl-ctrl-group button:hover { background-color: var(--bg-hover); }
+    .map-wrap .maplibregl-ctrl-group button + button { border-top: 1px solid var(--border); }
+    .map-wrap .maplibregl-ctrl-group button span { filter: invert(1); }
+    .map-wrap .maplibregl-ctrl-attrib { background: var(--overlay); color: var(--muted); font-size: var(--text-2xs); }
+    .map-wrap .maplibregl-ctrl-attrib a { color: var(--text-soft); }
+    .map-wrap .maplibregl-ctrl-attrib a:hover { color: var(--accent-bright); }
+    .map-wrap .maplibregl-ctrl-attrib-button { filter: invert(1); }
+    .traffic-popup .maplibregl-popup-content { min-width: 11rem; padding: var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--bg-raised); box-shadow: var(--shadow-tooltip); color: var(--text-soft); font-family: var(--font-mono); font-size: var(--text-xs); }
+    .traffic-popup .maplibregl-popup-content strong { display: block; margin-bottom: var(--space-1); color: var(--accent-bright); }
+    .traffic-popup .maplibregl-popup-close-button { width: 1.75rem; height: 1.75rem; color: var(--muted); font-family: var(--font-ui); font-size: var(--text-lg); }
+    .traffic-popup .maplibregl-popup-close-button:hover { background: var(--bg-hover); color: var(--text); }
+    .traffic-popup.maplibregl-popup-anchor-top .maplibregl-popup-tip,
+    .traffic-popup.maplibregl-popup-anchor-top-left .maplibregl-popup-tip,
+    .traffic-popup.maplibregl-popup-anchor-top-right .maplibregl-popup-tip { border-bottom-color: var(--bg-raised); }
+    .traffic-popup.maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
+    .traffic-popup.maplibregl-popup-anchor-bottom-left .maplibregl-popup-tip,
+    .traffic-popup.maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip { border-top-color: var(--bg-raised); }
+    .traffic-popup.maplibregl-popup-anchor-left .maplibregl-popup-tip { border-right-color: var(--bg-raised); }
+    .traffic-popup.maplibregl-popup-anchor-right .maplibregl-popup-tip { border-left-color: var(--bg-raised); }
     .traffic-side { min-width: 0; }
     .traffic-table { max-height: var(--map-height); overflow: auto; border: 1px solid var(--border-soft); border-radius: var(--radius-md); }
     .traffic-table .compact-table th { position: sticky; top: 0; z-index: 1; background: var(--bg-subtle); }
@@ -875,8 +903,12 @@
       const $ = (id) => document.getElementById(id);
       const numberFormatter = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
       const decimalFormatter = new Intl.NumberFormat("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-      const state = { data: null, lastSuccess: 0, timer: 0, inFlight: false, stale: false, mapCleanup: null };
+      const state = { data: null, lastSuccess: 0, timer: 0, inFlight: false, stale: false, mapCleanup: null, trafficMap: null, mapLoadPromise: null, mapStylePromise: null, mapFailed: false, mapGeneration: 0 };
       const chartColors = ["--chart-1", "--chart-2", "--chart-3", "--chart-4", "--chart-5", "--chart-6"];
+      const MAPLIBRE_SCRIPT_URL = "https://unpkg.com/maplibre-gl@^6.0.0/dist/maplibre-gl.mjs";
+      const MAPLIBRE_WORKER_URL = "https://unpkg.com/maplibre-gl@^6.0.0/dist/maplibre-gl-worker.mjs";
+      const MAPLIBRE_CSS_URL = "https://unpkg.com/maplibre-gl@^6.0.0/dist/maplibre-gl.css";
+      const MAPLIBRE_STYLE_URL = "https://tiles.openfreemap.org/styles/dark";
 
       function isObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
       function object(value) { return isObject(value) ? value : {}; }
@@ -1165,10 +1197,297 @@
       }
       function fmtCoordinate(value, positive, negative) { return `${Math.abs(value).toFixed(2)}° ${value >= 0 ? positive : negative}`; }
 
+      function canvasTrafficMapMarkup(top, offline = false) {
+        return `<div id="traffic-map-wrap" class="map-wrap${offline ? " is-offline" : " is-loading"}" data-map-mode="canvas" data-hotspots="${top.length}"><canvas id="traffic-map" tabindex="0" role="img" aria-label="Equirectangular world map showing ${top.length} most requested radar tile locations for this worker. Equivalent coordinates are listed in the adjacent table.">Your browser cannot display the hotspot map. Use the adjacent top-tile table.</canvas><span class="map-caption">TOP TILE CENTERS · EQUIRECTANGULAR</span><span id="map-offline-note" class="map-offline-note" title="The interactive basemap is unavailable; using the built-in offline map."${offline ? "" : " hidden"}>Offline map</span><span class="map-legend">Larger dots = more requests</span><div id="map-tooltip" class="map-tooltip" hidden></div><div id="map-loading" class="map-loading" role="status"${offline ? " hidden" : ""}>${icon("refresh", "icon-sm")}<span>Loading interactive map</span></div>${top.length ? "" : `<div class="map-empty">No hotspot tiles recorded yet</div>`}</div>`;
+      }
+
+      function ensureMapLibre() {
+        if (state.mapLoadPromise) return state.mapLoadPromise;
+        state.mapLoadPromise = new Promise((resolve) => {
+          const link = document.createElement("link");
+          const script = document.createElement("script");
+          let cssReady = false;
+          let scriptReady = false;
+          let settled = false;
+          const timeout = window.setTimeout(() => finish(null), 12000);
+          function finish(library) {
+            if (settled) return;
+            settled = true;
+            window.clearTimeout(timeout);
+            link.onload = link.onerror = script.onload = script.onerror = null;
+            if (!library) state.mapFailed = true;
+            resolve(library);
+          }
+          function ready() {
+            if (!cssReady || !scriptReady) return;
+            const library = window.__librewxrMapLibre;
+            delete window.__librewxrMapLibre;
+            finish(library && typeof library.Map === "function" ? library : null);
+          }
+          link.id = "maplibre-gl-css";
+          link.rel = "stylesheet";
+          link.href = MAPLIBRE_CSS_URL;
+          link.onload = () => { cssReady = true; ready(); };
+          link.onerror = () => finish(null);
+          script.id = "maplibre-gl-script";
+          script.type = "module";
+          // Inline module evaluation is signalled explicitly; not every browser fires load for it.
+          script.textContent = `import * as maplibregl from ${JSON.stringify(MAPLIBRE_SCRIPT_URL)}; maplibregl.setWorkerUrl(${JSON.stringify(MAPLIBRE_WORKER_URL)}); window.__librewxrMapLibre = maplibregl; document.getElementById("maplibre-gl-script").dispatchEvent(new Event("load"));`;
+          script.onload = () => { scriptReady = true; ready(); };
+          script.onerror = () => finish(null);
+          document.head.append(link, script);
+        });
+        return state.mapLoadPromise;
+      }
+
+      function showCanvasOffline() {
+        const wrap = $("traffic-map-wrap");
+        if (!wrap || wrap.dataset.mapMode !== "canvas") return;
+        wrap.classList.remove("is-loading");
+        wrap.classList.add("is-offline");
+        const note = $("map-offline-note");
+        const loading = $("map-loading");
+        if (note) note.hidden = false;
+        if (loading) loading.hidden = true;
+      }
+
+      function hotspotGeoJSON(top) {
+        const valid = top.filter((tile) => Number.isFinite(tile.center.lon) && Number.isFinite(tile.center.lat) && Math.abs(tile.center.lon) <= 180 && Math.abs(tile.center.lat) <= 85.0511);
+        const maxCount = Math.max(1, ...valid.map((tile) => Math.max(0, finite(tile.count, 0))));
+        return {
+          type: "FeatureCollection",
+          features: valid.map((tile) => {
+            const count = Math.max(0, finite(tile.count, 0));
+            return {
+              type: "Feature",
+              geometry: { type: "Point", coordinates: [tile.center.lon, tile.center.lat] },
+              properties: { z: finite(tile.z, 0), x: finite(tile.x, 0), y: finite(tile.y, 0), count, lat: tile.center.lat, lon: tile.center.lon, weight: Math.sqrt(count / maxCount) }
+            };
+          })
+        };
+      }
+
+      function trafficPopupHTML(properties) {
+        return `<strong>${esc(fmtInt(properties.count))} requests</strong>Z${esc(fmtInt(properties.z))} · X${esc(fmtInt(properties.x))} · Y${esc(fmtInt(properties.y))}<br>${esc(fmtCoordinate(finite(properties.lat, 0), "N", "S"))} · ${esc(fmtCoordinate(finite(properties.lon, 0), "E", "W"))}`;
+      }
+
+      function fitTrafficHotspots(map, features) {
+        if (!features.length) {
+          map.jumpTo({ center: [0, 20], zoom: 1 });
+          return;
+        }
+        if (features.length === 1) {
+          map.jumpTo({ center: features[0].geometry.coordinates, zoom: 2 });
+          return;
+        }
+        let west = 180, south = 85.0511, east = -180, north = -85.0511;
+        features.forEach((feature) => {
+          const [lon, lat] = feature.geometry.coordinates;
+          west = Math.min(west, lon); south = Math.min(south, lat);
+          east = Math.max(east, lon); north = Math.max(north, lat);
+        });
+        map.fitBounds([[west, south], [east, north]], { padding: 52, maxZoom: 2, duration: 0 });
+      }
+
+      function applyTrafficHotspots(controller, fit = false) {
+        const { map } = controller;
+        const data = hotspotGeoJSON(controller.top);
+        controller.shell.dataset.hotspots = String(data.features.length);
+        const empty = controller.shell.querySelector(".map-empty");
+        if (empty) empty.hidden = data.features.length > 0;
+        const source = map.getSource("traffic-hotspots");
+        if (source) source.setData(data);
+        else {
+          const css = getComputedStyle(document.documentElement);
+          const accent = css.getPropertyValue("--accent").trim() || "#55d6be";
+          const bright = css.getPropertyValue("--accent-bright").trim() || "#7ce7d3";
+          map.addSource("traffic-hotspots", { type: "geojson", data });
+          map.addLayer({
+            id: "traffic-hotspots",
+            type: "circle",
+            source: "traffic-hotspots",
+            paint: {
+              "circle-color": accent,
+              "circle-radius": ["interpolate", ["linear"], ["get", "weight"], 0, 3.5, 1, 14],
+              "circle-opacity": ["interpolate", ["linear"], ["get", "weight"], 0, 0.42, 1, 0.94],
+              "circle-stroke-color": bright,
+              "circle-stroke-width": 1,
+              "circle-stroke-opacity": 0.9,
+              "circle-blur": 0.08
+            }
+          });
+          map.on("click", "traffic-hotspots", (event) => {
+            const feature = event.features && event.features[0];
+            if (!feature || !feature.geometry) return;
+            controller.popup.setLngLat(feature.geometry.coordinates.slice()).setHTML(trafficPopupHTML(feature.properties)).addTo(map);
+          });
+          map.on("mouseenter", "traffic-hotspots", () => { map.getCanvas().style.cursor = "pointer"; });
+          map.on("mouseleave", "traffic-hotspots", () => { map.getCanvas().style.cursor = ""; });
+        }
+        if (fit) fitTrafficHotspots(map, data.features);
+      }
+
+      function restoreCanvasTrafficMap(top) {
+        if (state.mapCleanup) { state.mapCleanup(); state.mapCleanup = null; }
+        const wrap = $("traffic-map-wrap");
+        if (!wrap) return;
+        wrap.outerHTML = canvasTrafficMapMarkup(top, true);
+        setupCanvasTrafficMap(top);
+      }
+
+      function failTrafficMap(controller) {
+        if (state.trafficMap !== controller) { controller.destroy(); return; }
+        const top = controller.top;
+        state.trafficMap = null;
+        controller.destroy();
+        state.mapFailed = true;
+        restoreCanvasTrafficMap(top);
+      }
+
+      function destroyTrafficMap() {
+        state.mapGeneration += 1;
+        if (state.mapCleanup) { state.mapCleanup(); state.mapCleanup = null; }
+        if (state.trafficMap) {
+          const controller = state.trafficMap;
+          state.trafficMap = null;
+          controller.destroy();
+        }
+      }
+
+      function loadTrafficBasemap() {
+        if (state.mapStylePromise) return state.mapStylePromise;
+        state.mapStylePromise = (async () => {
+          const controller = new AbortController();
+          const timeout = window.setTimeout(() => controller.abort(), 12000);
+          try {
+            const response = await fetch(MAPLIBRE_STYLE_URL, { headers: { "Accept": "application/json" }, credentials: "omit", cache: "force-cache", signal: controller.signal });
+            if (!response.ok) throw new Error("Basemap style unavailable");
+            const style = await response.json();
+            if (!isObject(style) || !isObject(style.sources) || !Array.isArray(style.layers)) throw new Error("Basemap style malformed");
+            return style;
+          } catch (_) {
+            state.mapFailed = true;
+            return null;
+          } finally {
+            window.clearTimeout(timeout);
+          }
+        })();
+        return state.mapStylePromise;
+      }
+
+      async function activateTrafficMap(maplibregl, top, generation) {
+        const style = await loadTrafficBasemap();
+        if (generation !== state.mapGeneration) return;
+        if (!style) { showCanvasOffline(); return; }
+        const wrap = $("traffic-map-wrap");
+        if (!wrap) return;
+        if (state.mapCleanup) { state.mapCleanup(); state.mapCleanup = null; }
+        wrap.className = "map-wrap is-maplibre is-loading";
+        wrap.dataset.mapMode = "maplibre";
+        wrap.innerHTML = `<div id="traffic-map-gl" role="region" aria-label="Interactive Web Mercator map of the most requested radar tile locations for this worker. Select a circle for tile details; equivalent coordinates are listed in the adjacent table."></div><span class="map-caption">TOP TILE CENTERS · WEB MERCATOR</span><span class="map-legend">Larger dots = more requests</span><div id="map-loading" class="map-loading" role="status">${icon("refresh", "icon-sm")}<span>Loading basemap</span></div><div class="map-empty"${top.length ? " hidden" : ""}>No hotspot tiles recorded yet</div>`;
+        let map = null;
+        try {
+          map = new maplibregl.Map({
+            container: "traffic-map-gl",
+            style,
+            center: [0, 20],
+            zoom: 1,
+            minZoom: 0,
+            maxZoom: 12,
+            dragRotate: false,
+            pitchWithRotate: false,
+            touchPitch: false,
+            renderWorldCopies: false,
+            transformRequest: (url) => ({ url, credentials: "omit" })
+          });
+          map.addControl(new maplibregl.NavigationControl({ showCompass: false }));
+          const controller = {
+            shell: wrap,
+            map,
+            top,
+            ready: false,
+            popup: new maplibregl.Popup({ className: "traffic-popup", closeButton: true, closeOnClick: false, maxWidth: "260px" }),
+            observer: null,
+            resizeHandler: null,
+            styleTimer: 0,
+            detach() {
+              this.popup.remove();
+              this.shell.remove();
+            },
+            update(nextTop) {
+              this.top = nextTop;
+              this.shell.setAttribute("aria-label", `Radar tile hotspot map with ${nextTop.length} listed locations`);
+              try {
+                if (this.ready) applyTrafficHotspots(this);
+                this.map.resize();
+              } catch (_) { failTrafficMap(this); }
+            },
+            destroy() {
+              window.clearTimeout(this.styleTimer);
+              this.popup.remove();
+              if (this.observer) this.observer.disconnect();
+              if (this.resizeHandler) window.removeEventListener("resize", this.resizeHandler);
+              try { this.map.remove(); } catch (_) { /* Already removed or partially initialized. */ }
+            }
+          };
+          state.trafficMap = controller;
+          function ready() {
+            if (controller.ready || state.trafficMap !== controller) return;
+            try {
+              applyTrafficHotspots(controller, true);
+              controller.ready = true;
+              wrap.classList.remove("is-loading");
+              const loading = $("map-loading");
+              if (loading) loading.hidden = true;
+              window.clearTimeout(controller.styleTimer);
+            } catch (_) { failTrafficMap(controller); }
+          }
+          map.once("style.load", ready);
+          map.once("load", ready);
+          // Tile failures stay non-fatal: loaded circles remain over the dark map background.
+          // Only an initial style that never becomes ready returns to the offline canvas.
+          controller.styleTimer = window.setTimeout(() => { if (!controller.ready) failTrafficMap(controller); }, 12000);
+          if (typeof ResizeObserver === "function") {
+            controller.observer = new ResizeObserver(() => { if (wrap.isConnected) map.resize(); });
+            controller.observer.observe(wrap);
+          } else {
+            controller.resizeHandler = () => map.resize();
+            window.addEventListener("resize", controller.resizeHandler);
+          }
+        } catch (error) {
+          if (map) { try { map.remove(); } catch (_) { /* Partially initialized WebGL map. */ } }
+          state.trafficMap = null;
+          state.mapFailed = true;
+          restoreCanvasTrafficMap(top);
+        }
+      }
+
+      function setupTrafficMap(top, controller = null, generation = state.mapGeneration) {
+        if (controller) {
+          const mount = $("traffic-map-mount");
+          if (!mount) return;
+          mount.replaceWith(controller.shell);
+          controller.update(top);
+          return;
+        }
+        setupCanvasTrafficMap(top);
+        if (state.mapFailed || navigator.onLine === false) { showCanvasOffline(); return; }
+        ensureMapLibre().then((library) => {
+          if (generation !== state.mapGeneration) return;
+          if (!library) { showCanvasOffline(); return; }
+          if (!state.trafficMap) activateTrafficMap(library, top, generation);
+        });
+      }
+
       function renderTraffic(data) {
         const traffic = object(data.tile_requests);
+        state.mapGeneration += 1;
+        const generation = state.mapGeneration;
+        const existingMap = state.trafficMap;
+        if (existingMap) existingMap.detach();
         if (state.mapCleanup) { state.mapCleanup(); state.mapCleanup = null; }
         if (traffic.enabled === false) {
+          destroyTrafficMap();
           $("traffic-content").innerHTML = emptyState("Tile request tracking disabled", "Enable tile tracking to collect worker-local hotspots, zoom distribution, cache outcomes, and latency.", "map");
           return;
         }
@@ -1182,7 +1501,7 @@
         $("traffic-content").innerHTML = `
           <div class="traffic-summary"><div class="traffic-stat"><span>Tracked requests</span><strong>${esc(fmtInt(traffic.total_requests))}</strong></div><div class="traffic-stat"><span>Tracked tiles</span><strong>${esc(fmtInt(traffic.tracked_tiles))}</strong></div><div class="traffic-stat"><span>Hot tiles · ≥${esc(fmtInt(traffic.hot_threshold))}</span><strong class="text-accent">${esc(fmtInt(traffic.hot_tiles))}</strong></div><div class="traffic-stat"><span>Geometry hit rate</span><strong>${esc(fmtPctRatio(cache.hit_rate))}</strong></div><div class="traffic-stat"><span>Fast-path total</span><strong>${esc(fmtInt(fastPath.total))}</strong></div></div>
           <div class="traffic-layout">
-            <div class="map-wrap"><canvas id="traffic-map" tabindex="0" role="img" aria-label="Equirectangular world map showing ${top.length} most requested radar tile locations for this worker. Equivalent coordinates are listed in the adjacent table.">Your browser cannot display the hotspot map. Use the adjacent top-tile table.</canvas><span class="map-caption">TOP TILE CENTERS · EQUIRECTANGULAR</span><span class="map-legend">Larger dots = more requests</span><div id="map-tooltip" class="map-tooltip" hidden></div>${top.length ? "" : `<div class="map-empty">No hotspot tiles recorded yet</div>`}</div>
+            ${existingMap ? `<div id="traffic-map-mount"></div>` : canvasTrafficMapMarkup(top, state.mapFailed)}
             <div class="traffic-side"><div class="traffic-table"><table class="compact-table"><caption class="sr-only">Most requested radar tiles for this worker</caption><thead><tr><th scope="col">#</th><th scope="col">Tile z/x/y</th><th scope="col">Center lat / lon</th><th scope="col" class="num">Requests</th></tr></thead><tbody>${top.length ? top.map((tile, index) => `<tr><td><span class="rank">${index + 1}</span></td><td><code>${esc(fmtInt(tile.z))}/${esc(fmtInt(tile.x))}/${esc(fmtInt(tile.y))}</code></td><td class="num">${esc(fmtCoordinate(tile.center.lat, "N", "S"))}<br><span class="muted-note">${esc(fmtCoordinate(tile.center.lon, "E", "W"))}</span></td><td class="num"><strong>${esc(fmtInt(tile.count))}</strong></td></tr>`).join("") : `<tr><td colspan="4"><p class="muted-note" style="padding:var(--space-4)">No top tiles yet. Requests at zoom ${esc(fmtInt(traffic.min_zoom))} and above will populate this view.</p></td></tr>`}</tbody></table></div></div>
           </div>
           <div class="traffic-bottom">
@@ -1190,7 +1509,7 @@
             <section class="subpanel" aria-label="Worker tile serving performance"><h3 class="subpanel-title">Serving performance</h3><div class="latency-grid" style="margin-top:0"><div class="latency-item"><span>Request avg</span><strong>${esc(fmtMs(latency.avg_request_ms))}</strong></div><div class="latency-item"><span>Compute avg</span><strong>${esc(fmtMs(latency.avg_compute_ms))}</strong></div><div class="latency-item"><span>Present avg</span><strong>${esc(fmtMs(latency.avg_present_ms))}</strong></div></div><dl class="stat-list" style="margin-top:var(--space-4)">${statRow("Request samples", esc(fmtInt(latency.requests)))}${statRow("Compute / present samples", `${esc(fmtInt(latency.computes))} / ${esc(fmtInt(latency.presents))}`)}${statRow("Cache hits / misses", `${esc(fmtInt(cache.hits))} / ${esc(fmtInt(cache.misses))}`)}${statRow("Tracking range", `Z${esc(fmtInt(traffic.min_zoom))}+ · ${esc(fmtInt(traffic.max_entries))} tile cap`)}</dl>${reasons.length ? `<h4 class="subpanel-title" style="margin-top:var(--space-4)">Fast-path reasons</h4><ul class="fast-path-list">${reasons.map(([reason, count]) => `<li><span>${esc(humanize(reason))}</span><strong>${esc(fmtInt(count))}</strong></li>`).join("")}</ul>` : ""}</section>
           </div>
           <p class="scope-note">${icon("info", "icon-sm")}<span>Scope: radar-tile requests observed by this serving worker only. Hotspots reset on restart; cluster-wide top-tile rankings are not present in <code>/health</code>.</span></p>`;
-        setupTrafficMap(top);
+        setupTrafficMap(top, existingMap, generation);
       }
 
       // Compact, hand-simplified land silhouettes keep the map useful without any tile service.
@@ -1209,7 +1528,7 @@
         [[-180,-72],[-150,-73],[-120,-74],[-90,-72],[-60,-75],[-30,-72],[0,-70],[30,-69],[60,-67],[90,-66],[120,-67],[150,-71],[180,-72],[180,-90],[-180,-90]]
       ];
 
-      function setupTrafficMap(top) {
+      function setupCanvasTrafficMap(top) {
         const canvas = $("traffic-map");
         if (!canvas) return;
         const wrap = canvas.parentElement;
@@ -1446,7 +1765,7 @@
           if (interval > 0 && Date.now() - state.lastSuccess > interval * 1000) refreshHealth(false);
         }
       });
-      window.addEventListener("pagehide", () => { window.clearTimeout(state.timer); if (state.mapCleanup) state.mapCleanup(); });
+      window.addEventListener("pagehide", () => { window.clearTimeout(state.timer); destroyTrafficMap(); });
       window.setInterval(updateAge, 1000);
       refreshHealth(false);
     })();

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 import os
+import re
 import subprocess
 import sys
 from importlib.resources import files
@@ -38,11 +39,31 @@ def test_dashboard_asset_not_truncated():
     assert len(_dashboard_html().encode("utf-8")) > 50000
 
 
-def test_dashboard_asset_is_offline():
-    """The asset must be fully self-contained (no external URLs)."""
+_URL_RE = re.compile(r"https?://[^\s\"'<>)\\]+")
+_ALLOWED_URL_PREFIXES = (
+    "https://unpkg.com/maplibre-gl@",
+    "https://tiles.openfreemap.org/",
+)
+
+
+def test_dashboard_asset_external_urls_allowlisted():
+    """The asset is self-contained except the hot-tile map's external deps.
+
+    The page is self-contained except the hot-tile map's MapLibre GL
+    library (unpkg.com) and OpenFreeMap basemap (tiles.openfreemap.org);
+    no other external URLs are permitted.
+    """
     html = _dashboard_html()
-    assert "http://" not in html
-    assert "https://" not in html
+    urls = _URL_RE.findall(html)
+    insecure = [url for url in urls if url.startswith("http://")]
+    assert not insecure, f"Dashboard asset uses insecure URLs: {insecure}"
+    disallowed = [
+        url for url in urls if not url.startswith(_ALLOWED_URL_PREFIXES)
+    ]
+    assert not disallowed, (
+        "Dashboard asset references URLs outside the allowlist: "
+        + ", ".join(sorted(set(disallowed)))
+    )
 
 
 def test_disabled_endpoints_mount_no_route():

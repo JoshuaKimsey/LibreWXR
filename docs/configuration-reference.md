@@ -1868,7 +1868,7 @@ LibreWXR serves two read-only diagnostic surfaces on top of `/health`: a self-co
 
 ### `LIBREWXR_DASHBOARD_ENABLED`
 
-Master switch for the health dashboard page. When `true` (the default), `GET /dashboard` serves a single packaged HTML asset (no CDN, no external URLs) that polls `/health` client-side, by default every 10 seconds. When `false`, no route is mounted at all: a request is a plain `404`, the same semantics as the WebSocket channel. `/health` itself is unaffected.
+Master switch for the health dashboard page. When `true` (the default), `GET /dashboard` serves a single packaged HTML asset that polls `/health` client-side, by default every 10 seconds; apart from the hot-tile map's MapLibre GL library (unpkg.com) and OpenFreeMap basemap tiles (tiles.openfreemap.org, with an automatic offline canvas fallback), it makes no external requests. When `false`, no route is mounted at all: a request is a plain `404`, the same semantics as the WebSocket channel. `/health` itself is unaffected.
 
 | | |
 |---|---|

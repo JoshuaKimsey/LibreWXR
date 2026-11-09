@@ -52,7 +52,7 @@ src/librewxr/
     models.py        # Pydantic response models
     conditional.py   # ETag / If-None-Match conditional-request helpers
     dashboard.py     # GET /dashboard - serves the packaged health dashboard page
-    dashboard.html   # Self-contained (offline, no external URLs) dashboard asset
+    dashboard.html   # Self-contained asset (hot-tile map loads MapLibre GL + OpenFreeMap; offline canvas fallback)
     metrics.py       # GET /metrics - Prometheus text-exposition over the /health payload
   sources/                                # Per-source packages (auto-discovered)
     _base.py                              # Protocols + contribution dataclasses

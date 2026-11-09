@@ -20,15 +20,22 @@ never disagree.
 ## Overview
 
 `GET /dashboard` serves a single self-contained HTML page -- one asset
-packaged with the server, no CDN, no external URLs, no telemetry. It is
-served verbatim from memory and polls `/health` from the browser
-(default every 10 seconds; the page header selector offers 5 / 10 / 30 /
-60 seconds or manual-only) to render frame counts, per-region radar
-state, NWP grid availability, tile-cache and memory breakdowns, the
-per-worker cluster aggregation, alerts, storm cells, lightning, and the
-WebSocket channel state. Because the asset is packaged, the page works
-on an air-gapped deployment and costs nothing per request beyond sending
-the bytes.
+packaged with the server, no telemetry. Its only external requests are
+the hot-tile map's MapLibre GL library (unpkg.com) and the OpenFreeMap
+dark basemap (tiles.openfreemap.org); when those are unreachable (an
+air-gapped or firewalled deployment) the map automatically falls back to
+a built-in offline canvas, and the rest of the page makes no external
+requests. It is served verbatim from memory and polls `/health` from the
+browser (default every 10 seconds; the page header selector offers 5 /
+10 / 30 / 60 seconds or manual-only) to render frame counts, per-region
+radar state, NWP grid availability, tile-cache and memory breakdowns,
+the per-worker cluster aggregation, alerts, storm cells, lightning, and
+the WebSocket channel state. Map data is (c) OpenStreetMap contributors,
+served by OpenFreeMap; the map is rendered with MapLibre GL and the
+required attribution is shown in the map control. Because the asset is
+packaged, the page itself always loads on an air-gapped deployment and
+costs nothing per request beyond sending the bytes; only the optional
+interactive basemap needs egress.
 
 `GET /metrics` serves the Prometheus text-exposition (version 0.0.4) of
 that same health payload. It needs no `prometheus_client` dependency:
@@ -264,8 +271,10 @@ it derives from the shared worker pulses:
 LibreWXR deliberately ships **no built-in authentication**: the dashboard
 and the metrics endpoint are ordinary read-only routes, and the project
 leaves access control to the reverse proxy that already terminates TLS
-for the deployment. The dashboard asset itself has no external URLs and
-issues no requests other than to its own `/health`.
+for the deployment. The dashboard asset itself issues no requests other
+than to its own `/health` and the hot-tile map's MapLibre GL library
+(unpkg.com) and OpenFreeMap basemap (tiles.openfreemap.org); everything
+else is self-contained, and it sends no telemetry.
 
 Scrapers and browsers must then be pointed at the proxy (or at a
 loopback-bound LibreWXR instance), not at the public API host. A few
