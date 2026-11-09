@@ -40,7 +40,11 @@ from librewxr.config import settings
 from librewxr.data.alerts_store import AlertEntry, ensure_valid_polygon
 from librewxr.data.lightning_store import LightningStore
 from librewxr.data.store import FrameStore
-from librewxr.data.worker_pulse import read_worker_pulses
+from librewxr.data.worker_pulse import (
+    read_pipeline_pulse,
+    read_pss_mb,
+    read_worker_pulses,
+)
 from librewxr.mcp.discovery import build_ai_catalog
 from librewxr.memory import detect_memory_limit_mb
 from librewxr.tiles import window
@@ -223,8 +227,12 @@ def collect_worker_pulse() -> dict:
     """
     payload = {
         "pid": os.getpid(),
+        "role": "render",
         "written_at": int(time.time()),
         "rss_bytes": psutil.Process().memory_info().rss,
+        # Proportional set size: the de-double-counted unique-memory view
+        # (null where /proc/self/smaps_rollup is unavailable).
+        "pss_mb": read_pss_mb(),
     }
 
     if tile_cache is not None:
@@ -442,6 +450,84 @@ def _cluster_health_section() -> dict:
         ),
     }
 
+    # Per-worker list (render workers only, the live serving worker
+    # included), sorted by pid for stable output.  age_s comes from the
+    # pulse file's mtime at scan time; the live payload (plain dict) is
+    # age 0.  Older pulses without role/pss_mb default to render/null.
+    workers_block: list[dict] = []
+    for pulse in pulses:
+        role = pulse.get("role") or "render"
+        if role != "render":
+            continue
+        tile = pulse.get("tile_cache") or {}
+        pss = pulse.get("pss_mb")
+        pss_mb = (
+            round(float(pss), 1)
+            if isinstance(pss, (int, float)) and not isinstance(pss, bool)
+            else None
+        )
+        rss_bytes = pulse.get("rss_bytes") or 0
+        workers_block.append({
+            "pid": pulse["pid"],
+            "role": "render",
+            "rss_mb": round(rss_bytes / (1024 * 1024), 1),
+            "pss_mb": pss_mb,
+            "tile_cache_mb": round(
+                tile.get("total_bytes", 0) / (1024 * 1024), 1
+            ),
+            "age_s": round(float(getattr(pulse, "age_s", 0.0)), 1),
+        })
+    workers_block.sort(key=lambda entry: entry["pid"])
+    pss_values = [
+        entry["pss_mb"] for entry in workers_block if entry["pss_mb"] is not None
+    ]
+    workers_pss_block = (
+        {
+            "sum": round(sum(pss_values), 1),
+            "min": round(min(pss_values), 1),
+            "max": round(max(pss_values), 1),
+        }
+        if pss_values
+        else None
+    )
+
+    # Pipeline pulse: one file written by data_pipeline.py on the same
+    # cadence.  Absent (network-split render host: the pipeline runs
+    # remotely) or stale -> reporting false.
+    pipeline_block: dict = {"reporting": False}
+    if cache_dir is not None:
+        try:
+            record = read_pipeline_pulse(cache_dir)
+        except Exception:
+            record = None
+        if record is not None:
+            pipeline_pulse, pipeline_age = record
+            pipeline_pss = pipeline_pulse.get("pss_mb")
+            pipeline_rss = pipeline_pulse.get("rss_mb")
+            pipeline_pid = pipeline_pulse.get("pid")
+            pipeline_block = {
+                "reporting": True,
+                "pid": (
+                    pipeline_pid
+                    if isinstance(pipeline_pid, int)
+                    and not isinstance(pipeline_pid, bool)
+                    else 0
+                ),
+                "rss_mb": (
+                    round(float(pipeline_rss), 1)
+                    if isinstance(pipeline_rss, (int, float))
+                    and not isinstance(pipeline_rss, bool)
+                    else 0.0
+                ),
+                "pss_mb": (
+                    round(float(pipeline_pss), 1)
+                    if isinstance(pipeline_pss, (int, float))
+                    and not isinstance(pipeline_pss, bool)
+                    else None
+                ),
+                "age_s": round(pipeline_age, 1),
+            }
+
     return {
         "workers_reporting": len(pulses),
         "memory": memory_block,
@@ -449,6 +535,9 @@ def _cluster_health_section() -> dict:
         "coord": coord_block,
         "requests": requests_block,
         "tile_latency": tile_latency_block,
+        "workers": workers_block,
+        "workers_pss_mb": workers_pss_block,
+        "pipeline": pipeline_block,
     }
 
 

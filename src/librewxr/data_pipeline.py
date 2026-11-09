@@ -25,11 +25,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import random
 import signal
 import sys
+import time
 from pathlib import Path
 
 import cv2
+import psutil
 
 from librewxr.config import resolve_cache_dir, resolve_volatile_dir, settings
 from librewxr.data.alerts_fetcher import WMOAlertsFetcher
@@ -62,6 +66,11 @@ from librewxr.data.radar_cache import RadarFrameCache
 from librewxr.data.regions import REGIONS
 from librewxr.data.snapshot_sync import SnapshotPublisher
 from librewxr.data.store import FrameStore
+from librewxr.data.worker_pulse import (
+    PULSE_INTERVAL_S,
+    read_pss_mb,
+    write_pipeline_pulse,
+)
 from librewxr.logging_setup import setup_logging
 from librewxr.sources import (
     collect_nowcast_contributions,
@@ -88,6 +97,48 @@ logger = logging.getLogger(__name__)
 # process lifetime so it can't be garbage-collected mid-write (the write
 # is tens of MB); ``run_pipeline`` assigns it once at startup.
 _mask_save_task: asyncio.Task | None = None
+
+
+def _pipeline_pulse_payload() -> dict:
+    """Compact payload for ``<cache_dir>/workers/pipeline.json``.
+
+    Deliberately minimal — the pipeline builds no tiles, so there are no
+    tile-cache or request counters.  ``rss_mb`` is already in MB (the
+    worker pulses carry raw ``rss_bytes``); ``pss_mb`` is the
+    proportional set size, or ``None`` where ``/proc`` is unavailable.
+    """
+    return {
+        "pid": os.getpid(),
+        "role": "pipeline",
+        "written_at": int(time.time()),
+        "rss_mb": round(
+            psutil.Process().memory_info().rss / (1024 * 1024), 1
+        ),
+        "pss_mb": read_pss_mb(),
+    }
+
+
+async def _pipeline_pulse_loop(stop: asyncio.Event, cache_dir: Path) -> None:
+    """Publish the pipeline's pulse every PULSE_INTERVAL_S (jittered).
+
+    Mirrors ``main._worker_pulse_loop``: the write runs in a worker
+    thread (``write_pipeline_pulse`` never raises) and each iteration is
+    individually guarded so a transient failure never kills the loop.
+    """
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(
+                stop.wait(),
+                timeout=PULSE_INTERVAL_S * (0.5 + random.random()),
+            )
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            payload = _pipeline_pulse_payload()
+            await asyncio.to_thread(write_pipeline_pulse, cache_dir, payload)
+        except Exception:
+            logger.exception("Pipeline pulse write failed")
 
 
 async def _restore_cached_frames(
@@ -460,6 +511,13 @@ async def run_pipeline() -> None:
     await fetcher.start()
     logger.info("Pipeline running — Ctrl-C / SIGTERM to stop")
 
+    # Cluster /health pulse: this pipeline's own presence in the shared
+    # cache-dir aggregation (render hosts report pipeline.reporting true
+    # only when this file is fresh).  cache_dir is always resolved
+    # (explicit or tempdir fallback), so the pulse always runs.
+    pulse_stop = asyncio.Event()
+    pulse_task = asyncio.create_task(_pipeline_pulse_loop(pulse_stop, cache_dir))
+
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -478,6 +536,11 @@ async def run_pipeline() -> None:
     try:
         await stop_event.wait()
     finally:
+        pulse_stop.set()
+        try:
+            await pulse_task
+        except Exception:
+            logger.exception("Pipeline pulse loop shutdown error")
         await fetcher.stop()
         if alerts_fetcher is not None:
             await alerts_fetcher.close()

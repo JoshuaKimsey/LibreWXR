@@ -387,6 +387,9 @@
     .kpi-value { margin-top: var(--space-4); color: var(--text); font-size: clamp(1.45rem, 2.2vw, 2rem); line-height: 1; letter-spacing: -0.045em; }
     .kpi-value small { margin-left: var(--space-1); color: var(--muted); font-family: var(--font-ui); font-size: var(--text-xs); letter-spacing: 0; }
     .kpi-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-4); color: var(--muted); font-size: var(--text-xs); }
+    .kpi-basis { margin-top: var(--space-2); color: var(--accent-bright); font-size: var(--text-xs); font-weight: var(--weight-medium); line-height: 1.35; }
+    .kpi-detail { margin-top: var(--space-2); color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); overflow-wrap: anywhere; }
+    .kpi-hint { margin-top: var(--space-2); color: var(--faint); font-size: var(--text-2xs); line-height: 1.4; }
     .mini-track { height: 0.1875rem; margin-top: var(--space-3); overflow: hidden; border-radius: var(--radius-round); background: var(--track); }
     .mini-fill { height: 100%; border-radius: inherit; background: var(--accent); transition: width var(--transition-base); }
 
@@ -408,7 +411,30 @@
     .rss-stats { display: flex; gap: var(--space-5); }
     .rss-stat span { display: block; color: var(--muted); font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.05em; }
     .rss-stat strong { font-family: var(--font-mono); font-size: var(--text-md); font-weight: var(--weight-medium); }
+    .rss-stats { flex-wrap: wrap; justify-content: flex-end; }
     .cluster-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); padding: var(--space-4) var(--space-5) var(--space-5); }
+    .worker-distribution { grid-column: 1 / -1; }
+    .worker-list { display: grid; gap: var(--space-2); }
+    .worker-row { display: grid; grid-template-columns: minmax(7rem, 0.65fr) minmax(0, 3fr) minmax(5.5rem, 0.65fr); align-items: center; gap: var(--space-4); padding: var(--space-3); border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--bg-subtle); }
+    .worker-row.is-pipeline { border-left: 2px solid var(--purple); background: var(--bg-inset); }
+    .worker-identity { min-width: 0; }
+    .worker-identity code { display: inline-block; color: var(--text); font-size: var(--text-xs); }
+    .worker-role { display: inline-flex; margin-left: var(--space-2); padding: 0.125rem var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-round); color: var(--muted); font-size: var(--text-2xs); }
+    .worker-role.is-pipeline { border-color: var(--purple); color: var(--purple); }
+    .worker-age { display: block; margin-top: var(--space-1); color: var(--faint); font-family: var(--font-mono); font-size: var(--text-2xs); }
+    .worker-age.is-stale { color: var(--warning); }
+    .worker-bars { display: grid; gap: var(--space-2); min-width: 0; }
+    .worker-bar-line { display: grid; grid-template-columns: 2.25rem minmax(0, 1fr) 5rem; align-items: center; gap: var(--space-2); min-width: 0; }
+    .worker-bar-label { color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); }
+    .worker-track { height: 0.375rem; overflow: hidden; border-radius: var(--radius-round); background: var(--track); }
+    .worker-fill { display: block; height: 100%; border-radius: inherit; background: var(--info); }
+    .worker-fill.is-pss { background: var(--accent); }
+    .is-pipeline .worker-fill { background: var(--purple); }
+    .worker-bar-value { color: var(--text-soft); font-family: var(--font-mono); font-size: var(--text-2xs); text-align: right; white-space: nowrap; }
+    .worker-cache { color: var(--faint); font-size: var(--text-2xs); text-align: right; }
+    .worker-cache strong { display: block; margin-top: var(--space-1); color: var(--text-soft); font-family: var(--font-mono); font-size: var(--text-xs); font-weight: var(--weight-regular); }
+    .worker-pipeline-note { padding: var(--space-3); border: 1px dashed var(--border); border-radius: var(--radius-md); color: var(--faint); font-size: var(--text-xs); }
+    .worker-pipeline-note strong { color: var(--muted); font-weight: var(--weight-medium); }
     .stat-list { display: grid; gap: var(--space-3); }
     .stat-row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); min-width: 0; }
     .stat-row dt { color: var(--muted); font-size: var(--text-xs); }
@@ -677,7 +703,7 @@
       .status-card { min-height: auto; }
       .kpi-card { min-height: 9rem; }
       .cluster-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .cluster-grid > :last-child { grid-column: 1 / -1; }
+      .cluster-grid > .cluster-aggregate-card { grid-column: 1 / -1; }
       .cache-kinds { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .feature-card { grid-column: span 3; }
     }
@@ -709,6 +735,9 @@
       .rss-stats { width: 100%; justify-content: space-between; }
       .cluster-grid, .coordinate-layout { grid-template-columns: 1fr; }
       .cluster-grid > :last-child { grid-column: auto; }
+      .worker-row { grid-template-columns: 1fr; gap: var(--space-3); }
+      .worker-cache { display: flex; align-items: baseline; justify-content: space-between; text-align: left; }
+      .worker-cache strong { margin-top: 0; }
       .model-side { grid-template-columns: 1fr; }
       .traffic-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .section-heading { align-items: flex-start; }
@@ -872,7 +901,7 @@
       </div>
       <div class="two-column">
         <article class="panel" aria-labelledby="memory-title">
-          <div class="panel-header"><div class="panel-title-wrap"><span class="panel-icon"><svg class="icon" aria-hidden="true"><use href="#i-memory"/></svg></span><div><h3 id="memory-title" class="panel-title">Process memory</h3><p class="panel-subtitle">RSS allocation by component, in mebibytes.</p></div></div><span class="scope-badge">This worker</span></div>
+          <div class="panel-header"><div class="panel-title-wrap"><span class="panel-icon"><svg class="icon" aria-hidden="true"><use href="#i-memory"/></svg></span><div><h3 id="memory-title" class="panel-title">This worker</h3><p class="panel-subtitle">Serving-worker RSS and component allocation; not a cluster total.</p></div></div><span class="scope-badge">Serving worker</span></div>
           <div id="memory-content" class="panel-body"><div class="loading-state"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><div><strong>Loading memory breakdown</strong></div></div></div>
         </article>
         <article class="panel" aria-labelledby="frames-title">
@@ -1064,6 +1093,57 @@
         return `<article class="panel feature-card" data-feature="${esc(title.toLowerCase().replace(/\s+/g, "-"))}"><div class="feature-head"><div class="feature-title-wrap"><span class="panel-icon">${icon(iconName)}</span><h3 class="feature-title">${esc(title)}</h3></div>${badge("Enabled", tone)}</div><div class="feature-value">${headline}<span class="feature-unit">${esc(unit)}</span></div><p class="feature-caption">${caption}</p><div class="feature-details">${details}</div></article>`;
       }
 
+      function memoryPressureKPI(data) {
+        const cluster = isObject(data.cluster) ? data.cluster : null;
+        const memory = object(data.memory);
+        const extended = cluster && ("workers" in cluster || "workers_pss_mb" in cluster || "pipeline" in cluster);
+        const localPct = finite(memory.usage_pct, finite(memory.resident_mb, 0) > 0 && finite(memory.limit_mb, 0) > 0 ? memory.resident_mb / memory.limit_mb * 100 : null);
+        const tone = (pct) => pct >= 90 ? "var(--danger)" : pct >= 75 ? "var(--warning)" : "var(--accent)";
+        const result = (used, limit, pct, basis, hint, foot, unit = "% RSS", detail = "") => ({
+          value: pct === null ? fmtMB(used) : fmtPct(pct).replace("%", ""),
+          unit: pct === null ? "" : unit,
+          foot,
+          sub: finite(limit) === null ? "limit not reported" : `of ${fmtMB(limit)} limit`,
+          progress: pct === null ? null : clamp(pct),
+          color: tone(finite(pct, 0)),
+          basis,
+          hint,
+          detail
+        });
+        if (cluster && !extended) {
+          const memoryPct = finite(memory.usage_pct, 0);
+          return { value: fmtPct(memoryPct).replace("%", ""), unit: "% RSS", foot: `${fmtMB(memory.resident_mb)} resident`, sub: `of ${fmtMB(memory.limit_mb)} limit`, progress: clamp(memoryPct), color: tone(memoryPct), basis: "", hint: "", detail: "" };
+        }
+        if (cluster) {
+          const clusterMemory = object(cluster.memory);
+          const container = isObject(clusterMemory.container) ? clusterMemory.container : null;
+          if (container) {
+            const parts = ["anon", "file", "shmem"].map((key) => finite(container[`${key}_mb`], 0));
+            const used = parts.reduce((sum, value) => sum + value, 0);
+            const limit = finite(container.limit_mb);
+            const pct = limit !== null && limit > 0 ? used / limit * 100 : null;
+            return result(used, limit, pct, "container (cgroup)", "Whole-container cgroup truth: anonymous, file and shared memory combined.", `${fmtMB(used)} used`, "% cgroup", `Anon ${fmtMB(parts[0])} · File ${fmtMB(parts[1])} · Shmem ${fmtMB(parts[2])}`);
+          }
+          const pss = isObject(cluster.workers_pss_mb) ? cluster.workers_pss_mb : null;
+          const limit = finite(memory.limit_mb);
+          if (pss && finite(pss.sum) !== null) {
+            const used = finite(pss.sum);
+            const pct = limit !== null && limit > 0 ? used / limit * 100 : null;
+            return result(used, limit, pct, "sum of workers (PSS, unique)", "Proportional set size divides shared pages between workers instead of double-counting them.", `${fmtMB(used)} unique`, "% PSS");
+          }
+          const rss = finite(object(clusterMemory.workers_rss_mb).sum);
+          if (rss !== null) {
+            const pct = limit !== null && limit > 0 ? rss / limit * 100 : null;
+            return result(rss, limit, pct, "sum of workers (RSS, overestimates shared pages)", "RSS totals count shared memmap pages once per worker and can overstate actual usage.", `${fmtMB(rss)} resident`);
+          }
+        }
+        const used = finite(memory.resident_mb);
+        const limit = finite(memory.limit_mb);
+        const fallbackBasis = cluster ? "this worker only — cluster reported no memory aggregates" : "this worker only — no cluster data";
+        const fallbackHint = cluster ? "Serving-worker RSS only; the cluster response contained no usable memory total." : "Serving-worker RSS only; no usable fleet memory aggregate was returned.";
+        return result(used, limit, localPct, fallbackBasis, fallbackHint, `${fmtMB(used)} resident`);
+      }
+
       function renderSummary(data) {
         const degraded = data.status === "degraded";
         const palette = isObject(data.color_schemes) ? data.color_schemes : null;
@@ -1086,21 +1166,19 @@
         const localCache = object(localRequests.cache);
         const clusterLatency = object(cluster?.tile_latency);
         const localLatency = object(localRequests.latency);
-        const memory = object(data.memory);
+        const memoryKPI = memoryPressureKPI(data);
         const workers = finite(cluster?.workers_reporting);
         const totalRequests = cluster ? clusterRequests.total_requests : localRequests.total_requests;
         const hitRate = cluster ? clusterRequests.hit_rate : localCache.hit_rate;
         const requestLatency = cluster ? clusterLatency.avg_request_ms : localLatency.avg_request_ms;
-        const memoryPct = finite(memory.usage_pct, 0);
-        const memoryTone = memoryPct >= 90 ? "var(--danger)" : memoryPct >= 75 ? "var(--warning)" : "var(--accent)";
         const scope = cluster ? "Cluster total" : "This worker";
         const kpis = [
           { label: "Render workers", icon: "workers", value: workers === null ? "—" : fmtInt(workers), unit: workers === 1 ? "worker" : "workers", foot: cluster ? "Reporting live pulses" : "Cluster not reported", sub: cluster ? "Healthy pulse inventory" : "Local metrics remain live", progress: null },
-          { label: "Memory pressure", icon: "memory", value: fmtPct(memoryPct).replace("%", ""), unit: "% RSS", foot: `${fmtMB(memory.resident_mb)} resident`, sub: `of ${fmtMB(memory.limit_mb)} limit`, progress: clamp(memoryPct), color: memoryTone },
+          { label: "Memory pressure", icon: "memory", ...memoryKPI },
           { label: "Tile requests", icon: "requests", value: fmtInt(totalRequests), unit: "", foot: scope, sub: `${fmtInt(cluster ? clusterRequests.hot_tiles : localRequests.hot_tiles)} hot tiles`, progress: null },
           { label: "Geometry hit rate", icon: "cache", value: finite(hitRate) === null ? "—" : fmtPctRatio(hitRate).replace("%", ""), unit: "%", foot: `${fmtMs(requestLatency)} mean request`, sub: cluster ? "Across the fleet" : "This worker", progress: clamp(finite(hitRate, 0) * 100), color: "var(--info)" }
         ];
-        $("summary-kpis").innerHTML = kpis.map((kpi) => `<article class="panel kpi-card"><div><div class="kpi-top"><span class="kpi-label">${esc(kpi.label)}</span>${icon(kpi.icon)}</div><div class="kpi-value">${esc(kpi.value)}${kpi.unit ? `<small>${esc(kpi.unit)}</small>` : ""}</div></div><div><div class="kpi-foot"><span>${esc(kpi.foot)}</span><span>${esc(kpi.sub)}</span></div>${kpi.progress === null ? "" : `<div class="mini-track" aria-hidden="true"><div class="mini-fill" style="width:${kpi.progress}%;background:${kpi.color || "var(--accent)"}"></div></div>`}</div></article>`).join("");
+        $("summary-kpis").innerHTML = kpis.map((kpi) => `<article class="panel kpi-card"><div><div class="kpi-top"><span class="kpi-label">${esc(kpi.label)}</span>${icon(kpi.icon)}</div><div class="kpi-value">${esc(kpi.value)}${kpi.unit ? `<small>${esc(kpi.unit)}</small>` : ""}</div>${kpi.basis ? `<div class="kpi-basis">${esc(kpi.basis)}</div>` : ""}</div><div><div class="kpi-foot"><span>${esc(kpi.foot)}</span><span>${esc(kpi.sub)}</span></div>${kpi.progress === null ? "" : `<div class="mini-track" aria-hidden="true"><div class="mini-fill" style="width:${kpi.progress}%;background:${kpi.color || "var(--accent)"}"></div></div>`}${kpi.detail ? `<p class="kpi-detail">${esc(kpi.detail)}</p>` : ""}${kpi.hint ? `<p class="kpi-hint">${esc(kpi.hint)}</p>` : ""}</div></article>`).join("");
       }
 
       function coordRows(caches) {
@@ -1117,6 +1195,20 @@
         return `<div><div class="store-big">${esc(fmtPctRatio(ratio))}</div><p class="store-caption">Shared-store hit ratio</p><dl class="stat-list" style="margin-top:var(--space-4)">${statRow("Entries", `<strong>${esc(fmtInt(store.entries))}</strong>`)}${statRow("Disk footprint", esc(fmtBytes(store.bytes)))}${statRow("Publishes", esc(fmtInt(store.publishes)))}${statRow("Hits / misses", `${esc(fmtInt(store.hits))} / ${esc(fmtInt(store.misses))}`)}</dl></div>`;
       }
 
+      function workerMemoryRow(worker, scale, pipeline = false) {
+        const rss = finite(worker.rss_mb);
+        const pss = finite(worker.pss_mb);
+        const age = finite(worker.age_s);
+        const stale = age !== null && age >= 45;
+        const rssWidth = rss === null ? 0 : clamp(rss / scale * 100);
+        const pssWidth = pss === null ? 0 : clamp(pss / scale * 100);
+        const pid = finite(worker.pid);
+        const role = pipeline ? "pipeline" : text(worker.role, "render");
+        const cacheDetail = pipeline ? "" : `, tile cache ${fmtMB(worker.tile_cache_mb)}`;
+        const title = `${role} PID ${fmtInt(pid)}: RSS ${fmtMB(rss)}, PSS ${pss === null ? "not reported" : fmtMB(pss)}${cacheDetail}, pulse age ${fmtAge(age)}`;
+        return `<div class="worker-row${pipeline ? " is-pipeline" : ""}" title="${esc(title)}"><div class="worker-identity"><code>PID ${esc(fmtInt(pid))}</code><span class="worker-role${pipeline ? " is-pipeline" : ""}">${esc(role)}</span><span class="worker-age${stale ? " is-stale" : ""}">${esc(fmtAge(age))} old${stale ? " · stale" : ""}</span></div><div class="worker-bars" role="img" aria-label="${esc(title)}"><div class="worker-bar-line"><span class="worker-bar-label">RSS</span><div class="worker-track" aria-hidden="true"><span class="worker-fill" style="width:${rssWidth}%"></span></div><span class="worker-bar-value">${esc(fmtMB(rss))}</span></div><div class="worker-bar-line"><span class="worker-bar-label">PSS</span><div class="worker-track" aria-hidden="true">${pss === null ? "" : `<span class="worker-fill is-pss" style="width:${pssWidth}%"></span>`}</div><span class="worker-bar-value">${pss === null ? "not reported" : esc(fmtMB(pss))}</span></div></div><div class="worker-cache"><span>${pipeline ? "Process" : "Tile cache"}</span><strong>${pipeline ? "data pipeline" : esc(fmtMB(worker.tile_cache_mb))}</strong></div></div>`;
+      }
+
       function renderCluster(data) {
         const cluster = data.cluster;
         if (!isObject(cluster)) {
@@ -1125,7 +1217,12 @@
         }
         const memory = object(cluster.memory);
         const rss = object(memory.workers_rss_mb);
+        const pss = isObject(cluster.workers_pss_mb) ? cluster.workers_pss_mb : null;
         const container = isObject(memory.container) ? memory.container : null;
+        const workerRows = array(cluster.workers).filter(isObject).sort((a, b) => finite(a.pid, 0) - finite(b.pid, 0));
+        const pipeline = isObject(cluster.pipeline) ? cluster.pipeline : null;
+        const hasDistribution = Array.isArray(cluster.workers) || pipeline !== null;
+        const scale = Math.max(1, ...workerRows.flatMap((worker) => [finite(worker.rss_mb, 0), finite(worker.pss_mb, 0)]), pipeline?.reporting === true ? finite(pipeline.rss_mb, 0) : 0, pipeline?.reporting === true ? finite(pipeline.pss_mb, 0) : 0);
         const requests = object(cluster.requests);
         const latency = object(cluster.tile_latency);
         const tileCache = object(cluster.tile_cache);
@@ -1140,15 +1237,17 @@
         } else {
           containerContent = emptyState("No cgroup split", "Container memory accounting is not reported on this host.", "memory");
         }
+        const distribution = hasDistribution ? `<section class="subpanel worker-distribution" aria-label="Per-process memory distribution"><div class="breakdown-title" style="margin-top:0">Worker memory distribution <span>RSS / PSS · shared ${esc(fmtMB(scale))} scale</span></div><p class="muted-note" style="margin-bottom:var(--space-4)">RSS counts shared pages in every process; PSS divides them proportionally. Empty PSS bars mean the process did not report PSS.</p><div class="worker-list">${workerRows.length ? workerRows.map((worker) => workerMemoryRow(worker, scale)).join("") : `<p class="muted-note">No render worker details reported.</p>`}${pipeline?.reporting === true ? workerMemoryRow(pipeline, scale, true) : pipeline ? `<p class="worker-pipeline-note"><strong>pipeline not reporting</strong> · Normal on network-split deployments where the pipeline runs on another host.</p>` : ""}</div></section>` : "";
         $("cluster-content").innerHTML = `
           <div class="cluster-ribbon">
             <div class="cluster-ribbon-main">${icon("workers", "icon-lg")}<div><strong>${esc(fmtInt(workers))} render ${workers === 1 ? "worker" : "workers"} reporting</strong><p>Fresh process pulses aggregated into one fleet view.</p></div></div>
-            <div class="rss-stats" aria-label="Worker resident memory"><div class="rss-stat"><span>RSS sum</span><strong>${esc(fmtMB(rss.sum))}</strong></div><div class="rss-stat"><span>Minimum</span><strong>${esc(fmtMB(rss.min))}</strong></div><div class="rss-stat"><span>Maximum</span><strong>${esc(fmtMB(rss.max))}</strong></div></div>
+            <div class="rss-stats" aria-label="${pss ? "Worker resident and proportional memory" : "Worker resident memory"}"><div class="rss-stat"><span>RSS sum</span><strong>${esc(fmtMB(rss.sum))}</strong></div><div class="rss-stat"><span>${pss ? "RSS min" : "Minimum"}</span><strong>${esc(fmtMB(rss.min))}</strong></div><div class="rss-stat"><span>${pss ? "RSS max" : "Maximum"}</span><strong>${esc(fmtMB(rss.max))}</strong></div>${pss ? `<div class="rss-stat"><span>PSS sum</span><strong>${esc(fmtMB(pss.sum))}</strong></div><div class="rss-stat"><span>PSS min</span><strong>${esc(fmtMB(pss.min))}</strong></div><div class="rss-stat"><span>PSS max</span><strong>${esc(fmtMB(pss.max))}</strong></div>` : ""}</div>
           </div>
           <div class="cluster-grid">
             <section class="subpanel" aria-label="Container memory"><h3 class="subpanel-title">Container memory split</h3>${containerContent}</section>
             <section class="subpanel" aria-label="Cluster requests"><h3 class="subpanel-title">Request plane</h3><dl class="stat-list">${statRow("Total requests", `<strong>${esc(fmtInt(requests.total_requests))}</strong>`, true)}${statRow("Geometry hit rate", `<span class="text-accent">${esc(fmtPctRatio(requests.hit_rate))}</span>`)}${statRow("Cache hits / misses", `${esc(fmtInt(requests.cache_hits))} / ${esc(fmtInt(requests.cache_misses))}`)}${statRow("Fast-path responses", esc(fmtInt(requests.fast_path_total)))}${statRow("Hot-tile activity", esc(fmtInt(requests.hot_tiles)))}</dl><div class="latency-grid"><div class="latency-item"><span>Request</span><strong>${esc(fmtMs(latency.avg_request_ms))}</strong></div><div class="latency-item"><span>Compute</span><strong>${esc(fmtMs(latency.avg_compute_ms))}</strong></div><div class="latency-item"><span>Present</span><strong>${esc(fmtMs(latency.avg_present_ms))}</strong></div></div></section>
-            <section class="subpanel" aria-label="Cluster cache and coordinate aggregates"><h3 class="subpanel-title">Fleet cache &amp; coordinates</h3><dl class="stat-list" style="margin-bottom:var(--space-4)">${statRow("Cluster tile entries", `<strong>${esc(fmtInt(tileCache.entries))}</strong>`)}${statRow("Cluster tile memory", esc(fmtMB(tileCache.used_mb)))}</dl>${coordRows(coord.caches)}<div class="divider"></div><h4 class="subpanel-title">Shared coordinate store</h4>${isObject(coord.store) ? `<dl class="stat-list">${statRow("Hit ratio", `<span class="text-accent">${esc(fmtPctRatio(ratioFromHits(coord.store.hits, coord.store.misses)))}</span>`)}${statRow("Entries / bytes", `${esc(fmtInt(coord.store.entries))} / ${esc(fmtBytes(coord.store.bytes))}`)}${statRow("Hits / misses", `${esc(fmtInt(coord.store.hits))} / ${esc(fmtInt(coord.store.misses))}`)}${statRow("Publishes", esc(fmtInt(coord.store.publishes)))}</dl>` : `<p class="muted-note">No shared-store aggregate reported.</p>`}</section>
+            <section class="subpanel cluster-aggregate-card" aria-label="Cluster cache and coordinate aggregates"><h3 class="subpanel-title">Fleet cache &amp; coordinates</h3><dl class="stat-list" style="margin-bottom:var(--space-4)">${statRow("Cluster tile entries", `<strong>${esc(fmtInt(tileCache.entries))}</strong>`)}${statRow("Cluster tile memory", esc(fmtMB(tileCache.used_mb)))}</dl>${coordRows(coord.caches)}<div class="divider"></div><h4 class="subpanel-title">Shared coordinate store</h4>${isObject(coord.store) ? `<dl class="stat-list">${statRow("Hit ratio", `<span class="text-accent">${esc(fmtPctRatio(ratioFromHits(coord.store.hits, coord.store.misses)))}</span>`)}${statRow("Entries / bytes", `${esc(fmtInt(coord.store.entries))} / ${esc(fmtBytes(coord.store.bytes))}`)}${statRow("Hits / misses", `${esc(fmtInt(coord.store.hits))} / ${esc(fmtInt(coord.store.misses))}`)}${statRow("Publishes", esc(fmtInt(coord.store.publishes)))}</dl>` : `<p class="muted-note">No shared-store aggregate reported.</p>`}</section>
+            ${distribution}
           </div>`;
       }
 
@@ -1169,7 +1268,7 @@
         const entries = Object.entries(breakdown).filter(([key, value]) => key.endsWith("_mb") && !excluded.has(key) && finite(value) !== null).sort((a, b) => finite(b[1], 0) - finite(a[1], 0));
         const bars = entries.length ? `<ul class="bar-list">${entries.map(([key, value], index) => barRow(humanize(key), fmtMB(value), resident > 0 ? finite(value, 0) / resident * 100 : 0, index)).join("")}</ul>` : emptyState("No memory breakdown", "Component allocation details were not included in this sample.", "memory");
         const sharedStore = finite(breakdown.coord_store_mb, 0) > 0 || finite(breakdown.coord_store_entries, 0) > 0 ? `<p class="muted-note" style="margin-top:var(--space-4)">Shared coordinate store: ${esc(fmtMB(breakdown.coord_store_mb))} across ${esc(fmtInt(breakdown.coord_store_entries))} entries; disk-backed pages are excluded from RSS component shares.</p>` : "";
-        $("memory-content").innerHTML = `<div class="gauge-layout"><div class="gauge" style="--gauge-value:${clamp(pct)}%;--gauge-color:${gaugeColor}" role="img" aria-label="Memory usage ${esc(fmtPct(pct))}"><div class="gauge-content"><strong class="gauge-value">${esc(fmtPct(pct))}</strong><span class="gauge-label">of limit</span></div></div><dl class="gauge-stats"><div><dt class="big-stat-label">Resident set size</dt><dd class="big-stat-value">${esc(fmtMB(memory.resident_mb))}</dd><dd class="big-stat-note">Private process memory</dd></div><div><dt class="big-stat-label">Detected memory limit</dt><dd class="big-stat-value">${esc(fmtMB(memory.limit_mb))}</dd><dd class="big-stat-note">Host or cgroup ceiling</dd></div></dl></div><div class="breakdown-title">Component allocation <span>Share of process RSS</span></div>${bars}${sharedStore}`;
+        $("memory-content").innerHTML = `<div class="gauge-layout"><div class="gauge" style="--gauge-value:${clamp(pct)}%;--gauge-color:${gaugeColor}" role="img" aria-label="Memory usage ${esc(fmtPct(pct))}"><div class="gauge-content"><strong class="gauge-value">${esc(fmtPct(pct))}</strong><span class="gauge-label">of limit</span></div></div><dl class="gauge-stats"><div><dt class="big-stat-label">Resident set size</dt><dd class="big-stat-value">${esc(fmtMB(memory.resident_mb))}</dd><dd class="big-stat-note">Serving process RSS, including shared pages</dd></div><div><dt class="big-stat-label">Detected memory limit</dt><dd class="big-stat-value">${esc(fmtMB(memory.limit_mb))}</dd><dd class="big-stat-note">Host or cgroup ceiling</dd></div></dl></div><div class="breakdown-title">Component allocation <span>Share of process RSS</span></div>${bars}${sharedStore}`;
       }
 
       function renderFrames(data) {

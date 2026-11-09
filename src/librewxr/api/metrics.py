@@ -486,6 +486,33 @@ def _collect(out: _Families, payload: dict) -> None:
                 "Per-worker RSS across the cluster (MB)",
                 {"stat": stat},
             )
+        for stat, value in _dict(cluster.get("workers_pss_mb")).items():
+            out.add(
+                "librewxr_cluster_workers_pss_mb",
+                value,
+                "Per-worker PSS across the cluster (MB)",
+                {"stat": stat},
+            )
+        # The per-worker list (``cluster.workers``) is deliberately not
+        # exported: pid labels churn on every restart, so a per-pid series
+        # would leave a permanent stale-series trail for no analytic gain.
+        pipeline = _dict(cluster.get("pipeline"))
+        out.add(
+            "librewxr_cluster_pipeline_reporting",
+            pipeline.get("reporting"),
+            "Fetch pipeline pulse is fresh in the cluster aggregation (1 = yes)",
+        )
+        if pipeline.get("reporting"):
+            out.add(
+                "librewxr_cluster_pipeline_rss_mb",
+                pipeline.get("rss_mb"),
+                "Data pipeline resident set size (MB)",
+            )
+            out.add(
+                "librewxr_cluster_pipeline_pss_mb",
+                pipeline.get("pss_mb"),
+                "Data pipeline proportional set size (MB)",
+            )
         container = cluster_memory.get("container")
         if isinstance(container, dict):
             for kind in ("anon", "file", "shmem"):

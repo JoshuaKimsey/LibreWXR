@@ -143,6 +143,10 @@ NWP source is exported with no change to the exporter.
 | `librewxr_coord_store_bytes` | | `coord_caches.store.bytes` |
 | `librewxr_cluster_workers_reporting` | | `cluster.workers_reporting` |
 | `librewxr_cluster_workers_rss_mb` | `stat` (`sum`, `min`, `max`) | `cluster.memory.workers_rss_mb` |
+| `librewxr_cluster_workers_pss_mb` | `stat` (`sum`, `min`, `max`) | `cluster.workers_pss_mb` (omitted when no render worker reported PSS) |
+| `librewxr_cluster_pipeline_reporting` | | `cluster.pipeline.reporting` (`1` = a fresh pipeline pulse is present) |
+| `librewxr_cluster_pipeline_rss_mb` | | `cluster.pipeline.rss_mb` (only when reporting) |
+| `librewxr_cluster_pipeline_pss_mb` | | `cluster.pipeline.pss_mb` (only when reporting; omitted when `null`) |
 | `librewxr_cluster_container_mb` | `kind` (`anon`, `file`, `shmem`) | `cluster.memory.container.<kind>_mb` |
 | `librewxr_cluster_container_limit_mb` | | `cluster.memory.container.limit_mb` |
 | `librewxr_cluster_tile_cache_entries` | | `cluster.tile_cache.entries` |
@@ -200,7 +204,11 @@ NWP source is exported with no change to the exporter.
 
 `nwp_chain` is deliberately not exported (it is a static ordered list of
 source names; the dashboard renders it, and a scrape gains nothing from
-an info metric that only changes on redeploy).
+an info metric that only changes on redeploy). For the same reason the
+per-worker list (`cluster.workers`) is not exported: `pid` labels churn
+on every worker restart, so per-pid series would leave a permanent
+stale-series trail for no analytic gain. Use the PSS aggregates
+(`librewxr_cluster_workers_pss_mb`) for cluster memory instead.
 
 ## Tile request history
 
@@ -337,16 +345,48 @@ it derives from the shared worker pulses:
 - `librewxr_cluster_*` metrics are the **multi-worker aggregate**: the
   serving worker scans the tiny per-worker pulse files under the shared
   cache dir (mtime-filtered, lock-free) and unions in its own live
-  payload. Cluster sums (RSS, tile-cache bytes, request counters) are
-  additive; hit rates and latency averages are recomputed from the sums,
-  so idle workers do not drag the ratios around. `hot_tiles` is a sum
-  and may double-count a tile that several workers served.
+  payload. Cluster sums (RSS, PSS, tile-cache bytes, request counters)
+  are additive; hit rates and latency averages are recomputed from the
+  sums, so idle workers do not drag the ratios around. `hot_tiles` is a
+  sum and may double-count a tile that several workers served.
+- The `/health` `cluster.workers` list is the per-worker breakdown behind
+  those aggregates: one entry per live render worker (including the
+  serving worker), sorted by pid, with `rss_mb`, `pss_mb`,
+  `tile_cache_mb`, and pulse `age_s`. `cluster.workers_pss_mb` aggregates
+  only the non-null PSS values. `cluster.pipeline` reports the data
+  pipeline's own pulse (`reporting: true` with `pid` / `rss_mb` /
+  `pss_mb` / `age_s` when fresh).
 - When `cluster` is `null` (no shared cache dir, or the pulse scan
   failed; the failure is logged and `/health` still answers), **no**
   `librewxr_cluster_*` series are exported.
 - Frame counts, memory, NWP and satellite state come from the shared
   snapshot on render-only workers, so those are effectively
   cluster-wide already -- only inherently per-process counters differ.
+
+### Memory accounting
+
+Three figures answer different questions:
+
+- The serving worker's own memory section (`memory.*`) describes **only
+  the worker that answered this request**. Behind a load balancer it
+  moves with the worker, so it is not representative of the container.
+- `cluster.workers` / `cluster.workers_pss_mb` describe **every render
+  worker**: RSS per worker, and PSS (proportional set size) from
+  `/proc/self/smaps_rollup`. PSS is the true-unique-memory view: a page
+  mapped by N workers contributes 1/N to each worker's PSS, so summing
+  PSS across workers approximates real physical use, whereas summing RSS
+  counts every shared memmap page once per worker and overstates it.
+  PSS is `null` on platforms without `/proc` (non-Linux), in which case
+  `workers_pss_mb` is `null` and only RSS is available.
+- `cluster.pipeline` covers the **fetch pipeline** (its own pulse file,
+  same cadence and freshness window). When the pipeline runs on another
+  host (network-split deployments), render hosts see
+  `reporting: false` -- this is expected, not a failure, and the
+  pipeline's memory is simply not observable from the render host.
+- The cgroup container split (`cluster.memory.container`), when present,
+  remains the whole-container truth: it includes every process in the
+  container (render workers, sidecars, and their shared page cache) and
+  is not derived from the pulses.
 
 ## Authentication
 

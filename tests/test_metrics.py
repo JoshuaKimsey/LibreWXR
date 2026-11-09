@@ -275,6 +275,59 @@ class TestRenderPrometheus:
             in text
         )
 
+    def test_cluster_memory_pss_and_pipeline_series(self):
+        payload = _payload()
+        payload["cluster"]["workers"] = [
+            {"pid": 101, "role": "render", "rss_mb": 300.0, "pss_mb": 200.0,
+             "tile_cache_mb": 8.0, "age_s": 3.0},
+            {"pid": 102, "role": "render", "rss_mb": 340.0, "pss_mb": None,
+             "tile_cache_mb": 9.0, "age_s": 4.0},
+        ]
+        payload["cluster"]["workers_pss_mb"] = {
+            "sum": 200.0, "min": 150.0, "max": 200.0,
+        }
+        payload["cluster"]["pipeline"] = {
+            "reporting": True,
+            "pid": 4242,
+            "rss_mb": 250.0,
+            "pss_mb": 180.0,
+            "age_s": 2.0,
+        }
+        text = render_prometheus(payload)
+        assert 'librewxr_cluster_workers_pss_mb{stat="sum"} 200.0' in text
+        assert 'librewxr_cluster_workers_pss_mb{stat="min"} 150.0' in text
+        assert 'librewxr_cluster_workers_pss_mb{stat="max"} 200.0' in text
+        assert "librewxr_cluster_pipeline_reporting 1" in text
+        assert "librewxr_cluster_pipeline_rss_mb 250.0" in text
+        assert "librewxr_cluster_pipeline_pss_mb 180.0" in text
+        # The per-worker list is deliberately not exported (pid churn).
+        assert "librewxr_cluster_workers{" not in text
+        assert 'pid="' not in text
+
+    def test_cluster_pss_absent_when_null(self):
+        payload = _payload()
+        payload["cluster"]["workers_pss_mb"] = None
+        payload["cluster"]["pipeline"] = {"reporting": False}
+        text = render_prometheus(payload)
+        assert "librewxr_cluster_workers_pss_mb" not in text
+        assert "librewxr_cluster_pipeline_reporting 0" in text
+        assert "librewxr_cluster_pipeline_rss_mb" not in text
+        assert "librewxr_cluster_pipeline_pss_mb" not in text
+
+    def test_cluster_pipeline_pss_omitted_when_null(self):
+        payload = _payload()
+        payload["cluster"]["pipeline"] = {
+            "reporting": True,
+            "pid": 4242,
+            "rss_mb": 250.0,
+            "pss_mb": None,
+            "age_s": 2.0,
+        }
+        text = render_prometheus(payload)
+        assert "librewxr_cluster_pipeline_reporting 1" in text
+        assert "librewxr_cluster_pipeline_rss_mb 250.0" in text
+        assert "librewxr_cluster_pipeline_pss_mb" not in text
+
     def test_cluster_null_omits_cluster_metrics(self):
         payload = _payload()
         payload["cluster"] = None
