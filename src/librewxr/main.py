@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -1248,6 +1249,23 @@ def _describe_worker_exit(exitcode: int) -> str:
     return f"exit status {exitcode}"
 
 
+def _resolve_bind_host(host: str | None, workers: int) -> str | None:
+    """Pick the address uvicorn binds, keeping the dual-stack default.
+
+    With one worker, uvicorn hands ``host=None`` to asyncio, which binds
+    every address family.  With ``workers > 1`` uvicorn binds the shared
+    socket itself and ``None`` crashes it, so use the IPv6 wildcard
+    (dual-stack on Linux and macOS) or IPv4 when IPv6 is unavailable.
+    """
+    if host is not None or workers <= 1:
+        return host
+    try:
+        socket.socket(socket.AF_INET6, socket.SOCK_STREAM).close()
+    except OSError:
+        return "0.0.0.0"
+    return "::"
+
+
 def main():
     import uvicorn
     # Optional direct TLS: only enabled when both cert and key are set.
@@ -1409,7 +1427,7 @@ def main():
     try:
         uvicorn.run(
             "librewxr.main:app",
-            host=settings.host,
+            host=_resolve_bind_host(settings.host, settings.workers),
             port=settings.port,
             workers=settings.workers,
             timeout_worker_healthcheck=settings.worker_healthcheck_timeout,
