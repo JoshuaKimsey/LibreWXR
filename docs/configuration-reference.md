@@ -45,7 +45,9 @@ This document is the **full** reference for every setting LibreWXR understands. 
 
 ### `LIBREWXR_HOST`
 
-The network interface the server binds to. When unset (`None`), the value is passed straight to uvicorn, which selects a dual-stack listen — both IPv4 and IPv6 on capable systems. This replaced the previous IPv4-only `0.0.0.0` default in commit `f1eea96` ("Default host to None (dual-stack) instead of 0.0.0.0 (IPv4-only)").
+The network interface the server binds to. When unset (`None`), the listen is dual-stack on capable systems — both IPv4 and IPv6 — but the exact bind depends on the uvicorn worker count:
+- **Single worker** (`LIBREWXR_WORKERS=1`, or bare metal with `LIBREWXR_WORKERS` unset): `None` is passed straight to uvicorn, whose asyncio server opens the IPv4 and IPv6 wildcard sockets separately — the behaviour since commit `f1eea96` ("Default host to None (dual-stack) instead of 0.0.0.0 (IPv4-only)").
+- **`workers > 1`** (the Docker renderer's profile default, 16): uvicorn binds its own shared socket in the parent process before spawning workers, and that path cannot accept `host=None` — it crashes startup with `TypeError: str, bytes or bytearray expected, not NoneType`. LibreWXR resolves the unset host itself (`_resolve_bind_host` in `main.py`, PR #57) to the IPv6 wildcard `::` — again dual-stack on Linux and macOS defaults — falling back to `0.0.0.0` on hosts without IPv6 support.
 
 Most self-hosters want the new behaviour, but if your reverse proxy or network only speaks IPv4, set this explicitly:
 
@@ -58,7 +60,7 @@ Most self-hosters want the new behaviour, but if your reverse proxy or network o
 
 | | |
 |---|---|
-| **Default** | `None` (uvicorn dual-stack default) |
+| **Default** | `None` — dual-stack: single worker via uvicorn/asyncio, `workers > 1` via `_resolve_bind_host` (`::`, or `0.0.0.0` without IPv6) |
 | **Type** | string \| None |
 
 ### `LIBREWXR_PORT`

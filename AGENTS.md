@@ -174,7 +174,7 @@ All config via `LIBREWXR_*` env vars or `.env` file. Settings defined in `src/li
 - `LIBREWXR_RENDER_THREADS`: per-render-worker geometry compute pool size (0 = profile default: 4 multi, 0 = auto legacy-single; legacy alias `LIBREWXR_WARMER_THREADS`)
 - `LIBREWXR_RENDER_ONLY`: `true` — dedicated render workers only; skip fetcher init and memmap the pipeline snapshot (`main.py` auto-spawns the pipeline when unset)
 - `LIBREWXR_SSL_CERTFILE` / `LIBREWXR_SSL_KEYFILE`: optional direct TLS termination (paths to cert + key; leave both unset to serve plain HTTP behind a reverse proxy)
-- `LIBREWXR_HOST`: bind host (default unset → uvicorn dual-stack default; set `0.0.0.0` to restore the pre-`f1eea96` IPv4-only behaviour — useful for IPv4-only reverse proxies)
+- `LIBREWXR_HOST`: bind host (default unset → dual-stack by worker count: 1 uvicorn worker keeps `None` for asyncio's multi-family bind, `workers > 1` resolves to `::` — or `0.0.0.0` when IPv6 is unavailable — via `main._resolve_bind_host` since uvicorn's multi-process bind crashes on `host=None` (#57); set `0.0.0.0` to restore the pre-`f1eea96` IPv4-only behaviour — useful for IPv4-only reverse proxies)
 - `LIBREWXR_PORT`: bind port (default 8080)
 - `LIBREWXR_PUBLIC_URL`: public base URL advertised by the JSON API (default `http://localhost:8080`)
 - `LIBREWXR_CORS_ORIGINS`: comma-separated allowed origins (default `["*"]`)
