@@ -32,12 +32,13 @@ Note: images ship routinely for every future release from here on, so the
 - [x] Extend the README quickstart with `docker pull` / `docker compose pull` instructions
   alongside the existing build-from-source flow.
 - [x] Add standard OCI image labels (source, license AGPL-3.0-or-later, description).
-- [ ] Retire the git-pull + source-rebuild self-update flow in `scripts/auto-update.sh` once
+- [x] Retire the git-pull + source-rebuild self-update flow in `scripts/auto-update.sh` once
   published images exist: self-updating becomes `docker compose pull` + `up -d` against
   image tags instead of `git pull` + rebuild. Replace rather than patch; do not remove the
   old script until 0.6.0 images are live so source-based deployments keep a working update
-  path in the meantime. (scripts/update.sh shipped in 0.6.0; removing the legacy script is
-  deferred to a later release)
+  path in the meantime. (scripts/update.sh shipped in 0.6.0; the legacy script has since
+  been removed and its references swept - existing cron entries should point at
+  `scripts/update.sh`, or `scripts/update.sh --build` for source checkouts)
 - [x] Carry over the one genuinely useful piece: `.env` vs `.env.example` reconciliation
   (append missing `LIBREWXR_*` vars with their explanatory comments, write `.env.bak`
   first, never modify existing values), then sweep references to the old flow (AGENTS.md,
@@ -110,14 +111,20 @@ Note: shipped in 0.8.0.
 
 Tracked in issue #48.
 
-- [ ] Ship a static dashboard (e.g. served at `/dashboard`) rendering the existing `/health`
+- [x] Ship a static dashboard (e.g. served at `/dashboard`) rendering the existing `/health`
   payload: cluster section (per-worker RSS, hit ratios, cgroup split), per-NWP-grid health,
   sources, frames, tile cache.
-- [ ] Surface "most loaded areas" from the `tile_requests` hot-tile counters already
+- [x] Surface "most loaded areas" from the `tile_requests` hot-tile counters already
   collected by the request tracker.
-- [ ] Env-toggleable; document reverse-proxy auth instead of hand-rolling authentication.
-- [ ] Optional companion in this release: Prometheus `/metrics` export derived from
+- [x] Env-toggleable; document reverse-proxy auth instead of hand-rolling authentication.
+- [x] Optional companion in this release: Prometheus `/metrics` export derived from
   `/health` for users who already run Grafana.
+
+Note: complete on main; version assigned at release time. Landed alongside it: a MapLibre GL
+hot-tile map with a 24h tile-request snapshot history and timeline (a slice of #53 pulled
+forward), cluster-wide memory accounting (per-worker PSS list, pipeline pulse, cgroup
+`memory.current` basis), and the retirement of `scripts/auto-update.sh` (its 0.6.0
+leftover, above).
 
 ### WebSocket support
 
@@ -191,6 +198,10 @@ Tracked in issue #53.
 
 - [ ] Historical views: ring-buffered health snapshots for time-series trends and per-region
   load views.
+
+Note: the tile-request history slice (bounded snapshot ring served at `/health/tile-history`
+plus the dashboard timeline) shipped alongside the health dashboard (#48); the remaining
+scope - ring-buffered full-health snapshots and per-region load views - stays open.
 
 ### Palette ecosystem
 
