@@ -135,17 +135,25 @@ class _TokenManager:
 # ---------------------------------------------------------------------------
 
 def _feature_href(feature: dict) -> str | None:
-    """Extract the download href from a GeoJSON feature's ``links.data``."""
-    links = feature.get("links")
-    if not isinstance(links, dict):
-        return None
-    data = links.get("data")
-    if isinstance(data, list):
-        data = data[0] if data else None
-    if isinstance(data, dict):
-        href = data.get("href")
-        if isinstance(href, str) and href:
-            return href
+    """Extract the download href from a GeoJSON feature's ``links.data``.
+
+    The Data Store nests ``links`` under ``properties`` (verified against
+    the live API 2026-11-13); a top-level ``links`` is also accepted
+    defensively.
+    """
+    for container in (feature.get("properties"), feature):
+        if not isinstance(container, dict):
+            continue
+        links = container.get("links")
+        if not isinstance(links, dict):
+            continue
+        data = links.get("data")
+        if isinstance(data, list):
+            data = data[0] if data else None
+        if isinstance(data, dict):
+            href = data.get("href")
+            if isinstance(href, str) and href:
+                return href
     return None
 
 
@@ -499,21 +507,37 @@ class MTGLISource:
     # -- decode --------------------------------------------------------------
 
     def _decode_file(self, data: bytes) -> np.ndarray:
-        """Decode a product ZIP's netCDF member into flash points.
+        """Decode a product ZIP's netCDF members into flash points.
 
-        Raises ``ValueError`` on an unexpected schema (no netCDF member or a
-        missing variable) so the caller treats it as a decode failure and
-        skips the product.
+        The consolidated product carries a CHK-BODY and a CHK-TRAIL member
+        over the same sensing window; both hold flashes, so both are decoded
+        and concatenated.  Raises ``ValueError`` when the ZIP has no netCDF
+        member or every member fails to decode.
         """
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as zf:
                 members = [n for n in zf.namelist() if n.endswith(".nc")]
                 if not members:
                     raise ValueError("no netCDF member in MTG LI product")
-                nc_bytes = zf.read(members[0])
+                buffers = [zf.read(n) for n in members]
         except zipfile.BadZipFile as exc:
             raise ValueError("MTG LI product is not a ZIP archive") from exc
 
+        points: list[np.ndarray] = []
+        for member, buf in zip(members, buffers):
+            try:
+                points.append(self._decode_nc(buf))
+            except Exception as exc:  # noqa: BLE001 - corrupt member path
+                logger.warning(
+                    "MTG LI: decode failed for member %s (%s); continuing",
+                    member, exc,
+                )
+        if not points:
+            raise ValueError("no decodable netCDF member in MTG LI product")
+        return np.concatenate(points) if len(points) > 1 else points[0]
+
+    def _decode_nc(self, nc_bytes: bytes) -> np.ndarray:
+        """Decode one LI L2 flashes netCDF buffer into flash points."""
         with h5py.File(io.BytesIO(nc_bytes), "r") as f:
             try:
                 flash_time_var = f["flash_time"]

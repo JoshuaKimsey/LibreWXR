@@ -258,7 +258,7 @@ The `/health` endpoint surfaces an additive `lightning` section:
       },
       "meteosat12": {
         "source": "EO:EUM:DAT:0691",
-        "last_key": "W_XX-EUMETSAT-Darmstadt,IMG+SAT,MTI1+LI-2-FLASH+20261113115000Z.zip",
+        "last_key": "W_XX-EUMETSAT-Darmstadt,IMG+SAT,MTI1+LI-2-LFL--FD--x-x--ARC-x_C_EUMT_20261113092023_L2PF_OPE_20261113091005_20261113092005_N__O_0056_0000",
         "last_e": 1785130200,
         "units": "mW.m-2.sr-1",
         "stale": false,

@@ -31,6 +31,7 @@ from librewxr.data.lightning_eumetsat import (
     MTGLISource,
     _AuthError,
     _TokenManager,
+    _parse_feature,
 )
 from librewxr.data.lightning_fetcher import Watermarks
 from librewxr.data.lightning_store import _POINT_DTYPE
@@ -46,6 +47,33 @@ _LI_UNITS = "seconds since 2000-01-01 00:00:00.0"
 _RAD_SCALE = 1.0e-6
 
 NOW = 1_800_000_000
+
+# Real product identity, copied from a live Data Store probe (2026-11-13).
+# Product ids carry commas and ``+``; hrefs percent-encode them.
+_LIVE_PRODUCT_ID = (
+    "W_XX-EUMETSAT-Darmstadt,IMG+SAT,MTI1+LI-2-LFL--FD--x-x--ARC-x"
+    "_C_EUMT_20261113092023_L2PF_OPE_20261113091005_20261113092005"
+    "_N__O_0056_0000"
+)
+_LIVE_HREF = (
+    "https://api.eumetsat.int/data/download/1.0.0/collections/"
+    "EO%3AEUM%3ADAT%3A0691/products/"
+    "W_XX-EUMETSAT-Darmstadt%2CIMG%2BSAT%2CMTI1%2BLI-2-LFL--FD--x-x--ARC-x"
+    "_C_EUMT_20261113092023_L2PF_OPE_20261113091005_20261113092005"
+    "_N__O_0056_0000"
+)
+# The consolidated product ships a CHK-BODY and a CHK-TRAIL netCDF member
+# over the same sensing window; both hold flashes.
+_BODY_NC_NAME = (
+    "W_XX-EUMETSAT-Darmstadt,IMG+SAT,MTI1+LI-2-LFL--FD--CHK-BODY--ARC-NC4E"
+    "_C_EUMT_20261113092023_L2PF_OPE_20261113091005_20261113092005"
+    "_N__O_0056_0000.nc"
+)
+_TRAIL_NC_NAME = (
+    "W_XX-EUMETSAT-Darmstadt,IMG+SAT,MTI1+LI-2-LFL--FD--CHK-TRAIL--ARC-NC4E"
+    "_C_EUMT_20261113092023_L2PF_OPE_20261113091005_20261113092005"
+    "_N__O_0056_0000.nc"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -107,12 +135,23 @@ def _write_li_nc(flashes, base_unix, *, qc=True) -> bytes:
     return bio.getvalue()
 
 
-def _zip_product(nc_bytes: bytes, *, nc_name="product.nc") -> bytes:
-    """Wrap a netCDF buffer in the product ZIP (sidecars first on purpose)."""
+def _zip_product(
+    nc_bytes: bytes, *, nc_name="product.nc", extra_nc=None,
+) -> bytes:
+    """Wrap a netCDF buffer in the product ZIP (sidecars first on purpose).
+
+    When ``extra_nc`` is given the ZIP mirrors the real consolidated product:
+    two members named ``...CHK-BODY...`` and ``...CHK-TRAIL...`` over the same
+    sensing window (real names carry commas and ``+``).
+    """
     bio = io.BytesIO()
     with zipfile.ZipFile(bio, "w") as zf:
         zf.writestr("manifest.xml", "<manifest/>")
-        zf.writestr(nc_name, nc_bytes)
+        if extra_nc is not None:
+            zf.writestr(_BODY_NC_NAME, nc_bytes)
+            zf.writestr(_TRAIL_NC_NAME, extra_nc)
+        else:
+            zf.writestr(nc_name, nc_bytes)
         zf.writestr("quicklook.jpg", b"\xff\xd8\xff\xd9")
     return bio.getvalue()
 
@@ -142,17 +181,30 @@ def _parsed(pid, window_start, window_end) -> dict:
 
 
 def _feature(pid, start_iso, end_iso, *, href=None) -> dict:
-    """A raw GeoJSON search feature (the Data Store response shape)."""
+    """A raw GeoJSON search feature (the Data Store response shape).
+
+    Mirrors the live API (verified 2026-11-13): ``links`` nests under
+    ``properties`` and ``links.data`` is a LIST of link dicts.
+    """
     return {
+        "type": "Feature",
+        "id": pid,
+        "geometry": {"type": "Point", "coordinates": [0, 0]},
         "properties": {
             "identifier": pid,
             "date": f"{start_iso}/{end_iso}",
-        },
-        "links": {
-            "data": {
-                "href": href
-                or f"https://api.eumetsat.int/data/download/{pid}"
-            }
+            "links": {
+                "type": "Links",
+                "data": [
+                    {
+                        "type": "Link",
+                        "href": href
+                        or f"https://api.eumetsat.int/data/download/{pid}",
+                        "mediaType": "application/zip",
+                        "title": "Product download",
+                    }
+                ],
+            },
         },
     }
 
@@ -273,6 +325,46 @@ def test_decode_no_netcdf_member_raises():
         src._decode_file(_zip_without_nc())
 
 
+def test_decode_concatenates_body_and_trail():
+    src = _make_source()
+    body = _write_li_nc(
+        [
+            (11.0, 22.0, 1.0e-4, 1, 0),      # flash A
+            (13.75, 24.75, 1.1e-4, 2, 0),    # flash B
+        ],
+        NOW,
+    )
+    trail = _write_li_nc([(16.5, 27.5, 1.2e-4, 3, 0)], NOW)  # flash C
+
+    pts = src._decode_file(_zip_product(body, extra_nc=trail))
+
+    assert len(pts) == 3
+    assert [int(p["time_s"]) for p in pts] == [NOW + 1, NOW + 2, NOW + 3]
+    assert [float(p["lat"]) for p in pts] == [11.0, 13.75, 16.5]
+    assert all(int(p["satellite"]) == 12 for p in pts)
+
+
+def test_decode_corrupt_trail_member_keeps_body(caplog):
+    src = _make_source()
+    body = _write_li_nc([(11.0, 22.0, 1.0e-4, 1, 0)], NOW)
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        pts = src._decode_file(_zip_product(body, extra_nc=b"garbage"))
+
+    assert len(pts) == 1
+    assert pts[0]["lat"] == np.float32(11.0)
+    assert int(pts[0]["time_s"]) == NOW + 1
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "CHK-TRAIL" in warnings[0].getMessage()
+
+
+def test_decode_all_members_corrupt_raises():
+    src = _make_source()
+    with pytest.raises(ValueError, match="no decodable netCDF member"):
+        src._decode_file(_zip_product(b"garbage", extra_nc=b"garbage"))
+
+
 # ---------------------------------------------------------------------------
 # 2. fetch_cycle: watermark, cutoff, tail, auth, staleness
 # ---------------------------------------------------------------------------
@@ -280,18 +372,24 @@ def test_decode_no_netcdf_member_raises():
 def test_undecodable_zip_advances_watermark(tmp_path, monkeypatch):
     src = _make_source()
     wm = _watermarks(tmp_path)
-    feat = _parsed("prod-bad", NOW - 600, NOW - 300)
+    # A real product id carries commas and ``+``; prove the watermark JSON
+    # round-trips it and the status carries it verbatim.
+    feat = _parsed(_LIVE_PRODUCT_ID, NOW - 600, NOW - 300)
     _wire(src, monkeypatch, [feat], lambda href: _zip_without_nc())
 
     pts, status = src.fetch_cycle(NOW, wm)
 
     assert len(pts) == 0
-    assert status["last_key"] == "prod-bad"
+    assert status["last_key"] == _LIVE_PRODUCT_ID
     assert status["last_e"] == NOW - 300
     assert status["last_fetch_ok"] is True
     entry = wm.get("meteosat12")
-    assert entry["last_key"] == "prod-bad"
+    assert entry["last_key"] == _LIVE_PRODUCT_ID
     assert entry["source"] == _LI_COLLECTION
+    # Round-trip through a fresh reader (i.e. the on-disk JSON).
+    assert (
+        _watermarks(tmp_path).get("meteosat12")["last_key"] == _LIVE_PRODUCT_ID
+    )
 
 
 def test_watermark_resume_skips_processed(tmp_path, monkeypatch):
@@ -560,33 +658,23 @@ def test_search_products_paginates_and_parses(monkeypatch):
     page0 = {
         "totalResults": 3,
         "features": [
-            {
-                "properties": {
-                    "identifier": "p1",
-                    "date": "2026-11-13T10:00:00Z/2026-11-13T10:10:00Z",
-                },
-                # ``links.data`` may be a list of dicts.
-                "links": {"data": [{"href": "https://x/p1"}]},
-            },
-            {
-                "properties": {
-                    "identifier": "p2",
-                    "date": "2026-11-13T10:10:00Z/2026-11-13T10:20:00Z",
-                },
-                "links": {"data": {"href": "https://x/p2"}},
-            },
+            _feature(
+                "p1", "2026-11-13T10:00:00Z", "2026-11-13T10:10:00Z",
+                href="https://x/p1",
+            ),
+            _feature(
+                "p2", "2026-11-13T10:10:00Z", "2026-11-13T10:20:00Z",
+                href="https://x/p2",
+            ),
         ],
     }
     page1 = {
         "totalResults": 3,
         "features": [
-            {
-                "properties": {
-                    "identifier": "p3",
-                    "date": "2026-11-13T10:20:00Z/2026-11-13T10:30:00Z",
-                },
-                "links": {"data": {"href": "https://x/p3"}},
-            },
+            _feature(
+                "p3", "2026-11-13T10:20:00Z", "2026-11-13T10:30:00Z",
+                href="https://x/p3",
+            ),
         ],
     }
     client = _FakeClient([page0, page1])
@@ -604,7 +692,44 @@ def test_search_products_paginates_and_parses(monkeypatch):
     assert client.calls[1]["si"] == _SEARCH_PAGE_SIZE + 1
 
 
-def test_search_products_product_id_fallback(monkeypatch):
+def test_search_parses_live_feature_shape():
+    """A raw feature copied near-verbatim from the live Data Store probe."""
+    feature = {
+        "type": "Feature",
+        "id": _LIVE_PRODUCT_ID,
+        "geometry": {"type": "Point", "coordinates": [0, 0]},
+        "properties": {
+            "identifier": _LIVE_PRODUCT_ID,
+            "date": "2026-11-13T09:10:05Z/2026-11-13T09:20:05Z",
+            "links": {
+                "type": "Links",
+                "data": [
+                    {
+                        "type": "Link",
+                        "href": _LIVE_HREF,
+                        "mediaType": "application/zip",
+                        "title": "Product download",
+                    }
+                ],
+            },
+        },
+    }
+
+    item = _parse_feature(feature)
+
+    assert item is not None
+    assert item["product_id"] == _LIVE_PRODUCT_ID
+    assert item["href"] == _LIVE_HREF
+    assert item["window_start"] == datetime(
+        2026, 11, 13, 9, 10, 5, tzinfo=timezone.utc
+    ).timestamp()
+    assert item["window_end"] == datetime(
+        2026, 11, 13, 9, 20, 5, tzinfo=timezone.utc
+    ).timestamp()
+
+
+def test_feature_top_level_links_fallback(monkeypatch):
+    """The defensive top-level ``links`` shape is still accepted."""
     src = _make_source()
     page = {
         "totalResults": 2,
