@@ -303,9 +303,9 @@ async def get_storm_cells(
     return results
 
 
-# GOES bird number -> satellite label.  Keep in sync with _NOAA_SATS in
-# librewxr/data/lightning_fetcher.py.
-_SATELLITE_NAMES = {18: "goes18", 19: "goes19"}
+# Bird number -> satellite label.  GOES entries stay in sync with _NOAA_SATS
+# in librewxr/data/lightning_fetcher.py; 12 is Meteosat-12 (MTG LI).
+_SATELLITE_NAMES = {18: "goes18", 19: "goes19", 12: "meteosat12"}
 
 
 def lightning_strike_dicts(points: np.ndarray) -> list[dict]:
@@ -326,7 +326,7 @@ def lightning_strike_dicts(points: np.ndarray) -> list[dict]:
                 int(point["time_s"]), tz=timezone.utc,
             ).isoformat(),
             "energy": float(point["energy"]),
-            "satellite": _SATELLITE_NAMES.get(sat, f"goes{sat}"),
+            "satellite": _SATELLITE_NAMES.get(sat, f"sat{sat}"),
         })
 
     return results

@@ -26,7 +26,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Protocol, Sequence
 from urllib.parse import quote
 
 import h5py
@@ -111,13 +111,15 @@ def _key_window_epochs(key: str) -> tuple[float, float] | None:
     return (start, end)
 
 
-def _epoch_from_units(units: str | bytes | None) -> float:
+def _epoch_from_units(
+    units: str | bytes | None, default: float = _GLM_EPOCH_FALLBACK,
+) -> float:
     """Parse ``seconds since <epoch>`` netCDF units to a unix epoch offset."""
     if isinstance(units, (bytes, bytearray)):
         units = units.decode("utf-8", errors="replace")
     m = re.search(r"seconds since\s+(.+)", units or "")
     if m is None:
-        return _GLM_EPOCH_FALLBACK
+        return default
     token = m.group(1).strip()
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
         try:
@@ -128,7 +130,7 @@ def _epoch_from_units(units: str | bytes | None) -> float:
     try:
         dt = datetime.fromisoformat(token)
     except ValueError:
-        return _GLM_EPOCH_FALLBACK
+        return default
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.timestamp()
@@ -160,127 +162,131 @@ def _decode_int16_var(var) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# GOESGLMLightningFetcher
+# Watermarks
 # ---------------------------------------------------------------------------
 
-class GOESGLMLightningFetcher:
-    """Clock-aligned GOES GLM flash fetcher (pipeline-owned writer)."""
+class Watermarks:
+    """Per-source cursors persisted to ``<cache_dir>/lightning/watermark.json``.
+
+    The coordinator is the single writer, so the in-memory map is the truth;
+    the file is a best-effort mirror used to resume across restarts.
+    """
+
+    def __init__(self, path: Path | None) -> None:
+        self._path = path
+        self._lock = threading.Lock()
+        self._entries = self._load()
+
+    def get(self, name: str) -> dict:
+        """Return a copy of one source's cursor entry (``{}`` when absent)."""
+        with self._lock:
+            entry = self._entries.get(name)
+            return dict(entry) if isinstance(entry, dict) else {}
+
+    def update(self, name: str, **entry) -> None:
+        """Merge one source's entry and persist atomically.
+
+        Sources fetch concurrently, so the merge + write runs under a lock.
+        """
+        with self._lock:
+            self._entries[name] = entry
+            self._write(self._entries)
+
+    # -- persistence ---------------------------------------------------------
+
+    def _load(self) -> dict:
+        """Load the per-source resume file; ``{}`` when absent/corrupt."""
+        path = self._path
+        if path is None:
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "GLM: corrupt watermark file %s (%s); starting fresh", path, exc,
+            )
+            return {}
+        if not isinstance(data, dict):
+            logger.warning("GLM: watermark file %s is not a JSON object", path)
+            return {}
+        return data
+
+    def _write(self, data: dict) -> None:
+        """Best-effort atomic watermark write (pid+uuid tmp + os.replace)."""
+        path = self._path
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(
+                f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            )
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(data, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except OSError as exc:
+            logger.warning("GLM: failed to persist watermark: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# LightningSource protocol
+# ---------------------------------------------------------------------------
+
+class LightningSource(Protocol):
+    """One lightning family's fetch-cycle adapter (run in a worker thread)."""
+
+    name: str
+
+    def fetch_cycle(
+        self, now_s: int, watermarks: Watermarks,
+    ) -> tuple[np.ndarray, dict]: ...
+
+    def close(self) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# GOESGLMSource
+# ---------------------------------------------------------------------------
+
+class GOESGLMSource:
+    """One GOES satellite's GLM flash stream (anonymous NODD S3)."""
 
     def __init__(
         self,
-        store: LightningStore,
+        name: str,
+        bucket: str,
+        sat_id: int,
         *,
-        cache_dir: Path | str | None,
-        interval_s: int = 300,
-        max_age_s: int = 1800,
-        satellites: Sequence[tuple[str, str, int]] = _NOAA_SATS,
-        on_artifact_written: Callable[[], None] | None = None,
+        interval_s: int,
+        max_age_s: int,
         download_retries: int | None = None,
     ) -> None:
-        self._store = store
+        self.name = name
+        self.bucket = bucket
+        self.sat_id = sat_id
         self._interval_s = int(interval_s)
         self._max_age_s = int(max_age_s)
-        self._satellites = tuple(satellites)
-        # Called after each successful artifact write (the lightning hook)
-        self._on_artifact_written = on_artifact_written
         self._download_retries = download_retries
 
-        self._cache_dir = Path(cache_dir) if cache_dir is not None else None
-        self._watermark_path = (
-            self._cache_dir / _WATERMARK_RELPATH
-            if self._cache_dir is not None
-            else None
-        )
-        self._watermark_lock = threading.Lock()
-        self._watermarks = self._load_watermarks()
-        # Per-satellite stale-warn latch: warn once per stale episode,
-        # INFO once on recovery.
-        self._stale_warned: dict[str, bool] = {}
+        # Stale-warn latch: warn once per stale episode, INFO once on
+        # recovery.
+        self._stale_warned = False
 
         self._client: httpx.Client | None = None
-        self._task: asyncio.Task | None = None
 
     # -- lifecycle -----------------------------------------------------------
 
-    async def start(self) -> None:
-        """Kick off the background fetch task."""
-        self._task = asyncio.create_task(self._fetch_loop())
-
-    async def close(self) -> None:
-        """Cancel the background task and close the sync HTTP client.
-
-        Idempotent: safe to call before ``start`` or twice.
-        """
-        task = self._task
-        self._task = None
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+    def close(self) -> None:
+        """Close the lazily-created sync HTTP client (idempotent)."""
         client = self._client
         self._client = None
         if client is not None:
             client.close()
-
-    # -- background loop -----------------------------------------------------
-
-    async def _fetch_loop(self) -> None:
-        """Fetch immediately, then on each clock-aligned interval boundary."""
-        try:
-            await self._fetch_once()
-        except Exception:
-            logger.exception("Initial GLM lightning fetch failed")
-
-        while True:
-            now = time.time()
-            interval = self._interval_s
-            next_boundary = (int(now // interval) + 1) * interval
-            sleep_secs = max(next_boundary - now, 1.0)
-            logger.debug("Next GLM lightning fetch in %.1fs", sleep_secs)
-            await asyncio.sleep(sleep_secs)
-
-            try:
-                await self._fetch_once()
-            except Exception:
-                logger.exception("GLM lightning fetch failed")
-
-    # -- per-cycle body ------------------------------------------------------
-
-    async def _fetch_once(self) -> None:
-        """Fetch every satellite in parallel, merge, trim, and persist."""
-        now = self._now_s()
-
-        if self._satellites:
-            results = await asyncio.gather(
-                *(asyncio.to_thread(self._fetch_sat, sat) for sat in self._satellites)
-            )
-        else:
-            results = []
-
-        fresh = [points for points, _status in results if len(points)]
-        # Concatenating the store's current points keeps age-out working on a
-        # quiet feed; the watermark prevents double-adding.
-        merged = np.concatenate([self._store.points, *fresh])
-
-        satellites = {
-            sat[0]: status for sat, (_points, status) in zip(self._satellites, results)
-        }
-        await self._store.replace_points(
-            merged,
-            last_seen_s=now,
-            max_age_s=self._max_age_s,
-            meta={"units": "J", "satellites": satellites},
-        )
-        if await self._store.save_snapshot() and self._on_artifact_written is not None:
-            self._on_artifact_written()
-
-    # -- seams ---------------------------------------------------------------
-
-    def _now_s(self) -> int:
-        """Current unix time as an int (monkeypatched in tests)."""
-        return int(time.time())
 
     def _get_client(self) -> httpx.Client:
         if self._client is None or self._client.is_closed:
@@ -290,40 +296,62 @@ class GOESGLMLightningFetcher:
             )
         return self._client
 
-    # -- per-satellite fetch -------------------------------------------------
+    # -- fetch cycle ---------------------------------------------------------
 
-    def _fetch_sat(self, sat: tuple[str, str, int]) -> tuple[np.ndarray, dict]:
-        """Fetch one satellite; NEVER raises, returns (points, status)."""
-        name, bucket, sat_id = sat
+    def fetch_cycle(
+        self, now_s: int, watermarks: Watermarks,
+    ) -> tuple[np.ndarray, dict]:
+        """Fetch this satellite; NEVER raises, returns (points, status)."""
+        name = self.name
+        bucket = self.bucket
+        sat_id = self.sat_id
         status: dict = {
             "bucket": bucket,
             "last_key": None,
             "last_e": None,
             "stale": False,
             "last_fetch_ok": False,
+            "units": "J",
         }
         try:
-            now = self._now_s()
+            now = now_s
             cutoff = now - self._max_age_s - 2 * self._interval_s
 
-            now_utc = datetime.fromtimestamp(now, tz=timezone.utc)
-            prefix = f"{_GLM_PREFIX_TMPL}/{now_utc:%Y}/{now_utc:%j}/"
-
-            wm = self._watermarks.get(name) or {}
+            wm = watermarks.get(name) or {}
             last_key = wm.get("last_key")
             last_e = wm.get("last_e")
-            if last_key:
-                start_after = last_key
-            else:
-                # Cold start: begin one hour before the cutoff hour.  That
-                # hour's dir string sorts before all of its keys, so the
-                # listing picks up any boundary file the cutoff filter keeps.
-                cold = datetime.fromtimestamp(cutoff - 3600, tz=timezone.utc)
-                start_after = (
-                    f"{_GLM_PREFIX_TMPL}/{cold:%Y}/{cold:%j}/{cold:%H}/"
-                )
+            start_after = last_key if last_key else None
 
-            keys = self._list_keys(bucket, prefix, start_after)
+            # List every UTC day-directory the window touches, walking from
+            # one hour before the cutoff (keeping the boundary file) through
+            # today.  A cycle in the first hours after midnight UTC must still
+            # see yesterday's directory; at the default retention the walk is
+            # at most three iterations.  Day-directory names are fixed-width
+            # so concatenating the per-day listings stays ascending.
+            first_day = datetime.fromtimestamp(
+                cutoff - 3600, tz=timezone.utc,
+            ).date()
+            today = datetime.fromtimestamp(now, tz=timezone.utc).date()
+            keys: list[str] = []
+            day = first_day
+            while day <= today:
+                prefix = f"{_GLM_PREFIX_TMPL}/{day:%Y}/{day:%j}/"
+                day_keys = self._list_keys(bucket, prefix, start_after)
+                if not day_keys and day < today:
+                    # A past day-directory is never empty -- S3 always has
+                    # that day's objects.  Today's may legitimately be empty
+                    # right after midnight, so only older days degrade.
+                    # Same posture as a failed listing: no keys this cycle,
+                    # watermark untouched, retried next cycle.
+                    logger.warning(
+                        "GLM %s: empty listing for past day-directory "
+                        "%s; treating the cycle as degraded",
+                        name, f"{day:%Y}/{day:%j}",
+                    )
+                    keys = []
+                    break
+                keys.extend(day_keys)
+                day += timedelta(days=1)
 
             # -- staleness (newest published key window-end) -----------------
             newest_e: float | None = None
@@ -344,16 +372,16 @@ class GOESGLMLightningFetcher:
                 stale = True
             status["stale"] = stale
             if stale:
-                if not self._stale_warned.get(name):
+                if not self._stale_warned:
                     logger.warning(
                         "GLM %s: feed appears stale (newest window end %s, "
                         "now %s); holding last-known points",
                         name, newest_e, now,
                     )
-                    self._stale_warned[name] = True
-            elif self._stale_warned.get(name):
+                    self._stale_warned = True
+            elif self._stale_warned:
                 logger.info("GLM %s: feed recovered", name)
-                self._stale_warned[name] = False
+                self._stale_warned = False
 
             # -- tail the listing in ascending order -------------------------
             points: list[np.ndarray] = []
@@ -396,7 +424,9 @@ class GOESGLMLightningFetcher:
             status["last_fetch_ok"] = True
 
             if last_key is not None:
-                self._update_watermark(name, bucket, last_key, last_e)
+                watermarks.update(
+                    name, bucket=bucket, last_key=last_key, last_e=last_e,
+                )
 
             merged = np.concatenate(points) if points else np.empty(0, dtype=_POINT_DTYPE)
             return merged, status
@@ -537,61 +567,123 @@ class GOESGLMLightningFetcher:
         out["satellite"] = np.int8(sat_id)
         return out
 
-    # -- watermarks ----------------------------------------------------------
 
-    def _load_watermarks(self) -> dict:
-        """Load the per-satellite resume file; ``{}`` when absent/corrupt."""
-        path = self._watermark_path
-        if path is None:
-            return {}
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except FileNotFoundError:
-            return {}
-        except (OSError, ValueError) as exc:
-            logger.warning(
-                "GLM: corrupt watermark file %s (%s); starting fresh", path, exc,
-            )
-            return {}
-        if not isinstance(data, dict):
-            logger.warning("GLM: watermark file %s is not a JSON object", path)
-            return {}
-        return data
+# ---------------------------------------------------------------------------
+# LightningFetcher
+# ---------------------------------------------------------------------------
 
-    def _update_watermark(
-        self, name: str, bucket: str, last_key: str, last_e: float | None,
+class LightningFetcher:
+    """Clock-aligned multi-family lightning ingestion coordinator (single store writer)."""
+
+    def __init__(
+        self,
+        store: LightningStore,
+        *,
+        cache_dir: Path | str | None,
+        interval_s: int = 300,
+        max_age_s: int = 7200,
+        sources: Sequence[LightningSource],
+        on_artifact_written: Callable[[], None] | None = None,
     ) -> None:
-        """Merge one satellite's entry and persist atomically.
+        self._store = store
+        self._interval_s = int(interval_s)
+        self._max_age_s = int(max_age_s)
+        self._sources = tuple(sources)
+        # Called after each successful artifact write (the lightning hook)
+        self._on_artifact_written = on_artifact_written
 
-        Read-modify-write under a lock: the satellites fetch concurrently and
-        must not clobber each other's entries.
+        self._cache_dir = Path(cache_dir) if cache_dir is not None else None
+        watermark_path = (
+            self._cache_dir / _WATERMARK_RELPATH
+            if self._cache_dir is not None
+            else None
+        )
+        self._watermarks = Watermarks(watermark_path)
+
+        self._task: asyncio.Task | None = None
+
+    # -- lifecycle -----------------------------------------------------------
+
+    async def start(self) -> None:
+        """Kick off the background fetch task."""
+        self._task = asyncio.create_task(self._fetch_loop())
+
+    async def close(self) -> None:
+        """Cancel the background task and close every source's HTTP client.
+
+        Idempotent: safe to call before ``start`` or twice.
         """
-        entry = {"bucket": bucket, "last_key": last_key, "last_e": last_e}
-        with self._watermark_lock:
-            if self._watermark_path is not None:
-                current = self._load_watermarks()
-            else:
-                current = dict(self._watermarks)
-            current[name] = entry
-            self._watermarks = current
-            if self._watermark_path is not None:
-                self._write_watermarks(current)
+        task = self._task
+        self._task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        for source in self._sources:
+            source.close()
 
-    def _write_watermarks(self, data: dict) -> None:
-        """Best-effort atomic watermark write (pid+uuid tmp + os.replace)."""
-        path = self._watermark_path
-        if path is None:
-            return
+    # -- background loop -----------------------------------------------------
+
+    async def _fetch_loop(self) -> None:
+        """Fetch immediately, then on each clock-aligned interval boundary."""
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(
-                f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            await self._fetch_once()
+        except Exception:
+            logger.exception("Initial GLM lightning fetch failed")
+
+        while True:
+            now = time.time()
+            interval = self._interval_s
+            next_boundary = (int(now // interval) + 1) * interval
+            sleep_secs = max(next_boundary - now, 1.0)
+            logger.debug("Next GLM lightning fetch in %.1fs", sleep_secs)
+            await asyncio.sleep(sleep_secs)
+
+            try:
+                await self._fetch_once()
+            except Exception:
+                logger.exception("GLM lightning fetch failed")
+
+    # -- per-cycle body ------------------------------------------------------
+
+    async def _fetch_once(self) -> None:
+        """Fetch every source in parallel, merge, trim, and persist."""
+        now = self._now_s()
+
+        results = await asyncio.gather(
+            *(
+                asyncio.to_thread(source.fetch_cycle, now, self._watermarks)
+                for source in self._sources
             )
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(data, fh)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, path)
-        except OSError as exc:
-            logger.warning("GLM: failed to persist watermark: %s", exc)
+        )
+
+        fresh = [points for points, _status in results if len(points)]
+        # Concatenating the store's current points keeps age-out working on a
+        # quiet feed; the watermark prevents double-adding.
+        merged = np.concatenate([self._store.points, *fresh])
+
+        satellites = {
+            source.name: status
+            for source, (_points, status) in zip(self._sources, results)
+        }
+        units = (
+            "J"
+            if all(status.get("units") == "J" for _points, status in results)
+            else "mixed"
+        )
+        await self._store.replace_points(
+            merged,
+            last_seen_s=now,
+            max_age_s=self._max_age_s,
+            meta={"units": units, "satellites": satellites},
+        )
+        if await self._store.save_snapshot() and self._on_artifact_written is not None:
+            self._on_artifact_written()
+
+    # -- seams ---------------------------------------------------------------
+
+    def _now_s(self) -> int:
+        """Current unix time as an int (monkeypatched in tests)."""
+        return int(time.time())

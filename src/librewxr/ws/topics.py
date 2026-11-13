@@ -43,6 +43,17 @@ STATE_TOPICS: tuple[str, ...] = (
     TOPIC_STORM_CELLS,
 )
 
+# Bounded bootstrap window for the lightning snapshot (internal, not config):
+# at a 2 h retention a full-history snapshot would push tens of megabytes to
+# every subscriber on connect.  Deeper history is served by the REST
+# endpoint's ``minutes`` parameter; deltas are watermark-based and unaffected.
+_LIGHTNING_SNAPSHOT_S = 1800
+
+
+def _now_s() -> int:
+    """Current unix time as an int (monkeypatched in tests)."""
+    return int(time.time())
+
 
 def topic_available(topic: str) -> bool:
     """Whether the underlying data for ``topic`` is wired up right now.
@@ -160,14 +171,20 @@ async def build_lightning_snapshot() -> tuple[str, int]:
     reverse it to match the REST API's newest-first default.  The
     watermark is the newest strike time in the payload; the hub uses it to
     request strictly-newer strikes on subsequent ticks.
+
+    The window is pinned to ``_LIGHTNING_SNAPSHOT_S`` (30 min) rather than
+    the store's retention, so a 2 h retention does not turn every connect
+    into a tens-of-megabytes bootstrap; ``min`` keeps operators who lower
+    the retention below 30 min honest.
     """
     store = routes.lightning_store
     await store.maybe_reload()
 
     def _render() -> tuple[str, int]:
+        window_s = min(_LIGHTNING_SNAPSHOT_S, int(settings.lightning_max_age))
         points = store.points_in(
             -90, 90, -180, 180,
-            since_s=int(time.time()) - settings.lightning_max_age,
+            since_s=_now_s() - window_s,
         )
         if points.shape[0] == 0:
             watermark_s = int(store.window_end_s or 0)

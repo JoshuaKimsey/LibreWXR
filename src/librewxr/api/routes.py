@@ -2188,13 +2188,15 @@ async def get_lightning(
       point is supplied.
     - bbox: strikes inside ``west,south,east,north``.
 
-    ``minutes`` is clamped to ``LIBREWXR_LIGHTNING_MAX_AGE`` (the store's
-    retention).  ``limit`` returns the newest strikes first.
+    ``minutes`` defaults to 30 and is clamped to
+    ``LIBREWXR_LIGHTNING_MAX_AGE`` (the store's retention, 2 h by default).
+    ``limit`` returns the newest strikes first.
 
-    Response-size note: during severe outbreaks the no-args mode can be
-    very large -- prefer ``bbox`` or ``lat``+``lon``+``radius_km`` (with
-    ``minutes``) to narrow the query, and use ``limit`` to cap a large
-    window.
+    Response-size note: retention defaults to 2 h, so the no-args mode
+    returns only the default 30-minute window while the full history is
+    ``?minutes=120``.  A large window can be very large during severe
+    outbreaks -- prefer ``bbox`` or ``lat``+``lon``+``radius_km`` (with
+    ``minutes``) to narrow the query, and use ``limit`` to cap it.
 
     Reuses the MCP ``get_recent_lightning`` pure query function.  The
     import is deferred inside the body on purpose: a top-level import would

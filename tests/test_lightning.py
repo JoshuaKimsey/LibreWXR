@@ -11,7 +11,11 @@ import numpy as np
 import pytest
 
 from librewxr.data import lightning_store as lightning_store_module
-from librewxr.data.lightning_store import LightningStore, _POINT_DTYPE
+from librewxr.data.lightning_store import (
+    LightningStore,
+    _POINT_DTYPE,
+    _points_ceiling,
+)
 
 pytestmark = pytest.mark.lightning
 
@@ -91,6 +95,19 @@ async def test_max_age_trim(tmp_path):
     assert store.window_end_s == 7200
 
 
+@pytest.mark.parametrize(
+    ("max_age_s", "expected"),
+    [
+        (1800, 500_000),    # the 30-minute reference
+        (7200, 2_000_000),  # the 2 h default: 4x the reference
+        (600, 500_000),     # short retentions never go below the floor
+        (3600, 1_000_000),
+    ],
+)
+def test_points_ceiling_scales_with_retention(max_age_s, expected):
+    assert _points_ceiling(max_age_s) == expected
+
+
 async def test_ceiling_warn_once(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(lightning_store_module, "MAX_POINTS", 4)
     store = LightningStore(tmp_path)
@@ -98,8 +115,9 @@ async def test_ceiling_warn_once(tmp_path, monkeypatch, caplog):
     def _overflow() -> np.ndarray:
         return _make_points([(i, 1.0, 1.0, 1.0, 18) for i in range(10)])
 
+    # 30-minute retention -> the (patched) reference is the whole ceiling.
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
-        await store.replace_points(_overflow(), last_seen_s=9, max_age_s=10**9)
+        await store.replace_points(_overflow(), last_seen_s=9, max_age_s=1800)
         assert store.total_count == 4
         # Sorted ascending, oldest dropped -> keep times 6,7,8,9.
         assert list(store.points["time_s"]) == [6, 7, 8, 9]
@@ -111,7 +129,7 @@ async def test_ceiling_warn_once(tmp_path, monkeypatch, caplog):
         assert len(first_warnings) == 1
 
         caplog.clear()
-        await store.replace_points(_overflow(), last_seen_s=9, max_age_s=10**9)
+        await store.replace_points(_overflow(), last_seen_s=9, max_age_s=1800)
         second_warnings = [
             r for r in caplog.records
             if r.levelno == logging.WARNING and r.name == _LOGGER
@@ -119,6 +137,24 @@ async def test_ceiling_warn_once(tmp_path, monkeypatch, caplog):
         assert second_warnings == []
 
     assert store.ceiling_trimmed_total == 12
+
+
+async def test_ceiling_2h_retention_does_not_trim_500k(tmp_path):
+    """The ceiling scales with retention: 500_001 points at 2 h is fine."""
+    store = LightningStore(tmp_path)
+    count = lightning_store_module.MAX_POINTS + 1
+    points = np.zeros(count, dtype=_POINT_DTYPE)
+    # All inside the 2 h window (repeats are fine -- only the count matters).
+    points["time_s"] = 10_000 - (np.arange(count) % 1800)
+    points["lat"] = 1.0
+    points["lon"] = 1.0
+    points["energy"] = 1.0
+    points["satellite"] = 18
+
+    await store.replace_points(points, last_seen_s=10_000, max_age_s=7200)
+
+    assert store.total_count == count
+    assert store.ceiling_trimmed_total == 0
 
 
 # ---------------------------------------------------------------------------

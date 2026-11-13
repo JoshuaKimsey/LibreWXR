@@ -44,9 +44,11 @@ from librewxr.data.coverage import (
     persist_masks_in_background,
 )
 from librewxr.data.fetcher import RadarFetcher
+from librewxr.data.lightning_eumetsat import MTGLISource
 from librewxr.data.lightning_fetcher import (
     _NOAA_SATS,
-    GOESGLMLightningFetcher,
+    GOESGLMSource,
+    LightningFetcher,
 )
 from librewxr.data.lightning_store import LightningStore
 from librewxr.data.master_state import snapshot_state, write_state_snapshot
@@ -491,22 +493,55 @@ async def run_pipeline() -> None:
     # Lightning rides its own clock-aligned task (never coupled to the radar
     # fetch cycle or the alerts loop).  The artifact is the only handoff.
     lightning_fetcher = None
-    if lightning_store is not None and settings.lightning_noaa_enabled:
-        lightning_fetcher = GOESGLMLightningFetcher(
-            lightning_store,
-            cache_dir=cache_dir,
-            interval_s=settings.lightning_fetch_interval,
-            max_age_s=settings.lightning_max_age,
-            satellites=_NOAA_SATS,
-            on_artifact_written=lambda: _lightning_written(),
-        )
-        await lightning_fetcher.start()
-        logger.info(
-            "Lightning: GOES GLM ingest started (interval=%ds)",
-            settings.lightning_fetch_interval,
-        )
-    elif lightning_store is not None:
-        logger.info("Lightning enabled but no GLM family enabled; fetch loop idle")
+    if lightning_store is not None:
+        lightning_sources = []
+        if settings.lightning_noaa_enabled:
+            lightning_sources.extend(
+                GOESGLMSource(
+                    name,
+                    bucket,
+                    sat_id,
+                    interval_s=settings.lightning_fetch_interval,
+                    max_age_s=settings.lightning_max_age,
+                )
+                for (name, bucket, sat_id) in _NOAA_SATS
+            )
+        if settings.lightning_eumetsat_enabled:
+            if (
+                settings.lightning_eumetsat_api_key
+                and settings.lightning_eumetsat_api_secret
+            ):
+                lightning_sources.append(
+                    MTGLISource(
+                        interval_s=settings.lightning_fetch_interval,
+                        max_age_s=settings.lightning_max_age,
+                        api_key=settings.lightning_eumetsat_api_key,
+                        api_secret=settings.lightning_eumetsat_api_secret,
+                    )
+                )
+            else:
+                logger.info(
+                    "EUMETSAT MTG LI lightning family enabled but API credentials "
+                    "missing (LIBREWXR_LIGHTNING_EUMETSAT_API_KEY / _API_SECRET); "
+                    "family inactive"
+                )
+        if lightning_sources:
+            lightning_fetcher = LightningFetcher(
+                lightning_store,
+                cache_dir=cache_dir,
+                interval_s=settings.lightning_fetch_interval,
+                max_age_s=settings.lightning_max_age,
+                sources=lightning_sources,
+                on_artifact_written=lambda: _lightning_written(),
+            )
+            await lightning_fetcher.start()
+            logger.info(
+                "Lightning: ingest started (interval=%ds, families=%s)",
+                settings.lightning_fetch_interval,
+                ", ".join(source.name for source in lightning_sources),
+            )
+        else:
+            logger.info("Lightning enabled but no GLM family enabled; fetch loop idle")
 
     await fetcher.start()
     logger.info("Pipeline running — Ctrl-C / SIGTERM to stop")

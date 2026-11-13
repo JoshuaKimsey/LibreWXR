@@ -30,23 +30,31 @@ logger = logging.getLogger(__name__)
 # Module-level constants
 # ---------------------------------------------------------------------------
 
-# RAM circuit-breaker ceiling.  Every flash within MAX_AGE is held (there is
-# no data-side cap -- MCP/REST must always see the full picture), but a
-# runaway feed is bounded here to protect the pipeline and every render
-# worker that loads the artifact.  Oldest-first trim with a warn-once log;
-# normal 30-minute volume is tens of thousands of points.  Not config.
+# RAM circuit-breaker reference: 500k points per 30 minutes of retained
+# history.  Every flash within MAX_AGE is held (there is no data-side cap --
+# MCP/REST must always see the full picture), but a runaway feed is bounded
+# to the retention-scaled ``_points_ceiling`` below to protect the pipeline
+# and every render worker that loads the artifact.  Oldest-first trim with a
+# warn-once log; a normal 30-minute window holds tens of thousands of points.
+# Not config.
 MAX_POINTS = 500_000
 
+
+def _points_ceiling(max_age_s: int) -> int:
+    """RAM ceiling for ``max_age_s`` of history (500k per 30 min, floored)."""
+    return max(MAX_POINTS, MAX_POINTS * int(max_age_s) // 1800)
+
+
 # Structured dtype for one flash point.  Field access via ``arr["lat"]`` or
-# ``arr[i]`` (numpy void scalar).  ``satellite`` is the GOES bird number
-# (18 / 19) used as an internal identity; consumers decode it to a human
-# label.
+# ``arr[i]`` (numpy void scalar).  ``satellite`` is the satellite bird number
+# (GOES 18 / 19, Meteosat-12 12) used as an internal identity; consumers
+# decode it to a human label.
 _POINT_DTYPE = np.dtype([
     ("time_s", "int64"),    # UTC epoch seconds
     ("lat", "float32"),
     ("lon", "float32"),
     ("energy", "float32"),  # joules (decoded upstream)
-    ("satellite", "int8"),  # 18 / 19 (GOES bird number, internal identity)
+    ("satellite", "int8"),  # GOES 18 / 19, Meteosat-12 12 (internal identity)
 ])
 
 
@@ -95,8 +103,8 @@ class LightningStore:
         time, then trimmed to ``[window_end - max_age_s .. window_end]``
         where ``window_end`` is the later of ``last_seen_s`` and the newest
         point's ``time_s``.  A final ceiling trim drops the oldest points
-        above ``MAX_POINTS`` (RAM brake; a single warning per store
-        instance).
+        above ``_points_ceiling(max_age_s)`` (retention-scaled RAM brake; a
+        single warning per store instance).
         """
         arr = np.asarray(points, dtype=_POINT_DTYPE)
         # ``np.sort`` on a structured array needs the ``order`` name.
@@ -109,8 +117,9 @@ class LightningStore:
         cutoff = window_end - max_age_s
         arr = arr[arr["time_s"] >= cutoff]
 
-        if arr.shape[0] > MAX_POINTS:
-            dropped = arr.shape[0] - MAX_POINTS
+        ceiling = _points_ceiling(int(max_age_s))
+        if arr.shape[0] > ceiling:
+            dropped = arr.shape[0] - ceiling
             # Already sorted ascending -- drop the oldest (front) rows.
             arr = arr[dropped:]
             self._ceiling_trimmed_total += dropped
@@ -118,7 +127,7 @@ class LightningStore:
                 logger.warning(
                     "LightningStore point ceiling (%d) exceeded; dropped %d "
                     "oldest point(s).  Further ceiling trims are silent.",
-                    MAX_POINTS, dropped,
+                    ceiling, dropped,
                 )
                 self._ceiling_warned = True
 
@@ -325,5 +334,5 @@ class LightningStore:
 
     @property
     def ceiling_trimmed_total(self) -> int:
-        """Cumulative points dropped by the MAX_POINTS ceiling."""
+        """Cumulative points dropped by the retention-scaled point ceiling."""
         return self._ceiling_trimmed_total

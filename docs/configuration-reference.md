@@ -25,7 +25,7 @@ This document is the **full** reference for every setting LibreWXR understands. 
   - [East Asia: JMA MSM](#east-asia-jma-msm)
 - [Nowcasting](#nowcasting)
 - [Storm-Cell Detection](#storm-cell-detection)
-- [Lightning (GOES GLM)](#lightning-goes-glm)
+- [Lightning](#lightning)
 - [Satellite (GMGSI)](#satellite-gmgsi)
 - [Weather Alerts (WMO CAP)](#weather-alerts-wmo-cap)
 - [Persistent Cache](#persistent-cache)
@@ -1458,9 +1458,9 @@ At 25 km², a cell needs to be roughly 5×5 km to register — well below the si
 
 ---
 
-## Lightning (GOES GLM)
+## Lightning
 
-LibreWXR ingests NOAA GOES GLM (Geostationary Lightning Mapper) flash points from GOES-East + GOES-West on their own clock-aligned fetch loop and overlays them on radar tiles via the `?lightning=` query parameter. Flashes are held as structured points in `LightningStore` (500k-point RAM ceiling, warn-once) and written to a shared on-disk artifact `<cache_dir>/lightning/current.npz`, with per-satellite resume watermarks in `<cache_dir>/lightning/watermark.json`. There is deliberately no `state.json` section — the artifact is the cross-process handoff (the shared-tile-store / precip-mask pattern), and render workers plus the stdio MCP transport refresh it via a cheap mtime stat on demand. The store always holds every flash inside the window; only a presentational per-tile draw cap trims the overlay. Served on tiles via `?lightning=`, as GeoJSON at `/v2/lightning`, and through the MCP `get_recent_lightning` tool.
+LibreWXR ingests lightning flash points from two satellite families -- NOAA GOES GLM (Geostationary Lightning Mapper) on GOES-East + GOES-West, and the EUMETSAT Meteosat-12 MTG Lightning Imager over Europe / Africa / the Atlantic / the western Indian Ocean -- on one clock-aligned fetch loop and overlays them on radar tiles via the `?lightning=` query parameter. The NOAA family is anonymous (NODD S3 buckets); the EUMETSAT family is the project's one deliberate API-key source and stays off unless credentials are configured. Flashes are held as structured points in `LightningStore` (retention-scaled RAM ceiling, warn-once) and written to a shared on-disk artifact `<cache_dir>/lightning/current.npz`, with per-satellite resume watermarks in `<cache_dir>/lightning/watermark.json`. There is deliberately no `state.json` section — the artifact is the cross-process handoff (the shared-tile-store / precip-mask pattern), and render workers plus the stdio MCP transport refresh it via a cheap mtime stat on demand. The store always holds every flash inside the window; only a presentational per-tile draw cap trims the overlay. Served on tiles via `?lightning=`, as GeoJSON at `/v2/lightning`, and through the MCP `get_recent_lightning` tool. Per-flash `energy` is carried in each family's own unit (joules for GOES GLM, `mW.m-2.sr-1` radiance for Meteosat-12), reported per satellite in `/health`.
 
 `?lightning=` values: `""` = off; `1` / `true` / `dots` = small energy-scaled dots (default); `bolts` = a hand-authored vector bolt polygon (deliberately not a text glyph, so there is no font dependency). The overlay draws at constant brightness with no age fade and attaches to every requested frame's own 10-minute slot window `(T-600, T]` (a strike exactly on the boundary belongs to the earlier frame; strikes older than `LIBREWXR_LIGHTNING_MAX_AGE` render plain). Unknown values fall back to off silently, matching `cells`/`arrows`.
 
@@ -1475,16 +1475,53 @@ Master switch for the lightning layer and the MCP `get_recent_lightning` tool. W
 
 ### `LIBREWXR_LIGHTNING_NOAA_ENABLED`
 
-Per-family switch for the NOAA GOES GLM flash family (GOES-East + GOES-West). Satellite identity is internal and never configured; families are the knob. EUMETSAT / FengYun family booleans only appear alongside their decoders.
+Per-family switch for the NOAA GOES GLM flash family (GOES-East + GOES-West). Satellite identity is internal and never configured; families are the knob. FengYun's family boolean lands alongside its decoder.
 
 | | |
 |---|---|
 | **Default** | `true` |
 | **Type** | boolean |
 
+### `LIBREWXR_LIGHTNING_EUMETSAT_ENABLED`
+
+Per-family switch for the EUMETSAT MTG LI flash family — Meteosat-12 (MTG-I1) at 0°E, satellite identity `meteosat12`, L2 per-flash points from the Data Store collection `EO:EUM:DAT:0691`. The family additionally requires both API credentials below: with the boolean left at `true` but no key pair configured, the family logs once and stays off, so an instance without credentials behaves exactly as it did before — fully anonymous, GOES GLM only. Without credentials no request is made to EUMETSAT at all.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+### `LIBREWXR_LIGHTNING_EUMETSAT_API_KEY`
+
+EUMETSAT Data Store consumer key — one half of the key pair that unlocks the Meteosat-12 flash family. The Data Store is the project's only credentialed upstream, so this is the only API-key variable LibreWXR has.
+
+Registration is free and takes a few minutes:
+
+1. Register an account at https://user.eumetsat.int.
+2. Accept the Data Store terms of use on your first visit to https://data.eumetsat.int.
+3. Generate the consumer-key / consumer-secret pair at https://api.eumetsat.int/api-key, then set this variable and `LIBREWXR_LIGHTNING_EUMETSAT_API_SECRET`.
+
+Both halves must be set — a key without its secret leaves the family off. The pipeline exchanges the pair for an 8-hour bearer token from `POST https://api.eumetsat.int/token` automatically, refreshing ahead of expiry, so there is no manual token handling. Search is anonymous; only granule downloads are authenticated. The service rate limit (40 requests/second) sits far above LibreWXR's cadence of one small ZIP per 10-minute granule per loop.
+
+EUMETSAT data is free and unrestricted under CC-BY-4.0, redistribution included; attribution `Contains modified EUMETSAT Meteosat data 2026` is required when you redistribute it. The one-off exception to the project's no-API-keys rule, and its rationale, are recorded in [docs/source-survey.md](source-survey.md#lightning--implemented).
+
+| | |
+|---|---|
+| **Default** | *(empty — family off)* |
+| **Type** | string |
+
+### `LIBREWXR_LIGHTNING_EUMETSAT_API_SECRET`
+
+EUMETSAT Data Store consumer secret — the other half of the pair described under `LIBREWXR_LIGHTNING_EUMETSAT_API_KEY`; the registration walkthrough, token exchange, and licence terms live there. This one is an actual secret: supply it through `.env` or the orchestrator's secret store, not a committed file.
+
+| | |
+|---|---|
+| **Default** | *(empty — family off)* |
+| **Type** | string |
+
 ### `LIBREWXR_LIGHTNING_FETCH_INTERVAL`
 
-How often (in seconds) the clock-aligned GLM fetch loop runs. The loop is its own knob so disabling alerts never disables lightning and vice versa.
+How often (in seconds) the clock-aligned lightning fetch loop runs. The loop is its own knob so disabling alerts never disables lightning and vice versa.
 
 | | |
 |---|---|
@@ -1498,11 +1535,17 @@ Age in seconds of flash history retained in the store; older points are trimmed 
 
 | | |
 |---|---|
-| **Default** | `1800` |
+| **Default** | `7200` |
 | **Type** | integer |
 | **Unit** | seconds |
 
-1800 s = 30 minutes, matching the standard "wait 30 minutes after the last thunder" guidance and covering three 10-minute nowcast slots.
+7200 s = 2 hours, matching the 12-frame x 10-minute radar history (`LIBREWXR_MAX_FRAMES` x 10 minutes) so every past radar frame's 10-minute lightning slot is still populated when the timeline is replayed; at a shorter retention the older frames would render plain.
+
+The store's RAM ceiling scales with retention at 500k points per 30 minutes of history, floored at 500k — 2,000,000 points at the 2-hour default. It is a warn-once circuit breaker, not a data policy: drop-oldest trimming stays the same and normal load holds far fewer points. The `ceiling_trimmed_total` counter in `/health` reports how many points it has dropped.
+
+The API defaults are deliberately unchanged by this: `/v2/lightning` and the MCP `get_recent_lightning` tool default to `minutes=30`, and the WebSocket `lightning` topic's subscribe snapshot is pinned to the last 30 minutes as a bounded bootstrap. Deeper history is an explicit `minutes` request — `?minutes=120` returns the full two-hour window — and WebSocket deltas stay watermark-based, so raising retention never inflates the live tail.
+
+The GLM fetcher's cold-start listing walks every S3 day-directory from the retention cutoff back to now, so a pipeline start just after midnight UTC still picks up the previous UTC day's files instead of missing them.
 
 ### `LIBREWXR_LIGHTNING_MAX_DRAW_PER_TILE`
 

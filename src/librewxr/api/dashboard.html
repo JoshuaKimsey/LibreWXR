@@ -1998,16 +1998,16 @@
 
         const lightning = data.lightning;
         if (!isObject(lightning)) cards.push(unavailableFeature("bolt", "Lightning"));
-        else if (lightning.enabled === false) cards.push(disabledFeature("bolt", "Lightning", "GOES GLM flash ingestion and lightning tile overlays are disabled by server configuration."));
+        else if (lightning.enabled === false) cards.push(disabledFeature("bolt", "Lightning", "Lightning flash ingestion and lightning tile overlays are disabled by server configuration."));
         else {
           const satellites = Object.entries(object(lightning.satellites));
           const stale = satellites.some(([, raw]) => object(raw).stale === true || object(raw).last_fetch_ok === false);
           const feedHtml = satellites.length ? `<div class="satellite-feeds">${satellites.map(([name, raw]) => {
             const feed = object(raw);
             const staleFeed = feed.stale === true || feed.last_fetch_ok === false;
-            return `<div class="satellite-feed"><div class="satellite-feed-head"><strong class="satellite-feed-name">${esc(name)}</strong><span class="inline-flags">${badge(feed.stale ? "Stale" : "Fresh", feed.stale ? "warning" : "ok")}${feed.last_fetch_ok === false ? badge("Fetch failed", "danger") : ""}</span></div><div class="satellite-feed-meta">${esc(text(feed.bucket, "Bucket not reported"))} · last event ${esc(fmtEpoch(feed.last_e))}</div>${feed.last_key ? `<details class="details-disclosure"><summary>Last object key</summary><pre>${esc(feed.last_key)}</pre></details>` : ""}</div>`;
+            return `<div class="satellite-feed"><div class="satellite-feed-head"><strong class="satellite-feed-name">${esc(name)}</strong><span class="inline-flags">${badge(feed.stale ? "Stale" : "Fresh", feed.stale ? "warning" : "ok")}${feed.last_fetch_ok === false ? badge("Fetch failed", "danger") : ""}</span></div><div class="satellite-feed-meta">${esc(text(feed.bucket ?? feed.source, "Source not reported"))} · last event ${esc(fmtEpoch(feed.last_e))}</div>${feed.last_key ? `<details class="details-disclosure"><summary>Last object key</summary><pre>${esc(feed.last_key)}</pre></details>` : ""}</div>`;
           }).join("")}</div>` : "";
-          cards.push(featureShell("bolt", "Lightning", esc(fmtInt(lightning.points)), "held flashes", stale ? "At least one GLM feed needs attention." : "GOES-East and GOES-West flash window.", `<dl class="stat-list">${statRow("Window start", esc(fmtEpoch(lightning.window_start_s)))}${statRow("Window end", esc(fmtEpoch(lightning.window_end_s)))}${statRow("Ceiling trims", esc(fmtInt(lightning.ceiling_trimmed_total)))}${statRow("Last updated", esc(fmtEpoch(lightning.last_updated)))}${statRow("Artifact version", `<code>${esc(text(lightning.version))}</code>`)}</dl>${feedHtml}`, stale ? "warning" : "ok"));
+          cards.push(featureShell("bolt", "Lightning", esc(fmtInt(lightning.points)), "held flashes", stale ? "At least one lightning feed needs attention." : "Flash window across active feeds.", `<dl class="stat-list">${statRow("Window start", esc(fmtEpoch(lightning.window_start_s)))}${statRow("Window end", esc(fmtEpoch(lightning.window_end_s)))}${statRow("Ceiling trims", esc(fmtInt(lightning.ceiling_trimmed_total)))}${statRow("Last updated", esc(fmtEpoch(lightning.last_updated)))}${statRow("Artifact version", `<code>${esc(text(lightning.version))}</code>`)}</dl>${feedHtml}`, stale ? "warning" : "ok"));
         }
 
         const websocket = data.websocket;

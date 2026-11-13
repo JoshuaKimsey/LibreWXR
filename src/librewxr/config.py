@@ -539,12 +539,17 @@ class Settings(BaseSettings):
     storm_cells_enabled: bool = True
     storm_cells_min_dbz: int = 40  # Minimum dBZ for a pixel to be part of a cell
     storm_cells_min_area_km2: float = 25.0  # Minimum cell area in km^2 (filter noise/small cells)
-    # Lightning (GOES GLM flash points; per-family booleans - NOAA GOES now,
-    # EUMETSAT / FengYun decoder families later)
+    # Lightning (flash points; per-family booleans - NOAA GOES GLM and
+    # EUMETSAT MTG LI (API credentials), FengYun later)
     lightning_enabled: bool = True           # LIBREWXR_LIGHTNING_ENABLED
     lightning_noaa_enabled: bool = True      # LIBREWXR_LIGHTNING_NOAA_ENABLED
+    # EUMETSAT MTG LI needs a free Data Store registration + API key/secret;
+    # with either credential empty the family stays inactive.
+    lightning_eumetsat_enabled: bool = True      # LIBREWXR_LIGHTNING_EUMETSAT_ENABLED
+    lightning_eumetsat_api_key: str = ""         # LIBREWXR_LIGHTNING_EUMETSAT_API_KEY
+    lightning_eumetsat_api_secret: str = ""      # LIBREWXR_LIGHTNING_EUMETSAT_API_SECRET
     lightning_fetch_interval: int = 300      # LIBREWXR_LIGHTNING_FETCH_INTERVAL (seconds)
-    lightning_max_age: int = 1800           # LIBREWXR_LIGHTNING_MAX_AGE (seconds; 1800 = 30 min)
+    lightning_max_age: int = 7200           # LIBREWXR_LIGHTNING_MAX_AGE (seconds; 7200 = 2 h, matching the radar frame history)
     lightning_max_draw_per_tile: int = 1000 # LIBREWXR_LIGHTNING_MAX_DRAW_PER_TILE
     # External hooks (see hooks.py): operator commands the data pipeline runs
     # when a handoff file is complete, so a post-processing or mirroring

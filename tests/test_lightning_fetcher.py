@@ -3,7 +3,7 @@
 
 """Tests for the GOES GLM lightning fetcher (Phase 1, pipeline side).
 
-All HTTP is injected: the fetcher's ``_list_keys`` / ``_download`` /
+All HTTP is injected: each source's ``_list_keys`` / ``_download`` /
 ``_get_listing_page`` seams are monkeypatched, so these tests never touch
 real S3.  The synthetic netCDF writer mirrors the verified real GLM schema
 (flat h5py, int16 ``_Unsigned`` storage with scale/offset attrs).
@@ -21,7 +21,8 @@ import pytest
 from urllib.parse import quote
 
 from librewxr.data.lightning_fetcher import (
-    GOESGLMLightningFetcher,
+    GOESGLMSource,
+    LightningFetcher,
     _key_window_epochs,
 )
 from librewxr.data.lightning_store import LightningStore, _POINT_DTYPE
@@ -115,11 +116,31 @@ def _key(sat: int, start: int, end: int) -> str:
     )
 
 
-def _make_fetcher(tmp_path, **kwargs) -> GOESGLMLightningFetcher:
+def _make_fetcher(tmp_path, **kwargs) -> LightningFetcher:
+    """Build a coordinator over ``GOESGLMSource`` adapters.
+
+    ``satellites`` (the ``_NOAA_SATS`` tuple shape) selects which adapters
+    exist; every other keyword is forwarded to ``LightningFetcher``.
+    """
     store = LightningStore(tmp_path)
-    defaults = dict(cache_dir=tmp_path, interval_s=300, max_age_s=1800, satellites=(SAT,))
-    defaults.update(kwargs)
-    return GOESGLMLightningFetcher(store, **defaults)
+    satellites = kwargs.pop("satellites", (SAT,))
+    cache_dir = kwargs.pop("cache_dir", tmp_path)
+    interval_s = kwargs.pop("interval_s", 300)
+    max_age_s = kwargs.pop("max_age_s", 1800)
+    sources = [
+        GOESGLMSource(
+            name, bucket, sat_id, interval_s=interval_s, max_age_s=max_age_s,
+        )
+        for (name, bucket, sat_id) in satellites
+    ]
+    return LightningFetcher(
+        store,
+        cache_dir=cache_dir,
+        interval_s=interval_s,
+        max_age_s=max_age_s,
+        sources=sources,
+        **kwargs,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -150,8 +171,9 @@ def test_decode_qc(tmp_path):
     ]
     data = _write_glm_nc(flashes, base)
     fetcher = _make_fetcher(tmp_path)
+    source = fetcher._sources[0]
 
-    pts = fetcher._decode_file(data, 19)
+    pts = source._decode_file(data, 19)
     assert pts.dtype == _POINT_DTYPE
     assert len(pts) == 1
 
@@ -175,6 +197,7 @@ def test_decode_qc(tmp_path):
 
 async def test_watermark_resume_no_redownload(tmp_path, monkeypatch):
     fetcher = _make_fetcher(tmp_path)
+    source = fetcher._sources[0]
     monkeypatch.setattr(fetcher, "_now_s", lambda: NOW)
 
     w1, w2, w3 = NOW - 600, NOW - 400, NOW - 200
@@ -187,13 +210,13 @@ async def test_watermark_resume_no_redownload(tmp_path, monkeypatch):
     listings = iter([[k1, k2], [k2, k3]])
     calls = {k1: 0, k2: 0, k3: 0}
 
-    monkeypatch.setattr(fetcher, "_list_keys", lambda b, p, s: next(listings))
+    monkeypatch.setattr(source, "_list_keys", lambda b, p, s: next(listings))
 
     def fake_download(bucket, key):
         calls[key] += 1
         return data[key]
 
-    monkeypatch.setattr(fetcher, "_download", fake_download)
+    monkeypatch.setattr(source, "_download", fake_download)
 
     await fetcher._fetch_once()
     await fetcher._fetch_once()
@@ -210,6 +233,7 @@ async def test_watermark_resume_no_redownload(tmp_path, monkeypatch):
 
 async def test_transient_miss_stops_tail(tmp_path, monkeypatch):
     fetcher = _make_fetcher(tmp_path)
+    source = fetcher._sources[0]
     monkeypatch.setattr(fetcher, "_now_s", lambda: NOW)
 
     w1, w2, w3 = NOW - 600, NOW - 400, NOW - 200
@@ -222,7 +246,7 @@ async def test_transient_miss_stops_tail(tmp_path, monkeypatch):
     state = {"cycle": 0}
     attempts = []
 
-    monkeypatch.setattr(fetcher, "_list_keys", lambda b, p, s: [k1, k2, k3])
+    monkeypatch.setattr(source, "_list_keys", lambda b, p, s: [k1, k2, k3])
 
     def fake_download(bucket, key):
         attempts.append((state["cycle"], key))
@@ -230,7 +254,7 @@ async def test_transient_miss_stops_tail(tmp_path, monkeypatch):
             return None
         return data[key]
 
-    monkeypatch.setattr(fetcher, "_download", fake_download)
+    monkeypatch.setattr(source, "_download", fake_download)
 
     await fetcher._fetch_once()
     assert (0, k3) not in attempts
@@ -253,6 +277,7 @@ async def test_transient_miss_stops_tail(tmp_path, monkeypatch):
 
 async def test_cold_start_cutoff(tmp_path, monkeypatch):
     fetcher = _make_fetcher(tmp_path)
+    source = fetcher._sources[0]
     monkeypatch.setattr(fetcher, "_now_s", lambda: NOW)
 
     w_old = NOW - 5000   # window end NOW-4980 < cutoff (NOW-2400)
@@ -270,13 +295,13 @@ async def test_cold_start_cutoff(tmp_path, monkeypatch):
     }
     downloaded = []
 
-    monkeypatch.setattr(fetcher, "_list_keys", lambda b, p, s: [k_old, k_mid, k_new])
+    monkeypatch.setattr(source, "_list_keys", lambda b, p, s: [k_old, k_mid, k_new])
 
     def fake_download(bucket, key):
         downloaded.append(key)
         return data[key]
 
-    monkeypatch.setattr(fetcher, "_download", fake_download)
+    monkeypatch.setattr(source, "_download", fake_download)
 
     await fetcher._fetch_once()
     assert k_old not in downloaded
@@ -285,11 +310,163 @@ async def test_cold_start_cutoff(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 5b. Multi-day listing (2 h retention crosses midnight UTC)
+# ---------------------------------------------------------------------------
+
+# 00:30 UTC -> a 2 h10m window reaches back to 22:20 the previous day.
+NIGHT_NOW = int(datetime(2027, 1, 15, 0, 30, tzinfo=timezone.utc).timestamp())
+
+
+def _day_prefix(ts: int) -> str:
+    """The GLM day-directory prefix for a unix timestamp."""
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    return f"GLM-L2-LCFA/{dt:%Y}/{dt:%j}/"
+
+
+async def test_midnight_cold_start_lists_previous_day(tmp_path, monkeypatch):
+    """A cycle just after midnight UTC must still list yesterday's dir."""
+    fetcher = _make_fetcher(tmp_path, max_age_s=7200)
+    source = fetcher._sources[0]
+    monkeypatch.setattr(fetcher, "_now_s", lambda: NIGHT_NOW)
+
+    w_old = NIGHT_NOW - 3 * 3600     # yesterday 21:30 -> before the cutoff
+    w_prev = NIGHT_NOW - 90 * 60     # yesterday 23:00 -> inside the window
+    w_today = NIGHT_NOW - 20 * 60    # today 00:10
+    k_old = _key(19, w_old, w_old + 20)
+    k_prev = _key(19, w_prev, w_prev + 20)
+    k_today = _key(19, w_today, w_today + 20)
+    data = {
+        k_old: _write_glm_nc([(1.0, -80.0, 5e-14, 1.0, 0)], w_old),
+        k_prev: _write_glm_nc([(2.0, -80.0, 5e-14, 1.0, 0)], w_prev),
+        k_today: _write_glm_nc([(3.0, -80.0, 5e-14, 1.0, 0)], w_today),
+    }
+    by_prefix = {
+        _day_prefix(w_prev): [k_old, k_prev],
+        _day_prefix(w_today): [k_today],
+    }
+    listed = []
+
+    def fake_list(bucket, prefix, start_after):
+        listed.append((prefix, start_after))
+        return list(by_prefix.get(prefix, []))
+
+    monkeypatch.setattr(source, "_list_keys", fake_list)
+    downloaded = []
+
+    def fake_download(bucket, key):
+        downloaded.append(key)
+        return data[key]
+
+    monkeypatch.setattr(source, "_download", fake_download)
+
+    await fetcher._fetch_once()
+
+    # Both day-directories were requested, cold start (no start-after).
+    assert [prefix for prefix, _ in listed] == [
+        _day_prefix(w_prev), _day_prefix(w_today),
+    ]
+    assert all(start_after is None for _, start_after in listed)
+    # The pre-cutoff key in yesterday's dir is skipped by the tail filter;
+    # points from BOTH days land in the store.
+    assert k_old not in downloaded
+    assert set(downloaded) == {k_prev, k_today}
+    assert fetcher._store.total_count == 2
+
+
+async def test_warm_resume_across_midnight_lists_both_days(tmp_path, monkeypatch):
+    """A watermark from yesterday's dir still lists today's dir."""
+    fetcher = _make_fetcher(tmp_path, max_age_s=7200)
+    source = fetcher._sources[0]
+    monkeypatch.setattr(fetcher, "_now_s", lambda: NIGHT_NOW)
+
+    w_prev = NIGHT_NOW - 90 * 60
+    w_today = NIGHT_NOW - 20 * 60
+    k_prev = _key(19, w_prev, w_prev + 20)
+    k_today = _key(19, w_today, w_today + 20)
+    prev_end = _key_window_epochs(k_prev)[1]
+    fetcher._watermarks.update(
+        "goes19", bucket=SAT[1], last_key=k_prev, last_e=prev_end,
+    )
+
+    by_prefix = {
+        _day_prefix(w_prev): [k_prev],
+        _day_prefix(w_today): [k_today],
+    }
+    listed = []
+
+    def fake_list(bucket, prefix, start_after):
+        listed.append((prefix, start_after))
+        return list(by_prefix.get(prefix, []))
+
+    monkeypatch.setattr(source, "_list_keys", fake_list)
+    downloaded = []
+
+    def fake_download(bucket, key):
+        downloaded.append(key)
+        return _write_glm_nc([(4.0, -80.0, 5e-14, 1.0, 0)], w_today)
+
+    monkeypatch.setattr(source, "_download", fake_download)
+
+    await fetcher._fetch_once()
+
+    assert [prefix for prefix, _ in listed] == [
+        _day_prefix(w_prev), _day_prefix(w_today),
+    ]
+    assert all(start_after == k_prev for _, start_after in listed)
+    assert downloaded == [k_today]
+    assert fetcher._store.total_count == 1
+    wm = json.loads((tmp_path / "lightning" / "watermark.json").read_text())
+    assert wm["goes19"]["last_key"] == k_today
+
+
+async def test_empty_past_day_degrades_cycle(tmp_path, monkeypatch, caplog):
+    """An empty past day-directory means a degraded listing, not a gap."""
+    fetcher = _make_fetcher(tmp_path, max_age_s=7200)
+    source = fetcher._sources[0]
+    monkeypatch.setattr(fetcher, "_now_s", lambda: NIGHT_NOW)
+
+    w_prev = NIGHT_NOW - 90 * 60
+    w_today = NIGHT_NOW - 20 * 60
+    k_prev = _key(19, w_prev, w_prev + 20)
+    k_today = _key(19, w_today, w_today + 20)
+    prev_end = _key_window_epochs(k_prev)[1]
+    fetcher._watermarks.update(
+        "goes19", bucket=SAT[1], last_key=k_prev, last_e=prev_end,
+    )
+
+    by_prefix = {
+        _day_prefix(w_prev): [],           # degraded: a past day is never empty
+        _day_prefix(w_today): [k_today],
+    }
+
+    def fake_list(bucket, prefix, start_after):
+        return list(by_prefix.get(prefix, []))
+
+    monkeypatch.setattr(source, "_list_keys", fake_list)
+    downloaded = []
+    monkeypatch.setattr(
+        source, "_download",
+        lambda b, k: downloaded.append(k) or b"",
+    )
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        await fetcher._fetch_once()
+
+    assert downloaded == []
+    assert fetcher._store.total_count == 0
+    assert any("degraded" in r.getMessage() for r in caplog.records)
+    wm = json.loads((tmp_path / "lightning" / "watermark.json").read_text())
+    assert wm["goes19"]["last_key"] == k_prev
+    assert wm["goes19"]["last_e"] == prev_end
+
+
+# ---------------------------------------------------------------------------
 # 6. Pagination
 # ---------------------------------------------------------------------------
 
 def test_list_keys_pagination(tmp_path, monkeypatch):
     fetcher = _make_fetcher(tmp_path)
+    source = fetcher._sources[0]
     k1 = _key(19, NOW - 60, NOW - 40)
     k2 = _key(19, NOW - 40, NOW - 20)
     k3 = _key(19, NOW - 20, NOW)
@@ -314,9 +491,9 @@ def test_list_keys_pagination(tmp_path, monkeypatch):
         urls.append(url)
         return next(pages)
 
-    monkeypatch.setattr(fetcher, "_get_listing_page", fake_page)
+    monkeypatch.setattr(source, "_get_listing_page", fake_page)
 
-    keys = fetcher._list_keys("noaa-goes19", "GLM-L2-LCFA/2026/282/10/", None)
+    keys = source._list_keys("noaa-goes19", "GLM-L2-LCFA/2026/282/10/", None)
     assert keys == [k1, k2, k3]
     assert len(urls) == 2
     assert "start-after=" + quote(k2) in urls[1]
@@ -328,6 +505,7 @@ def test_list_keys_pagination(tmp_path, monkeypatch):
 
 async def test_staleness_warn_once_and_recovery(tmp_path, monkeypatch, caplog):
     fetcher = _make_fetcher(tmp_path)
+    source = fetcher._sources[0]
     monkeypatch.setattr(fetcher, "_now_s", lambda: NOW)
 
     stale_start = NOW - 4 * 300  # newest end NOW-1180 < NOW-900
@@ -339,8 +517,8 @@ async def test_staleness_warn_once_and_recovery(tmp_path, monkeypatch, caplog):
         k_fresh: _write_glm_nc([(2.0, -80.0, 5e-14, 1.0, 0)], fresh_start),
     }
     state = {"keys": [k_stale]}
-    monkeypatch.setattr(fetcher, "_list_keys", lambda b, p, s: list(state["keys"]))
-    monkeypatch.setattr(fetcher, "_download", lambda b, k: data[k])
+    monkeypatch.setattr(source, "_list_keys", lambda b, p, s: list(state["keys"]))
+    monkeypatch.setattr(source, "_download", lambda b, k: data[k])
 
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
         await fetcher._fetch_once()
@@ -370,6 +548,7 @@ async def test_staleness_warn_once_and_recovery(tmp_path, monkeypatch, caplog):
 
 async def test_merge_age_out_quiet_cycle(tmp_path, monkeypatch):
     fetcher = _make_fetcher(tmp_path)
+    source = fetcher._sources[0]
     clock = {"now": NOW}
     monkeypatch.setattr(fetcher, "_now_s", lambda: clock["now"])
 
@@ -381,8 +560,8 @@ async def test_merge_age_out_quiet_cycle(tmp_path, monkeypatch):
         k_new: _write_glm_nc([(6.0, -81.0, 5e-14, 1.0, 0)], w_new),
     }
     listings = iter([[k_old, k_new], []])
-    monkeypatch.setattr(fetcher, "_list_keys", lambda b, p, s: next(listings))
-    monkeypatch.setattr(fetcher, "_download", lambda b, k: data[k])
+    monkeypatch.setattr(source, "_list_keys", lambda b, p, s: next(listings))
+    monkeypatch.setattr(source, "_download", lambda b, k: data[k])
 
     await fetcher._fetch_once()
     assert fetcher._store.total_count == 2
@@ -407,6 +586,7 @@ async def test_merge_age_out_quiet_cycle(tmp_path, monkeypatch):
 
 async def test_corrupt_download_skipped(tmp_path, monkeypatch, caplog):
     fetcher = _make_fetcher(tmp_path)
+    source = fetcher._sources[0]
     monkeypatch.setattr(fetcher, "_now_s", lambda: NOW)
 
     w1, w2, w3 = NOW - 600, NOW - 400, NOW - 200
@@ -415,14 +595,14 @@ async def test_corrupt_download_skipped(tmp_path, monkeypatch, caplog):
         k1: _write_glm_nc([(10.0, -80.0, 5e-14, 1.0, 0)], w1),
         k3: _write_glm_nc([(12.0, -82.0, 5e-14, 1.0, 0)], w3),
     }
-    monkeypatch.setattr(fetcher, "_list_keys", lambda b, p, s: [k1, k2, k3])
+    monkeypatch.setattr(source, "_list_keys", lambda b, p, s: [k1, k2, k3])
 
     def fake_download(bucket, key):
         if key == k2:
             return b"not netcdf"
         return data[key]
 
-    monkeypatch.setattr(fetcher, "_download", fake_download)
+    monkeypatch.setattr(source, "_download", fake_download)
 
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
         await fetcher._fetch_once()
@@ -439,7 +619,8 @@ async def test_corrupt_download_skipped(tmp_path, monkeypatch, caplog):
 
 async def test_start_close_smoke(tmp_path, monkeypatch):
     fetcher = _make_fetcher(tmp_path)
-    monkeypatch.setattr(fetcher, "_list_keys", lambda b, p, s: [])
+    source = fetcher._sources[0]
+    monkeypatch.setattr(source, "_list_keys", lambda b, p, s: [])
 
     await fetcher.start()
     await asyncio.sleep(0)
@@ -448,3 +629,56 @@ async def test_start_close_smoke(tmp_path, monkeypatch):
 
     # close is idempotent
     await fetcher.close()
+
+
+# ---------------------------------------------------------------------------
+# 11. Multi-family coordinator merge (GLM + MTG LI)
+# ---------------------------------------------------------------------------
+
+class _FakeSource:
+    """Minimal ``LightningSource`` stand-in for coordinator tests."""
+
+    def __init__(self, name, units, points):
+        self.name = name
+        self._units = units
+        self._points = points
+        self.closed = False
+
+    def fetch_cycle(self, now_s, watermarks):
+        return self._points, {"source": self.name, "units": self._units}
+
+    def close(self):
+        self.closed = True
+
+
+async def test_multi_family_merge(tmp_path, monkeypatch):
+    """Two families merge into one store; units report as mixed."""
+    glm_points = np.zeros(1, dtype=_POINT_DTYPE)
+    glm_points[0] = (NOW - 30, 30.0, -95.0, 1.0e-5, 19)
+    mtg_points = np.zeros(1, dtype=_POINT_DTYPE)
+    mtg_points[0] = (NOW - 20, 45.0, -10.0, 2.0e-4, 12)
+
+    store = LightningStore(tmp_path)
+    written = []
+    sources = [
+        _FakeSource("goes19", "J", glm_points),
+        _FakeSource("meteosat12", "mW.m-2.sr-1", mtg_points),
+    ]
+    fetcher = LightningFetcher(
+        store,
+        cache_dir=tmp_path,
+        interval_s=300,
+        max_age_s=1800,
+        sources=sources,
+        on_artifact_written=lambda: written.append(1),
+    )
+    monkeypatch.setattr(fetcher, "_now_s", lambda: NOW)
+
+    await fetcher._fetch_once()
+
+    assert store.total_count == 2
+    assert set(store.meta["satellites"]) == {"goes19", "meteosat12"}
+    assert store.meta["units"] == "mixed"
+    assert len(written) == 1
+    assert {int(p["satellite"]) for p in store.points} == {12, 19}
+

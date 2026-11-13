@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 pytestmark = pytest.mark.lightning
 
 from librewxr.api import routes
+from librewxr.config import settings
 from librewxr.data.store import FrameStore, RadarFrame
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
@@ -645,8 +646,9 @@ def test_lightning_rest_bbox_400(client, monkeypatch, bbox, detail):
 
 
 def test_lightning_rest_minutes_clamped(client, monkeypatch):
-    """minutes=120 clamps to the 30-min retention: the 45-min-old point drops."""
+    """minutes=120 clamps to a 30-min retention: the 45-min-old point drops."""
     c, _, _ = client
+    monkeypatch.setattr(settings, "lightning_max_age", 1800)
     now = int(time.time())
     arr = np.zeros(2, dtype=_POINT_DTYPE)
     arr["lat"] = [35.0, 36.0]
@@ -662,6 +664,34 @@ def test_lightning_rest_minutes_clamped(client, monkeypatch):
     features = resp.json()["features"]
     assert len(features) == 1
     assert features[0]["geometry"]["coordinates"] == [-95.0, 35.0]
+
+
+def test_lightning_rest_default_window_stays_30_min(client, monkeypatch):
+    """No-args keeps the 30-min default; the clamp allows the 2 h retention."""
+    c, _, _ = client
+    monkeypatch.setattr(settings, "lightning_max_age", 7200)
+    now = int(time.time())
+    arr = np.zeros(2, dtype=_POINT_DTYPE)
+    arr["lat"] = [35.0, 36.0]
+    arr["lon"] = [-95.0, -94.0]
+    arr["energy"] = [1.0e-5, 2.0e-5]
+    arr["time_s"] = [now - 60, now - 4000]
+    arr["satellite"] = 19
+    stub = _StubLightningStore(arr)
+    monkeypatch.setattr(routes, "lightning_store", stub)
+
+    # No args -> only the default 30-minute window.
+    resp = c.get("/v2/lightning")
+    assert resp.status_code == 200
+    features = resp.json()["features"]
+    assert len(features) == 1
+    assert features[0]["geometry"]["coordinates"] == [-95.0, 35.0]
+
+    # An oversized minutes clamps to the retention (2 h) -> both strikes.
+    resp = c.get("/v2/lightning?minutes=99999")
+    assert resp.status_code == 200
+    coords = [f["geometry"]["coordinates"] for f in resp.json()["features"]]
+    assert coords == [[-95.0, 35.0], [-94.0, 36.0]]
 
 
 def test_lightning_rest_limit_newest_first(client, monkeypatch):

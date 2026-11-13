@@ -168,7 +168,7 @@ This is where the actual tile images come from. Your map library will call this 
 |-----------|-------------|--------|
 | `arrows` | Precipitation motion arrows | `""` (off), `light`, `dark`, `1`/`true` (alias for light) |
 | `cells` | Storm-cell markers (light/dark shape labels, rendered server-side) | `""` (off), `light`, `dark`, `1`/`true` (alias for light) |
-| `lightning` | GOES GLM lightning strike glyphs (rendered server-side) | `""` (off), `1`/`true`/`dots` (energy-scaled dots), `bolts` (bolt glyphs); unknown values fall back to off silently |
+| `lightning` | Lightning strike glyphs, GOES GLM + Meteosat-12 (rendered server-side) | `""` (off), `1`/`true`/`dots` (energy-scaled dots), `bolts` (bolt glyphs); unknown values fall back to off silently |
 
 **Example tile URL:**
 
@@ -317,20 +317,22 @@ GET /v2/lightning?lat={lat}&lon={lon}&radius_km={radius}
 GET /v2/lightning?bbox=west,south,east,north
 ```
 
-Returns recent GOES GLM lightning strikes as a GeoJSON `FeatureCollection` of `Point` features (coordinates `[lon, lat]`). With no parameters it returns every strike in the held 30-minute window; point queries return strikes within `radius_km` of `lat`/`lon`; `bbox=west,south,east,north` returns strikes inside the rectangle.
+Returns recent lightning strikes as a GeoJSON `FeatureCollection` of `Point` features (coordinates `[lon, lat]`) — NOAA GOES GLM (GOES-East + GOES-West) plus EUMETSAT Meteosat-12 when the server has credentials configured. With no parameters it returns the last 30 minutes of strikes (the `minutes` default), not the whole held window; pass `minutes=120` for the full two-hour history. Point queries return strikes within `radius_km` of `lat`/`lon`; `bbox=west,south,east,north` returns strikes inside the rectangle.
 
 **Query parameters:**
 
 | Parameter | Description |
 |-----------|-------------|
-| *(none)* | Every strike in the held 30-minute window |
+| *(none)* | Strikes from the last 30 minutes (the `minutes` default) |
 | `lat`, `lon` | Only strikes within `radius_km` of the point — both required together, otherwise `400` |
 | `radius_km` | Search radius in kilometres (default `25`, silently ignored when lat/lon are omitted) |
 | `bbox` | `west,south,east,north` — only strikes inside the rectangle (used when lat/lon are not both given); malformed boxes are rejected with `400` |
-| `minutes` | Lookback window in minutes, clamped to the server's `LIBREWXR_LIGHTNING_MAX_AGE` retention (default `1800` s / 30 min) |
-| `limit` | Maximum number of strikes returned, newest first (default: the full held window, uncapped) |
+| `minutes` | Lookback window in minutes, clamped to the server's `LIBREWXR_LIGHTNING_MAX_AGE` retention (default `7200` s / 2 h); `minutes=120` returns the full window |
+| `limit` | Maximum number of strikes returned, newest first (default: the full requested window, uncapped) |
 
-Each GeoJSON feature's `properties` carries `utc` (ISO 8601), `energy` (joules), and `satellite` (`goes18` / `goes19`); the strike location lives in the `geometry`. Returns `503 Service Unavailable` when lightning is disabled on the server.
+Each GeoJSON feature's `properties` carries `utc` (ISO 8601), `energy`, and `satellite` (`goes18` / `goes19` / `meteosat12`); the strike location lives in the `geometry`. `energy` follows the satellite's own family unit — joules for GOES GLM, `mW.m-2.sr-1` flash radiance for `meteosat12` — so switch on `satellite` before comparing magnitudes. Returns `503 Service Unavailable` when lightning is disabled on the server.
+
+The default 30-minute window stays bounded even during a severe outbreak. The full two-hour history is an explicit `minutes=120` request and can be large, so for routine polling prefer `bbox` or point + `radius_km` (with `minutes`) and use `limit` to cap a response. Responses of 1 KiB or more are gzipped automatically when the client advertises `Accept-Encoding: gzip` (browsers and standard fetch clients do by default).
 
 ### Health Endpoint
 
@@ -366,7 +368,7 @@ On connect the server sends a `hello` message, then one `error` message for any 
 | `weather-maps` | Exactly the `GET /public/weather-maps.json` response | The frame lists actually change (the volatile `generated` timestamp is excluded from change detection - it just records when that payload version was built); a scheme-list change (custom palette applied) pushes too — the palette version is part of the topic's cache key | Pipeline snapshot cadence: the radar fetch cycle (`LIBREWXR_FETCH_INTERVAL`, default `600` s) as picked up by the render worker's `state.json` poll |
 | `alerts` | Exactly the `GET /v2/alerts` GeoJSON `FeatureCollection` (unfiltered, default polygon simplification) | The feature collection content changes | Same snapshot cadence |
 | `storm-cells` | Exactly the `GET /v2/storm-cells` GeoJSON `FeatureCollection` | The cell list content changes | Same snapshot cadence |
-| `lightning` | GeoJSON `FeatureCollection` of GOES GLM strikes - full current window on subscribe, only not-yet-delivered strikes on `update` | New strikes land in the shared lightning artifact | The lightning fetch loop (`LIBREWXR_LIGHTNING_FETCH_INTERVAL`, default `300` s) |
+| `lightning` | GeoJSON `FeatureCollection` of lightning strikes (GOES GLM + Meteosat-12) - last 30 minutes on subscribe (pinned bootstrap regardless of retention), only not-yet-delivered strikes on `update` | New strikes land in the shared lightning artifact | The lightning fetch loop (`LIBREWXR_LIGHTNING_FETCH_INTERVAL`, default `300` s) |
 
 Satellite refills and nowcast frame merges ride the same pipeline snapshot, so they can also refresh the three state-derived topics. Nothing is pushed while the underlying content is unchanged, so an idle page costs nothing between fetch cycles.
 
@@ -414,9 +416,9 @@ The single-topic form `{"action":"subscribe","topic":"alerts"}` is accepted too.
 
 **Per-topic notes:**
 
-- **`lightning` is a stream, not a listing.** The snapshot holds every strike in the retained window (`LIBREWXR_LIGHTNING_MAX_AGE`, default `1800` s / 30 min), in **ascending chronological order** - oldest first. That is deliberately the opposite of `GET /v2/lightning`, which returns newest-first by default: with a stream you append to the end, so the ordering is part of the protocol.
-- **Updates are deltas.** Each connection carries a watermark, set from the newest strike in the snapshot it was served. `update` messages carry only strikes strictly newer than anything already delivered to that connection, so a strike is never delivered twice and an empty delta sends no frame at all.
-- **Late-published strikes are a known gap.** GLM flashes from GOES-East and GOES-West arrive independently. If one satellite publishes a batch *after* a newer strike from the other has already been delivered, those older-but-late strikes never appear in the live tail. Reconnect (or re-send `subscribe` for `lightning`) to reset the watermark and re-sync against the full window.
+- **`lightning` is a stream, not a listing.** The snapshot holds every strike in the last 30 minutes, in **ascending chronological order** - oldest first. The 30-minute bootstrap is deliberately pinned regardless of the server's retention (`LIBREWXR_LIGHTNING_MAX_AGE`, default `7200` s / 2 h), so a subscribe never dumps two hours of strikes; use `GET /v2/lightning?minutes=120` to backfill the deeper history. That ordering is deliberately the opposite of `GET /v2/lightning`, which returns newest-first by default: with a stream you append to the end, so the ordering is part of the protocol.
+- **Updates are deltas.** Each connection carries a watermark, set from the newest strike in the snapshot it was served. `update` messages carry only strikes strictly newer than anything already delivered to that connection, so a strike is never delivered twice and an empty delta sends no frame at all. Deltas are watermark-based, so a longer retention never inflates the live tail.
+- **Late-published strikes are a known gap.** GLM flashes from GOES-East and GOES-West arrive independently, and Meteosat-12 flashes arrive on their own 10-minute granule cadence. If one feed publishes a batch *after* a newer strike from another has already been delivered, those older-but-late strikes never appear in the live tail. Reconnect (or re-send `subscribe` for `lightning`) to reset the watermark and re-sync against the 30-minute bootstrap window.
 - **`alerts` can lag by one refresh cycle.** Payloads are built when the pipeline refreshes its alert store, so an alert that has just expired can linger in the pushed collection for up to one refresh cycle.
 - **`weather-maps` is the whole map's worth of metadata**, including nowcast and satellite frame lists, `colorSchemes`, and `host` - swap it in wholesale rather than patching individual fields.
 
@@ -505,7 +507,7 @@ function handlePayload(topic, data, isSnapshot) {
         restartAnimation(frames);          // your existing scrubber/animation
     } else if (topic === "lightning") {
         if (isSnapshot) {
-            lightningStrikes = data.features.slice();   // full window, oldest first
+            lightningStrikes = data.features.slice();   // 30-min snapshot, oldest first
         } else {
             lightningStrikes = lightningStrikes.concat(data.features); // delta
         }
@@ -1321,7 +1323,7 @@ The arrows indicate the direction and relative speed of precipitation movement, 
 
 ### Lightning Query Parameter
 
-Append `?lightning=dots` (or `?lightning=1` / `?lightning=true`) to any tile URL to overlay GOES GLM lightning strikes as small energy-scaled dots, or `?lightning=bolts` for a hand-authored vector bolt glyph:
+Append `?lightning=dots` (or `?lightning=1` / `?lightning=true`) to any tile URL to overlay lightning strikes — NOAA GOES GLM and, when configured, EUMETSAT Meteosat-12 — as small energy-scaled dots, or `?lightning=bolts` for a hand-authored vector bolt glyph:
 
 ```
 /v2/radar/1700000400/256/5/8/12/7/1_0.png?lightning=dots
@@ -1336,7 +1338,7 @@ Append `?lightning=dots` (or `?lightning=1` / `?lightning=true`) to any tile URL
 
 Unknown values fall back to off silently, matching `?arrows=` / `?cells=`. Glyphs render at constant brightness with no age fade.
 
-Each requested frame draws the strikes that happened during its own 10-minute slot window `(T-600, T]` — a strike exactly on the boundary belongs to the earlier frame — so timeline playback replays the storm instead of showing every strike on every frame. Strikes older than `LIBREWXR_LIGHTNING_MAX_AGE` (default 30 minutes) age out and render plain. The overlay combines freely with `?arrows=` / `?cells=`, and a presentational strongest-by-energy cap (`LIBREWXR_LIGHTNING_MAX_DRAW_PER_TILE`, default 1000) bounds the per-tile draw cost during dense outbreaks.
+Each requested frame draws the strikes that happened during its own 10-minute slot window `(T-600, T]` — a strike exactly on the boundary belongs to the earlier frame — so timeline playback replays the storm instead of showing every strike on every frame. The default retention (`LIBREWXR_LIGHTNING_MAX_AGE`, 2 hours) matches the 12-frame x 10-minute radar history, so the overlay persists across the whole past-frame timeline instead of only the newest few frames; strikes older than the retention age out and render plain. The overlay combines freely with `?arrows=` / `?cells=`, and a presentational strongest-by-energy cap (`LIBREWXR_LIGHTNING_MAX_DRAW_PER_TILE`, default 1000) bounds the per-tile draw cost during dense outbreaks.
 
 Use it for a severe-weather now-reading: with `?arrows=` and `?cells=` also on, strikes colocated with detected cells and steering arrows read as an active convective core.
 

@@ -39,6 +39,7 @@ from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.data.store import FrameStore, RadarFrame
 from librewxr.data.storm_cells import StormCellStore, _CELL_DTYPE
 from librewxr.tiles.cache import TileCache
+from librewxr.ws import topics as ws_topics
 from librewxr.ws.endpoint import router as ws_router
 from librewxr.ws.hub import ClientState, WebSocketHub
 from librewxr.ws.topics import (
@@ -753,6 +754,56 @@ class TestLightningPush:
         ]
         assert coordinates == [[-90.0, 30.0], [-91.0, 31.0]]
         assert client.lightning_watermark_s == now - 60
+
+    async def test_snapshot_window_pinned_to_30_minutes(
+        self, hub, tmp_path, monkeypatch,
+    ):
+        """A 2 h retention must not bootstrap 2 h of strikes to a subscriber.
+
+        The snapshot window is pinned at 30 min; deeper history stays a REST
+        concern (``?minutes=``).  Deltas are watermark-based, so a newer
+        strike still pushes after the snapshot.
+        """
+        monkeypatch.setattr(settings, "lightning_enabled", True)
+        monkeypatch.setattr(settings, "lightning_max_age", 7200)
+        now = int(time.time())
+        monkeypatch.setattr(ws_topics, "_now_s", lambda: now)
+
+        store = LightningStore(tmp_path)
+        monkeypatch.setattr(routes, "lightning_store", store)
+
+        points = _points(
+            [(30.0, -90.0, 1.0e-12), (31.0, -91.0, 2.0e-12)],
+            times=[now - 4000, now - 100],
+        )
+        await store.replace_points(points, last_seen_s=now, max_age_s=7200)
+
+        fake = _FakeWebSocket()
+        client = await _add_client(hub, fake, [TOPIC_LIGHTNING])
+        await hub._serve_snapshot(client, TOPIC_LIGHTNING)
+        await _wait_messages(fake, 1)
+
+        features = fake.sent[0]["data"]["features"]
+        assert [f["geometry"]["coordinates"] for f in features] == [[-91.0, 31.0]]
+        assert client.lightning_watermark_s == now - 100
+
+        # A new artifact version with a newer strike still delivers a delta.
+        newer = _points([(32.0, -92.0, 3.0e-12)], times=[now + 10])
+        await store.replace_points(
+            np.concatenate([points, newer]),
+            last_seen_s=now + 10, max_age_s=7200,
+        )
+        await store.save_snapshot()
+
+        await hub.on_poll_tick()
+        messages = await _wait_messages(fake, 2)
+        assert len(messages) == 2
+        update = messages[1]
+        assert update["type"] == "update"
+        assert update["topic"] == TOPIC_LIGHTNING
+        coords = [f["geometry"]["coordinates"] for f in update["data"]["features"]]
+        assert coords == [[-92.0, 32.0]]
+        assert client.lightning_watermark_s == now + 10
 
     async def test_no_new_strikes_pushes_nothing(self, hub, tmp_path, monkeypatch):
         monkeypatch.setattr(settings, "lightning_enabled", True)

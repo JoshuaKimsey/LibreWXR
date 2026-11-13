@@ -102,14 +102,14 @@ async def test_get_recent_lightning_window_filter():
 
 
 async def test_get_recent_lightning_satellite_label_fallback():
-    """An unknown bird number falls back to ``goes<N>``."""
+    """An unknown bird number falls back to ``sat<N>``."""
     now = int(time.time())
     points = _build_points([(now - 30, 35.0, -95.0, 1.0e-5, 20)])
     store = _MockLightningStore(points)
     result = await get_recent_lightning(store, minutes=30)
 
     assert len(result) == 1
-    assert result[0]["satellite"] == "goes20"
+    assert result[0]["satellite"] == "sat20"
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # MCP Server — Model Context Protocol
 
-LibreWXR ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes live weather data to LLM agents and MCP-capable tools. Phase 1 provides four tools: **`get_precip_nowcast`** (point-based precipitation forecast), **`get_active_alerts`** (WMO CAP weather alerts near a point), **`get_storm_cells`** (detected convective storm cells near a point), and **`get_recent_lightning`** (recent GOES GLM lightning strikes near a point, inside a bbox, or across the held window). Two transports are available: an **HTTP transport** mounted inside the main FastAPI app, and a **stdio transport** for local desktop agents like Claude Desktop.
+LibreWXR ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes live weather data to LLM agents and MCP-capable tools. Phase 1 provides four tools: **`get_precip_nowcast`** (point-based precipitation forecast), **`get_active_alerts`** (WMO CAP weather alerts near a point), **`get_storm_cells`** (detected convective storm cells near a point), and **`get_recent_lightning`** (recent lightning strikes — GOES GLM and Meteosat-12 — near a point, inside a bbox, or across the last 30 minutes by default). Two transports are available: an **HTTP transport** mounted inside the main FastAPI app, and a **stdio transport** for local desktop agents like Claude Desktop.
 
 ---
 
@@ -193,7 +193,7 @@ Returns a list of detected storm cells within `radius_km` of the point, sourced 
 
 ### `get_recent_lightning(lat, lon, radius_km=100.0, bbox=None, minutes=30.0, limit=2000)`
 
-Returns recent GOES GLM lightning strikes near a point, inside a bounding box, or across the held window.
+Returns recent lightning strikes — NOAA GOES GLM (GOES-East + GOES-West) and EUMETSAT Meteosat-12 — near a point, inside a bounding box, or across the last 30 minutes of the held window (pass `minutes` for deeper history).
 
 **Parameters:**
 
@@ -203,7 +203,7 @@ Returns recent GOES GLM lightning strikes near a point, inside a bounding box, o
 | `lon` | float | `None` | Longitude of the centre point (degrees). Optional; used together with `lat`. |
 | `radius_km` | float | `100.0` | Search radius in kilometres. Used only when both `lat` and `lon` are given. |
 | `bbox` | list[float] | `None` | `[west, south, east, north]` rectangle. Used when `lat` + `lon` are not both given. |
-| `minutes` | float | `30.0` | Lookback window in minutes, clamped to `LIBREWXR_LIGHTNING_MAX_AGE`. |
+| `minutes` | float | `30.0` | Lookback window in minutes, clamped to `LIBREWXR_LIGHTNING_MAX_AGE` (default `7200` s / 2 h). |
 | `limit` | int | `2000` | Maximum number of strikes returned, newest first. |
 
 **Returns:** A list of dicts, one per strike, each containing:
@@ -213,15 +213,15 @@ Returns recent GOES GLM lightning strikes near a point, inside a bounding box, o
 | `lat` | float | Strike latitude (degrees) |
 | `lon` | float | Strike longitude (degrees) |
 | `utc` | string | ISO 8601 observation time |
-| `energy` | float | Radiant energy of the flash (joules) |
-| `satellite` | string | Source satellite: `"goes18"` or `"goes19"` |
+| `energy` | float | Flash energy in the source family's unit: joules for GOES GLM, `mW.m-2.sr-1` flash radiance for `meteosat12` |
+| `satellite` | string | Source satellite: `"goes18"`, `"goes19"`, or `"meteosat12"` |
 
 **Behaviour:**
 
 - Returns strikes newest first.
 - When both `lat` and `lon` are given, filters to strikes within `radius_km` of the point. Point wins over `bbox` when both are supplied (mirrors `/v2/alerts`).
-- When `lat` + `lon` are not both given, `bbox` filters to strikes inside the rectangle; with neither, returns every strike in the held window.
-- `minutes` is clamped to `LIBREWXR_LIGHTNING_MAX_AGE` (default 30 minutes).
+- When `lat` + `lon` are not both given, `bbox` filters to strikes inside the rectangle; with neither, returns every strike in the requested window (the 30-minute default).
+- `minutes` defaults to 30 and is clamped to `LIBREWXR_LIGHTNING_MAX_AGE` (default 7200 s = 2 hours); pass `minutes=120` for the full retained history. Prefer `bbox` or `lat` + `lon` + `radius_km` with `limit` when polling — a full-window response can be large, and JSON responses of 1 KiB or more are gzipped when the client advertises gzip.
 - Both transports (HTTP and stdio) serve the same function.
 - Returns an empty list `[]` when lightning is disabled by configuration (`LIBREWXR_LIGHTNING_ENABLED=false`) or when nothing matches.
 - Never raises — invalid coordinates, disabled ingestion, or empty data all result in `[]`.
