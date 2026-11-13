@@ -31,6 +31,7 @@ Rain Viewer recently (as of January 1st, 2026) restricted their free API tier. L
 | Color schemes | Universal Blue only | 15 schemes + raw grayscale, fully replaceable |
 | Satellite layer | None | Global (GOES / Meteosat / Himawari composite) |
 | Forecast layer | None | 60-minute nowcast (radar extrapolation + NWP blend) |
+| Lightning overlay | None | GOES GLM + Meteosat-12 LI (EUMETSAT side needs a free API key) |
 | Image formats | PNG | PNG + WebP (configurable quality) |
 | Permitted use | Personal / educational only | Your server: Your terms (AGPL-3.0-or-later)<br /> Public server - api.librewxr.net: CC-BY-4.0 |
 | Uptime & rate limits | Best-effort, none guaranteed | Set by your own infrastructure |
@@ -69,7 +70,7 @@ Beyond compatibility, the goal is a far more customizable API backend for self-h
 - **Health endpoint** — `/health` for monitoring uptime, per-component memory breakdown, frame count, NWP chain status, alerts status, MCP mount state, websocket channel status (connections, per-topic subscribers), color-scheme status (`color_schemes`), and cache state, plus a `cluster` aggregation of per-worker stats in multi-worker deployments
 - **MCP server** for AI agents — query precipitation nowcast, active weather alerts, storm cells, and recent lightning strikes via Model Context Protocol. HTTP transport mounted at `/mcp` for n8n-style automation; stdio transport for local agents like Claude Desktop. See [MCP server](#mcp-server-librewxr-extension) below.
 - **Storm-cell detection** — convective cells detected on radar frames each cycle via connected-component labeling at a configurable dBZ threshold. Overlay them on tiles with `?cells=light|dark` (parallel to `?arrows=`). See [Storm-Cell Detection](docs/storm-cells.md).
-- **Lightning overlay** — NOAA GOES GLM flash points (GOES-East + GOES-West) drawn on radar tiles with `?lightning=dots`/`bolts`, each frame showing the strikes from its own 10-minute window; also queryable via `/v2/lightning` and the MCP `get_recent_lightning` tool. See [Lightning](docs/lightning.md).
+- **Lightning overlay** — flash points from NOAA GOES GLM (GOES-East + GOES-West) plus, with a free EUMETSAT API key, the Meteosat-12 Lightning Imager (Europe / Africa / the Atlantic / the western Indian Ocean), drawn on radar tiles with `?lightning=dots`/`bolts`; each frame shows the strikes from its own 10-minute window, and the 2-hour default retention matches the radar frame history so the overlay persists across the whole timeline. Also queryable via `/v2/lightning` and the MCP `get_recent_lightning` tool. See [Lightning](docs/lightning.md).
 - **WebSocket push channel** — additive /v2/ws endpoint that pushes the exact weather-maps, alerts, storm-cells, and lightning payloads the moment they change, so clients can stop polling; lightning arrives as a live delta stream. Configurable via LIBREWXR_WEBSOCKET_ENABLED / LIBREWXR_WEBSOCKET_PATH. See [Web Integration Guide](docs/web-integration-guide.md#websocket-endpoint).
 - **Fully configurable** — all tunable parameters exposed via environment variables
 
@@ -78,7 +79,7 @@ Beyond compatibility, the goal is a far more customizable API backend for self-h
 - **Limited radar coverage outside US / Canada / Europe / Central America / Taiwan / Japan / SE Asia** — real radar composites cover the US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Canada, El Salvador and its neighbours, Europe (via OPERA pan-European composite + DPC for Italy), Taiwan (CWA QPESUMS), Japan (JMA HRPN), Malaysia + Borneo + Brunei + Singapore + N. Sumatra (MET Malaysia), and the Philippines (PAGASA PANAHON). Within the 60S-70N band, the precipitation layer outside these radar domains is satellite-derived OBSERVED data (NOAA RRQPE, Enterprise Rain Rate GLB-5) — an IR-based estimate at 0.04° rather than radar-grade detail. Only poleward of the RRQPE band, in the fringe excluded by RRQPE's coverage polygon, and when RRQPE declines does the regional NWP chain on top of ECMWF IFS fill in — that's a complete picture of global precipitation, but those regions are modelled output, not direct radar observation
 - **Experimental nowcasting** — precipitation nowcast uses optical flow extrapolation blended with whichever regional model is active in the active NWP chain (or ECMWF IFS where none is), which works well for steady, organized precipitation but is less reliable for fast-developing convection, cell initiation/dissipation, or complex terrain effects
 - **Satellite is hourly, not real-time** — GMGSI publishes one composite per hour with tens of minutes of latency from observation. Native per-satellite feeds (GOES, Himawari, Meteosat) refresh every 5–15 minutes, but at the cost of seam-blending and reprojection work that GMGSI handles upstream. GMGSI also caps at ±72.7° latitude — the deep polar regions are out of frame
-- **Lightning coverage follows the GOES GLM observation footprint** — strikes come from the GOES-East + GOES-West geostationary disks, roughly the Americas, the Atlantic, and the eastern Pacific, to about ±57° latitude per satellite. Africa, Asia, and the Indian Ocean sit outside GLM's view, so no lightning overlay is available there
+- **Lightning coverage follows the GOES + MTG observation footprints** — strikes come from the GOES-East + GOES-West geostationary disks (roughly the Americas, the Atlantic, and the eastern Pacific, to about ±57° latitude per satellite) plus EUMETSAT's Meteosat-12 Lightning Imager at 0°E (Europe, Africa, the Atlantic, and the western Indian Ocean, to about ±79° latitude — enabled with a free EUMETSAT API key). The roughly 80°E–170°E band — South and East Asia and the Maritime Continent — sits outside both views, so no lightning overlay is available there
 
 ## Coverage
 
@@ -377,7 +378,7 @@ GET /v2/radar/{timestamp}/{size}/{z}/{x}/{y}/{color}/{smooth}_{snow}.{ext}
 |---|---|---|
 | `arrows` | `light`, `dark` | Draw precipitation motion arrows (light for dark maps, dark for light maps) |
 | `cells` | `light`, `dark` | Draw detected storm-cell markers (light for dark maps, dark for light maps) |
-| `lightning` | `""`, `1`, `true`, `dots`, `bolts` | Draw GOES GLM lightning strike glyphs (`""` / `1` / `true` / `dots` = energy-scaled dots, `bolts` = bolt glyphs; default off, unknown values fall back to off silently) |
+| `lightning` | `""`, `1`, `true`, `dots`, `bolts` | Draw lightning strike glyphs (`""` / `1` / `true` / `dots` = energy-scaled dots, `bolts` = bolt glyphs; default off, unknown values fall back to off silently) |
 
 Ready-made integration snippets: see [`docs/web-integration-guide.md`](docs/web-integration-guide.md) and the [Examples](#examples) section below.
 
@@ -470,7 +471,7 @@ GET /v2/lightning?lat={lat}&lon={lon}&radius_km={radius}
 GET /v2/lightning?bbox=west,south,east,north
 ```
 
-Returns recent GOES GLM lightning strikes as a GeoJSON `FeatureCollection` of `Point` features, each carrying `utc`, `energy` (joules), and `satellite` (`goes18` / `goes19`) properties. With no parameters it returns every strike in the held 30-minute window. `lat` + `lon` (with optional `radius_km`, default 25) returns strikes within distance of the point; `bbox=west,south,east,north` returns strikes inside the rectangle. `minutes` sets the lookback window (clamped to the 30-minute retention) and `limit` caps the results newest-first (default: the full window). Returns `503` when lightning is disabled. Prefer `bbox` or point + `radius_km` during severe outbreaks — the no-args window can be large; `limit` caps a large window.
+Returns recent lightning strikes as a GeoJSON `FeatureCollection` of `Point` features, each carrying `utc`, `energy` (joules for GOES GLM; flash radiance in mW·m⁻²·sr⁻¹ for Meteosat-12), and `satellite` (`goes18` / `goes19` / `meteosat12`) properties. With no parameters it returns the last 30 minutes; the full 2-hour retention is available via `minutes=120`. `lat` + `lon` (with optional `radius_km`, default 25) returns strikes within distance of the point; `bbox=west,south,east,north` returns strikes inside the rectangle. `minutes` sets the lookback window (clamped to the 2-hour retention) and `limit` caps the results newest-first (default: the full window). Returns `503` when lightning is disabled. Prefer `bbox` or point + `radius_km` during severe outbreaks, and `limit` to cap a large window.
 
 #### WebSocket (LibreWXR extension)
 
@@ -498,7 +499,7 @@ LibreWXR exposes an [MCP (Model Context Protocol)](https://modelcontextprotocol.
 - `get_precip_nowcast(lat, lon, minutes=60)` — returns future precipitation frames (up to 60 minutes ahead) with dBZ, rain rate (mm/h), data source (`radar` | `nwp` | `none`), blend weight, and coverage (`in_range` | `out_of_range`).
 - `get_active_alerts(lat, lon, radius_km=25, severity=None)` — returns a GeoJSON FeatureCollection of alerts within `radius_km` from the merged WMO + NWS store; US zone-based alerts (e.g. Tornado Watches) are resolved to zone polygons at ingest. Returns an empty collection when alerts are disabled or none match; never raises.
 - `get_storm_cells(lat, lon, radius_km=100)` — returns a list of detected storm cells within `radius_km` of the point. Each cell dict: `{lat, lon, area_km2, max_dbz, motion_speed_kmh, motion_heading_deg, region}`. Returns an empty list when detection is disabled or no cells are within range; never raises.
-- `get_recent_lightning(lat, lon, radius_km=100.0, bbox=None, minutes=30.0, limit=2000)` — returns recent GOES GLM lightning strikes near a point, inside a `bbox`, or across the held window. Each strike dict: `{lat, lon, utc, energy, satellite}`. Returns an empty list when lightning is disabled or nothing matches; never raises.
+- `get_recent_lightning(lat, lon, radius_km=100.0, bbox=None, minutes=30.0, limit=2000)` — returns recent lightning strikes (GOES GLM + EUMETSAT MTG LI when configured) near a point, inside a `bbox`, or across the held window; `minutes` defaults to 30 and clamps to the 2-hour retention. Each strike dict: `{lat, lon, utc, energy, satellite}` (`energy` is joules for GOES, flash radiance in mW·m⁻²·sr⁻¹ for Meteosat-12). Returns an empty list when lightning is disabled or nothing matches; never raises.
 
 The endpoint is mounted at `LIBREWXR_MCP_PATH` (default `/mcp`) when the `[mcp]` extra is installed and `LIBREWXR_MCP_ENABLED=true` (the default). Failures (missing extra, build error) are silently skipped so the REST API still boots; the `/health` endpoint surfaces the actual mount state as `mcp: {enabled, mounted, path, tools}`.
 
@@ -622,8 +623,8 @@ an 80-core / 32 GB rack: ~16 GB total RSS, all cores active under load.
 [WMO CAP] ───────> [Alert Store] ──────────────────────┤
    (per-agency feeds + MeteoAlarm / DWD / BoM geocodes)
                                                        │
-[GOES GLM] ──────> [Lightning Store] ──────────────────┘
-   (NOAA NODD S3, clock-aligned 5-min loop)
+[GOES GLM + MTG LI] ─> [Lightning Store] ──────────────┘
+   (NOAA NODD S3 + EUMETSAT Data Store, 5-min loop)
 ```
 
 All stores are memmap-backed — the OS page cache manages physical RAM
@@ -691,7 +692,8 @@ Layered ahead of IFS via specificity-first dispatch (see the [Regional NWP chain
 
 ### Lightning
 
-- Lightning: NOAA GOES-R Geostationary Lightning Mapper (GLM) — flash points from GOES-East + GOES-West, ingested from anonymous NOAA NODD S3 as an optional `?lightning=` radar-tile overlay and served through the MCP `get_recent_lightning` tool and the `/v2/lightning` GeoJSON endpoint (no-args full window, or `lat` + `lon` + `radius_km`, or `bbox`). Tiles replay each frame's strikes - every frame draws the strikes from its own 10-minute slot window. US public domain; attribution requested-not-required. See [docs/lightning.md](docs/lightning.md) for the full guide.
+- Lightning: NOAA GOES-R Geostationary Lightning Mapper (GLM) — flash points from GOES-East + GOES-West, ingested from anonymous NOAA NODD S3 as an optional `?lightning=` radar-tile overlay and served through the MCP `get_recent_lightning` tool and the `/v2/lightning` GeoJSON endpoint (no-args 30-minute default window, or `lat` + `lon` + `radius_km`, or `bbox`; the full 2-hour retention is `minutes=120`). Tiles replay each frame's strikes - every frame draws the strikes from its own 10-minute slot window, and the 2-hour retention matches the radar frame history. US public domain; attribution requested-not-required. See [docs/lightning.md](docs/lightning.md) for the full guide.
+- Lightning: [EUMETSAT MTG Lightning Imager (LI)](https://user.eumetsat.int/resources/user-guides/mtg-li-level-2-data-guide) — Meteosat-12 (MTG-I1) L2 flash points from the [EUMETSAT Data Store](https://data.eumetsat.int), covering Europe, Africa, the Atlantic, and the western Indian Ocean (~79°N–79°S). The project's one deliberate API-key exception to its anonymous-access rule: free account registration plus an API key pair (`LIBREWXR_LIGHTNING_EUMETSAT_API_KEY` / `LIBREWXR_LIGHTNING_EUMETSAT_API_SECRET`) enables the family — without credentials it stays off and the instance runs fully anonymous. Licensed [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/); attribution required on redistribution: "Contains modified EUMETSAT Meteosat data 2026". See [docs/lightning.md](docs/lightning.md).
 
 ### Weather alerts
 
@@ -714,7 +716,7 @@ The `examples/` directory contains three self-contained HTML files showcasing th
 - **Options panel** — collapsible controls for smoothing, snow mask, PNG/WebP output format, and 256/512px tile size with HiDPI auto-detection
 - **Motion arrows** — off, light, or dark
 - **Storm-cell markers** — cell detection with light/dark label styles
-- **Lightning strikes** — GOES GLM flash overlay via the `?lightning=` toggle (dots or bolts)
+- **Lightning strikes** — flash-point overlay (GOES GLM + EUMETSAT MTG LI) via the `?lightning=` toggle (dots or bolts)
 - **Scrubber bar** — draggable timeline with past/nowcast visual distinction and tick labels
 - **Background preloading** — pre-renders all frames with a progress indicator for smooth animation
 - **Keyboard shortcuts** — Space to play/pause, arrow keys to step through frames
