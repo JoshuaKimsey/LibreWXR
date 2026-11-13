@@ -123,16 +123,14 @@ class Settings(BaseSettings):
     coord_store_enabled: bool = True  # Kill switch; False bypasses the store entirely
     coord_store_mb: int = 0  # Coord-store size cap in MB; 0 = deployment default (legacy_single 4096, multi 8192)
     # Shared on-disk encoded-tile store (see tiles/shared_tile_store.py).
-    # Multi-mode only: render workers publish / read encoded tile bytes on
+    # Render workers publish / read encoded tile bytes on
     # the shared cache volume so one worker's encode serves all workers.
     # Content-versioned keys (built by the wiring) make stale entries
     # unreachable between fetch cycles.  Semantics:
-    #   None          - auto: render-only workers default to a 2048 MB
-    #                   budget; legacy 1-worker deployments leave the
-    #                   store disabled (the wiring decides).
+    #   None          - auto: a 2048 MB budget (the wiring decides).
     #   0 or negative - disabled.
     #   positive      - explicit MB budget for the shared encoded-tile
-    #                   store (multi-mode only).
+    #                   store.
     shared_tile_store_mb: int | None = None
     memory_limit_mb: int = 0  # Container memory limit in MB (0 = auto-detect)
     memory_pressure_check_interval: int = 30  # Seconds between memory pressure checks
@@ -566,7 +564,7 @@ class Settings(BaseSettings):
     snapshot_sync_endpoint_url: str = ""  # LIBREWXR_SNAPSHOT_SYNC_ENDPOINT_URL (S3-compatible stores)
     snapshot_sync_workers: int = 8        # LIBREWXR_SNAPSHOT_SYNC_WORKERS (parallel transfers)
     snapshot_pull_interval: float = 10.0  # LIBREWXR_SNAPSHOT_PULL_INTERVAL (seconds between manifest polls)
-    cache_dir: str = ""  # Persistent cache directory for fetched grids; empty = in-memory only
+    cache_dir: str = ""  # Persistent cache directory for fetched grids; empty = per-host tempdir fallback with a one-time warning
     # Optional directory for stores whose contents are fully regenerated
     # every fetch cycle (nowcast frames + optical-flow fields, per-timestamp
     # precip masks, storm cells, and the RRQPE source scan cache).  Empty

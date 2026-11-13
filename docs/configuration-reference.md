@@ -388,7 +388,7 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `SOUTHEAST_ASIA` | `MYPENINSULAR`, `MYEAST`, `PHCOMP` | Peninsular Malaysia + N. Sumatra + all of Borneo + Brunei + Singapore (MET Malaysia 12-radar composite) + the Philippines (PAGASA PANAHON 9-radar mosaic) |
 | `TAIWAN` | `TWCOMP` | Taiwan + W. Pacific buffer (CWA QPESUMS 7-radar composite) |
 | `JAPAN` | `JPCOMP` | Japan (JMA HRPN analysis-leg composite) |
-| `ALL` | All of the above | Every available region |
+| `ALL` | All of the above (the global RRQPE band is handled separately — see `LIBREWXR_RRQPE_ENABLED`) | Every available region |
 
 **Individual regions:**
 
@@ -408,6 +408,7 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `MYPENINSULAR` | Peninsular Malaysia + N. Sumatra | MET Malaysia (12-radar composite) | 424 x 551 | 0.022° lon / 0.019° lat (~2.5km) | <1 MB |
 | `MYEAST` | East Malaysia (Borneo) + Brunei | MET Malaysia (12-radar composite) | 640 x 570 | 0.022° lon / 0.019° lat (~2.5km) | <1 MB |
 | `PHCOMP` | Philippines (Luzon, Visayas, Mindanao) | PAGASA PANAHON (9-radar mosaic) | 2048 x 2048 | 0.0069° lon / 0.0091° lat (~770m) | ~4 MB |
+| `RRQPE` | Global 60S-70N band, all longitudes (always-on) | NOAA Enterprise Rain Rate GLB-5 (satellite-derived observed precip; the compositor's coarsest tier, filling only pixels no finer radar region claims) | 9000 x 3250 | 0.04° (~4.4km) | ~29 MB |
 
 **Examples:**
 ```bash
@@ -557,7 +558,7 @@ Best-effort: any store failure (unwritable cache dir, corrupt files, version mis
 
 ### `LIBREWXR_COORD_STORE_MB`
 
-Size cap of the shared on-disk coordinate store, in megabytes. The cap is **soft**: the store is pruned once per fetch cycle by the pipeline process (via the ~30 s-debounced cycle hook), so it can briefly overshoot between prunes.
+Size cap of the shared on-disk coordinate store, in megabytes. The cap is **soft**: the store is pruned once per fetch cycle by the pipeline process (in the pipeline's cycle-complete callback, debounced ~5 s), so it can briefly overshoot between prunes.
 
 The default is 8192 MB (4096 MB in the legacy-single profile). The budget is **shared by ALL render workers** — every worker reads the same on-disk store, so the 8192 MB default covers the combined warm set rather than 8192 MB per worker. Settable via `.env` like any knob; a restart applies the change. Requires `LIBREWXR_CACHE_DIR`; the store disables itself when the cache dir is unset.
 
@@ -614,6 +615,8 @@ A legacy `single` token - `COMPOSE_PROFILES=single` or `LIBREWXR_MODE=single` - 
 
 `LIBREWXR_WORKERS`, `LIBREWXR_TILE_CACHE_MB`, `LIBREWXR_COORD_CACHE_SIZE`, `LIBREWXR_COORD_STORE_MB`, `LIBREWXR_WARM_COORD_ZOOM`, and `LIBREWXR_RENDER_THREADS` all pick profile-appropriate defaults from this setting when left at `0` (or unset).
 
+A companion flag, `LIBREWXR_LEGACY_SINGLE`, is set automatically when the removed `single` token is detected; it is internal and not intended for direct configuration.
+
 ### `LIBREWXR_IMAGE_TAG`
 
 Tag of the published image that Docker Compose pulls from `ghcr.io/joshuakimsey/librewxr`; an image publishes there for every release, and `docker compose pull` plus `docker compose up -d` use this tag. Compose interpolation only - the application never reads it (`config.py` does not see it), and `.env.example` ships it as a commented line.
@@ -662,13 +665,13 @@ Seconds between memory pressure checks.
 
 ### `LIBREWXR_SHARED_TILE_STORE_MB`
 
-Budget, in megabytes, of the shared on-disk store of **encoded** tile bytes under `LIBREWXR_CACHE_DIR` (`tiles_shared/`). Render workers publish their freshly-encoded plain past-frame tiles here and read back bytes published by any other worker — one encode serves the whole fleet — instead of each worker redundantly colorizing and encoding the same viewport. A lone render worker leaves the store disabled (the in-memory cache is enough).
+Budget, in megabytes, of the shared on-disk store of **encoded** tile bytes under `LIBREWXR_CACHE_DIR` (`tiles_shared/`). Render workers publish their freshly-encoded plain past-frame tiles here and read back bytes published by any other worker — one encode serves the whole fleet — instead of each worker redundantly colorizing and encoding the same viewport.
 
-Semantics: unset (`None`) = auto, which resolves to **2048 MB for render workers** and **disabled for a lone render worker**; `0` or any negative value disables the store entirely; a positive value sets the MB budget explicitly. Content-versioned keys (the frame's content version is folded into each key) make stale entries unreachable between fetch cycles, and the render workers' state poller invalidates + prunes the store with the same cadence as the in-memory tile cache. Requires `LIBREWXR_CACHE_DIR` (a shared volume).
+Semantics: unset (`None`) = auto, which resolves to **2048 MB**; `0` or any negative value disables the store entirely; a positive value sets the MB budget explicitly. Content-versioned keys (the frame's content version is folded into each key) make stale entries unreachable between fetch cycles. Correctness invalidation runs in each render worker's state poll; **budget pruning is owned by the pipeline process**, once per fetch cycle (in network-split mode the per-host snapshot puller owns it). Requires `LIBREWXR_CACHE_DIR` (a shared volume).
 
 | | |
 |---|---|
-| **Default** | unset (auto: `2048` for render workers / disabled for a lone render worker) |
+| **Default** | unset (auto: `2048`) |
 | **Type** | integer (or unset) |
 | **Unit** | megabytes |
 
@@ -810,7 +813,7 @@ Number of ECMWF IFS hourly timesteps to fetch for global precipitation animation
 | **Default** | `0` (auto) |
 | **Type** | integer |
 
-When set to `0` (recommended), the count is derived automatically from `LIBREWXR_MAX_FRAMES` + nowcast frames so the IFS animation covers the same time window as radar.
+When set to `0` (recommended), the count is derived automatically from `LIBREWXR_MAX_FRAMES` + nowcast frames so the IFS animation covers the same time window as radar. The automatic derivation counts the nowcast frames' term only when nowcasting is enabled, and adds 2 extra hourly buckets so `now` landing between two IFS marks still has neighbors to interpolate from.
 
 ### `LIBREWXR_ECMWF_INTERPOLATION`
 
@@ -1136,6 +1139,27 @@ Each variant exposes four settings analogous to Antilles:
 (`true`, `https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net`, `420`,
 `6.0`).
 
+Each variant exposes the same four knobs; the literal names, defaults, and meanings:
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `LIBREWXR_AROME_GUYANE_ENABLED` | `true` | French Guiana (+ Suriname / Amapá border areas) on/off |
+| `LIBREWXR_AROME_GUYANE_BASE_URL` | `https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net` | AROME-OM PNT object-store host |
+| `LIBREWXR_AROME_GUYANE_PUBLISH_DELAY_MINUTES` | `420` | publish lag for the 0..48 h run |
+| `LIBREWXR_AROME_GUYANE_DBZ_OFFSET` | `6.0` | Marshall-Palmer calibration shift |
+| `LIBREWXR_AROME_INDIEN_ENABLED` | `true` | Réunion, Mayotte, the Comoros, most of Madagascar + the SW Indian Ocean on/off |
+| `LIBREWXR_AROME_INDIEN_BASE_URL` | `https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net` | AROME-OM PNT object-store host |
+| `LIBREWXR_AROME_INDIEN_PUBLISH_DELAY_MINUTES` | `420` | publish lag for the 0..48 h run |
+| `LIBREWXR_AROME_INDIEN_DBZ_OFFSET` | `6.0` | Marshall-Palmer calibration shift |
+| `LIBREWXR_AROME_NCALED_ENABLED` | `true` | Nouvelle-Calédonie + the adjacent SW Pacific on/off |
+| `LIBREWXR_AROME_NCALED_BASE_URL` | `https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net` | AROME-OM PNT object-store host |
+| `LIBREWXR_AROME_NCALED_PUBLISH_DELAY_MINUTES` | `420` | publish lag for the 0..48 h run |
+| `LIBREWXR_AROME_NCALED_DBZ_OFFSET` | `6.0` | Marshall-Palmer calibration shift |
+| `LIBREWXR_AROME_POLYN_ENABLED` | `true` | French Polynesia (Society, Tuamotu, Marquesas) on/off |
+| `LIBREWXR_AROME_POLYN_BASE_URL` | `https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net` | AROME-OM PNT object-store host |
+| `LIBREWXR_AROME_POLYN_PUBLISH_DELAY_MINUTES` | `420` | publish lag for the 0..48 h run |
+| `LIBREWXR_AROME_POLYN_DBZ_OFFSET` | `6.0` | Marshall-Palmer calibration shift |
+
 ### South American: WRF-SMN
 
 Servicio Meteorológico Nacional Argentina WRF-DET at 4 km LCC. First regional NWP for the South American Cone — covers Argentina, Chile, Uruguay, Paraguay, Bolivia, southern Brazil + adjacent oceans. Anonymous AWS Open Data (smn-ar-wrf in us-west-2). 4 cycles/day, 72 h horizon. Files are NetCDF4 (~34 MB each — the only non-GRIB source in the chain).
@@ -1313,6 +1337,8 @@ The model side is taken from the active NWP chain — **HRRR over CONUS, HRDPS o
 | **Default** | `blended` |
 | **Type** | string |
 | **Values** | `radar`, `blended`, `model` |
+
+The value is not validated: anything other than exactly `radar` or `model` falls through to the blended curve silently.
 
 - **`radar`** — Pure radar extrapolation for the first 60 minutes. Closest to Rain Viewer behavior. Visibly diverges from reality past ~30 minutes for fast-moving convection, since the extrapolation has no skill at cell initiation or dissipation.
 - **`blended`** (default) — Smooth transition from radar-heavy to model-heavy. The blend curve is `0.20 + 0.80 * (1 - t)^1.4` where `t` is normalized time from 0 to 1 across the 60-min window — about 100% radar at T+0, ~82% radar at T+10 min, ~50% at T+30 min, ~20% radar at T+60 min. Spatial feathering at radar coverage boundaries prevents hard seams. Leverages the regional NWP chain quality for the far end of the window.
@@ -1737,7 +1763,7 @@ Seconds a hook may run before it is killed. Keep it below the fetch interval so 
 
 ## Network Split (Snapshot Sync)
 
-Carries the pipeline/renderer handoff over an artifact store so the data pipeline and the render workers can run on different servers; see [docs/network-split.md](network-split.md). The pipeline publishes each `state.json` and the files it names; a puller (`python -m librewxr.snapshot_pull`) on each render host brings them into that host's cache, where render-only workers read them as usual. Off by default: the shared-filesystem handoff is unchanged.
+Carries the pipeline/renderer handoff over an artifact store so the data pipeline and the render workers can run on different servers; see [docs/network-split.md](network-split.md). The pipeline publishes each `state.json` and the files it names; a puller (`python -m librewxr.snapshot_pull`) on each render host brings them into that host's cache, where render-only workers read them as usual. Off by default: the shared-filesystem handoff is unchanged. On the Compose side, the `render-node` profile starts the `puller` + `renderer-node` pair (see [docs/network-split.md](network-split.md)).
 
 ### `LIBREWXR_SNAPSHOT_SYNC_URL`
 

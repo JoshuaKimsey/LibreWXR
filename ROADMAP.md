@@ -153,8 +153,10 @@ Tracked in issue #50.
 - [ ] Declare the public surface stable at 1.0.0: Rain Viewer-compatible HTTP endpoints, tile
   query parameters, JSON response shapes, and MCP tools. Semver applies to this surface;
   internal paths may change.
-- [ ] Documentation pass: `docs/configuration-reference.md` covers every knob added across
-  the pre-1.0 feature releases.
+- [x] Documentation pass: `docs/configuration-reference.md` covers every knob added across
+  the pre-1.0 feature releases. (completed 2026-11-13: literal AROME-OM knob names
+  added, five stale behavioral claims corrected, RRQPE added to the region tables;
+  literal-name completeness re-verified against config.py)
 - [ ] Cut 1.0.0 per repo conventions: `gh release create`, then
   `scripts/generate_changelog.py` and commit the regenerated `CHANGELOG.md` with the version
   bump; GHCR images built from the release tag; MCP registry republish at 1.0.0 (registry
