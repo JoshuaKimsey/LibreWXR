@@ -262,7 +262,7 @@ Example body:
   "description": "Precipitation nowcasts, weather alerts, storm cells, and recent lightning strikes for any point.",
   "version": "0.9.0",
   "websiteUrl": "http://localhost:8080",
-  "repository": { "source": "github", "url": "https://github.com/JoshuaKimsey/LibreWRX" },
+  "repository": { "source": "github", "url": "https://github.com/JoshuaKimsey/LibreWXR" },
   "remotes": [
     {
       "type": "streamable-http",

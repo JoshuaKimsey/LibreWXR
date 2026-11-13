@@ -45,7 +45,7 @@ _DESCRIPTION = (
     "Precipitation nowcasts, weather alerts, storm cells, and recent "
     "lightning strikes for any point."
 )
-_REPOSITORY_URL = "https://github.com/JoshuaKimsey/LibreWRX"
+_REPOSITORY_URL = "https://github.com/JoshuaKimsey/LibreWXR"
 
 _SERVER_CARD_MEDIA_TYPE = "application/mcp-server-card+json"
 _AI_CATALOG_MEDIA_TYPE = "application/ai-catalog+json"
