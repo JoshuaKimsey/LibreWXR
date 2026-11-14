@@ -63,11 +63,17 @@ _LIVE_HREF = (
     "_N__O_0056_0000"
 )
 # The consolidated product ships a CHK-BODY and a CHK-TRAIL netCDF member
-# over the same sensing window; both hold flashes.
+# over the same sensing window; only the BODY member carries the four flash
+# variables, while the TRAIL member holds statistics alone.
 _BODY_NC_NAME = (
     "W_XX-EUMETSAT-Darmstadt,IMG+SAT,MTI1+LI-2-LFL--FD--CHK-BODY--ARC-NC4E"
     "_C_EUMT_20261113092023_L2PF_OPE_20261113091005_20261113092005"
     "_N__O_0056_0000.nc"
+)
+_BODY2_NC_NAME = (
+    "W_XX-EUMETSAT-Darmstadt,IMG+SAT,MTI1+LI-2-LFL--FD--CHK-BODY--ARC-NC4E"
+    "_C_EUMT_20261113092023_L2PF_OPE_20261113091005_20261113092005"
+    "_N__O_0056_0001.nc"
 )
 _TRAIL_NC_NAME = (
     "W_XX-EUMETSAT-Darmstadt,IMG+SAT,MTI1+LI-2-LFL--FD--CHK-TRAIL--ARC-NC4E"
@@ -135,6 +141,25 @@ def _write_li_nc(flashes, base_unix, *, qc=True) -> bytes:
     return bio.getvalue()
 
 
+def _write_li_trailer_nc() -> bytes:
+    """Build a trailer-shaped MTG LI netCDF: valid HDF5, no flash variables.
+
+    Mirrors the real ``...CHK-TRAIL...`` member, which carries sensing-window
+    statistics only.  ``h5py`` opens it happily, but it has none of the four
+    flash variables, so the decoder's schema check rejects it.
+    """
+    bio = io.BytesIO()
+    with h5py.File(bio, "w") as f:
+        f.create_dataset(
+            "number_of_flashes", data=np.array([3], dtype=np.uint32),
+        )
+        f.create_dataset(
+            "number_of_events", data=np.array([5], dtype=np.uint32),
+        )
+        f.attrs["title"] = "MTG LI CHK-TRAIL statistics"
+    return bio.getvalue()
+
+
 def _zip_product(
     nc_bytes: bytes, *, nc_name="product.nc", extra_nc=None,
 ) -> bytes:
@@ -152,6 +177,17 @@ def _zip_product(
             zf.writestr(_TRAIL_NC_NAME, extra_nc)
         else:
             zf.writestr(nc_name, nc_bytes)
+        zf.writestr("quicklook.jpg", b"\xff\xd8\xff\xd9")
+    return bio.getvalue()
+
+
+def _zip_members(*members) -> bytes:
+    """Wrap explicit ``(name, bytes)`` netCDF members in the product ZIP."""
+    bio = io.BytesIO()
+    with zipfile.ZipFile(bio, "w") as zf:
+        zf.writestr("manifest.xml", "<manifest/>")
+        for name, payload in members:
+            zf.writestr(name, payload)
         zf.writestr("quicklook.jpg", b"\xff\xd8\xff\xd9")
     return bio.getvalue()
 
@@ -325,18 +361,20 @@ def test_decode_no_netcdf_member_raises():
         src._decode_file(_zip_without_nc())
 
 
-def test_decode_concatenates_body_and_trail():
+def test_decode_concatenates_multiple_body_members():
     src = _make_source()
-    body = _write_li_nc(
+    body_a = _write_li_nc(
         [
             (11.0, 22.0, 1.0e-4, 1, 0),      # flash A
             (13.75, 24.75, 1.1e-4, 2, 0),    # flash B
         ],
         NOW,
     )
-    trail = _write_li_nc([(16.5, 27.5, 1.2e-4, 3, 0)], NOW)  # flash C
+    body_b = _write_li_nc([(16.5, 27.5, 1.2e-4, 3, 0)], NOW)  # flash C
 
-    pts = src._decode_file(_zip_product(body, extra_nc=trail))
+    pts = src._decode_file(
+        _zip_members((_BODY_NC_NAME, body_a), (_BODY2_NC_NAME, body_b))
+    )
 
     assert len(pts) == 3
     assert [int(p["time_s"]) for p in pts] == [NOW + 1, NOW + 2, NOW + 3]
@@ -344,19 +382,71 @@ def test_decode_concatenates_body_and_trail():
     assert all(int(p["satellite"]) == 12 for p in pts)
 
 
-def test_decode_corrupt_trail_member_keeps_body(caplog):
+def test_decode_skips_trailer_member(caplog):
+    """The statistics-only CHK-TRAIL member is never decoded."""
     src = _make_source()
     body = _write_li_nc([(11.0, 22.0, 1.0e-4, 1, 0)], NOW)
+    trailer = _write_li_trailer_nc()
+
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER):
+        pts = src._decode_file(
+            _zip_members(
+                (_BODY_NC_NAME, body), (_TRAIL_NC_NAME, trailer),
+            )
+        )
+
+    assert len(pts) == 1
+    assert pts[0]["lat"] == np.float32(11.0)
+    assert int(pts[0]["time_s"]) == NOW + 1
+
+    # No decode-failure warning: the trailer is filtered before the attempt.
+    assert not [
+        r for r in caplog.records
+        if r.levelno >= logging.WARNING
+        and "decode failed for member" in r.getMessage()
+    ]
+    # The skip itself is reported (DEBUG only).
+    skips = [
+        r for r in caplog.records
+        if r.levelno == logging.DEBUG
+        and "skipping non-body member" in r.getMessage()
+        and _TRAIL_NC_NAME in r.getMessage()
+    ]
+    assert len(skips) == 1
+
+
+def test_decode_trailer_only_raises(caplog):
+    """With no CHK-BODY member the fallback attempts the trailer and fails."""
+    src = _make_source()
 
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
-        pts = src._decode_file(_zip_product(body, extra_nc=b"garbage"))
+        with pytest.raises(ValueError, match="no decodable netCDF member"):
+            src._decode_file(
+                _zip_members((_TRAIL_NC_NAME, _write_li_trailer_nc()))
+            )
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert _TRAIL_NC_NAME in warnings[0].getMessage()
+    assert "decode failed for member" in warnings[0].getMessage()
+
+
+def test_decode_corrupt_body_member_keeps_valid_body(caplog):
+    src = _make_source()
+    good = _write_li_nc([(11.0, 22.0, 1.0e-4, 1, 0)], NOW)
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        pts = src._decode_file(
+            _zip_members((_BODY_NC_NAME, b"garbage"), (_BODY2_NC_NAME, good))
+        )
 
     assert len(pts) == 1
     assert pts[0]["lat"] == np.float32(11.0)
     assert int(pts[0]["time_s"]) == NOW + 1
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
-    assert "CHK-TRAIL" in warnings[0].getMessage()
+    assert _BODY_NC_NAME in warnings[0].getMessage()
+    assert "decode failed for member" in warnings[0].getMessage()
 
 
 def test_decode_all_members_corrupt_raises():

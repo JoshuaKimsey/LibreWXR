@@ -510,15 +510,28 @@ class MTGLISource:
         """Decode a product ZIP's netCDF members into flash points.
 
         The consolidated product carries a CHK-BODY and a CHK-TRAIL member
-        over the same sensing window; both hold flashes, so both are decoded
-        and concatenated.  Raises ``ValueError`` when the ZIP has no netCDF
-        member or every member fails to decode.
+        over the same sensing window; only the BODY member holds the flash
+        variables (the TRAIL member carries statistics), so when any member
+        is named CHK-BODY only those are decoded and concatenated.  With no
+        such member every ``.nc`` member is attempted, so a naming drift
+        cannot silently blind ingestion.  Raises ``ValueError`` when the ZIP
+        has no netCDF member or every attempted member fails to decode.
         """
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as zf:
-                members = [n for n in zf.namelist() if n.endswith(".nc")]
-                if not members:
+                nc_members = [n for n in zf.namelist() if n.endswith(".nc")]
+                if not nc_members:
                     raise ValueError("no netCDF member in MTG LI product")
+                body_members = [n for n in nc_members if "CHK-BODY" in n]
+                if body_members:
+                    for name in nc_members:
+                        if name not in body_members:
+                            logger.debug(
+                                "MTG LI: skipping non-body member %s", name,
+                            )
+                    members = body_members
+                else:
+                    members = nc_members
                 buffers = [zf.read(n) for n in members]
         except zipfile.BadZipFile as exc:
             raise ValueError("MTG LI product is not a ZIP archive") from exc
