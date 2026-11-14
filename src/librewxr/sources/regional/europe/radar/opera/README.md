@@ -1,7 +1,29 @@
 # OPERA pan-European composite
 
 CIRRUS pan-European radar composite operated by **EUMETNET / OPERA**,
-published as ODIM HDF5 to Cloudferro S3 (`openradar-24h`).
+published as ODIM HDF5 to the MeteoGate S3 buckets.
+
+## Buckets
+
+Tried in order from `LIBREWXR_OPERA_BUCKET_URLS`; both use the same key
+layout (`YYYY/MM/DD/OPERA/COMP/OPERA@YYYYMMDDTHHMM@0@DBZH.h5`):
+
+| Bucket                                                            | Role    |
+| ----------------------------------------------------------------- | ------- |
+| `https://s3.waw3-1.cloudferro.com/openradar-24h`                  | primary |
+| `https://object-store.os-api.cci1.ecmwf.int/openradar-24h-backup` | backup  |
+
+EUMETNET moves Open Radar Data to the ECMWF backup while the Cloudferro
+bucket is unavailable (see the "ORD Backup" note in the
+[ORD API overview](https://eumetnet.github.io/openradardata-documentation/1-ORD-API-overview/)).
+The source sticks with the bucket that last served data and falls
+through to the next one only when every look-back slot is missing (404,
+or 403 from a bucket that hides missing keys), the server returns a 5xx
+error or the request fails at the network level, so a healthy cycle
+costs no extra requests.  A log line is written only when the active
+bucket changes.  The legacy `LIBREWXR_OPERA_BASE_URL` (host only) still
+replaces the primary entry as `<base>/openradar-24h` when the list is
+not set.
 
 ## Coverage
 
@@ -22,8 +44,8 @@ no per-country directory.
 
 - Native cadence: **5 min**.
 - Files publish with ~5–10 min delay; the source walks back up to 3
-  older slots on 404 (`_MAX_FALLBACK_STEPS = 3`).
-- Archive: **rolling 24 hours** at the S3 bucket — older frames are
+  older slots on 404/403 (`_MAX_FALLBACK_STEPS = 3`) in each bucket.
+- Archive: **rolling 24 hours** in each S3 bucket — older frames are
   pruned upstream.
 
 ## Format quirks

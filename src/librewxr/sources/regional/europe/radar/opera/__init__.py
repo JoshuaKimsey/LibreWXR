@@ -3,8 +3,9 @@
 """OPERA pan-European composite — self-contained source package.
 
 Single region (``OPERA``) in the ``EUROPE`` group, fetched as ODIM HDF5
-from Cloudferro S3 (``openradar-24h``).  5-min cadence, 24-hour rolling
-archive, LAEA projection.
+from the MeteoGate S3 buckets (Cloudferro ``openradar-24h``, with the
+ECMWF ``openradar-24h-backup`` as fallback).  5-min cadence, 24-hour
+rolling archive, LAEA projection.
 
 Discovered automatically by ``librewxr.sources``.  Cross-country source
 — no per-country directory because the OPERA composite genuinely covers
@@ -42,7 +43,7 @@ def radar_provider(settings) -> RadarSourceContribution | None:
     enabled it, so eager instantiation here is cheap (HTTP client opens
     lazily on first fetch).
     """
-    instance = OperaSource(settings.opera_base_url)
+    instance = OperaSource(settings.opera_bucket_urls)
     return RadarSourceContribution(
         regions=list(REGIONS),
         instance=instance,
