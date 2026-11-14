@@ -656,6 +656,53 @@ class TestCarryForwardRefetch:
         await fetcher._fetch_all_frames()
         assert (await store.get_frame(dropped_ts)).regions["TESTREG"][0, 0] == 111
 
+    @pytest.mark.asyncio
+    async def test_sustained_outage_drops_region_after_staleness_limit(
+        self, monkeypatch, small_region,
+    ):
+        """Carry-forward must not chain copies of copies.
+
+        A slot may only borrow *real* data from at most
+        ``_CARRY_FORWARD_MAX_INTERVALS`` back.  If a carried copy is itself
+        eligible as a carry-forward source, a source that stops publishing
+        leaves its last real frame frozen across the whole animation
+        instead of dropping to NWP fill once the staleness limit passes.
+        """
+        fetcher, source, store, clock, interval = self._clocked_fetcher(
+            monkeypatch, small_region, max_frames=8,
+        )
+        limit = RadarFetcher._CARRY_FORWARD_MAX_INTERVALS
+
+        # Cycle 1: healthy — the last real data the source will publish.
+        source.fill_value = 77
+        await fetcher._fetch_all_frames()
+        last_real_ts = int(clock["now"])
+
+        # The source then stops serving the region entirely (live and
+        # archive), as during a multi-hour upstream outage.
+        async def always_none(region, _arg):
+            return None
+
+        source.fetch_frame = always_none
+        source.fetch_archive_frame = always_none
+
+        outage_cycles = limit + 4
+        for _ in range(outage_cycles):
+            clock["now"] += interval
+            await fetcher._fetch_all_frames()
+
+        present = []
+        for k in range(1, outage_cycles + 1):
+            frame = await store.get_frame(last_real_ts + k * interval)
+            if frame is not None and "TESTREG" in frame.regions:
+                present.append(k)
+        # Only the first ``limit`` slots after the last real frame may be
+        # bridged; every later slot must be left to NWP fill.
+        assert present == list(range(1, limit + 1)), (
+            f"region present {present} interval(s) after the last real "
+            f"frame; expected only {list(range(1, limit + 1))}"
+        )
+
 
 class _StubSatelliteInstance:
     """Satellite source stand-in exposing only what the background task uses."""

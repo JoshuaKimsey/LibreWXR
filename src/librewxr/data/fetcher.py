@@ -655,14 +655,17 @@ class RadarFetcher:
             existing_frames = await self._store.get_region_keys()
             enabled_names = {r.name for r in self._enabled_regions}
 
-            # Prune carry-forward provenance for slots the source archive can
-            # no longer serve (or that left the store) — past that point the
-            # stale copy is final and retrying is wasted bandwidth.
+            # Carried slots older than the recovery window are no longer
+            # re-fetched: the source archive can't serve them any more, so
+            # the stale copy is final and retrying is wasted bandwidth.  The
+            # provenance itself is kept for as long as the slot is in the
+            # store — carry-forward lookback needs it to tell a stale copy
+            # from real data, or copies chain past the staleness limit.
             refetch_cutoff = (
                 now_rounded - self._CARRY_FORWARD_REFETCH_MAX_INTERVALS * interval
             )
             for carried_ts in list(self._carried_regions):
-                if carried_ts < refetch_cutoff or carried_ts not in existing_frames:
+                if carried_ts not in existing_frames:
                     del self._carried_regions[carried_ts]
 
             ts_and_sources: list[tuple[int, str, int | datetime]] = []
@@ -675,7 +678,10 @@ class RadarFetcher:
                 # is inside the recovery window they count as missing so the
                 # real product can replace the copy (store merge + tile-cache
                 # invalidation handle the swap).
-                carried = self._carried_regions.get(ts, set())
+                carried = (
+                    self._carried_regions.get(ts, set())
+                    if ts >= refetch_cutoff else set()
+                )
                 if (
                     ts in existing_frames
                     and enabled_names <= existing_frames[ts] - carried
@@ -695,6 +701,7 @@ class RadarFetcher:
 
             radar_s, post_s, write_s = await self._fetch_timestamps(
                 ts_and_sources, skip_regions=existing_frames,
+                refetch_cutoff=refetch_cutoff,
             )
         finally:
             # Both the normal path and the early-return path land here, so
@@ -730,6 +737,7 @@ class RadarFetcher:
         self,
         ts_and_sources: list[tuple[int, str, int | datetime]],
         skip_regions: dict[int, set[str]] | None = None,
+        refetch_cutoff: int | None = None,
     ) -> tuple[float, float, float]:
         """Fetch enabled regions for the given timestamps.
 
@@ -740,6 +748,8 @@ class RadarFetcher:
                 frames.  Regions recorded in ``_carried_regions`` are
                 fetched despite being present — their store entry is a
                 carry-forward copy awaiting the real product.
+            refetch_cutoff: Oldest timestamp whose carried regions are
+                still re-fetched; older carried copies are final.
 
         Returns:
             ``(radar_s, post_s, write_s)``: wall-clock seconds spent in the
@@ -756,7 +766,10 @@ class RadarFetcher:
 
         for ts, source_type, source_arg in ts_and_sources:
             have = skip_regions.get(ts, set()) if skip_regions else set()
-            carried = self._carried_regions.get(ts, set())
+            carried = (
+                self._carried_regions.get(ts, set())
+                if refetch_cutoff is None or ts >= refetch_cutoff else set()
+            )
             for region in self._enabled_regions:
                 if region.name in have and region.name not in carried:
                     continue
@@ -854,8 +867,11 @@ class RadarFetcher:
                     prev_ts = ts - lookback * interval
                     if prev_frame is None:
                         continue
+                    # Only real data is a valid source: re-copying a
+                    # carried copy would chain past the staleness limit.
+                    prev_carried = self._carried_regions.get(prev_ts, set())
                     for name in list(missing):
-                        if name in prev_frame.regions:
+                        if name in prev_frame.regions and name not in prev_carried:
                             regions_data[name] = np.asarray(
                                 prev_frame.regions[name]
                             ).copy()
