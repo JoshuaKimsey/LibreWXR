@@ -51,7 +51,7 @@ Region: CACOMP. Source: MSC GeoMet WMS, `RADAR_1KM_RRAI` layer with `Radar-Rain_
 
 ### Europe — OPERA Pan-European CIRRUS Composite
 
-Region: OPERA (\~184 radars across 27 countries). Source: EUMETNET OPERA CIRRUS MAX reflectivity via MeteoGate/Cloudferro S3 — anonymous, no key required. ODIM HDF5, float64 dBZ. Resolution 3800×4400 at 1 km, LAEA projection. 5-minute cadence, rolling 24-hour archive. Sentinels: nodata `-9999000.0`, undetect `-8888000.0` (both map to 0 in uint8, so clear sky falls through to the RRQPE bottom radar tier for in-band past frames, then to the NWP chain). URL pattern: `https://s3.waw3-1.cloudferro.com/openradar-24h/YYYY/MM/DD/OPERA/COMP/OPERA@YYYYMMDDTHHMM@0@DBZH.h5`.
+Region: OPERA (\~184 radars across 27 countries). Source: EUMETNET OPERA CIRRUS MAX reflectivity via MeteoGate S3 (Cloudferro primary, ECMWF backup) — anonymous, no key required. ODIM HDF5, float64 dBZ. Resolution 3800×4400 at 1 km, LAEA projection. 5-minute cadence, rolling 24-hour archive. Sentinels: nodata `-9999000.0`, undetect `-8888000.0` (both map to 0 in uint8, so clear sky falls through to the RRQPE bottom radar tier for in-band past frames, then to the NWP chain). URL pattern: `https://s3.waw3-1.cloudferro.com/openradar-24h/YYYY/MM/DD/OPERA/COMP/OPERA@YYYYMMDDTHHMM@0@DBZH.h5`; the same keys are published to the backup bucket `https://object-store.os-api.cci1.ecmwf.int/openradar-24h-backup` while the Cloudferro one is unavailable, and the source falls back to it automatically (`LIBREWXR_OPERA_BUCKET_URLS`).
 
 The legal lever that opened European radar data is the **EU High Value Datasets regulation (EU 2023/138)**, not WMO policy — it legally requires European meteorological data to be free, open-licensed, and API-accessible.
 

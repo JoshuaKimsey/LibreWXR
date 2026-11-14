@@ -244,9 +244,23 @@ Base URL for the Environment and Climate Change Canada MSC GeoMet WMS service (C
 | **Default** | `https://geo.weather.gc.ca` |
 | **Type** | string |
 
+### `LIBREWXR_OPERA_BUCKET_URLS`
+
+Ordered list of OPERA CIRRUS composite S3 buckets (European radar via MeteoGate), each given as host plus bucket name. Every bucket must use the same object layout (`YYYY/MM/DD/OPERA/COMP/OPERA@YYYYMMDDTHHMM@0@DBZH.h5`). The source keeps using the bucket that last served data and moves on to the next one only when every look-back slot is missing (404, or 403 from a bucket that hides missing keys), the server returns a 5xx error or the request fails at the network level, logging a line only when the active bucket changes. The second default entry is the ECMWF-hosted backup that EUMETNET switches Open Radar Data to while the Cloudferro bucket is unavailable.
+
+| | |
+|---|---|
+| **Default** | `["https://s3.waw3-1.cloudferro.com/openradar-24h", "https://object-store.os-api.cci1.ecmwf.int/openradar-24h-backup"]` |
+| **Type** | list of strings |
+
+**Example:**
+```bash
+LIBREWXR_OPERA_BUCKET_URLS='["https://s3.waw3-1.cloudferro.com/openradar-24h", "https://object-store.os-api.cci1.ecmwf.int/openradar-24h-backup"]'
+```
+
 ### `LIBREWXR_OPERA_BASE_URL`
 
-Base URL for the OPERA CIRRUS composite S3 bucket (European radar via MeteoGate).
+Legacy host-only setting for the primary OPERA bucket; the bucket path `/openradar-24h` is appended. When set and `LIBREWXR_OPERA_BUCKET_URLS` is not, it replaces the first entry of the bucket list (`<base>/openradar-24h`) and the ECMWF backup stays second. Ignored when `LIBREWXR_OPERA_BUCKET_URLS` is set.
 
 | | |
 |---|---|

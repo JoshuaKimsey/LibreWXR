@@ -225,6 +225,17 @@ class Settings(BaseSettings):
     msc_canada_base_url: str = "https://geo.weather.gc.ca"
     mrms_base_url: str = "https://mrms.ncep.noaa.gov/2D"
     opera_base_url: str = "https://s3.waw3-1.cloudferro.com"
+    # Ordered OPERA bucket URLs (host + bucket, no trailing slash).  The
+    # source tries them in order and keeps using whichever one last served
+    # data.  The second entry is the ECMWF-hosted backup that EUMETNET
+    # moves Open Radar Data to while the Cloudferro bucket is unavailable.
+    # A customised ``opera_base_url`` (legacy: host only, ``/openradar-24h``
+    # implied) replaces the first entry unless this list is set explicitly
+    # -- see ``_apply_opera_base_url``.
+    opera_bucket_urls: list[str] = [
+        "https://s3.waw3-1.cloudferro.com/openradar-24h",
+        "https://object-store.os-api.cci1.ecmwf.int/openradar-24h-backup",
+    ]
     # El Salvador MARN/SNET 120 km radar via anonymous Google Cloud Storage
     # bucket ``radar-images-sv``.  5-min cadence, PNG with HSV-style hue
     # gradient.  Region group: CENTRAL_AMERICA.
@@ -688,6 +699,33 @@ class Settings(BaseSettings):
         """Validate + canonicalize LIBREWXR_LOG_LEVEL via the shared helper."""
         from librewxr.logging_setup import normalize_level
         return normalize_level(v)
+
+    @field_validator("opera_bucket_urls")
+    @classmethod
+    def _normalize_opera_bucket_urls(cls, v: list[str]) -> list[str]:
+        """Strip trailing slashes and blanks; require at least one bucket."""
+        urls = [u.strip().rstrip("/") for u in v if u.strip()]
+        if not urls:
+            raise ValueError("opera_bucket_urls needs at least one bucket URL")
+        return urls
+
+    @model_validator(mode="after")
+    def _apply_opera_base_url(self):
+        """Keep a customised LIBREWXR_OPERA_BASE_URL working.
+
+        ``opera_base_url`` predates ``opera_bucket_urls`` and holds only the
+        host, with the ``/openradar-24h`` bucket implied.  When it is set
+        but the bucket list is not, it replaces the first (primary) bucket
+        and the backup entries stay in place.  An explicit
+        ``opera_bucket_urls`` always wins.
+        """
+        fields_set = self.model_fields_set
+        if "opera_base_url" in fields_set and "opera_bucket_urls" not in fields_set:
+            self.opera_bucket_urls = [
+                f"{self.opera_base_url.rstrip('/')}/openradar-24h",
+                *self.opera_bucket_urls[1:],
+            ]
+        return self
 
     @model_validator(mode="after")
     def _apply_mode_defaults(self):
