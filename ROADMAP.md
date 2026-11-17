@@ -77,11 +77,15 @@ A parallel workstream like the MCP registry listing: polish the gitignored landi
 it is visually appealing and eye-catching rather than purely utilitarian, ready before the
 1.0 announcement.
 
-- [ ] Refresh the visual design of `librewxr-site/` (gitignored, outside version control):
+- [x] Refresh the visual design of `librewxr-site/` (gitignored, outside version control):
   better graphical polish, more visually appealing and eye-catching instead of purely
   utilitarian.
-- [ ] Aim to land the refresh before the 1.0 announcement so the landing site matches the
+- [x] Aim to land the refresh before the 1.0 announcement so the landing site matches the
   public launch (Docker images, README quickstart).
+
+Note: redesign completed 2026-11-17 - the refreshed site lives in the gitignored
+`librewxr-site/` directory, deploy-ready ahead of 1.0; the previous design is
+preserved on disk as `librewxr-site-old/`.
 
 ### External color palettes
 
