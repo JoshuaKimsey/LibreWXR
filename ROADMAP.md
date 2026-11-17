@@ -162,10 +162,10 @@ Tracked in issue #50.
   the pre-1.0 feature releases. (completed 2026-11-13: literal AROME-OM knob names
   added, five stale behavioral claims corrected, RRQPE added to the region tables;
   literal-name completeness re-verified against config.py)
-- [ ] Cut 1.0.0 per repo conventions: `gh release create`, then
+- [x] Cut 1.0.0 per repo conventions: `gh release create`, then
   `scripts/generate_changelog.py` and commit the regenerated `CHANGELOG.md` with the version
   bump; GHCR images built from the release tag; MCP registry republish at 1.0.0 (registry
-  version tracks `pyproject.toml`).
+  version tracks `pyproject.toml`). (completed 2026-11-17: release v1.0.0 published with GHCR images built from the tag; MCP registry republish deferred - the registry listing is on hold)
 
 ## Post-1.0 (1.1+ candidates)
 

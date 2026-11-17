@@ -7,6 +7,28 @@ and commit the result alongside the version bump.
 
 ---
 
+## [v1.0.0 - Public API stability](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v1.0.0)
+
+2026-11-17
+
+LibreWXR 1.0.0 freezes the public API surface as stable under semantic versioning, and ships the health dashboard, Prometheus metrics, and the EUMETSAT MTG LI lightning family that landed since 0.9.0.
+
+**Public API stability (roadmap #50).** As of 1.0.0 the public surface - the Rain Viewer-compatible HTTP endpoints and their JSON response shapes, radar/satellite/coverage tile path and query parameters, the MCP tool set, and the WebSocket topics - is declared stable under semantic versioning: breaking changes to this surface only land in a new major version. The ops endpoints (/health, /metrics, /dashboard, /health/tile-history) are additive within 1.x: new sections and fields may appear, existing ones are not renamed or removed. The exact scope is documented in the new "API Stability" section of the README, linked from the Rain Viewer migration guide.
+
+**Health dashboard and cluster observability (roadmap #48).** The self-contained /dashboard page renders the /health payload - cluster-wide memory accounting with per-worker RSS/PSS lists and a pipeline pulse, per-NWP-grid health, sources, frames, tile cache - plus a MapLibre GL hot-tile map driven by a 24-hour tile-request snapshot history ring-buffered at /health/tile-history, timeline included. A Prometheus /metrics text export of the same payload covers existing Grafana setups. Env-toggleable per the configuration reference.
+
+**EUMETSAT MTG LI lightning family.** A second flash family joins GOES GLM: Meteosat-12 MTG LI flashes covering Europe, Africa, the Atlantic, and the western Indian Ocean, fetched from the EUMETSAT Data Store with an API key pair (opt-in - without credentials the family stays off and the instance runs fully anonymous). Flash retention extends to 2 hours by default, matching the 12-frame radar history so every past frame keeps its lightning slot, and the RAM ceiling of the store scales with it. Includes decode fixes for search-link parsing, body/trailer decode, and trailer-member skipping.
+
+**Fixes.** Multi-worker startup crash when LIBREWXR_HOST is unset (dual-stack bind resolution, #57); OPERA radar falls back to the backup bucket when the primary is empty (#60); carry-forward no longer re-copies carried copies (#62); smoothed-tile blur sized from the coverage-claiming region; MCP server card repository URL typo.
+
+**Housekeeping.** The legacy source-based scripts/auto-update.sh is retired (published images are the update path); the configuration reference completed its full knob sweep for 1.0; every release now also publishes a latest image tag, as the README quickstart and compose defaults always promised.
+
+**Credits.** Multi-worker bind fix by Patrick Rapin (@prapin); OPERA backup-bucket fallback and the carry-forward fix by tonitapias (@tonitapias); the rest by Joshua Kimsey.
+
+Deployments pulling published images: set LIBREWXR_IMAGE_TAG=1.0.0 and restart.
+
+---
+
 ## [v0.9.0 - Network split mode and external hooks](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v0.9.0)
 
 2026-11-05
