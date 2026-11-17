@@ -20,7 +20,10 @@ librewxr-site/examples/ for whichever pages have SITE_PAGES metadata (leaflet,
 maplibre, widget): the API base pinned to https://api.librewxr.net, the
 #lv-source selector markup removed when present, and the site's meta head
 (description/canonical/OG/twitter/favicon) injected - the same pattern the
-hand-maintained site examples already use.
+hand-maintained site examples already use. --site-dir DIR retargets all --site
+output (the examples/ variants and the index.html hero) at another site
+directory; relative names resolve against the project root, so the default is
+still librewxr-site.
 
 --site also regenerates the shared-engine hero embedded in the marketing
 front page librewxr-site/index.html. Three regions of that page live between
@@ -52,7 +55,14 @@ import sys
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 EXAMPLES_DIR = os.path.dirname(SRC_DIR)
 PROJECT_ROOT = os.path.dirname(EXAMPLES_DIR)
-SITE_EXAMPLES_DIR = os.path.join(PROJECT_ROOT, "librewxr-site", "examples")
+
+# --site output location. The --site-dir value is resolved against the project
+# root in main()/configure_site_dir() (absolute paths pass through unchanged);
+# SITE_DIR_LABEL keeps the value as typed so console output stays readable.
+DEFAULT_SITE_DIR = "librewxr-site"
+SITE_DIR = os.path.join(PROJECT_ROOT, DEFAULT_SITE_DIR)
+SITE_DIR_LABEL = DEFAULT_SITE_DIR
+SITE_EXAMPLES_DIR = os.path.join(SITE_DIR, "examples")
 
 GENERATED_COMMENT = (
     "<!-- SPDX-License-Identifier: MIT -->\n"
@@ -133,7 +143,7 @@ SITE_META = """    <meta name="description" content="{description}">
 # The three hero regions of the page live between these marker comments;
 # build.py --site replaces the text between each pair (markers stay in place,
 # so the operation is idempotent).
-INDEX_PATH = os.path.join(PROJECT_ROOT, "librewxr-site", "index.html")
+INDEX_PATH = os.path.join(SITE_DIR, "index.html")
 HERO_SHELL = "hero.html.js"
 BODY_TAG = '<body data-theme="dark">'
 
@@ -182,6 +192,21 @@ def read_file(path):
 def write_file(path, text):
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
+
+
+def configure_site_dir(value):
+    """Resolve --site-dir against the project root and rebind the derived paths.
+
+    A relative name ("librewxr-site", "librewxr-site-v2", ...) resolves against
+    PROJECT_ROOT; an absolute path is used as given (os.path.join returns the
+    absolute component unchanged). Rebinds SITE_DIR, SITE_EXAMPLES_DIR and
+    INDEX_PATH, which --site output and the index hero rebuild read.
+    """
+    global SITE_DIR, SITE_DIR_LABEL, SITE_EXAMPLES_DIR, INDEX_PATH
+    SITE_DIR = os.path.join(PROJECT_ROOT, value)
+    SITE_DIR_LABEL = value
+    SITE_EXAMPLES_DIR = os.path.join(SITE_DIR, "examples")
+    INDEX_PATH = os.path.join(SITE_DIR, "index.html")
 
 
 def git_short_hash():
@@ -259,9 +284,13 @@ def replace_region(html, start_marker, end_marker, content):
         end = html.index(end_marker, start)
     except ValueError:
         raise SystemExit(
-            "error: %r and %r markers not found in librewxr-site/index.html "
+            "error: %r and %r markers not found in %s "
             "- the shared-engine hero markers were removed or renamed"
-            % (start_marker, end_marker)
+            % (
+                start_marker,
+                end_marker,
+                os.path.join(SITE_DIR_LABEL, "index.html"),
+            )
         )
     return html[:start] + "\n" + content + "\n" + html[end:]
 
@@ -331,7 +360,7 @@ def rebuild_site_index_hero():
     write_file(path, html)
     print(
         "updated %s (%d bytes, --site)"
-        % (os.path.join("librewxr-site", "index.html"), os.path.getsize(path))
+        % (os.path.join(SITE_DIR_LABEL, "index.html"), os.path.getsize(path))
     )
 
 
@@ -351,7 +380,7 @@ def build_pages(args):
 
     if args.site:
         if not os.path.isdir(os.path.dirname(SITE_EXAMPLES_DIR)):
-            print("notice: librewxr-site/ not found, skipping --site output")
+            print("notice: %s/ not found, skipping --site output" % SITE_DIR_LABEL)
             return
         for shell, out in pages:
             key = out[: -len(".html")]  # 'leaflet' / 'maplibre' / 'widget' / 'hero'
@@ -361,7 +390,7 @@ def build_pages(args):
             html = make_site_variant(html, SITE_META.format(**SITE_PAGES[key]))
             dest = os.path.join(SITE_EXAMPLES_DIR, out)
             write_file(dest, html)
-            print("wrote %s (%d bytes, --site)" % (os.path.join("librewxr-site", "examples", out), os.path.getsize(dest)))
+            print("wrote %s (%d bytes, --site)" % (os.path.join(SITE_DIR_LABEL, "examples", out), os.path.getsize(dest)))
         rebuild_site_index_hero()
 
 
@@ -372,10 +401,18 @@ def main():
     parser.add_argument(
         "--site",
         action="store_true",
-        help="also write pinned API-base site variants to librewxr-site/examples/ "
-             "and regenerate the shared-engine hero in librewxr-site/index.html",
+        help="also write pinned API-base site variants to <site-dir>/examples/ "
+             "and regenerate the shared-engine hero in <site-dir>/index.html",
+    )
+    parser.add_argument(
+        "--site-dir",
+        default=DEFAULT_SITE_DIR,
+        metavar="DIR",
+        help="site directory used by --site; resolved against the project root "
+             "unless absolute (default: %(default)s)",
     )
     args = parser.parse_args()
+    configure_site_dir(args.site_dir)
     build_pages(args)
     return 0
 

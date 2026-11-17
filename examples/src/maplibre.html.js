@@ -5,7 +5,13 @@
     <title>LibreWXR - MapLibre Example</title>
     <meta charset="utf-8"/>
     <meta content="width=device-width, initial-scale=1.0" name="viewport">
-    <link href="https://unpkg.com/maplibre-gl@^6.0.0/dist/maplibre-gl.css" rel="stylesheet"/>
+    <link href="https://unpkg.com/maplibre-gl@6.19.0/dist/maplibre-gl.css" rel="stylesheet" integrity="sha384-S+OnE5M4U3Qc2nR0RgljGrVs06xqfRg8L7uFk/pOF5+sRuSDG4oKkqKZmFrx7w09" crossorigin="anonymous"/>
+    <!-- SRI for the pinned MapLibre ESM entry. A static import inside an
+         inline <script type="module"> cannot carry an integrity attribute
+         itself, so the exact same module URL is preloaded here with one:
+         browsers that enforce SRI on modulepreload verify these bytes, and
+         the import below (same URL) reuses that fetch either way. -->
+    <link rel="modulepreload" href="https://unpkg.com/maplibre-gl@6.19.0/dist/maplibre-gl.mjs" integrity="sha384-xwIwS2ZrVZdy1v8I+MtCDAkB+tCwelpTdNz9yPRN03mYLaG5HTwyhOnylbOgukuC" crossorigin="anonymous"/>
     <style>
         /*__VIEWER_CSS__*/
     </style>
@@ -123,15 +129,18 @@
 // attributes). This build wires all controls with addEventListener from the
 // engine instead, so no hoisting is needed - but if you ever reintroduce
 // inline handlers in this module scope, remember the gotcha.
-import * as maplibregl from 'https://unpkg.com/maplibre-gl@^6.0.0/dist/maplibre-gl.mjs';
+import * as maplibregl from 'https://unpkg.com/maplibre-gl@6.19.0/dist/maplibre-gl.mjs';
 
 // GeoJSON (the alerts overlay) is tiled in a Web Worker. When this page is
 // opened from file:// or served cross-origin, the default worker resolution
 // can be blocked by the browser's top-level worker same-origin rule, which
 // silently kills GeoJSON rendering while raster tiles (basemap/radar) keep
 // working. Pinning the worker URL lets MapLibre launder it through a
-// same-origin blob: worker so alerts render everywhere.
-maplibregl.setWorkerUrl('https://unpkg.com/maplibre-gl@^6.0.0/dist/maplibre-gl-worker.mjs');
+// same-origin blob: worker so alerts render everywhere. The worker script is
+// fetched by MapLibre itself, so it cannot carry an SRI integrity check - the
+// exact-version pin (which must match the module/CSS version above) is the
+// mitigation there.
+maplibregl.setWorkerUrl('https://unpkg.com/maplibre-gl@6.19.0/dist/maplibre-gl-worker.mjs');
 
 // === API SOURCE CONFIG (build.py rewrites for --site) ===
 var LVR_API_SOURCES = {

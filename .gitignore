@@ -38,6 +38,7 @@ cache/
 
 # Site (managed separately, not part of the API repo)
 librewxr-site/
+librewxr-site-old/
 
 # Outgoing correspondence drafts (kept local, sent manually)
 emails/
