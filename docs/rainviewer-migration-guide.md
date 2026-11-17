@@ -2,6 +2,11 @@
 
 LibreWXR is a drop-in replacement for the Rain Viewer v2 API. If you have an existing website or app that uses Rain Viewer for weather radar, switching to LibreWXR requires minimal changes — in most cases, just updating the server URL.
 
+As of 1.0.0, the Rain Viewer-compatible surface is declared stable under
+semantic versioning - breaking changes only land in a new major version.
+See [API Stability](../README.md#api-stability) in the README for the
+exact scope of the promise.
+
 ## Table of Contents
 
 - [Quick Migration (TL;DR)](#quick-migration-tldr)

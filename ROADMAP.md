@@ -10,7 +10,7 @@ status, as this file and the issues are kept in sync. The lists are not exhausti
 
 ## The path to 1.0.0
 
-The current version is 0.9.0. Every section below is an unordered theme: each ships as its
+The current version is 1.0.0. Every section below is an unordered theme: each ships as its
 own 0.x release whenever it is next in line, with the version number assigned at release
 time.
 
@@ -58,7 +58,7 @@ alignment, so it can land alongside any release.
   record + `mcp-publisher login dns`); the GitHub namespace is treated as unusable for the
   `api.librewxr.net` remote under the domain-matching rule.
 - [ ] Create `server.json` at the repo root per the runbook template; `version` tracks
-  `pyproject.toml` at publish time (0.9.0 today - re-check when executing).
+  `pyproject.toml` at publish time (1.0.0 today - re-check when executing).
 - [ ] Publish the hosted instance; published `(name, version)` pairs are immutable, so the
   registry is only touched on real `pyproject.toml` version bumps.
 - [ ] Follow-up: align the SEP-2127 server card name with the chosen namespace - one
@@ -147,16 +147,17 @@ were pulled forward and shipped as part of this release.
 
 Tracked in issue #50.
 
-- [ ] Split mode, phase 1: support and document render workers on separate hosts mounting one
+- [x] Split mode, phase 1: support and document render workers on separate hosts mounting one
   shared filesystem (NFS or object-store-backed volume), including memmap-over-network
   caveats; update `docs/self-host-sizing.md`. The full network-separated pipeline/renderer is
   a post-1.0 design project - today's multi-mode and this phase share the same
   shared-filesystem assumption. (superseded in 0.9.0: network split mode (#51) shipped separate-host
   render workers over an object store, and `docs/self-host-sizing.md` links to it; keep this item
-  only for an NFS/shared-filesystem profile if demand appears)
-- [ ] Declare the public surface stable at 1.0.0: Rain Viewer-compatible HTTP endpoints, tile
+  only for an NFS/shared-filesystem profile if demand appears) (closed for 1.0.0)
+- [x] Declare the public surface stable at 1.0.0: Rain Viewer-compatible HTTP endpoints, tile
   query parameters, JSON response shapes, and MCP tools. Semver applies to this surface;
-  internal paths may change.
+  internal paths may change. (completed at 1.0.0: the declaration lives in the README's API
+  Stability section, linked from docs/rainviewer-migration-guide.md)
 - [x] Documentation pass: `docs/configuration-reference.md` covers every knob added across
   the pre-1.0 feature releases. (completed 2026-11-13: literal AROME-OM knob names
   added, five stale behavioral claims corrected, RRQPE added to the region tables;

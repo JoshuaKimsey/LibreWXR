@@ -81,6 +81,33 @@ Beyond compatibility, the goal is a far more customizable API backend for self-h
 - **Satellite is hourly, not real-time** — GMGSI publishes one composite per hour with tens of minutes of latency from observation. Native per-satellite feeds (GOES, Himawari, Meteosat) refresh every 5–15 minutes, but at the cost of seam-blending and reprojection work that GMGSI handles upstream. GMGSI also caps at ±72.7° latitude — the deep polar regions are out of frame
 - **Lightning coverage follows the GOES + MTG observation footprints** — strikes come from the GOES-East + GOES-West geostationary disks (roughly the Americas, the Atlantic, and the eastern Pacific, to about ±57° latitude per satellite) plus EUMETSAT's Meteosat-12 Lightning Imager at 0°E (Europe, Africa, the Atlantic, and the western Indian Ocean, to about ±79° latitude — enabled with a free EUMETSAT API key). The roughly 80°E–170°E band — South and East Asia and the Maritime Continent — sits outside both views, so no lightning overlay is available there
 
+## API Stability
+
+As of 1.0.0, LibreWXR's public surface is declared stable and follows
+semantic versioning - breaking changes to this surface only land in a new
+major version:
+
+- **Rain Viewer-compatible HTTP endpoints** - `/v2/weather-maps.json`
+  (mirrored at `/public/weather-maps.json`), the radar, satellite, and
+  coverage tile endpoints, and the `/v2/alerts`, `/v2/storm-cells`, and
+  `/v2/lightning` JSON endpoints, including their response shapes.
+- **Tile parameters** - the tile path segments (`timestamp`, `size`,
+  zoom/x/y or `lat,lon` window pairs, `color`, the combined `smooth_snow`
+  segment, `ext`) and the `arrows`, `cells`, and `lightning` query
+  parameters.
+- **MCP tools** - `get_precip_nowcast`, `get_active_alerts`,
+  `get_storm_cells`, and `get_recent_lightning`, the `/mcp` transport and
+  stdio entry point, and the server-card discovery document.
+- **WebSocket topics** - `weather-maps`, `alerts`, `storm-cells`, and
+  `lightning`, with their payload shapes.
+
+The ops endpoints (`/health`, `/metrics`, `/dashboard`,
+`/health/tile-history`) are additive within 1.x: new sections and fields
+may appear, but existing ones are not renamed or removed. Everything
+else - internal modules, on-disk cache and `state.json` formats,
+configuration defaults - may change in any release, so pin exact image
+tags when stability matters.
+
 ## Coverage
 
 LibreWXR fuses native radar from regional networks across multiple

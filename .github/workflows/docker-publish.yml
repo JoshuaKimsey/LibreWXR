@@ -51,6 +51,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=sha
+            type=raw,value=latest
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -127,6 +128,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=sha
+            type=raw,value=latest
 
       - name: Create manifest list and push
         working-directory: /tmp/digests

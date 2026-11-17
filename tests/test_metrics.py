@@ -24,7 +24,7 @@ def _payload() -> dict:
     return {
         "status": "ok",
         "uptime_seconds": 1234,
-        "version": "0.9.0",
+        "version": "1.0.0",
         "color_schemes": {
             "version": "0123456789ab",
             "source": "path",
@@ -223,7 +223,7 @@ class TestRenderPrometheus:
         # Status / uptime / version.
         assert "librewxr_health_status 1" in text
         assert "# TYPE librewxr_uptime_seconds gauge" in text
-        assert 'librewxr_version_info{version="0.9.0"} 1' in text
+        assert 'librewxr_version_info{version="1.0.0"} 1' in text
 
         # Cluster aggregation.
         assert "librewxr_cluster_workers_reporting 2" in text
