@@ -640,14 +640,17 @@ async def build_health_payload() -> dict:
 
     # Split the tile cache into its five entry kinds: satellite render
     # entries (``"sat"``-prefixed keys), geometry entries (int timestamp +
-    # 6-element viewport key), present render entries (int timestamp +
-    # 10-element viewport/visual/palette key), overlay present entries
-    # (int timestamp + 10-element viewport/visual/palette key + 6-element
-    # style/version suffix -- arrows/cells/lightning styles and their
-    # content versions; any frame an overlay attaches to), and
-    # lat/lon-centered window present entries (int timestamp + "win" +
-    # 10-element window/visual/palette key).  Each kind is reported with
-    # its own count and byte total.
+    # 6-element viewport key -- tile mode only), present render entries
+    # (int timestamp + 10-element viewport/visual/palette key), overlay
+    # present entries (int timestamp + 10-element viewport/visual/palette
+    # key + 6-element style/version suffix -- arrows/cells/lightning
+    # styles and their content versions; any frame an overlay attaches
+    # to), and the window bucket, which holds BOTH lat/lon-centered window
+    # present entries (int timestamp + "win" + 10-element
+    # window/visual/palette key, length 12) and window-mode geometry
+    # entries (int timestamp + 6-element viewport key + trailing "win"
+    # marker, length 8).  Each kind is reported with its own count and
+    # byte total.
     cache_kind_geometry = 0
     cache_kind_geometry_bytes = 0
     cache_kind_present = 0
@@ -675,6 +678,11 @@ async def build_health_payload() -> dict:
             cache_kind_overlay += 1
             cache_kind_overlay_bytes += size
         elif key and isinstance(key[0], int) and len(key) == 12 and key[1] == "win":
+            cache_kind_window += 1
+            cache_kind_window_bytes += size
+        elif key and isinstance(key[0], int) and len(key) == 8 and key[-1] == "win":
+            # Window-mode geometry entries (viewport key + "win" marker;
+            # see ``_radar_window``'s ``get_component``).
             cache_kind_window += 1
             cache_kind_window_bytes += size
 
@@ -1132,7 +1140,15 @@ async def _radar_window(
             raise HTTPException(status_code=404, detail="Frame not found")
 
         async def get_component(tx: int, ty: int) -> TileGeometry:
-            geom_key = (timestamp, z, tx, ty, tile_size, smooth, snow)
+            # The trailing "win" marker keeps window-mode geometries out
+            # of tile mode's key space: tile mode (``radar_tile``) keys
+            # its geometries on the unmarked
+            # ``(timestamp, z, x, y, tile_size, smooth, snow)`` tuple and
+            # now sizes its blur from a different donor policy
+            # (coverage-claiming region vs. window mode's legacy
+            # finest-bbox region), so a shared key would let one mode
+            # serve the other's mis-sized geometry.
+            geom_key = (timestamp, z, tx, ty, tile_size, smooth, snow, "win")
             geom = tile_cache.get(geom_key)
             if geom is not None:
                 return geom
@@ -1155,6 +1171,7 @@ async def _radar_window(
                     frame_timestamp=timestamp,
                     nowcast_blend=nowcast_blend,
                     precip_mask=precip_mask,
+                    legacy_blur_donor=True,
                 )
             tile_cache.put(geom_key, geom)
             return geom

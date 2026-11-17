@@ -256,3 +256,101 @@ class TestStitchCoverage:
         canvas = stitch_coverage({(1, 0): a}, z=1, px0=384, py0=0, tile_size=256)
         assert np.all(canvas[:, :128] == [1, 2, 3, 4])
         assert np.all(canvas[:, 128:] == 0)
+
+
+class TestWindowLegacyBlurDonor:
+    """Window mode must keep the legacy finest-bbox blur donor.
+
+    Tile mode now sizes its blur from the finest region whose coverage
+    mask actually claims the tile core, while window-mode components keep
+    the old finest-bbox rule (the stitch applies the max component radius
+    to the whole canvas, so a per-component re-donor would shift that
+    rule).  Because the two modes disagree, window geometries must also
+    live under a cache key distinct from tile mode's — a shared key would
+    let whichever mode ran first serve its mis-sized geometry to the
+    other.
+
+    There is no route-level harness in this file, so this test drives the
+    public radar route through a TestClient (the pattern
+    tests/test_window_routes.py uses for window mode) with
+    ``routes.compute_tile_geometry`` and ``routes.tile_cache`` replaced by
+    recording stubs.
+    """
+
+    def test_components_pass_legacy_donor_and_use_distinct_geom_key(
+        self, monkeypatch,
+    ):
+        import time
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from librewxr.api import routes
+        from librewxr.data.store import RadarFrame
+
+        ts = int(time.time() // 300) * 300
+        # Content is irrelevant: compute_tile_geometry is stubbed.  Only
+        # the region name matters (it gates the transparent fast path).
+        frame = RadarFrame(
+            timestamp=ts,
+            regions={"USCOMP": np.zeros((2, 2), dtype=np.uint8)},
+        )
+
+        computes: list[dict] = []
+        puts: list[tuple] = []
+
+        def _fake_compute(**kwargs):
+            computes.append(kwargs)
+            return TileGeometry.transparent(kwargs["tile_size"])
+
+        class _RecordingCache:
+            def get(self, key):
+                return None
+
+            def put(self, key, value):
+                puts.append(key)
+
+        class _FrameStore:
+            async def get_frame(self, timestamp):
+                return frame if timestamp == ts else None
+
+            async def get_timestamps(self):
+                return [ts]
+
+        monkeypatch.setattr(routes, "compute_tile_geometry", _fake_compute)
+        monkeypatch.setattr(routes, "tile_cache", _RecordingCache())
+        monkeypatch.setattr(routes, "frame_store", _FrameStore())
+        monkeypatch.setattr(routes, "nowcast_store", None)
+        monkeypatch.setattr(routes, "nwp_chain", None)
+        monkeypatch.setattr(routes, "precip_mask", None)
+        monkeypatch.setattr(routes, "enabled_regions", ["USCOMP"])
+        monkeypatch.setattr(routes, "tile_request_tracker", None)
+        monkeypatch.setattr(routes, "_latest_ts_cache", None)
+        monkeypatch.setattr(routes, "_TRANSPARENT_RENDER_MEMO", {})
+
+        app = FastAPI()
+        app.include_router(routes.router)
+        with TestClient(app) as client:
+            resp = client.get(f"/v2/radar/{ts}/256/5/37.0/-95.5/2/0_0.png")
+        assert resp.status_code == 200
+
+        # (a) every window component asks for the legacy donor policy.
+        assert computes, "window path never reached compute_tile_geometry"
+        assert all(call["legacy_blur_donor"] is True for call in computes)
+
+        # (b) the geometry key is tile mode's tuple plus a "win" marker.
+        tile_mode_keys = set()
+        window_keys = []
+        for key in puts:
+            if len(key) == 8 and key[-1] == "win":
+                window_keys.append(key)
+                tile_mode_keys.add(key[:-1])
+        assert window_keys, "window geometry was not cached under a marked key"
+        for key in puts:
+            assert key not in tile_mode_keys, (
+                f"window geometry must not share a key with tile mode: {key}"
+            )
+        # The marked keys carry the same viewport fields as tile mode's.
+        ts0, z0, tx0, ty0, size0, smooth0, snow0, _marker = window_keys[0]
+        assert (ts0, z0, size0, smooth0, snow0) == (ts, 5, 256, False, False)
+        assert isinstance(tx0, int) and isinstance(ty0, int)

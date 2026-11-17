@@ -15,7 +15,7 @@ from librewxr.colors.schemes import (
     capture_luts,
     packaged_table_bytes,
 )
-from librewxr.data.regions import REGIONS
+from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import (
     COMPOSITE_HEIGHT,
@@ -26,6 +26,7 @@ from librewxr.tiles.png_palette import _PALETTE_MIN_COLORS, encode_png
 from librewxr.tiles.renderer import (
     TileGeometry,
     _compute_nwp_only_geometry,
+    _select_blur_region,
     compute_tile_geometry,
     present_tile,
     render_coverage_tile,
@@ -373,6 +374,223 @@ class TestBlurRadius:
         x, y = self._lonlat_to_tile(10.0, 50.0, z)
         r = compute_blur_radius(opera, z, x, y, 256)
         assert r <= 256 / 32 + 1e-6, f"blur {r} exceeded safety cap"
+
+
+class TestBlurRegionSelection:
+    """The blur donor is the finest region whose coverage mask actually
+    claims pixels in the tile core — not merely the finest region whose
+    bbox overlaps the tile (``renderer._select_blur_region``).
+
+    Without this, an ocean tile inside USCOMP's bbox (every displayed
+    pixel served by the coarse global RRQPE band) sized its Gaussian
+    from USCOMP's Jacobian and left RRQPE's 0.04° precip edges blocky.
+    """
+
+    # Same tile the NWP-fill tests use; only the coverage stubs and the
+    # helper's probe/exact-call shapes drive the assertions here.
+    _Z, _X, _Y, _TILE = 5, 7, 12, 256
+
+    @staticmethod
+    def _region(name: str, pixel_size: float = 0.005) -> RegionDef:
+        return RegionDef(
+            name=name, west=-100.0, east=-90.0, south=30.0, north=40.0,
+            pixel_size=pixel_size, group="TEST",
+        )
+
+    def _select(self, regions: list[RegionDef]) -> RegionDef:
+        return _select_blur_region(
+            regions, self._Z, self._X, self._Y, self._TILE,
+        )
+
+    def test_single_region_skips_coverage_entirely(self, monkeypatch):
+        """99%+ of tiles: one region with data -> return it, no coverage."""
+        from librewxr.tiles import renderer as renderer_mod
+
+        calls = []
+
+        def _never(*args, **kwargs):
+            calls.append(args)
+            raise AssertionError("no coverage call expected for a single region")
+
+        monkeypatch.setattr(renderer_mod, "sample_coverage", _never)
+        region = self._region("FINE")
+        assert self._select([region]) is region
+        assert calls == []
+
+    def test_probe_hit_keeps_finest_donor(self, monkeypatch):
+        """A probe hit must reproduce the old donor with zero core work."""
+        from librewxr.tiles import renderer as renderer_mod
+
+        fine, coarse = self._region("FINE"), self._region("COARSE", 0.04)
+        calls = []
+
+        def _coverage(name, lat, lon):
+            calls.append((name, lat.shape))
+            return np.ones(lat.shape, dtype=bool)
+
+        monkeypatch.setattr(renderer_mod, "sample_coverage", _coverage)
+        assert self._select([fine, coarse]) is fine
+        # Only the 3x3 probe ran; no full-core grid was ever sampled.
+        assert calls == [("FINE", (3, 3))]
+
+    def test_ocean_tile_hands_donor_to_the_claiming_region(self, monkeypatch):
+        """Finest probe-miss + zero core claims -> next claiming region."""
+        from librewxr.tiles import renderer as renderer_mod
+
+        fine, coarse = self._region("FINE"), self._region("COARSE", 0.04)
+        calls = []
+
+        def _coverage(name, lat, lon):
+            calls.append((name, lat.shape))
+            if name == "FINE":
+                return np.zeros(lat.shape, dtype=bool)
+            return np.ones(lat.shape, dtype=bool)
+
+        monkeypatch.setattr(renderer_mod, "sample_coverage", _coverage)
+        assert self._select([fine, coarse]) is coarse
+        # Probe first, then the exact full-core check finest-first.
+        assert calls == [
+            ("FINE", (3, 3)),
+            ("FINE", (self._TILE, self._TILE)),
+            ("COARSE", (self._TILE, self._TILE)),
+        ]
+
+    def test_thin_wedge_claim_survives_a_probe_miss(self, monkeypatch):
+        """Coverage False at all 9 probe points but True in the core grid:
+        the exact check must keep the finest region as the donor instead
+        of over-blurring a coastal wedge / island with the coarse radius.
+        """
+        from librewxr.tiles import renderer as renderer_mod
+
+        fine, coarse = self._region("FINE"), self._region("COARSE", 0.04)
+
+        def _coverage(name, lat, lon):
+            if name != "FINE":
+                return np.ones(lat.shape, dtype=bool)
+            out = np.zeros(lat.shape, dtype=bool)
+            if out.shape == (self._TILE, self._TILE):
+                out[123, 45] = True  # interior: off the probe rows/cols
+            return out
+
+        monkeypatch.setattr(renderer_mod, "sample_coverage", _coverage)
+        assert self._select([fine, coarse]) is fine
+
+    def test_no_claim_falls_back_to_finest(self, monkeypatch):
+        """Nothing claims the core -> status-quo finest-region donor."""
+        from librewxr.tiles import renderer as renderer_mod
+
+        fine, coarse = self._region("FINE"), self._region("COARSE", 0.04)
+        monkeypatch.setattr(
+            renderer_mod, "sample_coverage",
+            lambda name, lat, lon: np.zeros(lat.shape, dtype=bool),
+        )
+        assert self._select([fine, coarse]) is fine
+
+
+class TestBlurDonorIntegration:
+    """``compute_tile_geometry(smooth=True)`` sizes the blur from the
+    selected donor, and ``legacy_blur_donor`` restores the old
+    finest-bbox rule for window-mode components."""
+
+    # Tile (z=8, x=60, y=101): lon ~-95.6..-94.2, lat ~34.3..35.4 — inside
+    # both test regions' bboxes, with the coarse region 2x the fine
+    # region's radius at this zoom.
+    _Z, _X, _Y, _TILE = 8, 60, 101, 256
+
+    @pytest.fixture(autouse=True)
+    def _pin_noise_floor(self, monkeypatch):
+        from librewxr.config import settings
+        monkeypatch.setattr(settings, "noise_floor_dbz", 10.0)  # threshold 84
+
+    @staticmethod
+    def _regions() -> tuple[RegionDef, RegionDef]:
+        fine = RegionDef(
+            name="FINE", west=-100.0, east=-90.0, south=30.0, north=40.0,
+            pixel_size=0.005, group="TEST",
+        )
+        coarse = RegionDef(
+            name="COARSE", west=-105.0, east=-85.0, south=25.0, north=45.0,
+            pixel_size=0.04, group="TEST",
+        )
+        return fine, coarse
+
+    def _patch_tile(self, monkeypatch):
+        """Both regions overlap the tile; only COARSE's coverage claims it."""
+        from librewxr.tiles import renderer as renderer_mod
+
+        fine, coarse = self._regions()
+        monkeypatch.setattr(
+            renderer_mod, "overlapping_regions",
+            lambda z, x, y, enabled=None: [fine, coarse],
+        )
+        monkeypatch.setattr(
+            renderer_mod, "sample_coverage",
+            lambda name, lat, lon: (
+                np.zeros(lat.shape, dtype=bool) if name == "FINE"
+                else np.ones(lat.shape, dtype=bool)
+            ),
+        )
+        frames = {
+            "FINE": np.full((fine.height, fine.width), 150, dtype=np.uint8),
+            "COARSE": np.full((coarse.height, coarse.width), 200, dtype=np.uint8),
+        }
+        return fine, coarse, frames
+
+    def test_default_donor_is_the_claiming_coarse_region(self, monkeypatch):
+        fine, coarse, frames = self._patch_tile(monkeypatch)
+        geom = compute_tile_geometry(
+            frames, self._Z, self._X, self._Y,
+            tile_size=self._TILE, smooth=True, nwp_chain=None,
+        )
+        assert geom.is_transparent is False
+        assert geom.blur_radius == compute_blur_radius(
+            coarse, self._Z, self._X, self._Y, self._TILE,
+        )
+        assert geom.blur_radius != compute_blur_radius(
+            fine, self._Z, self._X, self._Y, self._TILE,
+        )
+
+    def test_legacy_donor_restores_finest_bbox_rule(self, monkeypatch):
+        fine, _, frames = self._patch_tile(monkeypatch)
+        geom = compute_tile_geometry(
+            frames, self._Z, self._X, self._Y,
+            tile_size=self._TILE, smooth=True, nwp_chain=None,
+            legacy_blur_donor=True,
+        )
+        assert geom.is_transparent is False
+        assert geom.blur_radius == compute_blur_radius(
+            fine, self._Z, self._X, self._Y, self._TILE,
+        )
+
+    def test_legacy_donor_default_is_inert_for_single_region_tiles(
+        self, monkeypatch,
+    ):
+        """The new default must not change single-region tiles (and must
+        never consult coverage there)."""
+        from librewxr.tiles import renderer as renderer_mod
+
+        fine = self._regions()[0]
+        frames = {"FINE": np.full((fine.height, fine.width), 150, dtype=np.uint8)}
+        monkeypatch.setattr(
+            renderer_mod, "overlapping_regions",
+            lambda z, x, y, enabled=None: [fine],
+        )
+
+        def _never(name, lat, lon):
+            raise AssertionError("coverage must not be sampled here")
+
+        monkeypatch.setattr(renderer_mod, "sample_coverage", _never)
+        expected = compute_blur_radius(
+            fine, self._Z, self._X, self._Y, self._TILE,
+        )
+        for legacy in (False, True):
+            geom = compute_tile_geometry(
+                frames, self._Z, self._X, self._Y,
+                tile_size=self._TILE, smooth=True, nwp_chain=None,
+                legacy_blur_donor=legacy,
+            )
+            assert geom.is_transparent is False
+            assert geom.blur_radius == expected
 
 
 class TestEmptyTileFastPath:

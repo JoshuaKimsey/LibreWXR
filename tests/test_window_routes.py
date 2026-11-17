@@ -402,3 +402,33 @@ class TestHealthWindowBucket:
             "satellite_entries", "satellite_bytes",
         ):
             assert key in tile_cache, f"missing pre-existing health key {key}"
+
+    def test_window_geometry_entries_counted(self, client):
+        """Window-mode geometry keys count under the window bucket.
+
+        The window path caches geometry under ``(timestamp, z, tx, ty,
+        tile_size, smooth, snow, "win")`` (length 8, trailing marker).
+        That shape is distinct from tile-mode geometry (length 7) and
+        from the window present key (length 12), so it needs its own
+        classifier branch instead of silently dropping out.
+        """
+        c, ts, _ = client
+        cache = routes.tile_cache
+        # A timestamp no test requests, so the entry is inert and can be
+        # dropped afterwards without disturbing the shared module cache.
+        geom_ts = ts + 300
+        geom_key = (geom_ts, 5, 1, 2, 256, True, False, "win")
+        payload = b"g" * 24
+
+        before = c.get("/health").json()["tile_cache"]
+        cache.put(geom_key, payload)
+        try:
+            after = c.get("/health").json()["tile_cache"]
+        finally:
+            cache.invalidate_timestamp(geom_ts)
+
+        assert after["window_entries"] == before["window_entries"] + 1
+        assert after["window_bytes"] == before["window_bytes"] + len(payload)
+        # Tile-mode geometry is unaffected by the window geometry key.
+        assert after["geometry_entries"] == before["geometry_entries"]
+        assert after["geometry_bytes"] == before["geometry_bytes"]

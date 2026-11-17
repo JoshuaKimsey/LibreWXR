@@ -144,6 +144,56 @@ def transparent_fast_path_label(
     return None
 
 
+def _select_blur_region(
+    regions_with_data: list[RegionDef],
+    z: int, x: int, y: int, tile_size: int,
+) -> RegionDef:
+    """Pick the blur-radius donor region for a smoothed tile.
+
+    The donor is the finest region whose coverage mask actually claims
+    pixels in the tile core — not merely the finest region whose bbox
+    overlaps the tile.  On an ocean tile inside USCOMP's bbox (or any
+    tile whose content is served entirely by the coarse global RRQPE
+    band) the finest bbox-overlapping region claims nothing, so sizing
+    the Gaussian from its Jacobian leaves blocky 0.04° precip edges
+    unblurred.
+
+    Cost shape (the helper runs on every smoothed multi-region tile):
+
+    1. Single region with data -> return it, zero coverage work.  This
+       is 99%+ of tiles.
+    2. 9-point probe (corners, edge midpoints, centre) on the finest
+       region.  A hit keeps the status-quo donor, so land tiles in fine
+       radar coverage are bit-identical to the pre-fix behaviour at the
+       cost of one 3x3 coverage sample.
+    3. Probe miss only: walk the list finest-first over the exact
+       full-core lat/lon grid and return the first region claiming any
+       pixel.  The exact check is what keeps thin coverage wedges,
+       coastal fringes and islands from being over-blurred to the coarse
+       neighbour's radius — a 9-point probe alone could miss them.
+    4. Nothing claims the core -> fall back to the finest region
+       (status quo).
+    """
+    if len(regions_with_data) == 1:
+        return regions_with_data[0]
+
+    lats, lons = tile_pixel_latlons(z, x, y, tile_size)
+
+    idx = [0, tile_size // 2, tile_size - 1]
+    probe_lats = lats[np.ix_(idx, idx)]
+    probe_lons = lons[np.ix_(idx, idx)]
+    if sample_coverage(regions_with_data[0].name, probe_lats, probe_lons).any():
+        return regions_with_data[0]
+
+    # ``regions_with_data`` is finest-first (see ``overlapping_regions``);
+    # preserve that order so the finest claimer wins.
+    for region in regions_with_data:
+        if sample_coverage(region.name, lats, lons).any():
+            return region
+
+    return regions_with_data[0]
+
+
 def compute_tile_geometry(
     frame_regions: dict[str, np.ndarray],
     z: int,
@@ -157,6 +207,7 @@ def compute_tile_geometry(
     frame_timestamp: int | None = None,
     nowcast_blend: float | None = None,
     precip_mask=None,  # PrecipMaskStore | None — multi-mode only
+    legacy_blur_donor: bool = False,
 ) -> TileGeometry:
     """Compute the cacheable geometry for a tile.
 
@@ -165,6 +216,11 @@ def compute_tile_geometry(
     (when requested) — and returns a ``TileGeometry`` that any number of
     color schemes / output formats / arrow styles can be rendered from
     via ``present_tile``.
+
+    ``legacy_blur_donor`` forces the pre-fix blur rule (finest
+    bbox-overlapping region, regardless of what its coverage claims);
+    window-mode components pass it so the window stitch's max-radius
+    rule keeps sizing from the finest region overall.
     """
     regions = overlapping_regions(z, x, y, enabled_regions)
     regions_with_data = [r for r in regions if r.name in frame_regions]
@@ -186,12 +242,25 @@ def compute_tile_geometry(
 
     # Determine blur radius from local geometry: scale Gaussian kernel
     # to the number of tile pixels covered by a single region pixel.
-    # Uses the highest-priority (finest) region's Jacobian so that mixed
-    # coarse + fine tiles size their blur to the resolution that's
-    # actually visible at the center.
-    blur_radius = compute_blur_radius(
-        regions_with_data[0], z, x, y, tile_size,
-    ) if smooth else 0.0
+    # The donor is the finest region whose coverage mask actually claims
+    # pixels in this tile's core — not merely the finest region whose
+    # bbox overlaps it — so tiles whose content comes entirely from a
+    # coarse region (ocean inside a fine region's bbox, the global RRQPE
+    # band) get the coarse region's radius instead of the fine floor.
+    # A 9-point probe keeps land tiles on the status-quo path at
+    # negligible cost; the exact full-core check runs only on probe-miss
+    # tiles, so thin coverage wedges / islands can never be over-blurred.
+    # ``legacy_blur_donor`` preserves the old finest-bbox rule for
+    # window-mode components, whose stitch applies the max component
+    # radius to the whole canvas.
+    if smooth:
+        donor = (
+            regions_with_data[0] if legacy_blur_donor
+            else _select_blur_region(regions_with_data, z, x, y, tile_size)
+        )
+        blur_radius = compute_blur_radius(donor, z, x, y, tile_size)
+    else:
+        blur_radius = 0.0
 
     use_blur = blur_radius >= 0.5
     pad = int(blur_radius * 3) if use_blur else 0

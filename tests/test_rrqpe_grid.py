@@ -1163,3 +1163,59 @@ class TestCompositorOrdering:
         assert (values[:, :n_fine_cols] == 0).all()
         # Outside FINE's coverage RRQPE fills.
         assert (values[:, n_fine_cols:] == 200).all()
+
+    # Smooth-mode donor tile: z=10 over lon -95.5 / lat 37.5 — inside both
+    # the fine region's bbox and RRQPE's band.  At this zoom RRQPE's 0.04°
+    # pixels span ~37 tile pixels each, so ``compute_blur_radius`` grows
+    # well past the fine region's baseline radius.
+    _SMOOTH_Z, _SMOOTH_X, _SMOOTH_Y = 10, 240, 396
+
+    def test_smooth_tile_blurs_by_rrqpe_when_fine_coverage_misses(
+        self, monkeypatch,
+    ):
+        """A smoothed tile whose pixels are all served by RRQPE must size
+        its blur from RRQPE, not from the fine bbox-overlapping region
+        whose coverage misses the tile (the original blocky-edge bug)."""
+        from librewxr.tiles import renderer as renderer_mod
+
+        from librewxr.config import settings as real_settings
+        from librewxr.tiles.coordinates import compute_blur_radius
+
+        monkeypatch.setattr(real_settings, "noise_floor_dbz", 10.0)
+
+        fine = RegionDef(
+            name="FINE", west=-100.0, east=-90.0, south=30.0, north=45.0,
+            pixel_size=0.005, group="TEST",
+            grid_width=2000, grid_height=3000,
+        )
+        rrqpe = REGIONS["RRQPE"]
+        monkeypatch.setattr(
+            renderer_mod, "overlapping_regions",
+            lambda z, x, y, enabled=None: [fine, rrqpe],
+        )
+        monkeypatch.setattr(
+            renderer_mod, "sample_coverage",
+            lambda name, lat, lon: (
+                np.zeros(lat.shape, dtype=bool) if name == "FINE"
+                else np.ones(lat.shape, dtype=bool)
+            ),
+        )
+
+        fine_frame = np.full((fine.height, fine.width), 150, dtype=np.uint8)
+        rrqpe_frame = np.full(
+            (rrqpe.height, rrqpe.width), 200, dtype=np.uint8,
+        )
+        geom = renderer_mod.compute_tile_geometry(
+            {"FINE": fine_frame, "RRQPE": rrqpe_frame},
+            self._SMOOTH_Z, self._SMOOTH_X, self._SMOOTH_Y,
+            tile_size=self._TILE, smooth=True, nwp_chain=None,
+        )
+        assert geom.is_transparent is False
+        rrqpe_radius = compute_blur_radius(
+            rrqpe, self._SMOOTH_Z, self._SMOOTH_X, self._SMOOTH_Y, self._TILE,
+        )
+        fine_radius = compute_blur_radius(
+            fine, self._SMOOTH_Z, self._SMOOTH_X, self._SMOOTH_Y, self._TILE,
+        )
+        assert geom.blur_radius == rrqpe_radius
+        assert geom.blur_radius > fine_radius
