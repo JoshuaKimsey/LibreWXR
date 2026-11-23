@@ -4,7 +4,8 @@
 
 Covers the entire Philippines (Luzon + Visayas + Mindanao + W. Palawan,
 plus edges of Sabah and N. Sulawesi) via a single 2048×2048 national
-mosaic served anonymously from ``cdn.panahon.gov.ph``.  Public domain per
+mosaic served anonymously from ``panahon.gov.ph`` (the old CDN host was
+retired in November 2026).  Public domain per
 Philippine IP code RA 8293 §176 (government-works exception); attribution
 to PAGASA / DOST recorded in the package README.  One region rides on one
 API pair per cycle: ``PHCOMP`` in the ``SOUTHEAST_ASIA`` group, peer to

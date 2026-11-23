@@ -45,7 +45,7 @@ box that would have implied coverage where none exists.
 | `SVCOMP` | MARN El Salvador | S-band (1, San Andrés) | 120 km | 5 min | ~0.009° (~1 km) |
 | `TWCOMP` | CWA Taiwan QPESUMS | S/C-band (7) | 450 km | 10 min | ~0.0125° (~1.4 km) |
 | `MYPENINSULAR` + `MYEAST` | MET Malaysia | S-band (12, national network) | 350-375 km | 10 min | ~0.022° lon / 0.019° lat (~2.5 km) |
-| `PHCOMP` | PAGASA Philippines | S-band (9, national mosaic) | 240 km | 15 min | ~0.0069° lon / 0.0091° lat (~770 m) |
+| `PHCOMP` | PAGASA Philippines | S-band (9, national mosaic) | 240 km | 10 min | ~0.0069° lon / 0.0091° lat (~770 m) |
 | `JPCOMP` | JMA HRPN (Japan) | C-band (20) + XRAIN X-band + AMeDAS gauges | 240 km | 5 min | ~0.0125° (~1.4 km) |
 | `RRQPE` | NOAA RRQPE (observed) | geostationary IR blend (no radar stations) | — | 10 min | 0.04° stored (0.02° native) |
 

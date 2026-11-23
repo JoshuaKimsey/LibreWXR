@@ -343,11 +343,11 @@ MET publishes each 10-min slot ~11 minutes after its real data time, so the newe
 
 ### `LIBREWXR_PAGASA_BASE_URL`
 
-Base URL for the PAGASA PANAHON radar API. The JSON timeline endpoint at `{base}/api/v1/radar/timeline` returns 6 frames at 15-min cadence with explicit UTC timestamps; the image endpoint at `{base}/api/v1/radar-image?sublayer=hybrid-reflectivity&index=N` serves the corresponding 2048×2048 RGBA PNGs. Public domain per Philippine IP code RA 8293 §176. Only used when `PHCOMP` or the `SOUTHEAST_ASIA` group is in `LIBREWXR_ENABLED_REGIONS`.
+Base URL for the PAGASA PANAHON radar API. The JSON timeline endpoint at `{base}/api/v1/radar/timeline?sublayer=mosaic-reflectivity` returns 9 frames at 10-min cadence with explicit UTC `observed_at_unix` timestamps, plus `tile_version` and the reflectivity `colormap`/`scale.max` the source decodes with. The image endpoint at `{base}/api/v1/radar-data-image?sublayer=mosaic-reflectivity&t={observed_at_unix}&mode=dbz&size=2048&v={tile_version}` serves the matching 2048×2048 RGBA PNGs; a response-provided 14-stop 0-80 dBZ palette is authoritative, with a verbatim fallback table shipping in the source. While the upstream radar renderer is unavailable the image endpoint returns HTTP 200 with a 1×1 placeholder PNG, which the source's size guard skips as a failed frame. Public domain per Philippine IP code RA 8293 §176. Only used when `PHCOMP` or the `SOUTHEAST_ASIA` group is in `LIBREWXR_ENABLED_REGIONS`.
 
 | | |
 |---|---|
-| **Default** | `https://cdn.panahon.gov.ph` |
+| **Default** | `https://panahon.gov.ph` |
 | **Type** | string |
 
 ### `LIBREWXR_PAGASA_ENABLED`
