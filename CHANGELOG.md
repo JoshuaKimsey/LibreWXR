@@ -7,6 +7,22 @@ and commit the result alongside the version bump.
 
 ---
 
+## [v1.0.1 - Radar fetch reliability](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v1.0.1)
+
+2026-11-23
+
+LibreWXR 1.0.1 hardens the radar fetch loop against slow upstreams and re-points the PAGASA Philippines source at its migrated PANAHON API.
+
+**Overall radar fetch timeout (#63).** Each per-region radar fetch (live and archive) now runs under an overall deadline via the new `LIBREWXR_RADAR_FETCH_TIMEOUT` setting (default 180 s, 0 disables), mirroring the satellite fetch timeout. Previously a single slow-drip source could hold the per-cycle gather — and frame updates for every region — open indefinitely, because per-source HTTP read timeouts only bound the time between reads. A timed-out fetch takes the existing warn-and-skip path with an explicit reason, and per-region skip warnings no longer log a blank reason for exceptions with empty messages.
+
+**PAGASA Philippines ported to the new PANAHON API.** The retired `cdn.panahon.gov.ph` host went NXDOMAIN in a silent November 2026 migration; the source now speaks the same-origin API at `panahon.gov.ph` — a 9-frame 10-minute timeline matching the store grid 1:1, images keyed by timestamp, a response-provided 14-stop 0-80 dBZ colormap with a verbatim fallback, and a browser User-Agent to get past the host's decoy-PNG soft block. While PAGASA's radar renderer is unavailable upstream, placeholder frames are skipped with a single summarized warning per cycle instead of per-frame tracebacks, and PHCOMP repopulates automatically once real frames return.
+
+**Credits.** The fetch-stall diagnosis and production validation of the overall-timeout approach by srmncnk (@srmncnk, issue #63); the rest by Joshua Kimsey.
+
+Deployments pulling published images: set `LIBREWXR_IMAGE_TAG=1.0.1` and restart.
+
+---
+
 ## [v1.0.0 - Public API stability](https://github.com/JoshuaKimsey/LibreWXR/releases/tag/v1.0.0)
 
 2026-11-17
