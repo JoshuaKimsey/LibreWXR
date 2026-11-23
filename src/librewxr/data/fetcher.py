@@ -775,9 +775,21 @@ class RadarFetcher:
                     continue
                 source = self._sources[region.name]
                 if source_type == "live":
-                    tasks.append(_bounded_fetch(sem, source.fetch_frame(region, source_arg)))
+                    tasks.append(
+                        _bounded_fetch(
+                            sem,
+                            source.fetch_frame(region, source_arg),
+                            timeout=settings.radar_fetch_timeout,
+                        )
+                    )
                 else:
-                    tasks.append(_bounded_fetch(sem, source.fetch_archive_frame(region, source_arg)))
+                    tasks.append(
+                        _bounded_fetch(
+                            sem,
+                            source.fetch_archive_frame(region, source_arg),
+                            timeout=settings.radar_fetch_timeout,
+                        )
+                    )
                 task_meta.append((ts, region, source_type, source_arg))
 
         radar_start = time.monotonic()
@@ -804,7 +816,10 @@ class RadarFetcher:
         for (ts, region, source_type, source_arg), result in zip(task_meta, results):
             if isinstance(result, Exception):
                 logger.warning(
-                    "Failed to fetch %s for ts=%d: %s", region.name, ts, result
+                    "Failed to fetch %s for ts=%d: %s",
+                    region.name,
+                    ts,
+                    str(result) or type(result).__name__,
                 )
                 continue
             finalize_coros.append(
@@ -1095,15 +1110,28 @@ class RadarFetcher:
         )
 
 
-async def _bounded_fetch(sem: asyncio.Semaphore, coro: Awaitable) -> object:
+async def _bounded_fetch(
+    sem: asyncio.Semaphore, coro: Awaitable, timeout: float | None = None
+) -> object:
     """Run a single fetch coroutine under the radar fetch-concurrency semaphore.
 
     Wraps an already-created (but not yet scheduled) coroutine object so
     the gather in ``_fetch_timestamps`` can hand each task a semaphore
-    slot without starting any fetch ahead of the gather.
+    slot without starting any fetch ahead of the gather.  When
+    ``timeout`` is positive the coroutine runs under an overall deadline
+    acquired *inside* the semaphore, so the budget covers transfer time
+    rather than queue wait; a deadline miss re-raises as a descriptive
+    ``TimeoutError`` so the per-region skip warning logs a real reason.
     """
     async with sem:
-        return await coro
+        if timeout is None or timeout <= 0:
+            return await coro
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout)
+        except TimeoutError:
+            raise TimeoutError(
+                f"exceeded the {timeout:.0f}s overall fetch limit"
+            ) from None
 
 
 def _blend_cacomp_arrays(

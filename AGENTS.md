@@ -197,6 +197,7 @@ All config via `LIBREWXR_*` env vars or `.env` file. Settings defined in `src/li
 - `LIBREWXR_MAX_FRAMES`: default 12 (past radar frames to keep)
 - `LIBREWXR_MAX_ZOOM`: default 12
 - `LIBREWXR_RADAR_FETCH_CONCURRENCY`: max parallel radar region fetches per fetch cycle (default 8)
+- `LIBREWXR_RADAR_FETCH_TIMEOUT`: overall deadline per region-frame fetch, live or archive (default 180 s; 0 disables)
 - `LIBREWXR_DOWNLOAD_RETRIES`: retries on transient download errors (default 1)
 
 **NWP:**

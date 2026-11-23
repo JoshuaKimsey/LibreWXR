@@ -1314,6 +1314,16 @@ Maximum number of radar region-frame fetches (live or archive) running in parall
 
 8 caps transient decode RAM around 1.6 GB; raise on fatter rigs to shorten backfill wall time.
 
+### `LIBREWXR_RADAR_FETCH_TIMEOUT`
+
+Overall deadline for one radar region-frame fetch (live or archive). A source that trickles data past the deadline is skipped for that pass — carry-forward bridges the gap — instead of stalling frame updates for every region. `0` disables the deadline.
+
+| | |
+|---|---|
+| **Default** | `180.0` |
+| **Type** | float |
+| **Unit** | seconds |
+
 ---
 
 ## Nowcasting

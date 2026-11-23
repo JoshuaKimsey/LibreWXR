@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 import asyncio
+import logging
+import time
 
 import numpy as np
 import pytest
 
 pytestmark = pytest.mark.store
 
-from librewxr.data.fetcher import RadarFetcher
+from librewxr.data.fetcher import RadarFetcher, _bounded_fetch
 from librewxr.data.radar_cache import RadarFrameCache
 from librewxr.data.regions import RegionDef
 from librewxr.data.store import FrameStore, RadarFrame
@@ -779,3 +781,73 @@ class TestSatelliteBackgroundFetch:
         with caplog.at_level("WARNING"):
             await fetcher._fetch_satellite_background(_StubSatelliteContribution(boom))
         assert any("fetch failed" in r.message for r in caplog.records)
+
+
+class TestRadarFetchTimeout:
+    @pytest.fixture
+    def small_region(self):
+        return RegionDef(
+            name="TESTREG",
+            west=0.0, east=3.2, south=0.0, north=3.2,
+            pixel_size=0.1, group="US",
+            grid_width=32, grid_height=32,
+        )
+
+    @pytest.mark.asyncio
+    async def test_bounded_fetch_enforces_overall_timeout(self):
+        sem = asyncio.Semaphore(2)
+
+        async def hang():
+            await asyncio.sleep(30)
+            return object()
+
+        with pytest.raises(TimeoutError, match="overall fetch limit"):
+            await _bounded_fetch(sem, hang(), timeout=0.05)
+
+    @pytest.mark.asyncio
+    async def test_bounded_fetch_timeout_disabled(self):
+        sem = asyncio.Semaphore(2)
+
+        async def quick():
+            await asyncio.sleep(0.01)
+            return 42
+
+        assert await _bounded_fetch(sem, quick(), timeout=0) == 42
+        assert await _bounded_fetch(sem, quick(), timeout=None) == 42
+
+    @pytest.mark.asyncio
+    async def test_hung_region_is_skipped_within_deadline(
+        self, tmp_path, small_region, monkeypatch, caplog
+    ):
+        # Issue #63: a single slow-drip region must not stall the cycle.
+        # The fake source's per-source timeouts can't save us here, so
+        # the overall per-task deadline has to cut the hung fetch short.
+        from librewxr.config import settings
+        monkeypatch.setattr(settings, "radar_fetch_timeout", 0.05)
+
+        store = FrameStore(max_frames=4)
+        tile_cache = TileCache(max_mb=1)
+        radar_cache = RadarFrameCache(tmp_path)
+        fetcher, source = _build_fetcher(store, tile_cache, radar_cache, small_region)
+
+        async def hang(region, minutes_ago):
+            await asyncio.sleep(30)
+            return None
+
+        source.fetch_frame = hang
+
+        start = time.monotonic()
+        with caplog.at_level(logging.WARNING):
+            await fetcher._fetch_timestamps([(1000, "live", 0)])
+        elapsed = time.monotonic() - start
+
+        # A regression would block for the 30 s hang instead of ~0.05 s.
+        assert elapsed < 10
+        # Every result failed, so the empty-frame write was skipped.
+        assert await store.get_timestamps() == []
+        assert not (tmp_path / "radar" / "radar_1000_TESTREG.dat").exists()
+        assert any(
+            "TESTREG" in r.getMessage() and "overall fetch limit" in r.getMessage()
+            for r in caplog.records
+            if r.levelno >= logging.WARNING
+        )

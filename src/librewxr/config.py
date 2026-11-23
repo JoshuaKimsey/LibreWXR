@@ -656,6 +656,16 @@ class Settings(BaseSettings):
     # decode RAM around 1.6 GB; raise on fatter rigs to shorten backfill
     # wall time.
     radar_fetch_concurrency: int = 8
+    # Overall deadline for one radar region-frame fetch (live or
+    # archive).  Per-source httpx read timeouts only bound the time
+    # *between* reads, so a slow-drip server that trickles a few bytes
+    # per minute never trips them; without an overall deadline a single
+    # hung region stalls the per-cycle gather — and with it frame
+    # updates for every region.  A fetch that runs past the deadline is
+    # cancelled and takes the existing warn-and-skip path, with
+    # carry-forward bridging the gap on the next cycle.  180 s sits far
+    # above any healthy fetch; 0 disables the deadline.
+    radar_fetch_timeout: float = 180.0
     cors_origins: list[str] = ["*"]
 
     @model_validator(mode="before")
