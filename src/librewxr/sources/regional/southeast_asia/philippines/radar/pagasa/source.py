@@ -468,6 +468,7 @@ class PAGASASource:
             tasks = [self._fetch_image(client, ts) for _, ts in targets]
             pngs = await asyncio.gather(*tasks, return_exceptions=True)
 
+            guard_rejected: list[tuple[int, str]] = []
             for (i, ts), png in zip(targets, pngs):
                 if isinstance(png, BaseException):
                     logger.warning(
@@ -478,12 +479,36 @@ class PAGASASource:
                     continue
                 try:
                     grid = self._decode_png(png, palette)
+                except ValueError as exc:
+                    # The decode guards (unexpected image size / channel
+                    # count) fire on the upstream's placeholder and decoy
+                    # PNGs.  A traceback per frame adds noise, not
+                    # information -- collect and summarize after the loop.
+                    guard_rejected.append((ts, str(exc)))
+                    continue
                 except Exception:
                     logger.exception("PAGASA frame %d decode failed", i)
                     continue
                 self._frame_cache[ts] = grid
                 if ts not in self._cache_order:
                     self._cache_order.append(ts)
+
+            if guard_rejected:
+                if len(guard_rejected) == len(targets):
+                    logger.warning(
+                        "PAGASA: all %d frames rejected by the decode "
+                        "guard (%s) -- the upstream is serving placeholder "
+                        "or decoy PNGs; its radar renderer is likely "
+                        "unavailable",
+                        len(guard_rejected), guard_rejected[0][1],
+                    )
+                else:
+                    logger.warning(
+                        "PAGASA: %d of %d frames rejected by the decode "
+                        "guard -- first: ts=%d (%s)",
+                        len(guard_rejected), len(targets),
+                        guard_rejected[0][0], guard_rejected[0][1],
+                    )
 
             self._cache_order.sort()
             while len(self._cache_order) > self._CACHE_MAX:

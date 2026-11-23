@@ -5,6 +5,7 @@ southeast_asia/philippines/radar/pagasa/)."""
 import asyncio
 import io
 import json
+import logging
 from datetime import datetime, timezone
 
 import numpy as np
@@ -430,9 +431,47 @@ class TestPAGASARefresh:
 
         assert placeholder_ts not in src._cache_order
         assert len(src._cache_order) == _PAGASA_EXPECTED_FRAMES - 1
-        assert "decode failed" in caplog.text
+        assert "1 of 9 frames rejected by the decode guard" in caplog.text
+        assert not [
+            r for r in caplog.records if r.levelno >= logging.ERROR
+        ]
         with pytest.raises(ValueError):
             src._decode_png(_make_placeholder_png())
+
+    def test_refresh_all_placeholders_log_one_summary(self, caplog):
+        # While the upstream radar renderer is down EVERY image response
+        # is the 1x1 placeholder.  Nine tracebacks per cycle add noise
+        # without information; the cycle must emit exactly one summary
+        # warning instead, and still cache nothing.
+        start = 1778962500
+        timeline = _FakeResp(200, payload=_make_timeline(start))
+        images = {
+            start + i * _PAGASA_NATIVE_CADENCE_SEC: _FakeResp(
+                200, content=_make_placeholder_png(),
+            )
+            for i in range(_PAGASA_EXPECTED_FRAMES)
+        }
+        src = PAGASASource()
+        import librewxr.sources.regional.southeast_asia.philippines.radar.pagasa.source as mod
+        original = mod.retry_get
+        mod.retry_get = _stub_retry_get(timeline, images)
+        try:
+            with caplog.at_level("WARNING"):
+                asyncio.run(src._refresh())
+        finally:
+            mod.retry_get = original
+
+        assert src._cache_order == []
+        summaries = [
+            r for r in caplog.records
+            if "all 9 frames rejected by the decode guard" in r.getMessage()
+        ]
+        assert len(summaries) == 1
+        assert "unavailable" in summaries[0].getMessage()
+        assert "(1, 1)" in summaries[0].getMessage()
+        assert not [
+            r for r in caplog.records if r.levelno >= logging.ERROR
+        ]
 
     def test_refresh_survives_failed_image_fetch(self):
         # If one of the per-timestamp image fetches 404s, the rest must
