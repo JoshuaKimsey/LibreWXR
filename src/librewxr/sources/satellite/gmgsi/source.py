@@ -94,6 +94,11 @@ LON_VEC = np.linspace(LON_MIN, LON_MAX, GRID_WIDTH, dtype=np.float32)
 
 # S3 bucket — anonymous, NOAA Open Data Dissemination Program.
 S3_BUCKET = "noaa-gmgsi-pds"
+# The bucket's region, pinned so the client never takes it from
+# AWS_DEFAULT_REGION / AWS_REGION: a deployment that sets those for its own
+# (non-AWS) store would otherwise send every request to a host that
+# doesn't exist (e.g. noaa-gmgsi-pds.s3.rbx.amazonaws.com).
+S3_REGION = "us-east-1"
 
 # Filename prefix shared by every GMGSI product (LW, VIS, WV, SW).
 # The product path under the bucket changes per channel; the leading
@@ -186,6 +191,7 @@ class GMGSISource:
             self._fs = fsspec.filesystem(
                 "s3",
                 anon=True,
+                client_kwargs={"region_name": S3_REGION},
                 config_kwargs={
                     "connect_timeout": 30,
                     "read_timeout": 60,

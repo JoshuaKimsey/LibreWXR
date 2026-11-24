@@ -141,6 +141,21 @@ def test_vis_subclass_s3_metadata():
     assert GMGSIVISSource.friendly_name == "GMGSI VIS"
 
 
+def test_s3_client_ignores_ambient_aws_region(monkeypatch):
+    """The NOAA bucket's region is pinned, not taken from the environment.
+
+    A deployment that sets AWS_DEFAULT_REGION for its own non-AWS store
+    (e.g. an OVH ``rbx`` bucket) must not send GMGSI requests to
+    ``s3.rbx.amazonaws.com``. Building the client makes no network call.
+    """
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "rbx")
+    monkeypatch.setenv("AWS_REGION", "rbx")
+    fs = GMGSILWSource(cache_dir=None)._get_fs()
+    fs.connect()
+    assert fs.s3.meta.region_name == "us-east-1"
+    assert "rbx" not in fs.s3.meta.endpoint_url
+
+
 # ── Frame store / retention ──
 
 
