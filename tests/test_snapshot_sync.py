@@ -16,6 +16,7 @@ import pytest
 
 from librewxr.data.master_state import load_state, snapshot_state, write_state_snapshot
 from librewxr.data.snapshot_sync import (
+    ALERTS_ARTIFACT,
     LIGHTNING_ARTIFACT,
     MANIFEST_VERSION,
     SnapshotPublisher,
@@ -547,3 +548,181 @@ async def test_repair_leaves_the_lightning_artifact_to_its_own_refresh(
     assert not puller.pull()
     assert (render / LIGHTNING_ARTIFACT).read_bytes() == b"newer and longer strikes"
     assert not puller.pull()
+
+
+# ---------------------------------------------------------------------------
+# Alerts artifact
+# ---------------------------------------------------------------------------
+
+def test_alerts_artifact_name_matches_the_artifact_module():
+    """The sync layer keeps the literal (no shapely/api.models import chain
+    from a data-layer module), so the two definitions must not drift."""
+    from librewxr.data.alerts_artifact import ARTIFACT_NAME
+
+    assert ALERTS_ARTIFACT == ARTIFACT_NAME
+
+
+def test_snapshot_files_includes_the_alerts_artifact_only_when_present(tmp_path: Path):
+    cache = tmp_path / "cache"
+    (cache / "alerts").mkdir(parents=True)
+    assert snapshot_files({}, cache, None) == {}
+    (cache / ALERTS_ARTIFACT).write_bytes(b"alerts-v1")
+    assert set(snapshot_files({}, cache, None)) == {ALERTS_ARTIFACT}
+
+
+async def _published_alerts_node(
+    tmp_path: Path, pipeline_cache: Path, content: bytes = b"alerts-v1"
+) -> tuple[SnapshotPublisher, SnapshotPuller, Path, Path]:
+    """Publish one snapshot with an alerts artifact and pull it on a render node."""
+    url = f"file://{tmp_path / 'store'}"
+    (pipeline_cache / "alerts").mkdir()
+    (pipeline_cache / ALERTS_ARTIFACT).write_bytes(content)
+    store = FrameStore(max_frames=2, cache_dir=pipeline_cache)
+    await store.add_frame(_frame(T0, 1))
+    publisher = SnapshotPublisher(pipeline_cache, url)
+    manifest = await _publish(store, pipeline_cache, publisher)
+    assert ALERTS_ARTIFACT in manifest["files"]
+    render = tmp_path / "render"
+    puller = SnapshotPuller(render, url)
+    assert puller.pull()
+    assert (render / ALERTS_ARTIFACT).read_bytes() == content
+    return publisher, puller, render, tmp_path / "store"
+
+
+def test_publish_alerts_uploads_the_object_and_reports_a_missing_file(tmp_path: Path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    remote = tmp_path / "store"
+    publisher = SnapshotPublisher(cache, f"file://{remote}")
+    assert publisher.publish_alerts() is False
+    assert not (remote / ALERTS_ARTIFACT).exists()
+
+    (cache / "alerts").mkdir()
+    (cache / ALERTS_ARTIFACT).write_bytes(b"alerts-v1")
+    assert publisher.publish_alerts() is True
+    assert (remote / ALERTS_ARTIFACT).read_bytes() == b"alerts-v1"
+
+
+async def test_alerts_artifact_follows_the_store_between_snapshots(
+    tmp_path: Path, pipeline_cache: Path, monkeypatch
+):
+    publisher, puller, render, remote = await _published_alerts_node(tmp_path, pipeline_cache)
+    downloads: list[str] = []
+    real_download = puller._download
+
+    def counting_download(name: str) -> str:
+        downloads.append(name)
+        return real_download(name)
+
+    monkeypatch.setattr(puller, "_download", counting_download)
+
+    (pipeline_cache / ALERTS_ARTIFACT).write_bytes(b"alerts-v2-longer")
+    assert publisher.publish_alerts()
+    assert (remote / ALERTS_ARTIFACT).read_bytes() == b"alerts-v2-longer"
+    assert not puller.pull()  # no new snapshot, but the artifact is refreshed
+    assert downloads == [ALERTS_ARTIFACT]
+    assert (render / ALERTS_ARTIFACT).read_bytes() == b"alerts-v2-longer"
+
+    downloads.clear()
+    assert not puller.pull()  # unchanged store stamp: not downloaded again
+    assert downloads == []
+    assert (render / ALERTS_ARTIFACT).read_bytes() == b"alerts-v2-longer"
+
+
+async def test_pull_applies_manifests_with_the_alerts_artifact_out_of_needed(
+    tmp_path: Path, pipeline_cache: Path, monkeypatch
+):
+    """The artifact is listed in the manifest but downloaded by its stamp path,
+    never by the manifest's batched download."""
+    url = f"file://{tmp_path / 'store'}"
+    store_dir = tmp_path / "store"
+    (pipeline_cache / "alerts").mkdir()
+    (pipeline_cache / ALERTS_ARTIFACT).write_bytes(b"alerts-v1")
+    store = FrameStore(max_frames=2, cache_dir=pipeline_cache)
+    await store.add_frame(_frame(T0, 1))
+    await _publish(store, pipeline_cache, SnapshotPublisher(pipeline_cache, url))
+    # A stamp the local cache can never look intact against
+    _poison_manifest(store_dir, files={ALERTS_ARTIFACT: {"size": 1, "mtime_ns": 1}})
+
+    render = tmp_path / "render"
+    puller = SnapshotPuller(render, url)
+    monkeypatch.setattr(puller, "_pull_alerts", lambda: None)
+    assert puller.pull()
+    assert (render / "state.json").exists()
+    assert not (render / ALERTS_ARTIFACT).exists()
+
+
+async def test_pull_tolerates_a_missing_remote_alerts_artifact(
+    tmp_path: Path, pipeline_cache: Path
+):
+    url = f"file://{tmp_path / 'store'}"
+    store = FrameStore(max_frames=2, cache_dir=pipeline_cache)
+    await store.add_frame(_frame(T0, 1))
+    publisher = SnapshotPublisher(pipeline_cache, url)
+    await _publish(store, pipeline_cache, publisher)
+    render = tmp_path / "render"
+    puller = SnapshotPuller(render, url)
+    assert puller.pull()  # the store has no alerts artifact at all
+    assert not (render / ALERTS_ARTIFACT).exists()
+
+    (pipeline_cache / "alerts").mkdir()
+    (pipeline_cache / ALERTS_ARTIFACT).write_bytes(b"alerts-v1")
+    assert publisher.publish_alerts()
+    assert not puller.pull()
+    assert (render / ALERTS_ARTIFACT).read_bytes() == b"alerts-v1"
+
+    (tmp_path / "store" / ALERTS_ARTIFACT).unlink()  # the store lost it
+    assert not puller.pull()
+    assert (render / ALERTS_ARTIFACT).read_bytes() == b"alerts-v1"
+
+
+async def test_repair_does_not_flag_or_restore_the_alerts_artifact(
+    tmp_path: Path, pipeline_cache: Path, caplog, monkeypatch
+):
+    """Its manifest size is stale by construction, so a changed local copy is
+    not damage; the stamp path owns the file."""
+    _publisher, puller, render, _remote = await _published_alerts_node(
+        tmp_path, pipeline_cache
+    )
+    downloads: list[str] = []
+    real_download = puller._download
+
+    def counting_download(name: str) -> str:
+        downloads.append(name)
+        return real_download(name)
+
+    monkeypatch.setattr(puller, "_download", counting_download)
+    (render / ALERTS_ARTIFACT).write_bytes(b"short")
+
+    assert not puller.pull()
+    assert downloads == []
+    assert "Restoring" not in caplog.text
+    assert (render / ALERTS_ARTIFACT).read_bytes() == b"short"
+    assert (render / "state.json").exists()
+
+
+async def test_a_failed_alerts_download_keeps_the_local_copy(
+    tmp_path: Path, pipeline_cache: Path, caplog, monkeypatch
+):
+    publisher, puller, render, _remote = await _published_alerts_node(
+        tmp_path, pipeline_cache
+    )
+    (pipeline_cache / ALERTS_ARTIFACT).write_bytes(b"alerts-v2-longer")
+    assert publisher.publish_alerts()
+
+    real_get_file = puller._fs.get_file
+
+    def failing_get_file(rpath, lpath, **kwargs):
+        if rpath.endswith(ALERTS_ARTIFACT):
+            raise OSError("store hiccup")
+        return real_get_file(rpath, lpath, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(puller._fs, "get_file", failing_get_file)
+        assert not puller.pull()  # guarded: the pull does not raise
+        assert (render / ALERTS_ARTIFACT).read_bytes() == b"alerts-v1"
+    assert "alerts artifact" in caplog.text and "keeping the local copy" in caplog.text
+
+    # The stamp was not recorded, so the next pull retries and lands it
+    assert not puller.pull()
+    assert (render / ALERTS_ARTIFACT).read_bytes() == b"alerts-v2-longer"

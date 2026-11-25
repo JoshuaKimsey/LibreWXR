@@ -17,8 +17,8 @@ itself under a unique name, then one ``manifest.json`` that lists the
 snapshot and its files.  The manifest is the single atomic object a
 reader keys off; files a snapshot no longer names are deleted once they
 are out of the previous manifest too, the same one-cycle grace the
-pipeline's own eviction keeps.  The lightning artifact, which lives
-outside ``state.json``, is uploaded whenever the pipeline writes it.
+pipeline's own eviction keeps.  The lightning and alerts artifacts, which
+live outside ``state.json``, are uploaded whenever the pipeline writes them.
 
 Render side, :class:`SnapshotPuller` (``python -m librewxr.snapshot_pull``
 on a render node, next to render-only workers that share its cache
@@ -69,6 +69,11 @@ VOLATILE_SUBDIR = "volatile"
 # memmap files the snapshot names (see snapshot_files)
 _WHOLE_DIRS = ("coverage_masks", "palettes")
 LIGHTNING_ARTIFACT = "lightning/current.npz"
+# The alerts artifact (``librewxr.data.alerts_artifact.ARTIFACT_NAME``), also
+# written outside the snapshot cycle and synced the same way.  Kept a literal
+# so this data-layer module does not pull in the artifact's shapely/api.models
+# import chain; ``tests/test_snapshot_sync.py`` asserts the two agree.
+ALERTS_ARTIFACT = "alerts/current.db"
 # Objects per delete request: a 1000-key multi-object delete timed out
 # against OVH, and a failed batch is simply retried on the next publish
 DELETE_BATCH = 100
@@ -143,7 +148,7 @@ def snapshot_files(
     that store serves plus files kept one cycle for eviction grace.  The
     satellite frames (resolved from ``cache_root`` by the page-cache
     walker), the directories read whole (coverage masks, the palette
-    artifact) and the lightning artifact complete the set.
+    artifact) and the lightning and alerts artifacts complete the set.
     """
     files: dict[str, Path] = {}
 
@@ -168,6 +173,7 @@ def snapshot_files(
                 if path.is_file() and ".tmp" not in path.name:
                     add(path)
     add(cache_dir / LIGHTNING_ARTIFACT)
+    add(cache_dir / ALERTS_ARTIFACT)
     return files
 
 
@@ -567,6 +573,14 @@ class SnapshotPublisher:
         self._put(path, LIGHTNING_ARTIFACT)
         return True
 
+    def publish_alerts(self) -> bool:
+        """Upload the alerts artifact (written outside the snapshot cycle)."""
+        path = self._cache_dir / ALERTS_ARTIFACT
+        if not path.is_file():
+            return False
+        self._put(path, ALERTS_ARTIFACT)
+        return True
+
 
 # ---------------------------------------------------------------------------
 # Render side
@@ -593,6 +607,7 @@ class SnapshotPuller:
         except (OSError, ValueError):
             self._applied = {"sequence": 0, "files": {}, "previous_files": {}}
         self._lightning_stamp: tuple | None = None
+        self._alerts_stamp: tuple | None = None
 
     def _remote(self, name: str) -> str:
         return f"{self._root}/{name}"
@@ -609,8 +624,8 @@ class SnapshotPuller:
         ``state.json`` last, then deletes tracked files that neither this
         nor the previously applied manifest names.  With the manifest
         already applied it only restores what the local cache has since
-        lost (see ``_repair``).  The lightning artifact is refreshed on
-        every call.  Raises on store errors; the local
+        lost (see ``_repair``).  The lightning and alerts artifacts are
+        refreshed on every call.  Raises on store errors; the local
         cache is left as it was (a partial download never reaches
         ``state.json``).
         """
@@ -620,8 +635,10 @@ class SnapshotPuller:
         except FileNotFoundError:
             logger.info("No manifest at %s yet", self._root)
             self._pull_lightning()
+            self._pull_alerts()
             return False
         self._pull_lightning()
+        self._pull_alerts()
         if manifest.get("version") != MANIFEST_VERSION:
             raise ValueError(
                 f"manifest version {manifest.get('version')!r} at {self._root}; "
@@ -643,7 +660,7 @@ class SnapshotPuller:
         files: dict[str, dict] = manifest["files"]
         needed = [
             name for name, stamp in files.items()
-            if name != LIGHTNING_ARTIFACT
+            if name not in (LIGHTNING_ARTIFACT, ALERTS_ARTIFACT)
             and (
                 self._applied["files"].get(name) != stamp
                 or not self._local_copy_intact(name, stamp)
@@ -717,12 +734,13 @@ class SnapshotPuller:
         Only the lost files come back, with no cleanup and no change to the
         record of applied manifests, so the files kept one cycle late keep
         their grace.  ``True`` when ``state.json`` itself had to be rewritten.
-        The lightning artifact is left to ``_pull_lightning``: it changes
-        between manifests, so its listed size is no reference.
+        The artifacts that change between manifests (lightning, alerts) are
+        left to their own refresh: their listed size is no reference.
         """
         damaged = [
             name for name, stamp in manifest["files"].items()
-            if name != LIGHTNING_ARTIFACT and not self._local_copy_intact(name, stamp)
+            if name not in (LIGHTNING_ARTIFACT, ALERTS_ARTIFACT)
+            and not self._local_copy_intact(name, stamp)
         ]
         if damaged:
             logger.warning(
@@ -755,3 +773,34 @@ class SnapshotPuller:
             return
         self._download(LIGHTNING_ARTIFACT)
         self._lightning_stamp = stamp
+
+    def _pull_alerts(self) -> None:
+        """Refresh the alerts artifact when the store's copy changed.
+
+        Unlike the lightning artifact this is best effort: the artifact is
+        written outside the snapshot cycle, so a store that has none yet -- or
+        one answering with a transient error -- must not fail the pull.  The
+        local copy stays as it is and the stamp is only recorded once the
+        download landed, so the next pull retries.
+        """
+        try:
+            info = self._fs.info(self._remote(ALERTS_ARTIFACT))
+        except FileNotFoundError:
+            return
+        except Exception as exc:  # noqa: BLE001 - the artifact is optional
+            logger.warning(
+                "Reading the alerts artifact's store stamp failed (%s); "
+                "keeping the local copy", exc,
+            )
+            return
+        stamp = (info.get("size"), info.get("ETag") or info.get("mtime") or info.get("LastModified"))
+        if stamp == self._alerts_stamp:
+            return
+        try:
+            self._download(ALERTS_ARTIFACT)
+        except Exception as exc:  # noqa: BLE001 - the artifact is optional
+            logger.warning(
+                "Downloading the alerts artifact failed (%s); keeping the local copy", exc
+            )
+            return
+        self._alerts_stamp = stamp
