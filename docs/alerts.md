@@ -9,6 +9,7 @@ through pluggable geocode tables, and serves the result as GeoJSON at
 ## Table of Contents
 
 - [How it works](#how-it-works)
+- [Artifact handoff](#artifact-handoff)
 - [Geocode tables](#geocode-tables)
 - [CAP entry semantics](#cap-entry-semantics)
 - [Configuration](#configuration)
@@ -55,7 +56,8 @@ own clock-aligned loop, every `LIBREWXR_ALERTS_FETCH_INTERVAL` seconds
 6. Downloads each candidate CAP document and turns it into one alert
    entry (see [CAP entry semantics](#cap-entry-semantics)).
 
-The cycle ends by replacing the store and logging a summary line,
+The cycle ends by replacing the store, rewriting the alerts artifact
+(see [Artifact handoff](#artifact-handoff)) and logging a summary line,
 `Alerts updated: N total (N WMO + N NWS) from K/J WMO feed URLs`, so the
 operator-visible health of the ingest is one grep away. Feeds that fail
 are counted rather than silently dropped; a cycle in which every
@@ -81,6 +83,69 @@ A sources.json or wmo_all.json outage does not freeze the US slice: the
 last-known non-NWS alerts are kept and refreshed NWS alerts are merged
 in, with the store flagged degraded.
 
+## Artifact handoff
+
+Alerts no longer ride `state.json`. The pipeline writes a standalone
+single-file SQLite artifact, `<LIBREWXR_CACHE_DIR>/alerts/current.db`
+(`data/alerts_artifact.py`), and every process that serves alerts reads
+it -- render workers, the WebSocket `alerts` topic and the stdio MCP
+transport. This is the same pattern as the lightning artifact
+(`lightning/current.npz`) and the shared tile store: the file itself is
+the cross-process handoff, and `state.json` carries no alerts section at
+all. The artifact always lives under `LIBREWXR_CACHE_DIR`, the directory
+every process shares; `LIBREWXR_ALERTS_CACHE_DIR` only relocates the
+pipeline-side geocode tables and NWS zone cache (see
+[Geocode tables](#geocode-tables)).
+
+The artifact holds two tables:
+
+- `meta` -- `last_updated`, `fetch_success`, `count`, and `response`: the
+  zlib-compressed JSON of the no-params `/v2/alerts` body, built once by
+  the pipeline so serving the whole collection never re-runs the shapely
+  union / simplify pass.
+- `entries` -- one row per alert in store order, carrying the polygon's
+  bounding box in columns the spatial-query prefilter compares against
+  (all NULL for a polygon-less alert) plus the zlib-compressed per-entry
+  payload.
+
+The pipeline rewrites the artifact (temp file plus atomic rename, so a
+reader never sees a partial file) after every store mutation --
+successful, empty and failed cycles alike -- so a degraded cycle is
+representable instead of leaving a stale file behind. Render workers
+open it read-only on demand and watch its `mtime`/size stamp: the reload
+runs on the poll tick, before the `state.json` mtime early-out, and again
+inside the WebSocket topic key, so `/health` scalars and subscribers pick
+up an alerts-only change without any snapshot write. The request path
+does not wait for either tick: every `/v2/alerts` variant and the MCP
+tool read the artifact per request.
+
+Serving follows from that split:
+
+| Request | Source |
+|---|---|
+| `/v2/alerts`, no parameters and the default `simplify` | the packaged `response` bytes, served as-is |
+| `/v2/alerts` with `lat` + `lon` or `bbox` | artifact rows prefiltered by polygon bounds, exact geometry test, response rebuilt at request time |
+| `/v2/alerts` with a non-default `simplify` and no spatial filter | full artifact scan, response rebuilt at request time |
+| WebSocket `alerts` topic | the packaged `response` bytes, using them as the change fingerprint too |
+| MCP `get_active_alerts` | conservative bbox candidates from the artifact, then the unchanged radius / severity / expiry filters |
+
+**Accepted trade-off.** The packaged body -- and therefore the no-params
+endpoint and the WebSocket payload -- is the collection as of the last
+alerts fetch cycle (~300 s at the default
+`LIBREWXR_ALERTS_FETCH_INTERVAL`). Expiry is bounded by that interval:
+an alert that expires between cycles stays in the packaged body until
+the next one replaces it. The point, `bbox`, non-default `simplify` and
+MCP radius variants filter against the artifact rows and evaluate expiry
+at request time, so a client that needs to-the-second expiry can pass
+`lat`/`lon` or `bbox`.
+
+Degraded contracts are unchanged. With alerts disabled
+(`LIBREWXR_ALERTS_ENABLED=false`) `/v2/alerts` still returns
+`503 Service Unavailable`, and a cold or unreadable artifact -- the
+pipeline has not written one yet, or the file is corrupt -- degrades to
+an empty `FeatureCollection` (the WebSocket topic falls back to the same
+empty collection) with `/health` reporting `count: 0`.
+
 ## Geocode tables
 
 Many CAP areas carry no `<polygon>` at all -- they reference a national
@@ -103,7 +168,7 @@ Operational notes:
 - The tables download on first startup (~67 MB in total), cache under
   `<LIBREWXR_ALERTS_CACHE_DIR or LIBREWXR_CACHE_DIR>/alerts/`, and load
   once per process lifetime. Only the pipeline process loads them --
-  render workers read the resulting alerts from `state.json` and never
+  render workers read the resulting alerts from the artifact and never
   touch a table.
 - They do not refresh on their own; upstream changes arrive with a cache
   clear. A corrupt cached table file is self-healing: the bad file is
@@ -187,9 +252,12 @@ differs accordingly). Each feature's properties are `title`, `severity`,
 Filtering runs against the full-resolution geometry, features are grouped
 per alert `uri` and unioned before encoding, and `regions` is a list
 carrying the entry's `areaDesc` string -- for merged alerts that is the
-semicolon-joined list of area descriptions. Expiry is evaluated at
-request time: features are filtered to `expires` in the future, and
-alerts with no expiry always pass. Returns `503 Service Unavailable`
+semicolon-joined list of area descriptions. The bare request at the
+default `simplify` serves the body the pipeline packaged on its last
+alerts cycle (see [Artifact handoff](#artifact-handoff)); the point,
+`bbox` and non-default `simplify` variants rebuild at request time and
+filter expiry there: features are filtered to `expires` in the future,
+and alerts with no expiry always pass. Returns `503 Service Unavailable`
 when alerts are disabled (`LIBREWXR_ALERTS_ENABLED=false`).
 
 The same payload is also pushed over the WebSocket channel
@@ -208,7 +276,12 @@ get_active_alerts(lat, lon, radius_km=25, severity=None)
 
 It filters by radius around a point with an optional CAP severity, and
 returns an empty `FeatureCollection` (never raises) when alerts are
-disabled or nothing matches.
+disabled or nothing matches. The candidate set comes from the artifact's
+conservative bounding-box prefilter (padded, with a full scan whenever
+the envelope cannot be trusted -- polar latitudes, a longitude window
+wider than 90 degrees or crossing the antimeridian, a negative radius);
+the radius, severity and expiry filters stay the geometric authority and
+run per request.
 
 See [docs/mcp-server.md](mcp-server.md) for the full tool reference and
 transport setup.
@@ -229,12 +302,13 @@ The `/health` endpoint carries an additive `alerts` section:
 ```
 
 `enabled` reports the master switch, `count` is how many alert entries
-the store currently holds, `last_updated` is the epoch second of the last
-successful store replace, and `ingest_ok` mirrors the store's
-`fetch_success` flag. `ingest_ok` degrades to `false` only when every
-attempted WMO feed URL failed in the last cycle -- an agency that simply
-has no active alerts is healthy and leaves the flag alone. When alerts
-are disabled the section degrades to `{"enabled": false}`.
+the artifact currently holds, `last_updated` is the epoch second of the
+last successful store replace recorded in the artifact's `meta` table,
+and `ingest_ok` mirrors its `fetch_success` flag. `ingest_ok` degrades to
+`false` only when every attempted WMO feed URL failed in the last cycle
+-- an agency that simply has no active alerts is healthy and leaves the
+flag alone. When alerts are disabled the section degrades to
+`{"enabled": false}`.
 
 ## Coverage and attribution
 

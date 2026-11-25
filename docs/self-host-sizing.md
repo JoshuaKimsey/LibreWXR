@@ -68,7 +68,9 @@ Weather alerts add a small, fixed footprint next to radar and NWP:
 |---|---|
 | Geocode tables (MeteoAlarm, DWD Warngebiete, BoM AAC) | ~67 MB one-time download, cached under `<cache_dir>/alerts/` |
 | Table memory | resident in the pipeline process only -- render workers never load a table |
-| Alerts slice of `state.json` | roughly 20-25 MB at current global activity |
+| Alerts artifact (`<cache_dir>/alerts/current.db`) | a few MB on disk (zlib-compressed per-entry payloads plus the packaged `/v2/alerts` response); one copy, shared by every process through the page cache |
+| Render-side alert memory | no retained alert copies: the SQLite file lives once on disk and requests read it read-only, instead of every render worker holding a parsed snapshot dict and rebuilding shapely geometry |
+| `state.json` | carries no alerts payload -- the snapshot holds only store descriptors, so the ~20-25 MB alerts slice it used to carry is gone |
 | Ingest cadence | one clock-aligned fetch cycle per 300 s (`LIBREWXR_ALERTS_FETCH_INTERVAL`) |
 
 ## Frame Memory per Region
@@ -211,7 +213,9 @@ with `SIGBUS` mid-memmap-write rather than raising, which is why the
 writers now pre-flight free space and fail with an actionable error
 instead. The lightning artifact adds ~360 small files/hour under
 `<cache_dir>/lightning/` (a few MB total) - negligible next to the tile
-caches.
+caches. The alerts artifact is a single SQLite file of a few MB at
+`<cache_dir>/alerts/current.db`, replaced atomically once per alerts
+cycle - likewise negligible.
 
 **RRQPE memory:** the RRQPE observed-precipitation layer (NOAA
 Enterprise Rain Rate) is now a radar region, so its frames live in the

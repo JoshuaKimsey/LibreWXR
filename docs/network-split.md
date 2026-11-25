@@ -19,6 +19,7 @@ data_pipeline  ──publish──▶  <prefix>/radar/..., nowcast/...  ◀─�
   (state.json)               <prefix>/snapshots/<n>.json.gz               (state.json)
                              <prefix>/manifest.json                        render workers
                              <prefix>/lightning/current.npz                (memmap, as usual)
+                             <prefix>/alerts/current.db
 ```
 
 - **Publish (pipeline, `LIBREWXR_SNAPSHOT_SYNC_URL`).** After every
@@ -35,8 +36,10 @@ data_pipeline  ──publish──▶  <prefix>/radar/..., nowcast/...  ◀─�
   meanwhile without the upload losing the content the snapshot named. Files a
   snapshot dropped are deleted after the next publish, the same
   one-cycle grace the pipeline's local eviction keeps, so a reader
-  mid-pull can finish. The lightning artifact, which lives outside
-  `state.json`, is uploaded whenever the pipeline writes it.
+  mid-pull can finish. The lightning artifact and the alerts artifact,
+  which both live outside `state.json`, are uploaded whenever the
+  pipeline writes them -- the alerts artifact after every alerts fetch
+  cycle, on its own cadence rather than the snapshot's.
 - **Pull (render host, `python -m librewxr.snapshot_pull`).** One puller
   per host polls the manifest, downloads the listed files it lacks into
   `LIBREWXR_CACHE_DIR` under the same relative paths, rewrites the
@@ -46,15 +49,22 @@ data_pipeline  ──publish──▶  <prefix>/radar/..., nowcast/...  ◀─�
   exactly as they would from a local pipeline. The puller also does the
   housekeeping the pipeline would do on that host: pruning the shared
   coordinate and tile stores, page-cache priming of fresh frames, and
-  removing files no snapshot names (again one cycle late).
+  removing files no snapshot names (again one cycle late). On every pull
+  it also compares the store's copy of the lightning and alerts artifacts
+  with its own and downloads the ones that changed, so artifact-only
+  updates reach render hosts between snapshots; the alerts download is
+  best effort, leaving the local copy in place when the store has none yet
+  or answers with a transient error.
 
 What travels: `state.json`, `radar/`, `nowcast/` (and flow fields), the
 NWP grid directories, `gmgsi/`, `mask/`, `storm_cells/`, `lightning/`,
-`palettes/`, `coverage_masks/`. What stays per host: `coord/`,
-`tiles_shared/`, `workers/` (render-side caches and heartbeats) and the
-pipeline's own `rrqpe/` scan cache and `alerts/` geocode tables (alerts
-ride inside `state.json`). Files written to `LIBREWXR_VOLATILE_CACHE_DIR`
-on the pipeline host land under `<cache_dir>/volatile/` on render hosts.
+`alerts/current.db`, `palettes/`, `coverage_masks/`. What stays per host:
+`coord/`, `tiles_shared/`, `workers/` (render-side caches and heartbeats)
+and the pipeline's own `rrqpe/` scan cache and `alerts/` geocode tables.
+The state snapshot itself carries no alerts: the SQLite artifact is the
+handoff, exactly like the lightning artifact. Files written to
+`LIBREWXR_VOLATILE_CACHE_DIR` on the pipeline host land under
+`<cache_dir>/volatile/` on render hosts.
 
 ## Configuration
 
@@ -121,9 +131,12 @@ the worker after the puller has caught up in that case.
   reachable.
 - **Local damage.** On every poll the puller checks that the files of the
   applied snapshot are present at their published size, and downloads any
-  that are missing or truncated (and `state.json`, if that is gone). A
-  same-size corruption is not detected. A render worker that already
-  dropped a store over a missing file still recovers as described under
+  that are missing or truncated (and `state.json`, if that is gone). The
+  lightning and alerts artifacts are excluded from that check -- their
+  listed size is no reference once they change between manifests -- and
+  their own per-pull refresh restores them instead. A same-size
+  corruption is not detected. A render worker that already dropped a
+  store over a missing file still recovers as described under
   [Start order](#start-order-on-a-render-host).
 - **One publisher per store.** Point exactly one pipeline at a store URL.
   Two publishers would silently interleave their snapshots in one series
