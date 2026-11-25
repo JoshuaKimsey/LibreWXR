@@ -86,6 +86,29 @@ def ensure_valid_polygon(geom: Optional[Polygon]) -> Optional[Polygon]:
         return None
 
 
+def entry_to_dict(a: AlertEntry) -> dict:
+    """Return one alert as a JSON-friendly dict (the snapshot entry shape).
+
+    Polygons are emitted as GeoJSON via shapely's ``__geo_interface__`` so the
+    whole payload is JSON-friendly.  This is the single source of the per-entry
+    snapshot shape: ``AlertsStore.__getstate__`` and the alerts artifact writer
+    both use it, and ``__setstate__`` is its inverse.
+    """
+    return {
+        "source_id": a.source_id,
+        "event": a.event,
+        "description": a.description,
+        "severity": a.severity,
+        "effective": a.effective,
+        "expires": a.expires,
+        "area_desc": a.area_desc,
+        "url": a.url,
+        "polygon": (
+            a.polygon.__geo_interface__ if a.polygon is not None else None
+        ),
+    }
+
+
 class AlertsStore:
     """Thread-safe in-memory store of active weather alerts."""
 
@@ -140,22 +163,7 @@ class AlertsStore:
             return {
                 "last_updated": self.last_updated,
                 "fetch_success": self._fetch_success,
-                "alerts": [
-                    {
-                        "source_id": a.source_id,
-                        "event": a.event,
-                        "description": a.description,
-                        "severity": a.severity,
-                        "effective": a.effective,
-                        "expires": a.expires,
-                        "area_desc": a.area_desc,
-                        "url": a.url,
-                        "polygon": (
-                            a.polygon.__geo_interface__ if a.polygon is not None else None
-                        ),
-                    }
-                    for a in self._alerts
-                ],
+                "alerts": [entry_to_dict(a) for a in self._alerts],
             }
 
     def __setstate__(self, state: dict) -> None:
