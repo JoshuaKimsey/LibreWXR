@@ -78,6 +78,10 @@ async def run_puller() -> None:
                 payload = load_state(cache_dir)
                 if payload is not None:
                     await asyncio.to_thread(prime_fresh_memmaps, payload, cache_dir)
+                # This coroutine lives for the whole process, so keeping the
+                # parsed snapshot here would hold hundreds of MB (it embeds every
+                # alert polygon) through the next pull, which parses it again.
+                del payload
             await asyncio.to_thread(prune_shared_coord_store)
             if shared_tiles is not None:
                 await asyncio.to_thread(shared_tiles.prune)
