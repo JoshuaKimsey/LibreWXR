@@ -174,8 +174,8 @@ async def get_active_alerts(
 
     Parameters
     ----------
-    alerts_store : AlertsStore | None
-        The global alerts store (None when alerts are disabled by config).
+    alerts_store : AlertsArtifactStore | None
+        The alerts artifact store (None when alerts are disabled by config).
     alerts_enabled : bool
         The global alerts-enabled flag.
     lat : float

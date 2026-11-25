@@ -14,15 +14,30 @@ Also covers the ``LightningStore`` stdio wiring: it is built from the
 on-disk artifact path and eagerly ``maybe_reload``-ed, but (unlike storm
 cells) it is deliberately NOT part of the ``stores`` dict -- it has no
 ``__getstate__`` and no state.json section.
+
+The alerts store follows the lightning pattern: an ``AlertsArtifactStore``
+built from the artifact path, deliberately outside the ``stores`` dict, and
+refreshed by the stdio poll loop so artifact-only changes reach clients
+without a state.json write.
 """
+
+import asyncio
+import json
+import time
 
 import numpy as np
 import pytest
+from shapely.geometry import Polygon
 
 from librewxr.api import routes
 from librewxr.config import settings
+from librewxr.data.alerts_artifact import (
+    AlertsArtifactStore,
+    write_alerts_artifacts,
+)
+from librewxr.data.alerts_store import AlertEntry, AlertsStore
 from librewxr.data.lightning_store import _POINT_DTYPE, LightningStore
-from librewxr.data.master_state import dump_state
+from librewxr.data.master_state import dump_state, state_mtime
 from librewxr.data.storm_cells import _CELL_DTYPE, StormCellStore
 from librewxr.data.store import FrameStore, RadarFrame
 from librewxr.mcp.context import build_stdio_lifespan
@@ -184,3 +199,98 @@ async def test_stdio_context_lightning_disabled_is_none(tmp_path, monkeypatch):
     async with build_stdio_lifespan(None):
         assert routes.lightning_store is None
         assert routes.lightning_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Alerts artifact store (same pattern as lightning: outside the stores dict)
+# ---------------------------------------------------------------------------
+
+def _alert_entries(count: int) -> list[AlertEntry]:
+    """``count`` distinct, non-expiring alerts with valid polygons."""
+    return [
+        AlertEntry(
+            source_id=f"alert-{i}",
+            event=f"Alert {i}",
+            description="Stdio alerts test",
+            severity="Severe",
+            effective="2026-01-01T00:00:00+00:00",
+            expires="2099-01-01T00:00:00+00:00",
+            area_desc="Test area",
+            url=f"https://example.test/alert-{i}",
+            polygon=Polygon([
+                (float(i), 0.0), (float(i) + 0.2, 0.0),
+                (float(i) + 0.2, 0.2), (float(i), 0.2),
+                (float(i), 0.0),
+            ]),
+        )
+        for i in range(count)
+    ]
+
+
+async def _seed_alerts_artifact(cache_dir, count: int = 2) -> None:
+    """Write a real alerts artifact with ``count`` entries."""
+    alerts_store = AlertsStore()
+    alerts_store.replace_all(_alert_entries(count))
+    assert write_alerts_artifacts(alerts_store, cache_dir) is True
+
+
+async def test_stdio_context_restores_alerts_artifact(tmp_path, monkeypatch):
+    """Artifact present -> the booted context exposes a loaded read-only store."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    _configure_settings(monkeypatch, cache_dir)
+    monkeypatch.setattr(settings, "storm_cells_enabled", False)
+    monkeypatch.setattr(settings, "alerts_enabled", True)
+    await _seed_state(cache_dir, with_storm_cells=False)
+    await _seed_alerts_artifact(cache_dir)
+
+    async with build_stdio_lifespan(None):
+        store = routes.alerts_store
+        assert isinstance(store, AlertsArtifactStore)
+        assert routes.alerts_enabled is True
+        assert store.count == 2
+        assert len(store.alerts()) == 2
+        payload = json.loads(store.response_bytes())
+        assert payload["type"] == "FeatureCollection"
+        assert len(payload["features"]) == 2
+
+
+async def test_stdio_context_alerts_disabled_is_none(tmp_path, monkeypatch):
+    """``alerts_enabled=False`` -> None even when the artifact exists."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    _configure_settings(monkeypatch, cache_dir)
+    monkeypatch.setattr(settings, "storm_cells_enabled", False)
+    await _seed_state(cache_dir, with_storm_cells=False)
+    await _seed_alerts_artifact(cache_dir)
+
+    async with build_stdio_lifespan(None):
+        assert routes.alerts_store is None
+        assert routes.alerts_enabled is False
+
+
+async def test_stdio_context_polls_alerts_artifact(tmp_path, monkeypatch):
+    """An artifact-only change reaches the store without a state.json write."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    _configure_settings(monkeypatch, cache_dir)
+    monkeypatch.setattr(settings, "storm_cells_enabled", False)
+    monkeypatch.setattr(settings, "alerts_enabled", True)
+    await _seed_state(cache_dir, with_storm_cells=False)
+    await _seed_alerts_artifact(cache_dir, count=1)
+
+    async with build_stdio_lifespan(None):
+        store = routes.alerts_store
+        assert isinstance(store, AlertsArtifactStore)
+        assert store.count == 1
+        mtime_before = state_mtime(cache_dir)
+
+        # Replace the artifact; state.json is never touched.
+        await _seed_alerts_artifact(cache_dir, count=3)
+
+        deadline = time.monotonic() + 5.0
+        while store.count != 3 and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+
+        assert store.count == 3
+        assert state_mtime(cache_dir) == mtime_before

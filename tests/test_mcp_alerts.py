@@ -8,7 +8,11 @@ import pytest
 from shapely.geometry import MultiPolygon, Polygon, shape
 
 from librewxr.api.models import AlertsResponse
-from librewxr.data.alerts_store import AlertEntry
+from librewxr.data.alerts_artifact import (
+    AlertsArtifactStore,
+    write_alerts_artifacts,
+)
+from librewxr.data.alerts_store import AlertEntry, AlertsStore
 from librewxr.mcp.alerts_query import alerts_within_radius
 
 
@@ -17,9 +21,18 @@ from librewxr.mcp.alerts_query import alerts_within_radius
 # ---------------------------------------------------------------------------
 
 class _MockAlertsStore:
-    """Minimal object satisfying the ``alerts``-property interface."""
+    """Minimal object satisfying the artifact-store query interface.
+
+    ``alerts_near_candidates`` returns the whole list: the conservative
+    superset the artifact store promises (the query stays the geometric
+    authority), so this doubles as the brute-force reference.
+    """
     def __init__(self, alerts):
         self.alerts = alerts
+
+    def alerts_near_candidates(self, lat, lon, radius_km):
+        return self.alerts
+
 _NEAR_POLY = Polygon([
     (-0.1, -0.1), (0.1, -0.1), (0.1, 0.1), (-0.1, 0.1),
     (-0.1, -0.1),
@@ -221,3 +234,124 @@ async def test_invalid_polygon_repaired_not_raised():
     assert feature.properties.title == "Bow Tie"
     assert feature.geometry is not None
     assert shape(feature.geometry).is_valid is True
+
+
+# ---------------------------------------------------------------------------
+# Artifact-store parity: conservative candidates vs. a brute-force list
+# ---------------------------------------------------------------------------
+
+def _box(x: float, y: float, size: float = 0.2) -> Polygon:
+    return Polygon([
+        (x, y), (x + size, y), (x + size, y + size), (x, y + size), (x, y),
+    ])
+
+
+def _parity_entries() -> list[AlertEntry]:
+    """A fixture with near/far, severity, expiry, polar and dateline entries."""
+    return [
+        _make_alert(
+            "New York Warning", "Severe", _box(-74.1, 40.6),
+            url="https://wmo.example.com/ny",
+        ),
+        _make_alert(
+            "Berlin Warning", "Severe", _box(13.3, 52.4),
+            url="https://wmo.example.com/berlin",
+        ),
+        _make_alert(
+            "Multi Area Warning", "Severe",
+            MultiPolygon([_box(-74.2, 40.5), _box(20.0, 40.0)]),
+            url="https://wmo.example.com/multi",
+        ),
+        _make_alert(
+            "Far Pacific Advisory", "Minor", _box(-160.0, -20.0),
+            url="https://wmo.example.com/pacific",
+        ),
+        _make_alert(
+            "Expired New York", "Severe", _box(-74.0, 40.7),
+            url="https://wmo.example.com/expired",
+            expires="2020-01-01T00:00:00+00:00",
+        ),
+        _make_alert(
+            "Minor New York", "Minor", _box(-74.05, 40.65),
+            url="https://wmo.example.com/minor-ny",
+        ),
+        _make_alert(
+            "Polar Warning", "Extreme", _box(-0.1, 89.35),
+            url="https://wmo.example.com/polar",
+        ),
+        _make_alert(
+            "Dateline Warning", "Severe",
+            MultiPolygon([_box(179.8, 0.0), _box(-179.95, 0.0)]),
+            url="https://wmo.example.com/dateline",
+        ),
+    ]
+
+
+def _titles(response: AlertsResponse) -> list[str]:
+    return [feature.properties.title for feature in response.features]
+
+
+@pytest.mark.mcp
+async def test_radius_query_parity_with_bruteforce(tmp_path):
+    """Artifact candidates + the shared query logic == a brute-force list.
+
+    The artifact store only narrows the candidate set (SQL bbox prefilter, or
+    a full scan where the envelope cannot be trusted); every filter, repair
+    and geometric test must produce identical output either way.
+    """
+    store = AlertsStore()
+    store.replace_all(_parity_entries())
+    assert write_alerts_artifacts(store, tmp_path) is True
+
+    artifact = AlertsArtifactStore(tmp_path)
+    assert artifact.maybe_reload() is True
+    brute = _MockAlertsStore(artifact.alerts())
+    assert brute.alerts, "fixture must survive the artifact round-trip"
+
+    queries = [
+        ("mid-latitude", 40.7, -74.0, 25.0, None),
+        ("europe", 52.5, 13.4, 50.0, None),
+        ("severity", 40.7, -74.0, 25.0, "Minor"),
+        ("polar", 89.0, 0.0, 100.0, None),
+        ("antimeridian", 0.0, 179.9, 5000.0, None),
+    ]
+    for label, lat, lon, radius_km, severity in queries:
+        expected = await alerts_within_radius(
+            brute, lat, lon, radius_km, severity,
+        )
+        actual = await alerts_within_radius(
+            artifact, lat, lon, radius_km, severity,
+        )
+        assert actual.model_dump() == expected.model_dump(), label
+
+    # The prefilter is genuinely narrowing on a mid-latitude query (so the
+    # parity above is not just two full scans).
+    assert len(artifact.alerts_near_candidates(40.7, -74.0, 25.0)) < artifact.count
+
+    mid_lat = await alerts_within_radius(artifact, 40.7, -74.0, 25.0)
+    assert "New York Warning" in _titles(mid_lat)
+    assert "Expired New York" not in _titles(mid_lat)
+
+    severity = await alerts_within_radius(artifact, 40.7, -74.0, 25.0, "Minor")
+    assert _titles(severity) == ["Minor New York"]
+
+    # Polar (< 85 deg latitude trust floor) -> the store full-scans, and the
+    # query still filters correctly.
+    polar = await alerts_within_radius(artifact, 89.0, 0.0, 100.0)
+    assert _titles(polar) == ["Polar Warning"]
+
+    # Antimeridian-crossing envelope -> full scan fallback, still correct.
+    dateline = await alerts_within_radius(artifact, 0.0, 179.9, 5000.0)
+    assert "Dateline Warning" in _titles(dateline)
+    assert "New York Warning" not in _titles(dateline)
+
+
+@pytest.mark.mcp
+async def test_radius_query_cold_artifact_is_empty(tmp_path):
+    """A cold (missing) artifact degrades to an empty collection, no raise."""
+    artifact = AlertsArtifactStore(tmp_path / "missing")
+    assert artifact.maybe_reload() is False
+
+    result = await alerts_within_radius(artifact, 40.7, -74.0, 25.0)
+    assert result.type == "FeatureCollection"
+    assert result.features == []

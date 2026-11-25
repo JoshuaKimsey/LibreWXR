@@ -10,7 +10,8 @@ Three layers:
   origin / ``/health``).
 * Push-path tests exercise ``WebSocketHub.on_state_refreshed`` /
   ``on_poll_tick`` directly against real stores (``FrameStore``,
-  ``AlertsStore``, ``LightningStore``) with a fake websocket duck-type.
+  ``AlertsArtifactStore``, ``LightningStore``) with a fake websocket
+  duck-type.
 * ``tests/test_config.py`` carries the two ``websocket_*`` settings
   cases.
 
@@ -33,6 +34,11 @@ from starlette.websockets import WebSocketDisconnect
 
 from librewxr.api import routes
 from librewxr.config import settings
+from librewxr.data.alerts_artifact import (
+    AlertsArtifactStore,
+    write_alerts_artifacts,
+)
+from librewxr.data.alerts_response import build_alerts_response
 from librewxr.data.alerts_store import AlertEntry, AlertsStore
 from librewxr.data.lightning_store import LightningStore
 from librewxr.data.regions import REGIONS, RegionDef
@@ -194,10 +200,9 @@ class TestConnectPath:
         actual = {k: v for k, v in data.items() if k != "generated"}
         assert actual == expected
 
-    def test_alerts_topic_snapshot(self, client, monkeypatch):
-        store = AlertsStore()
-        store.replace_all([_alert()])
-        monkeypatch.setattr(routes, "alerts_store", store)
+    def test_alerts_topic_snapshot(self, client, monkeypatch, tmp_path):
+        artifact = _artifact_store(tmp_path, [_alert()])
+        monkeypatch.setattr(routes, "alerts_store", artifact)
         monkeypatch.setattr(routes, "alerts_enabled", True)
 
         with client.websocket_connect(
@@ -220,6 +225,11 @@ class TestConnectPath:
         assert props["uri"] == "https://example.com/ws-alert"
         assert props["expires"]
         assert data["features"][0]["geometry"]["type"] == "Polygon"
+        # The snapshot IS the packaged /v2/alerts body built from the same
+        # entries (byte-for-byte, via the model).
+        assert data == json.loads(
+            build_alerts_response([_alert()]).model_dump_json()
+        )
 
     def test_unknown_topic_errors_and_connection_survives(self, client):
         with client.websocket_connect(
@@ -533,6 +543,16 @@ def _alert(
     )
 
 
+def _artifact_store(cache_dir, entries) -> AlertsArtifactStore:
+    """Write the alerts artifact for ``entries`` and load it once."""
+    store = AlertsStore()
+    store.replace_all(entries)
+    assert write_alerts_artifacts(store, cache_dir) is True
+    artifact = AlertsArtifactStore(cache_dir)
+    assert artifact.maybe_reload() is True
+    return artifact
+
+
 def _single_cell_array(
     centroid_row: float, centroid_col: float,
     area_km2: float = 120.0, max_dbz: float = 55.0,
@@ -591,50 +611,76 @@ class TestStateTopicPush:
         assert len(fake_a.sent) == 2
         assert len(fake_b.sent) == 2
 
-    async def test_alerts_push_skips_identical_payload(self, hub, monkeypatch):
-        store = AlertsStore()
-        store.replace_all([_alert()])
-        monkeypatch.setattr(routes, "alerts_store", store)
+    async def test_alerts_push_serves_packaged_response(
+        self, hub, tmp_path, monkeypatch,
+    ):
+        """The push payload is the artifact's packaged /v2/alerts body."""
+        artifact = _artifact_store(tmp_path, [_alert()])
+        monkeypatch.setattr(routes, "alerts_store", artifact)
         monkeypatch.setattr(routes, "alerts_enabled", True)
 
         fake = _FakeWebSocket()
         await _add_client(hub, fake, [TOPIC_ALERTS])
 
         await hub.on_state_refreshed()
-        await _wait_messages(fake, 1)
-        assert fake.sent[0]["topic"] == TOPIC_ALERTS
-        key_first = hub._topic_state[TOPIC_ALERTS][0]
+        messages = await _wait_messages(fake, 1)
+        assert messages[0]["type"] == "update"
+        assert messages[0]["topic"] == TOPIC_ALERTS
+        assert messages[0]["data"] == json.loads(
+            build_alerts_response([_alert()]).model_dump_json()
+        )
 
-        # Different entries -> different key -> different fingerprint -> push.
-        changed = [_alert(
+        # Unchanged artifact -> unchanged key and fingerprint -> no re-push.
+        await hub.on_state_refreshed()
+        await _quiesce()
+        assert len(fake.sent) == 1
+
+    async def test_alerts_artifact_only_change_rekeys_and_pushes(
+        self, hub, tmp_path, monkeypatch,
+    ):
+        """An artifact-only change re-keys the topic with no state.json write.
+
+        Nothing in this test writes or touches ``state.json``: the key path's
+        own ``maybe_reload`` is what surfaces the new ``last_updated``.
+        """
+        artifact = _artifact_store(tmp_path, [_alert()])
+        monkeypatch.setattr(routes, "alerts_store", artifact)
+        monkeypatch.setattr(routes, "alerts_enabled", True)
+
+        key_first = await topic_cache_key(TOPIC_ALERTS)
+        assert key_first == artifact.last_updated
+
+        fake = _FakeWebSocket()
+        await _add_client(hub, fake, [TOPIC_ALERTS])
+        await hub.on_state_refreshed()
+        await _wait_messages(fake, 1)
+
+        # Replace the artifact (different entries, different last_updated)
+        # without reloading the store by hand.
+        changed_entries = [_alert(
             url="https://example.com/ws-alert-2",
             event="Severe Thunderstorm Warning",
             severity="Severe",
             area="Orange, NY",
         )]
-        store.replace_all(changed)
-        # ``replace_all`` stamps ``time.time()``; nudge it so the key change
-        # is deterministic even on a coarse clock.
-        store.last_updated += 5.0
+        changed_store = AlertsStore()
+        changed_store.replace_all(changed_entries)
+        assert write_alerts_artifacts(changed_store, tmp_path) is True
+
+        key_second = await topic_cache_key(TOPIC_ALERTS)
+        assert key_second != key_first
+        assert key_second == pytest.approx(changed_store.last_updated)
 
         await hub.on_state_refreshed()
-        await _wait_messages(fake, 2)
-        assert len(fake.sent) == 2
-        assert fake.sent[1]["data"]["features"][0]["properties"]["title"] == (
+        messages = await _wait_messages(fake, 2)
+        assert len(messages) == 2
+        assert messages[1]["topic"] == TOPIC_ALERTS
+        assert messages[1]["data"] == json.loads(
+            build_alerts_response(changed_entries).model_dump_json()
+        )
+        assert messages[1]["data"]["features"][0]["properties"]["title"] == (
             "Severe Thunderstorm Warning"
         )
-        key_second = hub._topic_state[TOPIC_ALERTS][0]
-        assert key_second != key_first
-
-        # Same entries, new ``last_updated`` -> the payload is rebuilt (the
-        # key changed) but the fingerprint is identical -> no push.
-        store.replace_all(changed)
-        store.last_updated += 5.0
-        await hub.on_state_refreshed()
-        await _quiesce()
-        key_third = hub._topic_state[TOPIC_ALERTS][0]
-        assert key_third != key_second, "expected a rebuild on the new key"
-        assert len(fake.sent) == 2, "identical payload must not be pushed"
 
 
 # ---------------------------------------------------------------------------

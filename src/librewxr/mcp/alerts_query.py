@@ -5,6 +5,10 @@
 WMO + NWS store.  US zone-based alerts (e.g. Tornado Watches) are resolved
 to zone polygons at ingest, so no query-time NWS calls exist.
 
+Candidates come from the alerts artifact store's conservative spatial
+prefilter (``alerts_near_candidates``); the filters below are unchanged and
+stay the geometric authority.
+
 Uses an equirectangular cos(lat) approximation for the km-plane reprojection:
     x_km = (px - lon) * 111.0 * cos(radians(lat))
     y_km = (py - lat) * 111.0
@@ -58,8 +62,10 @@ async def alerts_within_radius(
 
     Parameters
     ----------
-    alerts_store : AlertsStore | None
-        The global alerts store (may be None when alerts are disabled).
+    alerts_store : AlertsArtifactStore | None
+        The alerts artifact store (None when alerts are disabled).  Only a
+        conservative candidate set is read from it; this function stays the
+        geometric authority for the radius test.
     lat : float
         Query latitude in degrees.
     lon : float
@@ -79,7 +85,10 @@ async def alerts_within_radius(
     if alerts_store is None:
         return AlertsResponse(type="FeatureCollection", features=[])
 
-    alerts = alerts_store.alerts
+    # Conservative candidate set from the artifact: the SQL bbox prefilter (or
+    # a full scan where the envelope cannot be trusted) in original order.
+    # Everything below stays the geometric authority.
+    alerts = alerts_store.alerts_near_candidates(lat, lon, radius_km)
     now_utc = int(time.time())
 
     features: list[GeoJSONFeature] = []

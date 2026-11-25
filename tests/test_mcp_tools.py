@@ -6,9 +6,15 @@ with mocked stores."""
 
 import numpy as np
 import pytest
+from shapely.geometry import Polygon
 
 from librewxr.api.models import AlertProperties, AlertsResponse, GeoJSONFeature
 from librewxr.config import settings
+from librewxr.data.alerts_artifact import (
+    AlertsArtifactStore,
+    write_alerts_artifacts,
+)
+from librewxr.data.alerts_store import AlertEntry, AlertsStore
 from librewxr.data.nowcast import NowcastFrame
 from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.mcp.sampling import dbz_to_rate_mmh
@@ -92,6 +98,9 @@ class MockNWPChain:
 class MockAlertsStore:
     def __init__(self, alerts):
         self.alerts = alerts
+
+    def alerts_near_candidates(self, lat, lon, radius_km):
+        return self.alerts
 
 
 # ---------------------------------------------------------------------------
@@ -342,3 +351,62 @@ async def test_get_active_alerts_delegates(monkeypatch):
     assert len(result.features) == 1
     assert result.features[0].properties.title == "Delegated Alert"
     assert result.features[0].properties.uri == "test:delegated"
+
+
+# ---------------------------------------------------------------------------
+# get_active_alerts against a real alerts artifact store
+# ---------------------------------------------------------------------------
+
+def _alert_entry(title, polygon, url, severity="Severe"):
+    return AlertEntry(
+        source_id=title,
+        event=title,
+        description=f"{title} description",
+        severity=severity,
+        effective="2026-01-01T00:00:00+00:00",
+        expires="2099-01-01T00:00:00+00:00",
+        area_desc="Test area",
+        url=url,
+        polygon=polygon,
+    )
+
+
+@pytest.mark.mcp
+async def test_get_active_alerts_artifact_store(tmp_path):
+    """The artifact store feeds the tool end to end (near in, far out)."""
+    near = _alert_entry(
+        "Near", Polygon([
+            (-100.1, 39.9), (-99.9, 39.9), (-99.9, 40.1), (-100.1, 40.1),
+            (-100.1, 39.9),
+        ]),
+        "https://example.test/near",
+    )
+    far = _alert_entry(
+        "Far", Polygon([
+            (-99.1, 39.9), (-98.9, 39.9), (-98.9, 40.1), (-99.1, 40.1),
+            (-99.1, 39.9),
+        ]),
+        "https://example.test/far",
+    )
+    store = AlertsStore()
+    store.replace_all([near, far])
+    assert write_alerts_artifacts(store, tmp_path) is True
+
+    artifact = AlertsArtifactStore(tmp_path)
+    assert artifact.maybe_reload() is True
+
+    result = await get_active_alerts(artifact, True, 40.0, -100.0)
+    assert [f.properties.title for f in result.features] == ["Near"]
+    assert result.features[0].properties.uri == "https://example.test/near"
+
+
+@pytest.mark.mcp
+async def test_get_active_alerts_cold_artifact_store(tmp_path):
+    """A cold (missing) artifact yields the empty collection, never a raise."""
+    artifact = AlertsArtifactStore(tmp_path / "missing")
+    assert artifact.maybe_reload() is False
+
+    result = await get_active_alerts(artifact, True, 40.0, -100.0)
+    assert isinstance(result, AlertsResponse)
+    assert result.type == "FeatureCollection"
+    assert result.features == []

@@ -28,7 +28,7 @@ from librewxr.data.master_state import (
 from librewxr.data.nowcast import NowcastStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.store import FrameStore
-from librewxr.data.alerts_store import AlertsStore
+from librewxr.data.alerts_artifact import AlertsArtifactStore
 from librewxr.data.lightning_store import LightningStore
 from librewxr.data.storm_cells import StormCellStore
 from librewxr.api import routes
@@ -49,7 +49,7 @@ class McpContext:
     nwp_grids_by_slug: dict = field(default_factory=dict)
     nwp_chain: NWPChain | None = None
     nowcast_store: NowcastStore | None = None
-    alerts_store: AlertsStore | None = None
+    alerts_store: AlertsArtifactStore | None = None
     enabled_regions: list[str] = field(default_factory=list)
     alerts_enabled: bool = False
     poller_task: asyncio.Task | None = None
@@ -137,7 +137,6 @@ async def build_stdio_lifespan(mcp_instance):
         if (settings.nowcast_enabled or settings.arrow_flow_enabled)
         else None
     )
-    alerts_store = AlertsStore() if settings.alerts_enabled else None
     storm_cell_store = (
         # The pipeline owns the shared storm-cells dir and may be
         # mid-write; a boot here must never delete its in-flight tmp
@@ -146,6 +145,16 @@ async def build_stdio_lifespan(mcp_instance):
         if settings.storm_cells_enabled
         else None
     )
+    # No state.json section (the pipeline owns writing the artifact, and the
+    # file itself IS the cross-process handoff), so the alerts store stays OUT
+    # of the ``stores`` dict below -- exactly like the lightning store.
+    alerts_store = (
+        AlertsArtifactStore(cache_dir) if settings.alerts_enabled else None
+    )
+    if alerts_store is not None:
+        # Opportunistic first load (cheap stat): the pipeline may not have
+        # written the artifact yet, in which case this is a no-op.
+        alerts_store.maybe_reload()
     # No state.json section and no __getstate__: the on-disk artifact IS the
     # cross-process handoff, so this store stays OUT of the ``stores`` dict
     # below (it is not part of the master snapshot).
@@ -163,7 +172,6 @@ async def build_stdio_lifespan(mcp_instance):
         **nwp_grids_by_slug,
         "nowcast_store": nowcast_store,
         "storm_cell_store": storm_cell_store,
-        "alerts_store": alerts_store,
     }
 
     # ---- Load snapshot ----------------------------------------------------
@@ -188,7 +196,6 @@ async def build_stdio_lifespan(mcp_instance):
     }
     nowcast_store = stores["nowcast_store"]
     storm_cell_store = stores["storm_cell_store"]
-    alerts_store = stores["alerts_store"]
 
     # ---- Coverage masks --------------------------------------------------
     station_map, range_overrides, coverage_polygons = collect_radar_coverage_metadata(
@@ -256,6 +263,15 @@ async def build_stdio_lifespan(mcp_instance):
                 return
             except asyncio.TimeoutError:
                 pass
+            # The alerts artifact is not part of the snapshot: refresh it on
+            # every tick (cheap stat unless the file changed) so stdio clients
+            # see artifact changes without waiting for a state.json write.
+            # Best-effort, mirroring the loop's existing error handling.
+            if alerts_store is not None:
+                try:
+                    alerts_store.maybe_reload()
+                except Exception:
+                    logger.exception("Failed to reload the alerts artifact")
             mtime = state_mtime(cache_dir)
             if mtime is None or mtime == last_mtime:
                 continue

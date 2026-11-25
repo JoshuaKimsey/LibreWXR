@@ -9,19 +9,27 @@ exactly the bytes ``/public/weather-maps.json``, ``/v2/alerts``,
 ``/v2/storm-cells``, and ``/v2/lightning`` would return.
 
 Builders read the ``routes`` module globals at call time (the codebase
-has no dependency injection).  Everything expensive -- the shapely union
-in the alerts builder, the per-strike conversion loop, Pydantic
-serialization -- runs through ``asyncio.to_thread`` so the render loop
-that serves tiles never stalls.
+has no dependency injection).  Everything expensive -- the alerts
+artifact read, the per-strike conversion loop, Pydantic serialization --
+runs through ``asyncio.to_thread`` so the render loop that serves tiles
+never stalls.
+
+The ``alerts`` topic serves the artifact's packaged ``/v2/alerts`` response
+bytes instead of rebuilding the collection from entries: the shapely union
+/ simplify pass already ran once in the pipeline, and the bytes are the
+exact HTTP body.
 """
 
 import asyncio
+import logging
 import time
 
 from librewxr.api import routes
 from librewxr.colors import schemes
 from librewxr.config import settings
 from librewxr.mcp import tools as mcp_tools
+
+log = logging.getLogger(__name__)
 
 TOPIC_WEATHER_MAPS = "weather-maps"
 TOPIC_ALERTS = "alerts"
@@ -106,7 +114,19 @@ async def topic_cache_key(topic: str):
             schemes.current_version(),
         )
     if topic == TOPIC_ALERTS:
-        return routes.alerts_store.last_updated if routes.alerts_store is not None else None
+        store = routes.alerts_store
+        if store is None:
+            return None
+        # The artifact store refreshes from its own on-disk file, so an
+        # artifact-only change (no ``state.json`` write) must re-key the
+        # topic here.  ``maybe_reload`` never raises and is a cheap stat
+        # when nothing changed; the guard is belt-and-braces for a store
+        # that predates the artifact wiring.
+        try:
+            store.maybe_reload()
+        except Exception:  # pragma: no cover - never-raises contract
+            log.warning("Failed to reload the alerts artifact", exc_info=True)
+        return store.last_updated
     if topic == TOPIC_STORM_CELLS:
         return (
             routes.storm_cell_store.cells_version
@@ -140,12 +160,14 @@ async def build_topic_snapshot(topic: str) -> tuple[str, str]:
         return await asyncio.to_thread(_render)
 
     if topic == TOPIC_ALERTS:
-        # Sync property; a shallow copy of the entry list.
-        alerts = routes.alerts_store.alerts
+        store = routes.alerts_store
 
         def _render() -> tuple[str, str]:
-            model = routes.build_alerts_response(alerts)
-            payload_json = model.model_dump_json()
+            payload_json = store.response_bytes().decode("utf-8")
+            if not payload_json:
+                # Cold artifact: subscribers still get a valid empty
+                # FeatureCollection instead of an empty (unparsable) frame.
+                payload_json = routes.build_alerts_response([]).model_dump_json()
             return payload_json, payload_json
 
         return await asyncio.to_thread(_render)
