@@ -541,6 +541,54 @@ class TestHealthEndpoint:
         # automatically; it is None while the store is inactive.
         assert data["coord_caches"]["store"] is None
 
+    def test_health_alerts_section_reflects_artifact_store(self, client, tmp_path, monkeypatch):
+        """``/health``'s alerts block reads the artifact store's scalars.
+
+        Render workers now own a reader-side ``AlertsArtifactStore`` instead
+        of a snapshot-managed ``AlertsStore``; the section's surface is
+        unchanged (``enabled`` / ``count`` / ``last_updated`` / ``ingest_ok``).
+        """
+        from shapely.geometry import Polygon
+
+        from librewxr.data.alerts_artifact import (
+            AlertsArtifactStore,
+            write_alerts_artifacts,
+        )
+        from librewxr.data.alerts_store import AlertEntry, AlertsStore
+
+        producer = AlertsStore()
+        producer.replace_all([
+            AlertEntry(
+                source_id="test-1",
+                event="High Wind Warning",
+                description="Strong winds expected",
+                severity="Severe",
+                effective="2026-05-07T01:00:00-08:00",
+                expires="2099-05-07T18:00:00-08:00",
+                area_desc="San Francisco, CA",
+                url="https://example.com/alert2",
+                polygon=Polygon([
+                    (-122.5, 37.0), (-121.5, 37.0), (-121.5, 38.0),
+                    (-122.5, 38.0), (-122.5, 37.0),
+                ]),
+            ),
+        ])
+        assert write_alerts_artifacts(producer, tmp_path) is True
+        store = AlertsArtifactStore(tmp_path)
+        assert store.maybe_reload() is True
+
+        monkeypatch.setattr(routes, "alerts_store", store)
+        monkeypatch.setattr(routes, "alerts_enabled", True)
+
+        c, _, _ = client
+        resp = c.get("/health")
+        assert resp.status_code == 200
+        section = resp.json()["alerts"]
+        assert section["enabled"] is True
+        assert section["count"] == 1
+        assert section["ingest_ok"] is True
+        assert section["last_updated"] == int(producer.last_updated)
+
     def test_health_reports_running_version(self, client):
         """``/health`` advertises the running package version."""
         c, _, _ = client

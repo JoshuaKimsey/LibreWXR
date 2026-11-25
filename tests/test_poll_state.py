@@ -10,6 +10,7 @@ existing snapshot tests in ``tests/test_data_pipeline.py``.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -464,3 +465,125 @@ def test_apply_palette_invalid_artifact_keeps_current(tmp_path, monkeypatch, pac
     ) is False
     assert schemes.current_version() == before
     assert routes.palette_info is None
+
+
+# ---------------------------------------------------------------------------
+# Per-tick alerts artifact refresh
+# ---------------------------------------------------------------------------
+
+#: Every ``routes`` attribute the render lifespan writes; snapshotted so an
+#: in-test lifespan run cannot leak its stores (or its teardown Nones) into
+#: the rest of the suite.
+_LIFESPAN_ROUTES_ATTRS = (
+    "frame_store", "tile_cache", "shared_tile_store", "nwp_grids",
+    "ecmwf_grid", "nwp_chain", "satellite_grids", "nowcast_store",
+    "storm_cell_store", "lightning_store", "lightning_enabled",
+    "tile_request_tracker", "start_time", "enabled_regions", "radar_cache",
+    "radar_fetcher", "alerts_store", "alerts_fetcher", "alerts_enabled",
+    "precip_mask", "memory_monitor", "ws_hub", "palette_info",
+    "present_executor", "io_executor",
+)
+
+
+@pytest.fixture
+def restore_routes_state(monkeypatch):
+    for name in _LIFESPAN_ROUTES_ATTRS:
+        monkeypatch.setattr(routes, name, getattr(routes, name))
+    yield
+
+
+async def test_poll_tick_reloads_alerts_artifact_without_state_write(
+    tmp_path, monkeypatch, restore_routes_state,
+):
+    """An alerts artifact rewrite is picked up with state.json untouched.
+
+    The pipeline rewrites ``<cache_dir>/alerts/current.db`` on the alerts
+    fetch cadence and never touches state.json for it, so the poller checks
+    the artifact every tick -- before, and independently of, the snapshot
+    mtime early-out.  Observable through the ``routes.alerts_store`` the
+    lifespan wires (its scalars only leave the cold state via reload).
+    """
+    from librewxr.config import settings
+    from librewxr.data.alerts_artifact import write_alerts_artifacts
+    from librewxr.data.alerts_store import AlertEntry, AlertsStore
+    from librewxr.data.master_state import STATE_FILENAME, dump_state
+    from librewxr.data.store import FrameStore, RadarFrame
+    from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
+    from shapely.geometry import Polygon
+
+    from librewxr import main as main_module
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+
+    # Pipeline side: one snapshot, written once and never again.
+    frame_store = FrameStore(max_frames=4, cache_dir=cache_dir)
+    grid = np.zeros((COMPOSITE_HEIGHT, COMPOSITE_WIDTH), dtype=np.uint8)
+    await frame_store.add_frame(RadarFrame(timestamp=42, regions={"USCOMP": grid}))
+    dump_state({"frame_store": frame_store}, cache_dir)
+
+    monkeypatch.setattr(settings, "render_only", True)
+    monkeypatch.setattr(settings, "cache_dir", str(cache_dir))
+    # Optional stores off: this test only cares about the alerts tick.
+    monkeypatch.setattr(settings, "satellite_enabled", False)
+    monkeypatch.setattr(settings, "nowcast_enabled", False)
+    monkeypatch.setattr(settings, "arrow_flow_enabled", False)
+    monkeypatch.setattr(settings, "storm_cells_enabled", False)
+    monkeypatch.setattr(settings, "lightning_enabled", False)
+    monkeypatch.setattr(settings, "websocket_enabled", False)
+    monkeypatch.setattr(settings, "alerts_enabled", True)
+    monkeypatch.setattr(settings, "state_wait_timeout", 5.0)
+    monkeypatch.setattr(settings, "state_poll_interval", 0.05)
+    # Keeps the coord warm pass negligible; the jitter constant is
+    # module-level so the test can neutralize the 0-15 s stall.
+    monkeypatch.setattr(settings, "warm_coord_zoom", 2)
+    monkeypatch.setattr(main_module, "_WARM_JITTER_MAX_S", 0.0)
+
+    class _StubApp:
+        pass
+
+    try:
+        async with main_module._render_only_lifespan(_StubApp()):
+            store = routes.alerts_store
+            assert store is not None
+            # Cold: the pipeline has not written an artifact yet.
+            assert store.last_updated == 0.0
+            state_path = cache_dir / STATE_FILENAME
+            state_mtime = state_path.stat().st_mtime_ns
+
+            # Pipeline side: write the artifact only -- state.json untouched.
+            writer = AlertsStore()
+            writer.replace_all([
+                AlertEntry(
+                    source_id="test-1",
+                    event="High Wind Warning",
+                    description="Strong winds expected",
+                    severity="Severe",
+                    effective="2026-05-07T01:00:00-08:00",
+                    expires="2099-05-07T18:00:00-08:00",
+                    area_desc="San Francisco, CA",
+                    url="https://example.com/alert2",
+                    polygon=Polygon([
+                        (-122.5, 37.0), (-121.5, 37.0), (-121.5, 38.0),
+                        (-122.5, 38.0), (-122.5, 37.0),
+                    ]),
+                ),
+            ])
+            assert write_alerts_artifacts(writer, cache_dir) is True
+            assert state_path.stat().st_mtime_ns == state_mtime
+
+            # Next tick (0.05 s, jittered 0.5-1.5x) reloads it.
+            deadline = asyncio.get_running_loop().time() + 5.0
+            while store.last_updated == 0.0:
+                assert asyncio.get_running_loop().time() < deadline, (
+                    "poller never reloaded the alerts artifact"
+                )
+                await asyncio.sleep(0.02)
+
+            assert store.last_updated == pytest.approx(writer.last_updated)
+            assert store.count == 1
+            assert store.fetch_success is True
+            # And the refresh was driven by the artifact, not the snapshot.
+            assert state_path.stat().st_mtime_ns == state_mtime
+    finally:
+        frame_store.cleanup()

@@ -12,7 +12,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from shapely.errors import GEOSException
-from shapely.geometry import MultiPolygon, Point, Polygon, shape
+from shapely.geometry import MultiPolygon, Point, Polygon, box, shape
 
 from librewxr.api import routes
 from librewxr.data.alert_geocodes import (
@@ -38,6 +38,11 @@ from librewxr.data.alerts_fetcher import (
     _parse_cap_time,
     _rss_item_links,
 )
+from librewxr.data.alerts_artifact import (
+    AlertsArtifactStore,
+    write_alerts_artifacts,
+)
+from librewxr.data.alerts_response import build_alerts_response
 from librewxr.data.alerts_store import AlertEntry, AlertsStore, ensure_valid_polygon
 from librewxr.data.store import FrameStore
 from librewxr.tiles.cache import TileCache
@@ -127,11 +132,38 @@ def alerts_store(sample_alert_entries):
     return store
 
 
+def _artifact_store(entries, cache_dir) -> AlertsArtifactStore:
+    """Write a real alerts artifact for ``entries`` and open a reader on it.
+
+    Mirrors the deployment wiring: the pipeline produces the SQLite artifact
+    from an ``AlertsStore`` and render workers only ever read it.
+    """
+    producer = AlertsStore()
+    producer.replace_all(entries)
+    assert write_alerts_artifacts(producer, cache_dir) is True
+    store = AlertsArtifactStore(cache_dir)
+    assert store.maybe_reload() is True
+    return store
+
+
 @pytest.fixture
-def test_app(alerts_store):
+def artifact_store(tmp_path, sample_alert_entries):
+    """Render-side store backed by a written artifact."""
+    return _artifact_store(sample_alert_entries, tmp_path)
+
+
+def _expected_json(entries, simplify: float = 1000.0) -> dict:
+    """The response body ``GET /v2/alerts`` must produce for ``entries``."""
+    return json.loads(
+        build_alerts_response(entries, simplify=simplify).model_dump_json()
+    )
+
+
+@pytest.fixture
+def test_app(artifact_store):
     app = FastAPI()
     app.include_router(routes.router)
-    routes.alerts_store = alerts_store
+    routes.alerts_store = artifact_store
     routes.alerts_enabled = True
     routes.frame_store = FrameStore(max_frames=2)
     routes.tile_cache = TileCache(max_mb=10)
@@ -234,7 +266,7 @@ class TestAlertsEndpoint:
         assert resp.status_code == 503
         routes.alerts_enabled = True
 
-    async def test_expired_alerts_filtered(self, alerts_store):
+    async def test_expired_alerts_filtered(self, tmp_path):
         expired_alert = AlertEntry(
             source_id="test",
             event="Expired",
@@ -246,11 +278,11 @@ class TestAlertsEndpoint:
             url="https://example.com/expired",
             polygon=Polygon([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)]),
         )
-        alerts_store.replace_all([expired_alert])
+        store = _artifact_store([expired_alert], tmp_path)
 
         app = FastAPI()
         app.include_router(routes.router)
-        routes.alerts_store = alerts_store
+        routes.alerts_store = store
         routes.alerts_enabled = True
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -286,6 +318,92 @@ class TestAlertsEndpoint:
         assert data["alerts"]["enabled"] is True
         assert data["alerts"]["count"] == 3
         assert data["alerts"]["ingest_ok"] is True
+
+
+@pytest.mark.alerts
+class TestAlertsArtifactEndpoint:
+    """The artifact-backed ``/v2/alerts`` paths.
+
+    The route serves the pipeline-packaged whole-collection body for the
+    no-params default-simplify request and falls back to store-driven scans for
+    every filtered / simplified variant; both must match the pre-artifact
+    contract exactly.
+    """
+
+    async def test_no_params_serves_packaged_response(self, client, artifact_store):
+        resp = await client.get("/v2/alerts")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/json"
+        # Byte-for-byte the packaged artifact body: the fast path never scans.
+        assert resp.content == artifact_store.response_bytes()
+        # JSON-equal (not byte-equal) to the scan result -- the packaged bytes
+        # are compact and leave non-ascii unescaped, while FastAPI's default
+        # serialization does not.
+        assert resp.json() == _expected_json(artifact_store.alerts())
+
+    async def test_point_lookup_matches_brute_force(self, client, artifact_store):
+        entries = artifact_store.alerts()
+        for lat, lon in ((40.7, -74.0), (37.5, -122.0), (0.0, 0.0)):
+            resp = await client.get(f"/v2/alerts?lat={lat}&lon={lon}")
+            assert resp.status_code == 200
+            point = Point(lon, lat)
+            expected = [
+                a for a in entries
+                if a.polygon is not None and a.polygon.intersects(point)
+            ]
+            assert resp.json() == _expected_json(expected)
+
+    async def test_bbox_matches_brute_force(self, client, artifact_store):
+        entries = artifact_store.alerts()
+        for w, s, e, n in ((-125.0, 35.0, -70.0, 45.0), (0.0, 0.0, 10.0, 10.0)):
+            resp = await client.get(f"/v2/alerts?bbox={w},{s},{e},{n}")
+            assert resp.status_code == 200
+            bbox_poly = box(w, s, e, n)
+            expected = [
+                a for a in entries
+                if a.polygon is not None and a.polygon.intersects(bbox_poly)
+            ]
+            assert resp.json() == _expected_json(expected)
+
+    async def test_simplify_zero_serves_unsimplified_geometry(
+        self, client, artifact_store,
+    ):
+        resp = await client.get("/v2/alerts?simplify=0")
+        assert resp.status_code == 200
+        entries = artifact_store.alerts()
+        # Non-default simplify -> full scan, no packaged body.
+        assert resp.json() == _expected_json(entries, simplify=0)
+        # The NY ring keeps every stored vertex (the default 1000 m tolerance
+        # would drop some).
+        entry = next(a for a in entries if a.url == "https://example.com/alert1")
+        feature = next(
+            f for f in resp.json()["features"]
+            if f["properties"]["uri"] == "https://example.com/alert1"
+        )
+        ring = feature["geometry"]["coordinates"][0]
+        assert len(ring) == len(list(entry.polygon.exterior.coords))
+
+    async def test_disabled_store_returns_503(self, client, monkeypatch):
+        monkeypatch.setattr(routes, "alerts_store", None)
+        resp = await client.get("/v2/alerts")
+        assert resp.status_code == 503
+
+    async def test_cold_store_serves_empty_feature_collection(self, tmp_path):
+        # No artifact on disk: the packaged body is b"", so the route falls
+        # through to the scan path and serves an empty collection (200), not
+        # an error.  Same contract as a live-but-empty store.
+        store = AlertsArtifactStore(tmp_path / "cold")
+        assert store.response_bytes() == b""
+
+        app = FastAPI()
+        app.include_router(routes.router)
+        routes.alerts_store = store
+        routes.alerts_enabled = True
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/v2/alerts")
+        assert resp.status_code == 200
+        assert resp.json() == {"type": "FeatureCollection", "features": []}
 
 
 @pytest.mark.alerts
@@ -327,9 +445,8 @@ class TestMultiAreaAlertGrouping:
             ),
         ]
 
-    async def _get(self, entries, path):
-        store = AlertsStore()
-        store.replace_all(entries)
+    async def _get(self, entries, path, cache_dir):
+        store = _artifact_store(entries, cache_dir)
         app = FastAPI()
         app.include_router(routes.router)
         routes.alerts_store = store
@@ -338,8 +455,10 @@ class TestMultiAreaAlertGrouping:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             return await ac.get(path)
 
-    async def test_global_groups_by_url_and_unions_polygons(self):
-        resp = await self._get(self._make_multi_area_entries(), "/v2/alerts")
+    async def test_global_groups_by_url_and_unions_polygons(self, tmp_path):
+        resp = await self._get(
+            self._make_multi_area_entries(), "/v2/alerts", tmp_path,
+        )
         assert resp.status_code == 200
         data = resp.json()
         # Two regions sharing one url -> exactly one feature
@@ -356,9 +475,9 @@ class TestMultiAreaAlertGrouping:
         assert merged.contains(Point(21.0, 42.0))  # inside Region A
         assert merged.contains(Point(27.0, 44.0))  # inside Region B
 
-    async def test_point_lookup_returns_only_matching_region(self):
+    async def test_point_lookup_returns_only_matching_region(self, tmp_path):
         resp = await self._get(
-            self._make_multi_area_entries(), "/v2/alerts?lat=42.0&lon=21.0"
+            self._make_multi_area_entries(), "/v2/alerts?lat=42.0&lon=21.0", tmp_path,
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -372,7 +491,7 @@ class TestMultiAreaAlertGrouping:
         assert feature["geometry"] is not None
         assert feature["geometry"]["type"] == "Polygon"
 
-    async def test_null_polygon_group_collapses_to_one_null_feature(self):
+    async def test_null_polygon_group_collapses_to_one_null_feature(self, tmp_path):
         entries = [
             AlertEntry(
                 source_id="fr-meteofrance-xx",
@@ -397,7 +516,7 @@ class TestMultiAreaAlertGrouping:
                 polygon=None,
             ),
         ]
-        resp = await self._get(entries, "/v2/alerts")
+        resp = await self._get(entries, "/v2/alerts", tmp_path)
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["features"]) == 1
@@ -503,9 +622,7 @@ class TestInvalidPolygonHandling:
         )
 
     @staticmethod
-    async def _get(entries, path):
-        store = AlertsStore()
-        store.replace_all(entries)
+    async def _get(store, path):
         app = FastAPI()
         app.include_router(routes.router)
         routes.alerts_store = store
@@ -530,10 +647,13 @@ class TestInvalidPolygonHandling:
 
         assert ensure_valid_polygon(None) is None
 
-    async def test_endpoint_renders_invalid_polygon_alert(self):
+    async def test_endpoint_renders_invalid_polygon_alert(self, tmp_path):
         """Regression: a bow-tie alert in the store must not 500 /v2/alerts."""
         resp = await self._get(
-            [self._entry("https://example.com/bowtie", self._bow_tie())],
+            _artifact_store(
+                [self._entry("https://example.com/bowtie", self._bow_tie())],
+                tmp_path,
+            ),
             "/v2/alerts",
         )
         assert resp.status_code == 200
@@ -543,7 +663,7 @@ class TestInvalidPolygonHandling:
         assert geometry is not None
         assert shape(geometry).is_valid is True
 
-    async def test_union_failure_falls_back_to_first_polygon(self, monkeypatch):
+    async def test_union_failure_falls_back_to_first_polygon(self, monkeypatch, tmp_path):
         """A union that still raises must degrade to the first polygon, not 500."""
         poly_a = Polygon([
             (20.0, 41.0), (22.0, 41.0), (22.0, 43.0), (20.0, 43.0), (20.0, 41.0),
@@ -556,14 +676,19 @@ class TestInvalidPolygonHandling:
             self._entry("https://example.com/union", poly_b, area_desc="Region B"),
         ]
 
+        # Build the artifact before the union is broken: the writer itself
+        # unions the group into the packaged response.
+        store = _artifact_store(entries, tmp_path)
+
         def _explode(*args, **kwargs):
             raise GEOSException("TopologyException: side location conflict")
 
-        # get_alerts imports unary_union lazily inside the function, so the
-        # attribute lookup happens at call time and this patch takes effect.
+        # build_alerts_response imports unary_union lazily inside the
+        # function, so the attribute lookup happens at call time (also in
+        # the worker thread) and this patch takes effect.
         monkeypatch.setattr("shapely.ops.unary_union", _explode)
 
-        resp = await self._get(entries, "/v2/alerts?simplify=0")
+        resp = await self._get(store, "/v2/alerts?simplify=0")
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["features"]) == 1

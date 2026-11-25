@@ -1978,13 +1978,23 @@ async def get_alerts(
     if not alerts_enabled or alerts_store is None:
         raise HTTPException(status_code=503, detail="Alerts not available")
 
-    alerts = alerts_store.alerts
+    # Fast path: the artifact packages the serialized whole-collection body
+    # for the default simplify, so the common no-params request never re-runs
+    # the shapely union / simplify pass.  A cold artifact returns b"" -- fall
+    # through to the scan path so it still serves an empty FeatureCollection
+    # exactly like a live-but-empty store.
+    if lat is None or lon is None:
+        if bbox is None and simplify == 1000.0:
+            packaged = await asyncio.to_thread(alerts_store.response_bytes)
+            if packaged:
+                # Returning a Response bypasses response_model serialization
+                # on purpose: the bytes are already the packaged
+                # ``AlertsResponse`` JSON built by the pipeline.
+                return Response(content=packaged, media_type="application/json")
 
     # Filter by point
     if lat is not None and lon is not None:
-        from shapely.geometry import Point
-        point = Point(lon, lat)
-        alerts = [a for a in alerts if a.polygon is not None and a.polygon.intersects(point)]
+        alerts = await asyncio.to_thread(alerts_store.alerts_at_point, lon, lat)
     # Filter by bbox
     elif bbox is not None:
         parts = bbox.split(",")
@@ -1996,11 +2006,13 @@ async def get_alerts(
             raise HTTPException(status_code=400, detail="bbox values must be numeric")
         if w < -180 or e > 180 or s < -90 or n > 90 or w > e or s > n:
             raise HTTPException(status_code=400, detail="bbox values out of range")
-        from shapely.geometry import box
-        bbox_poly = box(w, s, e, n)
-        alerts = [a for a in alerts if a.polygon is not None and a.polygon.intersects(bbox_poly)]
+        alerts = await asyncio.to_thread(alerts_store.alerts_in_bbox, w, s, e, n)
+    else:
+        # No spatial filter and a non-default simplify: full scan.
+        alerts = await asyncio.to_thread(alerts_store.alerts)
 
-    return build_alerts_response(alerts, simplify=simplify)
+    # The union / simplify pass is the expensive part; keep it off the loop.
+    return await asyncio.to_thread(build_alerts_response, alerts, simplify=simplify)
 
 
 # ---------------------------------------------------------------------------

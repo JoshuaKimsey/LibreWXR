@@ -30,6 +30,7 @@ from librewxr.api.tile_history import router as tile_history_router
 from librewxr.colors import schemes
 from librewxr.colors.schemes import apply_external_table
 from librewxr.config import resolve_cache_dir, settings
+from librewxr.data.alerts_artifact import AlertsArtifactStore
 from librewxr.data.coverage import (
     build_coverage_masks,
     build_feather_masks,
@@ -58,7 +59,6 @@ from librewxr.sources import (
     nwp_grid_slug,
     satellite_source_slug,
 )
-from librewxr.data.alerts_store import AlertsStore
 from librewxr.memory import (
     MemoryMonitor,
     describe_cgroup_memory,
@@ -584,7 +584,16 @@ async def _render_only_lifespan(app: FastAPI):
         if settings.lightning_enabled
         else None
     )
-    alerts_store = AlertsStore() if settings.alerts_enabled else None
+    alerts_store = (
+        # Alerts are reader-owned too: the pipeline writes the SQLite
+        # artifact (``alerts/current.db``) on its own fetch cadence and
+        # the poller reloads it independently of state.json.  Deliberately
+        # NOT in the ``stores`` dict below -- it has no state.json section
+        # (no __getstate__), so adding it would crash the snapshot writer.
+        AlertsArtifactStore(cache_dir)
+        if settings.alerts_enabled
+        else None
+    )
 
     # Per-timestamp global precip mask, built by the pipeline and
     # snapshotted into state.json.  Re-mmaps the mask files read-only;
@@ -597,7 +606,6 @@ async def _render_only_lifespan(app: FastAPI):
         **satellite_grids_by_slug,
         "nowcast_store": nowcast_store,
         "storm_cell_store": storm_cell_store,
-        "alerts_store": alerts_store,
         "precip_mask": precip_mask_store,
     }
 
@@ -634,7 +642,6 @@ async def _render_only_lifespan(app: FastAPI):
     ecmwf_grid = nwp_grids_by_slug.get("ecmwf_grid")
     nowcast_store = stores["nowcast_store"]
     storm_cell_store = stores["storm_cell_store"]
-    alerts_store = stores["alerts_store"]
 
     # The enabled set includes every always-on contribution region (the
     # coarse global observed tier stays fetchable/renderable even under a
@@ -778,10 +785,12 @@ async def _render_only_lifespan(app: FastAPI):
     routes.enabled_regions = enabled
     routes.radar_cache = None
     routes.radar_fetcher = None
-    # Alerts ride the master_state snapshot — pipeline owns the WMO ingest,
-    # render workers just read alerts_store via apply_state.  alerts_fetcher
-    # stays None here (no duplicate fetching), and alerts_enabled tracks
-    # whether the snapshot actually included an alerts_store entry.
+    # Alerts are reader-owned: the artifact store reads the pipeline's
+    # SQLite artifact by path on demand, so a cold render worker is never
+    # blocked on a boot snapshot and refreshes on its own poll tick (the
+    # artifact changes on the alerts fetch cadence, without a state.json
+    # write).  alerts_fetcher stays None here (no duplicate fetching);
+    # alerts_enabled tracks whether alerts are configured for this worker.
     routes.alerts_store = alerts_store
     routes.alerts_fetcher = None
     routes.alerts_enabled = alerts_store is not None
@@ -856,6 +865,25 @@ async def _render_only_lifespan(app: FastAPI):
                         await ws_hub.on_state_refreshed()
                     except Exception:
                         logger.exception("WebSocket hub refresh failed")
+            # Alerts artifact tick, also before the "nothing changed"
+            # early-out: the pipeline rewrites ``alerts/current.db`` on the
+            # alerts fetch cadence without a state.json write, so the
+            # store's own mtime stamp is the only signal of new content.
+            # Guarded like the hub tick above -- an unguarded error here
+            # would kill the poller task and silently stop all state
+            # refresh (the hub call is a cheap no-op for topics whose key
+            # didn't change).
+            if alerts_store is not None:
+                try:
+                    reloaded = await asyncio.to_thread(alerts_store.maybe_reload)
+                except Exception:
+                    logger.exception("Alerts artifact refresh failed")
+                else:
+                    if reloaded and ws_hub is not None:
+                        try:
+                            await ws_hub.on_state_refreshed()
+                        except Exception:
+                            logger.exception("WebSocket hub refresh failed")
             if mtime is None or mtime == last_mtime:
                 continue
             try:
