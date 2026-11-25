@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Optional
 
@@ -601,16 +602,34 @@ class WMOAlertsFetcher:
         interval: int = 300,
         timeout: float = 30.0,
         concurrency: int = 5,
+        on_store_update: Optional[Callable[[], Awaitable[None]]] = None,
     ):
         self._store = store
         self._interval = interval
         self._timeout = timeout
         self._concurrency = concurrency
+        self._on_store_update = on_store_update
         self._client: Optional[httpx.AsyncClient] = None
         self._task: Optional[asyncio.Task] = None
         self._geocode_providers = build_default_providers()
         self._tables_ready = asyncio.Event()
         self._cache_dir = Path(cache_dir) if cache_dir else None
+
+    async def _notify_store_update(self) -> None:
+        """Run the post-update hook after a store mutation.
+
+        Called after every ``replace_all`` — successful, empty, or degraded
+        (``fetch_success=False``) — so the pipeline's alerts artifact never
+        lags the in-memory store.  The hook owns its own failure handling;
+        this guard exists so a raising hook can never break the fetch loop
+        that must keep running to recover the store.
+        """
+        if self._on_store_update is None:
+            return
+        try:
+            await self._on_store_update()
+        except Exception:
+            logger.exception("Alerts post-update hook failed")
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -834,6 +853,7 @@ class WMOAlertsFetcher:
             nws_alerts = await self._await_nws(nws_task)
             kept = [a for a in self._store.alerts if a.source_id != "nws-api"]
             self._store.replace_all(kept + nws_alerts, fetch_success=False)
+            await self._notify_store_update()
             return
         sources_data = resp.json()
         sources = sources_data.get("sources", [])
@@ -845,6 +865,7 @@ class WMOAlertsFetcher:
             nws_alerts = await self._await_nws(nws_task)
             kept = [a for a in self._store.alerts if a.source_id != "nws-api"]
             self._store.replace_all(kept + nws_alerts, fetch_success=False)
+            await self._notify_store_update()
             return
         wmo_all_data = resp.json()
         wmo_all_items = wmo_all_data.get("items", [])
@@ -994,6 +1015,7 @@ class WMOAlertsFetcher:
         self._store.replace_all(
             all_alerts, fetch_success=(feeds_ok > 0) or not source_ids
         )
+        await self._notify_store_update()
         logger.info(
             "Alerts updated: %d total (%d WMO + %d NWS) from %d/%d WMO feed URLs",
             len(all_alerts), len(all_alerts) - len(nws_alerts), len(nws_alerts),

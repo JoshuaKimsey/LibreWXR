@@ -36,6 +36,7 @@ import cv2
 import psutil
 
 from librewxr.config import resolve_cache_dir, resolve_volatile_dir, settings
+from librewxr.data.alerts_artifact import write_alerts_artifacts
 from librewxr.data.alerts_fetcher import WMOAlertsFetcher
 from librewxr.data.alerts_store import AlertsStore
 from librewxr.data.coverage import (
@@ -163,6 +164,32 @@ async def _restore_cached_frames(
         "Restored %d radar frame(s) from disk cache (%d → %d)",
         len(restored), restored[0].timestamp, restored[-1].timestamp,
     )
+
+
+async def _publish_alerts_artifact(
+    alerts_store: AlertsStore,
+    cache_dir: Path,
+    publisher: SnapshotPublisher | None,
+) -> None:
+    """Write the alerts artifact, then publish it when snapshot sync is on.
+
+    Called after EVERY mutation of the pipeline's alerts store — successful,
+    empty and failed fetches alike — so ``<cache_dir>/alerts/current.db``
+    always represents the current store instead of going stale behind a
+    degraded cycle.  The SQLite write and the upload both run in a worker
+    thread (the artifact carries every alert plus the packaged response), and
+    each step is guarded on its own: an artifact or store error must never
+    break the alerts fetch loop.
+    """
+    try:
+        await asyncio.to_thread(write_alerts_artifacts, alerts_store, cache_dir)
+    except Exception:  # writer is best-effort, but never trust that
+        logger.exception("Failed to write alerts artifact")
+    if publisher is not None:
+        try:
+            await asyncio.to_thread(publisher.publish_alerts)
+        except Exception:  # store client errors are not all OSError
+            logger.exception("Alerts artifact publish failed")
 
 
 async def run_pipeline() -> None:
@@ -309,10 +336,11 @@ async def run_pipeline() -> None:
     regions_by_name = {name: REGIONS[name] for name in enabled}
     await _restore_cached_frames(radar_cache, store, regions_by_name)
 
-    # AlertsStore is constructed up-front (even before the fetcher starts)
-    # so it can ride along in the master_state snapshot.  The render-only
-    # workers don't run their own alerts ingest — they read this store
-    # via apply_state instead.
+    # AlertsStore is constructed up-front (even before the fetcher starts).
+    # It is deliberately NOT a member of the state.json snapshot: the SQLite
+    # artifact under <cache_dir>/alerts/ IS the cross-process handoff (the
+    # pipeline writes it after every store update, render-only workers read
+    # it), mirroring the shared-tile-store / lightning-artifact precedent.
     alerts_store = AlertsStore() if settings.alerts_enabled else None
 
     # LightningStore is pipeline-owned and deliberately NOT a member of the
@@ -366,13 +394,14 @@ async def run_pipeline() -> None:
 
     # Stores keyed by slug — render-only workers consume the same keys
     # via ``apply_state``.  None entries are skipped by snapshot_state.
+    # ``alerts_store`` is absent on purpose: alerts ride the SQLite artifact,
+    # not the snapshot (see the AlertsStore comment above).
     stores = {
         "frame_store": store,
         **nwp_grids_by_slug,
         **satellite_grids_by_slug,
         "nowcast_store": nowcast_store,
         "storm_cell_store": storm_cell_store,
-        "alerts_store": alerts_store,
         "precip_mask": precip_mask_store,
     }
 
@@ -467,6 +496,14 @@ async def run_pipeline() -> None:
             cache_dir=str(alerts_cache),
             interval=settings.alerts_fetch_interval,
             concurrency=settings.alerts_concurrency,
+            # Every store mutation (successful, empty or degraded fetch) must
+            # land in the artifact, which render workers read instead of a
+            # state.json section.  The artifact belongs to the SHARED cache
+            # dir (not the fetcher's own CAP/zone cache) so render nodes find
+            # it at the same path this pipeline writes.
+            on_store_update=lambda: _publish_alerts_artifact(
+                alerts_store, cache_dir, publisher
+            ),
         )
         await alerts_fetcher.start()
         logger.info(

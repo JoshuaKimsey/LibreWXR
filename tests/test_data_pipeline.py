@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 import os
 import sys
 import threading
@@ -565,3 +566,279 @@ async def test_restored_frames_release_files_after_eviction(tmp_path):
         if target.startswith(str(radar_dir)) and target.endswith("(deleted)"):
             pinned.append(target)
     assert pinned == []
+
+
+# ---------------------------------------------------------------------------
+# Alerts artifact: the pipeline writes <cache_dir>/alerts/current.db after
+# every alerts store update instead of serializing the store into state.json.
+# ---------------------------------------------------------------------------
+
+def _alert_entry(source_id: str = "test-1"):
+    """Minimal AlertEntry (polygon-less keeps the fixture shapely-free)."""
+    from librewxr.data.alerts_store import AlertEntry
+
+    return AlertEntry(
+        source_id=source_id,
+        event="Severe Thunderstorm Warning",
+        description="A description",
+        severity="Severe",
+        effective="2026-05-07T00:00:00+00:00",
+        expires="2099-05-07T06:00:00+00:00",
+        area_desc="Test area",
+        url=f"https://example.test/{source_id}",
+        polygon=None,
+    )
+
+
+def _stub_pipeline_boot(monkeypatch, cache_dir: Path) -> None:
+    """Disable / stub everything run_pipeline touches before its fetch loop.
+
+    Same set of stubs ``test_pipeline_stores_use_frame_deletion_grace``
+    uses: the source walkers, PP mask builders and network plumbing are all
+    irrelevant here, but they run before the ``stores`` dict is built.
+    """
+    from librewxr.config import settings
+    from librewxr import data_pipeline
+
+    monkeypatch.setattr(settings, "cache_dir", str(cache_dir))
+    monkeypatch.setattr(settings, "volatile_cache_dir", "")
+    monkeypatch.setattr(settings, "nowcast_enabled", False)
+    monkeypatch.setattr(settings, "arrow_flow_enabled", False)
+    monkeypatch.setattr(settings, "storm_cells_enabled", False)
+    monkeypatch.setattr(data_pipeline, "collect_nwp_contributions", lambda *a, **k: [])
+    monkeypatch.setattr(
+        data_pipeline, "collect_satellite_contributions", lambda *a, **k: [],
+    )
+    monkeypatch.setattr(
+        data_pipeline, "collect_radar_coverage_metadata", lambda *a, **k: ({}, {}, []),
+    )
+    monkeypatch.setattr(data_pipeline, "build_coverage_masks", lambda *a, **k: None)
+    monkeypatch.setattr(data_pipeline, "build_feather_masks", lambda *a, **k: None)
+    monkeypatch.setattr(
+        data_pipeline, "persist_masks_in_background", lambda *a, **k: None,
+    )
+
+
+def test_pipeline_stores_dict_omits_alerts_store(tmp_path, monkeypatch):
+    """Alerts ride the SQLite artifact, never the state.json snapshot.
+
+    Capture the mapping the pipeline hands to ``snapshot_state`` (reached
+    through the ``on_cycle_complete`` callback it builds) and assert the
+    ``alerts_store`` entry is gone while the other stores remain.  Alerts
+    stay ENABLED: the producer store is still constructed and wired to the
+    fetcher, it just must not enter the snapshot.
+    """
+    from librewxr.config import settings
+    from librewxr import data_pipeline
+
+    class _Stop(Exception):
+        """Abort run_pipeline once the stores dict has been observed."""
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+
+    _stub_pipeline_boot(monkeypatch, cache_dir)
+    monkeypatch.setattr(settings, "alerts_enabled", True)
+
+    captured: dict[str, object] = {}
+
+    def _capturing_snapshot_state(stores):
+        captured.update(stores)
+        raise _Stop
+
+    monkeypatch.setattr(data_pipeline, "snapshot_state", _capturing_snapshot_state)
+
+    held: dict[str, object] = {}
+
+    class _StubFetcher:
+        def __init__(self, *args, **kwargs):
+            held["on_cycle_complete"] = kwargs["on_cycle_complete"]
+
+        async def start(self):
+            raise _Stop
+
+        async def stop(self):  # pragma: no cover - the boot was aborted
+            raise AssertionError("stop must not run after an aborted start")
+
+    monkeypatch.setattr(data_pipeline, "RadarFetcher", _StubFetcher)
+
+    with pytest.raises(_Stop):
+        asyncio.run(data_pipeline.run_pipeline())
+
+    assert "on_cycle_complete" in held
+    with pytest.raises(_Stop):
+        asyncio.run(held["on_cycle_complete"]())
+
+    assert "frame_store" in captured
+    assert "alerts_store" not in captured
+
+
+async def test_alerts_artifact_hook_writes_and_publishes(tmp_path):
+    """The post-update hook writes the artifact and publishes it when configured."""
+    from librewxr.data.alerts_artifact import ARTIFACT_NAME, AlertsArtifactStore
+    from librewxr.data.alerts_store import AlertsStore
+    from librewxr import data_pipeline
+
+    store = AlertsStore()
+    store.replace_all([_alert_entry("test-1")])
+
+    published: list[int] = []
+
+    class _Publisher:
+        def publish_alerts(self):
+            published.append(1)
+            return True
+
+    await data_pipeline._publish_alerts_artifact(store, tmp_path, _Publisher())
+
+    assert (tmp_path / ARTIFACT_NAME).exists()
+    artifact = AlertsArtifactStore(tmp_path)
+    assert artifact.maybe_reload() is True
+    assert artifact.count == store.count == 1
+    assert artifact.last_updated == pytest.approx(store.last_updated)
+    assert artifact.fetch_success is store.fetch_success is True
+    assert [a.source_id for a in artifact.alerts()] == ["test-1"]
+    assert len(published) == 1
+
+    # No publisher (snapshot sync off): the artifact is still written, and
+    # nothing is uploaded.
+    await data_pipeline._publish_alerts_artifact(store, tmp_path, None)
+    assert len(published) == 1
+
+
+async def test_alerts_artifact_hook_survives_write_and_publish_failures(
+    tmp_path, caplog,
+):
+    """A failed artifact write is logged and never escapes the hook.
+
+    A regular file where the ``alerts/`` directory belongs makes every write
+    fail deterministically (a chmod would be bypassed by a root test run), so
+    the writer returns False instead of raising -- and a publisher that blows
+    up must not escape either, or the alerts loop would die with it.
+    """
+    from librewxr.data.alerts_store import AlertsStore
+    from librewxr import data_pipeline
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    (cache_dir / "alerts").write_text("not a directory")
+
+    store = AlertsStore()
+    store.replace_all([_alert_entry("degraded-1")])
+    store.replace_all([], fetch_success=False)
+
+    class _BrokenPublisher:
+        def publish_alerts(self):
+            raise OSError("store unavailable")
+
+    with caplog.at_level(logging.WARNING):
+        await data_pipeline._publish_alerts_artifact(
+            store, cache_dir, _BrokenPublisher()
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Failed to write alerts artifact" in m for m in messages), messages
+    assert any("Alerts artifact publish failed" in m for m in messages), messages
+
+
+async def _drive_alerts_fetch(tmp_path, monkeypatch, retry_get, seed=None):
+    """Run one real ``_fetch_once`` with the HTTP layer faked out.
+
+    Returns ``(store, shared_cache_dir)``; the hook is the real pipeline
+    hook, pointed at a cache dir separate from the fetcher's own CAP/zone
+    cache so the artifact's location is observable.
+    """
+    from librewxr.data import alerts_fetcher as alerts_fetcher_module
+    from librewxr.data.alerts_fetcher import WMOAlertsFetcher
+    from librewxr.data.alerts_store import AlertsStore
+    from librewxr import data_pipeline
+
+    shared_cache = tmp_path / "cache"
+    shared_cache.mkdir()
+    store = AlertsStore()
+    if seed:
+        store.replace_all(seed)
+
+    monkeypatch.setattr(alerts_fetcher_module, "retry_get", retry_get)
+
+    fetcher = WMOAlertsFetcher(
+        store=store,
+        cache_dir=str(tmp_path / "alerts-cache"),
+        on_store_update=lambda: data_pipeline._publish_alerts_artifact(
+            store, shared_cache, None
+        ),
+    )
+
+    async def _no_nws():
+        return []
+
+    fetcher._fetch_nws_alerts = _no_nws  # type: ignore[method-assign]
+    try:
+        await fetcher._fetch_once()
+    finally:
+        await fetcher.close()
+    return store, shared_cache
+
+
+async def test_alerts_fetcher_writes_artifact_on_degraded_update(
+    tmp_path, monkeypatch,
+):
+    """A failed WMO fetch still lands in the artifact (never goes stale)."""
+    from librewxr.data.alerts_artifact import ARTIFACT_NAME, AlertsArtifactStore
+
+    async def _all_down(client, url, **kwargs):
+        return None
+
+    store, cache_dir = await _drive_alerts_fetch(tmp_path, monkeypatch, _all_down)
+
+    assert store.fetch_success is False
+    assert (cache_dir / ARTIFACT_NAME).exists()
+    # The artifact belongs to the SHARED cache dir, not the fetcher's own.
+    assert not (tmp_path / "alerts-cache" / ARTIFACT_NAME).exists()
+
+    artifact = AlertsArtifactStore(cache_dir)
+    assert artifact.maybe_reload() is True
+    assert artifact.count == store.count == 0
+    assert artifact.fetch_success is False
+    assert artifact.last_updated == pytest.approx(store.last_updated)
+
+
+async def test_alerts_fetcher_writes_artifact_on_successful_update(
+    tmp_path, monkeypatch,
+):
+    """A healthy fetch replaces the artifact, including an emptied store."""
+    from librewxr.data import alerts_fetcher as alerts_fetcher_module
+    from librewxr.data.alerts_artifact import AlertsArtifactStore
+
+    class _Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    # No operating sources and no hub items: a healthy cycle with no alerts,
+    # which must still replace a previously populated store.
+    responses = {
+        alerts_fetcher_module._SOURCES_URL: _Response({"sources": []}),
+        alerts_fetcher_module._WMO_ALL_URL: _Response({"items": []}),
+    }
+
+    async def _ok(client, url, **kwargs):
+        return responses[url]
+
+    # Seed a populated store so "count 0 afterwards" proves the artifact
+    # tracks the update rather than the pre-fetch state.
+    store, cache_dir = await _drive_alerts_fetch(
+        tmp_path, monkeypatch, _ok, seed=[_alert_entry("stale-1")],
+    )
+    assert store.fetch_success is True
+    assert store.count == 0
+
+    artifact = AlertsArtifactStore(cache_dir)
+    assert artifact.maybe_reload() is True
+    assert artifact.count == 0
+    assert artifact.fetch_success is True
+    assert artifact.last_updated == pytest.approx(store.last_updated)
